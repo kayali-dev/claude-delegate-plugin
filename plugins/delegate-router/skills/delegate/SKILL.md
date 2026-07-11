@@ -85,7 +85,7 @@ ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|
 After `delegate_start`, retain the job ID and revision. Use:
 
 - `delegate_list` to rediscover jobs when an ID is no longer in context (after compaction or in a new session). It reconciles orphans and returns compact summaries, newest first.
-- `delegate_inspect` for lifecycle, capabilities, continuation IDs, the final `result`, and current revision. A running job whose worker process died is reconciled to `failed` with an `ORPHANED` error event.
+- `delegate_inspect` for lifecycle, capabilities, continuation IDs, the final `result`, and current revision. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. A running job whose worker process died is reconciled to `failed` with an `ORPHANED` error event.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
 - `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Shared-worktree Cursor attribution is best-effort; never claim exact ownership of pre-existing changes.

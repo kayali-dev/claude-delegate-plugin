@@ -69,6 +69,8 @@ test('Cursor ACP maps structured updates and reports correction as restart', () 
   assert.equal(completed.status, 'completed');
   assert.match(completed.result.text, /answer/);
   assert.ok(completed.result.stopReason);
+  assert.match(completed.result.plan, /1\. Search repo for the old name \[pending\]/);
+  assert.match(completed.result.plan, /2\. Rename and update call sites/);
   assert.equal(completed.controls['cursor-correction'].state, 'applied');
   assert.equal(completed.controls['cursor-correction-2'].state, 'applied');
   const events = readJobEvents(job.id, { limit: 1000 });

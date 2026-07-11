@@ -59,7 +59,7 @@ Codex app-server produces provider-level file and aggregated diff events. Cursor
 
 ## Completion Semantics
 
-`completed` means the provider turn ended, not that the objective was met. Read `result`, `changedFiles`, and the diff before treating a job as successful. `delegate-jobs wait` exits 5 when a write-mode job completes with zero observed file changes — a strong signal the objective was not met. Codex threads that engaged the multi-agent review flow may refuse direct resume; that surfaces as `RESUME_UNSUPPORTED`, and the recovery is a fresh job whose packet folds in the prior findings.
+Cursor plan-mode plans arrive as ACP `plan` updates, not agent messages: they are journaled as `plan.updated` and folded into the terminal record as `result.plan`, while `result.text` carries only conversational messages. `completed` means the provider turn ended, not that the objective was met. Read `result`, `changedFiles`, and the diff before treating a job as successful. `delegate-jobs wait` exits 5 when a write-mode job completes with zero observed file changes — a strong signal the objective was not met. Codex threads that engaged the multi-agent review flow may refuse direct resume; that surfaces as `RESUME_UNSUPPORTED`, and the recovery is a fresh job whose packet folds in the prior findings.
 
 ## Response Bounds
 

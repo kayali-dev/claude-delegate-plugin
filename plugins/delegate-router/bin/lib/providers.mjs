@@ -187,7 +187,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.8.2' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.8.3' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -416,14 +416,27 @@ function mapCodexResumeError(error, isResume) {
   return error;
 }
 
-function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas) {
+function planEntriesText(entries) {
+  if (!Array.isArray(entries) || !entries.length) return null;
+  return entries
+    .map((entry, index) => `${index + 1}. ${entry.content ?? entry.title ?? JSON.stringify(entry)}${entry.status ? ` [${entry.status}]` : ''}`)
+    .join('\n');
+}
+
+function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas, planHolder) {
   const kind = update.sessionUpdate;
   const options = { sessionId };
   if (kind === 'agent_message_chunk') {
     const text = update.content?.text || '';
     messageParts.push(text);
     appendJobEvent(jobId, 'message.delta', { id: update.messageId, delta: deltas.redactDelta(`message:${update.messageId ?? 'acp'}`, text) }, options);
-  } else if (kind === 'plan' || kind === 'plan_update') appendJobEvent(jobId, 'plan.updated', update, options);
+  } else if (kind === 'plan' || kind === 'plan_update') {
+    appendJobEvent(jobId, 'plan.updated', update, options);
+    // Plan-mode output arrives here, not as agent message chunks; hold the
+    // latest entries so the terminal result can carry the actual plan.
+    const entries = update.entries || update.plan?.entries || null;
+    if (planHolder && entries) planHolder.entries = entries;
+  }
   else if (kind === 'tool_call') {
     appendJobEvent(jobId, 'tool.started', update, options);
     for (const location of update.locations || []) if (location.path) appendJobEvent(jobId, 'file.changed', { path: location.path }, options);
@@ -515,12 +528,13 @@ async function runCursorAcp(job) {
   let cancelSignalSent = false;
   let promptPromise = null;
   const messageParts = [];
+  const planHolder = { entries: null };
   const deltas = new DeltaRedactor();
   const rpc = new JsonRpcProcess(launch.command, launch.args, {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
     onNotification: async (method, params) => {
-      if (method === 'session/update') mapAcpUpdate(job.id, params.update || {}, params.sessionId, messageParts, deltas);
+      if (method === 'session/update') mapAcpUpdate(job.id, params.update || {}, params.sessionId, messageParts, deltas, planHolder);
     },
     onRequest: async (method, params) => {
       if (method !== 'session/request_permission') throw new Error(`Unsupported ACP request: ${method}`);
@@ -538,7 +552,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.8.2' }
+      clientInfo: { name: 'delegate-router', version: '0.8.3' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -632,8 +646,13 @@ async function runCursorAcp(job) {
         continue;
       }
       recordGitState(job, sessionId);
+      const planText = planEntriesText(planHolder.entries);
       terminal(job, 'completed', 'completed', {
-        result: { text: messageParts.join(''), stopReason: completed.response.stopReason },
+        result: {
+          text: messageParts.join(''),
+          ...(planText ? { plan: planText } : {}),
+          stopReason: completed.response.stopReason
+        },
         session: sessionId
       });
       break;

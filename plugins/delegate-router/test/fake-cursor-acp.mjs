@@ -44,6 +44,10 @@ lines.on('line', (line) => {
     } });
   } else if (request.method === 'session/set_config_option') send({ jsonrpc: '2.0', id: request.id, result: {} });
   else if (request.method === 'session/prompt') {
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'plan', entries: [
+      { content: 'Search repo for the old name', priority: 'medium', status: 'pending' },
+      { content: 'Rename and update call sites', priority: 'high', status: 'pending' }
+    ] } } });
     count += 1;
     if (count === 1 && process.env.FAKE_CURSOR_WRITE === '1') {
       fs.writeFileSync('new-file.txt', 'new file\n');

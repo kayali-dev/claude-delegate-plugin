@@ -401,7 +401,9 @@ export function listManagedJobs(options = {}) {
       completedAt: job.completedAt || null,
       resultPreview: typeof job.result === 'string'
         ? job.result.slice(0, 200)
-        : typeof job.result?.text === 'string' ? job.result.text.slice(0, 200) : null,
+        : typeof job.result?.text === 'string' && job.result.text.trim()
+          ? job.result.text.slice(0, 200)
+          : typeof job.result?.plan === 'string' ? job.result.plan.slice(0, 200) : null,
       changedFiles: job.changedFiles || null,
       resolvedModel: job.resolvedModel || null,
       error: job.error || null
