@@ -100,6 +100,18 @@ export function buildCursorArgs({ mode, model, cwd, approval = 'auto', resume = 
   return args;
 }
 
+export function stripPromptArgs(args) {
+  const result = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === '--prompt' || args[i] === '--prompt-file') {
+      i += 1;
+      continue;
+    }
+    result.push(args[i]);
+  }
+  return result;
+}
+
 export function findValue(value, keys) {
   if (!value || typeof value !== 'object') return null;
   for (const key of keys) if (value[key] != null) return value[key];

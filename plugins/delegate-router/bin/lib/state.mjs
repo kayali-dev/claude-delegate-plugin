@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { withFileLock } from './lock.mjs';
 
 const PROVIDERS = ['claude', 'codex', 'cursor'];
 
@@ -94,6 +95,18 @@ export function saveState(state) {
   const temporary = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(temporary, file);
+}
+
+// Serialized read-modify-write. Concurrent writers (status-line renders, Codex
+// rate-limit notifications, CLI commands) each reload inside the lock, so no
+// writer can clobber another's windows with a stale snapshot.
+export function mutateState(mutator) {
+  return withFileLock(`${statePath()}.lock`, () => {
+    const state = loadState();
+    const result = mutator(state);
+    saveState(state);
+    return result ?? state;
+  });
 }
 
 export function setWindow(state, provider, windowName, usedPercent, options = {}) {

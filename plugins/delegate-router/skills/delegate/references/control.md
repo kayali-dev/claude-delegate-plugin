@@ -15,9 +15,9 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 - Codex uses `approval_policy=on-request` with `approvals_reviewer=auto_review`. This is Approve-for-me: Auto-review evaluates escalations rather than bypassing the sandbox.
 - Cursor write modes use `--auto-review --trust`. Use `--force` only for an explicit `approval=force` override.
 - New Codex starts are blocked by a `PreToolUse` quota hook at or above the avoid threshold. Users can deliberately override with `DELEGATE_ALLOW_OVER_LIMIT=codex`.
-- Network remains off unless the task needs current external information and the user permits it.
+- Network remains off unless the task needs current external information and the user permits it; the explicit control is `network=true` on `delegate_start` (Codex workspace-write sandbox only).
 - Consult, plan, and review modes are read-only.
-- Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization.
+- Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. `allowSensitive=true` relaxes only that rule; the base security packet (scope control, preserve existing changes) is always sent.
 
 ## Writer Ownership
 

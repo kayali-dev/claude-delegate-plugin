@@ -240,3 +240,46 @@ test('list returns compact summaries newest first with active filtering', () => 
   const failed = listManagedJobs({ status: ['completed'] });
   assert.deepEqual(failed.jobs.map((job) => job.id), [first.id]);
 }));
+
+test('delta redactor suppresses secrets split across chunk boundaries', async () => {
+  const { DeltaRedactor } = await import('../bin/lib/control.mjs');
+  const redactor = new DeltaRedactor();
+  assert.equal(redactor.redactDelta('m1', 'the key is sk-'), 'the key is sk-');
+  assert.equal(redactor.redactDelta('m1', 'ABCDEFGHIJKLMNOPQRST and more'), '[REDACTED]');
+  assert.equal(redactor.redactDelta('m2', 'plain '), 'plain ');
+  assert.equal(redactor.redactDelta('m2', 'text continues'), 'text continues');
+  const single = new DeltaRedactor();
+  assert.equal(single.redactDelta('m3', 'token sk-ABCDEFGHIJKLMNOPQRST here'), '[REDACTED]');
+});
+
+test('stale queued jobs reconcile to failed and release the writer guard', () => isolated((directory) => {
+  const abandoned = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'never launched' });
+  updateManagedJob(abandoned.id, (current) => { current.createdAt = Math.floor(Date.now() / 1000) - 3600; }, { incrementRevision: false });
+  const previous = process.env.DELEGATE_CODEX_BIN;
+  process.env.DELEGATE_CODEX_BIN = '/usr/bin/false';
+  try {
+    const next = launchManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'new writer' });
+    assert.equal(next.mode, 'implement');
+    assert.equal(inspectJob(abandoned.id).status, 'failed');
+  } finally {
+    if (previous == null) delete process.env.DELEGATE_CODEX_BIN;
+    else process.env.DELEGATE_CODEX_BIN = previous;
+  }
+  const fresh = createManagedJob({ provider: 'codex', mode: 'consult', cwd: directory, prompt: 'fresh' });
+  assert.equal(inspectJob(fresh.id).status, 'queued');
+}));
+
+test('network option is stored, defaults off, and shapes codex spawn args', async () => isolated(async (directory) => {
+  const { codexSpawnArgs, securityPreamble } = await import('../bin/lib/providers.mjs');
+  const off = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+  assert.equal(inspectJob(off.id).network, false);
+  assert.ok(codexSpawnArgs(off).includes('sandbox_workspace_write.network_access=false'));
+  const on = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', network: true });
+  assert.equal(inspectJob(on.id).network, true);
+  assert.ok(codexSpawnArgs(on).includes('sandbox_workspace_write.network_access=true'));
+  assert.match(securityPreamble(false), /Do not read, print, transmit/);
+  assert.match(securityPreamble(false), /Preserve pre-existing changes/);
+  assert.match(securityPreamble(true), /explicitly authorized/);
+  assert.match(securityPreamble(true), /Preserve pre-existing changes/);
+  assert.match(securityPreamble(true), /allowed scope/);
+}));

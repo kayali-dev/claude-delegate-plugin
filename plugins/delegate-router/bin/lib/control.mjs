@@ -6,6 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { avoidPercentFor, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerEnabled, saveJob, validateProvider } from './state.mjs';
 import { isProcessAlive } from './process.mjs';
+import { withFileLock } from './lock.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -91,6 +92,28 @@ export function redact(value, key = '', maxLength = MAX_STRING) {
 }
 
 export function eventPath(id) { return paths(id).events; }
+
+// Streaming deltas can split a credential across chunk boundaries, evading
+// per-chunk regexes. Keep a bounded per-stream tail and suppress any chunk
+// whose combination with the tail matches a sensitive pattern, so the journal
+// never holds the completing fragment of a secret.
+const DELTA_TAIL_CHARS = 256;
+
+export class DeltaRedactor {
+  constructor() {
+    this.tails = new Map();
+  }
+
+  redactDelta(streamId, delta) {
+    const key = String(streamId ?? 'default');
+    const text = delta == null ? '' : String(delta);
+    const tail = this.tails.get(key) || '';
+    const combined = `${tail}${text}`;
+    this.tails.set(key, combined.slice(-DELTA_TAIL_CHARS));
+    if (redact(combined, '', Number.POSITIVE_INFINITY) !== combined) return '[REDACTED]';
+    return redact(text);
+  }
+}
 
 function readRawEvents(id) {
   try {
@@ -246,13 +269,22 @@ export function readJobEventPage(id, options = {}) {
   });
 }
 
+const QUEUED_STALE_SECONDS = 600;
+
+function isOrphaned(job) {
+  const now = Math.floor(Date.now() / 1000);
+  if (job.status === 'running') return !isProcessAlive(job.workerPid || job.pid);
+  if (job.status === 'queued') return !job.pid && !job.workerPid && now - (job.createdAt || 0) > QUEUED_STALE_SECONDS;
+  return false;
+}
+
 export function reconcileJob(id) {
   const job = loadJob(assertJobId(id));
   if (!job) throw new Error(`job not found: ${id}`);
-  if (job.status !== 'running' || isProcessAlive(job.workerPid || job.pid)) return job;
+  if (!isOrphaned(job)) return job;
   return withLock(id, () => {
     const current = loadJob(id);
-    if (!current || current.status !== 'running' || isProcessAlive(current.workerPid || current.pid)) return current;
+    if (!current || !isOrphaned(current)) return current;
     current.status = 'failed';
     current.phase = 'failed';
     current.error ||= 'ORPHANED: worker exited without recording a terminal result';
@@ -282,7 +314,7 @@ export function listManagedJobs(options = {}) {
   const jobs = [];
   for (const raw of listJobs()) {
     let job = raw;
-    if (raw.status === 'running') {
+    if (['running', 'queued'].includes(raw.status)) {
       try { job = reconcileJob(raw.id); } catch { job = raw; }
     }
     if (options.activeOnly && TERMINAL_STATUSES.has(job.status)) continue;
@@ -440,6 +472,7 @@ export function createManagedJob(options) {
     approval: options.approval || 'auto',
     effort: options.effort || null,
     timeoutSeconds,
+    network: options.network === true,
     allowSensitive: options.allowSensitive === true,
     status: 'queued',
     phase: 'queued',
@@ -474,13 +507,19 @@ function assertNoActiveWriter(options) {
   for (const other of listJobs()) {
     if (other.managedBy !== 'delegate-control' || !WRITE_MODES.has(other.mode) || other.isolation === 'worktree') continue;
     if (path.resolve(other.cwd || '') !== cwd) continue;
-    const current = other.status === 'running' ? reconcileJob(other.id) : other;
+    const current = ['running', 'queued'].includes(other.status) ? reconcileJob(other.id) : other;
     if (TERMINAL_STATUSES.has(current.status)) continue;
     const error = new Error(`WRITER_ACTIVE: job ${current.id} (${current.mode}) is already ${current.status} in ${cwd}; wait for it, cancel it, or pass overrideWriter=true`);
     error.code = 'WRITER_ACTIVE';
     error.activeJobId = current.id;
     throw error;
   }
+}
+
+function writerLockPath(options) {
+  const cwd = path.resolve(options.cwd || process.cwd());
+  const digest = crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 16);
+  return path.join(jobsDir(), `.writer-${digest}.lock`);
 }
 
 export function launchManagedJob(options) {
@@ -493,9 +532,16 @@ export function launchManagedJob(options) {
   if (!options.overrideLimit && !overrides.includes(provider) && !overrides.includes('all') && usage.known && usage.usedPercent >= threshold) {
     throw new Error(`QUOTA_GUARD: ${provider} is at ${usage.usedPercent}% (threshold ${threshold}%); route to a fallback or explicitly override`);
   }
-  assertNoActiveWriter(options);
   try { maybePruneJobs(); } catch {}
-  const job = createManagedJob(options);
+  // The guard check and the job-record creation must be atomic per cwd, or two
+  // concurrent write-mode launches can both pass the check before either
+  // persists its record.
+  const job = WRITE_MODES.has(options.mode) && options.isolation !== 'worktree'
+    ? withFileLock(writerLockPath(options), () => {
+        assertNoActiveWriter(options);
+        return createManagedJob(options);
+      })
+    : createManagedJob(options);
   const p = paths(job.id);
   const stdout = fs.openSync(p.stdout, 'a', 0o600);
   const stderr = fs.openSync(p.stderr, 'a', 0o600);
@@ -647,6 +693,7 @@ export function resumeManagedJob(id, options) {
     transport: parent.transport,
     isolation: parent.isolation,
     timeoutSeconds: options.timeoutSeconds ?? parent.timeoutSeconds ?? null,
+    network: options.network ?? parent.network ?? false,
     overrideLimit: options.overrideLimit,
     overrideWriter: options.overrideWriter
   });

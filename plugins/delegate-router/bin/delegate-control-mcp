@@ -22,7 +22,7 @@ const TOOLS = [
     inputSchema: { type: 'object', required: ['provider', 'prompt'], properties: {
       provider: { enum: enabledProviders() }, model: { type: 'string' }, mode: { enum: ['consult', 'plan', 'review', 'implement', 'verify'] },
       cwd: { type: 'string' }, prompt: { type: 'string' }, approval: { enum: ['auto', 'force'] }, effort: { enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
-      timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 },
+      timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, network: { type: 'boolean' },
       allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' }, transport: { enum: ['app-server', 'acp', 'headless'] }
     } }
   },
@@ -34,7 +34,7 @@ const TOOLS = [
   { name: 'delegate_files', description: 'Return files reported as changed by the provider.', inputSchema: jobOnly() },
   { name: 'delegate_steer', description: 'Correct an active job. Codex can steer the same turn; Cursor explicitly cancels and resumes.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision', 'text'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, expectedTurnId: { type: 'string' }, correctionId: { type: 'string' }, strategy: { enum: ['auto', 'same-turn', 'restart', 'next-turn'] }, text: { type: 'string' } } } },
   { name: 'delegate_cancel', description: 'Request provider-aware cancellation using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
-  { name: 'delegate_resume', description: 'Start a new supervised job on the same provider session or thread.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, cwd: { type: 'string' }, effort: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' } } } },
+  { name: 'delegate_resume', description: 'Start a new supervised job on the same provider session or thread.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, cwd: { type: 'string' }, effort: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, network: { type: 'boolean' }, allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' } } } },
   { name: 'delegate_usage', description: 'Return per-job observed usage separately from provider allowance headroom.', inputSchema: jobOnly() }
 ];
 
@@ -79,7 +79,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.6.0' }
+        serverInfo: { name: 'delegate-control', version: '0.7.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

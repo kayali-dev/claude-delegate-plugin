@@ -139,3 +139,24 @@ test('quota hook applies the stricter cursor band only to fresh known data', () 
   const staleAllowed = spawnSync(process.execPath, [hook], { input: cursorStart, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
   assert.equal(staleAllowed.status, 0);
 }));
+
+test('mutateState serializes writers and cleans up its lock', async () => withStateFile(async (file) => {
+  const { mutateState } = await import('../bin/lib/state.mjs');
+  mutateState((state) => setWindow(state, 'codex', 'primary', 10, { source: 'a' }));
+  mutateState((state) => setWindow(state, 'codex', 'secondary', 20, { source: 'b' }));
+  const usage = effectiveUsage(loadState(), 'codex');
+  assert.deepEqual(usage.windows.map((window) => window.name).sort(), ['primary', 'secondary']);
+  assert.equal(fs.existsSync(`${file}.lock`), false);
+}));
+
+test('a stale lock is reclaimed instead of deadlocking', async () => withStateFile((file) => {
+  const lockPath = `${file}.lock`;
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, '99999\n');
+  const past = new Date(Date.now() - 60000);
+  fs.utimesSync(lockPath, past, past);
+  return import('../bin/lib/state.mjs').then(({ mutateState }) => {
+    mutateState((state) => setWindow(state, 'codex', 'primary', 33, { source: 'reclaim' }));
+    assert.equal(effectiveUsage(loadState(), 'codex').usedPercent, 33);
+  });
+}));

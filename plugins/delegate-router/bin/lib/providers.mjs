@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, inspectJob, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, inspectJob, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -12,18 +12,25 @@ import {
 } from './cursor.mjs';
 import { delay, JsonRpcProcess } from './jsonrpc.mjs';
 import { terminateProcessTree } from './process.mjs';
-import { loadJob, loadState, saveState, setWindow } from './state.mjs';
+import { loadJob, mutateState, setWindow } from './state.mjs';
 
-const SECURITY = `Security boundary:
-- Do not read, print, transmit, or modify credentials, private keys, tokens, or .env files unless the task explicitly authorizes the exact path.
+// The base boundary always applies. allowSensitive only swaps the sensitive-
+// path rule for an explicit authorization line; it never removes scope control
+// or the preserve-existing-changes rule.
+export function securityPreamble(allowSensitive) {
+  const sensitiveRule = allowSensitive
+    ? '- Sensitive-path access is explicitly authorized for this task; touch only the sensitive paths the task names.'
+    : '- Do not read, print, transmit, or modify credentials, private keys, tokens, or .env files unless the task explicitly authorizes the exact path.';
+  return `Security boundary:
+${sensitiveRule}
 - Preserve pre-existing changes and never revert unrelated work.
 - Stay inside the task's allowed scope. Stop and report if required work falls outside it.
 
 `;
+}
 
 function promptFor(job) {
-  const prompt = fs.readFileSync(job.promptPath, 'utf8');
-  return job.allowSensitive ? prompt : `${SECURITY}${prompt}`;
+  return `${securityPreamble(job.allowSensitive)}${fs.readFileSync(job.promptPath, 'utf8')}`;
 }
 
 function codexModel(model) {
@@ -92,6 +99,16 @@ function mapCodexItem(jobId, phase, params) {
   }
 }
 
+export function codexSpawnArgs(job) {
+  return [
+    'app-server', '--stdio',
+    '-c', 'approval_policy="on-request"',
+    '-c', 'approvals_reviewer="auto_review"',
+    '-c', `sandbox_workspace_write.network_access=${job.network === true}`,
+    '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]'
+  ];
+}
+
 async function runCodex(job) {
   let turnDone = null;
   let turnResolve;
@@ -99,15 +116,10 @@ async function runCodex(job) {
   const queuedPrompts = [];
   let interruptRequested = false;
   const messages = new Map();
-  const rpc = new JsonRpcProcess(process.env.DELEGATE_CODEX_BIN || 'codex', [
-    'app-server', '--stdio',
-    '-c', 'approval_policy="on-request"',
-    '-c', 'approvals_reviewer="auto_review"',
-    '-c', 'sandbox_workspace_write.network_access=false',
-    '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]'
-  ], {
+  const deltas = new DeltaRedactor();
+  const rpc = new JsonRpcProcess(process.env.DELEGATE_CODEX_BIN || 'codex', codexSpawnArgs(job), {
     cwd: job.cwd,
-    onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text }),
+    onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
     onRequest: async (method, params) => {
       appendJobEvent(job.id, 'approval.requested', { method, params });
       const forced = job.approval === 'force';
@@ -131,10 +143,10 @@ async function runCodex(job) {
       } else if (method === 'item/agentMessage/delta') {
         const text = `${messages.get(params.itemId) || ''}${params.delta || ''}`;
         messages.set(params.itemId, text);
-        appendJobEvent(job.id, 'message.delta', { id: params.itemId, delta: params.delta }, options);
+        appendJobEvent(job.id, 'message.delta', { id: params.itemId, delta: deltas.redactDelta(`message:${params.itemId}`, params.delta) }, options);
       } else if (method === 'item/started') mapCodexItem(job.id, 'started', params);
       else if (method === 'item/completed') mapCodexItem(job.id, 'completed', params);
-      else if (method === 'item/commandExecution/outputDelta') appendJobEvent(job.id, 'tool.output', { id: params.itemId, delta: params.delta }, options);
+      else if (method === 'item/commandExecution/outputDelta') appendJobEvent(job.id, 'tool.output', { id: params.itemId, delta: deltas.redactDelta(`tool:${params.itemId}`, params.delta) }, options);
       else if (method === 'turn/plan/updated') appendJobEvent(job.id, 'plan.updated', { explanation: params.explanation, plan: params.plan }, options);
       else if (method === 'turn/diff/updated') appendJobEvent(job.id, 'diff.updated', { diff: params.diff }, options);
       else if (method === 'thread/tokenUsage/updated') {
@@ -148,16 +160,14 @@ async function runCodex(job) {
         appendJobEvent(job.id, 'provider.event', { providerEvent: method }, options);
         try {
           const limits = params.rateLimits || {};
-          const state = loadState();
-          let changed = false;
-          for (const name of ['primary', 'secondary']) {
-            const value = limits[name];
-            if (value && Number.isFinite(value.usedPercent)) {
-              setWindow(state, 'codex', name, value.usedPercent, { resetsAt: value.resetsAt, source: 'codex-app-server' });
-              changed = true;
+          mutateState((state) => {
+            for (const name of ['primary', 'secondary']) {
+              const value = limits[name];
+              if (value && Number.isFinite(value.usedPercent)) {
+                setWindow(state, 'codex', name, value.usedPercent, { resetsAt: value.resetsAt, source: 'codex-app-server' });
+              }
             }
-          }
-          if (changed) saveState(state);
+          });
         } catch {}
       } else if (method === 'error') appendJobEvent(job.id, 'error', params, options);
       else if (!method.includes('reasoning')) appendJobEvent(job.id, 'provider.event', { providerEvent: method }, options);
@@ -166,7 +176,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.6.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.7.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -177,7 +187,7 @@ async function runCodex(job) {
       approvalPolicy: 'on-request',
       approvalsReviewer: 'auto_review',
       sandbox: readOnly(job) ? 'read-only' : 'workspace-write',
-      developerInstructions: SECURITY,
+      developerInstructions: securityPreamble(job.allowSensitive),
       config: job.effort ? { model_reasoning_effort: job.effort } : {}
     };
     const thread = job.providerSessionId
@@ -305,13 +315,13 @@ function cursorModel(options, requested) {
   return candidates[0]?.value || requested;
 }
 
-function mapAcpUpdate(jobId, update, sessionId, messageParts) {
+function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas) {
   const kind = update.sessionUpdate;
   const options = { sessionId };
   if (kind === 'agent_message_chunk') {
     const text = update.content?.text || '';
     messageParts.push(text);
-    appendJobEvent(jobId, 'message.delta', { id: update.messageId, delta: text }, options);
+    appendJobEvent(jobId, 'message.delta', { id: update.messageId, delta: deltas.redactDelta(`message:${update.messageId ?? 'acp'}`, text) }, options);
   } else if (kind === 'plan' || kind === 'plan_update') appendJobEvent(jobId, 'plan.updated', update, options);
   else if (kind === 'tool_call') {
     appendJobEvent(jobId, 'tool.started', update, options);
@@ -399,11 +409,12 @@ async function runCursorAcp(job) {
   let cancelSignalSent = false;
   let promptPromise = null;
   const messageParts = [];
+  const deltas = new DeltaRedactor();
   const rpc = new JsonRpcProcess(launch.command, launch.args, {
     cwd: job.cwd,
-    onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text }),
+    onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
     onNotification: async (method, params) => {
-      if (method === 'session/update') mapAcpUpdate(job.id, params.update || {}, params.sessionId, messageParts);
+      if (method === 'session/update') mapAcpUpdate(job.id, params.update || {}, params.sessionId, messageParts, deltas);
     },
     onRequest: async (method, params) => {
       if (method !== 'session/request_permission') throw new Error(`Unsupported ACP request: ${method}`);
@@ -421,7 +432,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.6.0' }
+      clientInfo: { name: 'delegate-router', version: '0.7.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -490,7 +501,10 @@ async function runCursorAcp(job) {
         continue;
       }
       recordGitState(job, sessionId);
-      terminal(job, 'completed', 'completed', { result: { stopReason: completed.response.stopReason }, session: sessionId });
+      terminal(job, 'completed', 'completed', {
+        result: { text: messageParts.join(''), stopReason: completed.response.stopReason },
+        session: sessionId
+      });
       break;
     }
   } finally {
@@ -498,7 +512,7 @@ async function runCursorAcp(job) {
   }
 }
 
-function mapHeadlessEvent(jobId, event) {
+function mapHeadlessEvent(jobId, event, deltas) {
   const sessionId = findValue(event, ['session_id', 'sessionId', 'chat_id', 'chatId']);
   if (sessionId) {
     updateManagedJob(jobId, (job) => { job.providerSessionId = sessionId; job.session = sessionId; }, { incrementRevision: false });
@@ -506,7 +520,7 @@ function mapHeadlessEvent(jobId, event) {
   const options = { sessionId };
   if (event.type === 'assistant') {
     const text = findValue(event, ['text', 'content', 'message']) || '';
-    appendJobEvent(jobId, 'message.delta', { delta: typeof text === 'string' ? text : JSON.stringify(text) }, options);
+    appendJobEvent(jobId, 'message.delta', { delta: deltas.redactDelta('message:headless', typeof text === 'string' ? text : JSON.stringify(text)) }, options);
   } else if (event.type === 'tool_call') {
     const type = event.subtype === 'started' ? 'tool.started' : event.subtype === 'completed' ? 'tool.completed' : 'tool.output';
     appendJobEvent(jobId, type, { toolCall: event.tool_call, subtype: event.subtype }, options);
@@ -527,6 +541,7 @@ async function runCursorHeadless(job) {
   let text = promptFor(job);
   let cancelRequested = false;
   const pendingCorrections = [];
+  const deltas = new DeltaRedactor();
 
   while (true) {
     let activeChild = null;
@@ -539,7 +554,7 @@ async function runCursorHeadless(job) {
       prompt: text,
       timeoutMs: jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600),
       onChild: (child) => { activeChild = child; },
-      onEvent: (event) => mapHeadlessEvent(job.id, event)
+      onEvent: (event) => mapHeadlessEvent(job.id, event, deltas)
     });
     let outcome;
     while (!outcome) {
@@ -614,9 +629,7 @@ export async function runManagedProvider(job) {
     else throw new Error(`Unsupported managed provider: ${job.provider}`);
   } catch (error) {
     if (/(?:quota|usage limit|rate limit|allowance)/i.test(error.message || '')) {
-      const state = loadState();
-      setWindow(state, job.provider, 'quota-error', 100, { source: 'quota-error' });
-      saveState(state);
+      mutateState((state) => setWindow(state, job.provider, 'quota-error', 100, { source: 'quota-error' }));
     }
     const current = inspectJob(job.id);
     if (!['completed', 'cancelled', 'failed'].includes(current.status)) terminal(job, 'failed', 'failed', { error: error.message });

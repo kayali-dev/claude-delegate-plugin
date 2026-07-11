@@ -59,3 +59,9 @@ test('runCursor terminates a timed-out process tree', async () => {
   assert.equal(outcome.timedOut, true);
   assert.ok(Date.now() - started < 5000);
 });
+
+test('background forwarding strips prompt arguments from child argv', async () => {
+  const { stripPromptArgs } = await import('../bin/lib/cursor.mjs');
+  const stripped = stripPromptArgs(['--model', 'composer', '--prompt', 'secret sk-ABCDEFGHIJKLMNOPQRST', '--mode', 'consult', '--prompt-file', '/tmp/x']);
+  assert.deepEqual(stripped, ['--model', 'composer', '--mode', 'consult']);
+});

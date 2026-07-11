@@ -1,0 +1,25 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+      - name: Run test suite
+        working-directory: plugins/delegate-router
+        run: node --test test/*.test.mjs
+      - name: Version locations agree
+        run: |
+          set -euo pipefail
+          plugin_version=$(node -p "require('./plugins/delegate-router/.claude-plugin/plugin.json').version")
+          package_version=$(node -p "require('./plugins/delegate-router/package.json').version")
+          test "$plugin_version" = "$package_version"
+          grep -q "version: '$plugin_version'" plugins/delegate-router/bin/delegate-control-mcp

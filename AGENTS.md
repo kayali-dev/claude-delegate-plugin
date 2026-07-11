@@ -31,6 +31,8 @@ Provider configuration is authoritative. Installations may enable Codex only, Cu
 - `plugins/delegate-router/bin/lib/control.mjs`: durable jobs, events, artifacts, redaction, revisions, and control inbox.
 - `plugins/delegate-router/bin/lib/providers.mjs`: Codex app-server and Cursor ACP/headless supervision.
 - `plugins/delegate-router/bin/lib/jsonrpc.mjs`: newline-delimited JSON-RPC process client and deadlines.
+- `plugins/delegate-router/bin/lib/lock.mjs`: shared file-lock primitive used by job control, the per-cwd writer guard, and transactional usage-state mutation.
+- `.github/workflows/test.yml`: CI on the latest Node LTS; runs the suite and checks version alignment.
 - `plugins/delegate-router/bin/lib/router.mjs`: deterministic task/model/provider routing.
 - `plugins/delegate-router/bin/lib/state.mjs`: provider configuration, allowance snapshots, and invocation history.
 - `plugins/delegate-router/bin/lib/cursor.mjs`: Cursor executable/model discovery and headless command construction.

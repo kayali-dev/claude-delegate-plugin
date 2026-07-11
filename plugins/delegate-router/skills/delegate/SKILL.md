@@ -47,7 +47,8 @@ For observable work, call `mcp__delegate_control__delegate_start` with `provider
 - `cwd`: `${CLAUDE_PROJECT_DIR}`
 - `config.approvals_reviewer`: `auto_review`
 - `config.model_reasoning_effort`: routed effort
-- `config.sandbox_workspace_write.network_access`: `false` unless the user explicitly enables network
+- `config.sandbox_workspace_write.network_access`: `false` unless the user explicitly enables network; pass `network=true` on `delegate_start`/`delegate_resume` only for that explicit case (Codex write modes only — read-only sandboxes and Cursor have no network toggle)
+- `allowSensitive=true` authorizes sensitive-path access only; the scope and preserve-existing-changes rules always remain in force
 - Include the controls from [control.md](references/control.md) in the task packet.
 
 Inspect the returned job revision before controlling it. `delegate_steer` with `strategy=same-turn` or `auto` maps to Codex `turn/steer` with the active expected turn ID. Use `restart` to interrupt and begin another turn on the same thread, and `next-turn` to queue a follow-up. Every correction needs a stable `correctionId` so retries are idempotent.

@@ -9,10 +9,12 @@ import {
   findValue,
   resolveCursorBinary,
   resolveCursorModel,
-  runCursor
+  runCursor,
+  stripPromptArgs
 } from './lib/cursor.mjs';
 import { terminateProcessTree } from './lib/process.mjs';
-import { appendJobEvent, updateManagedJob } from './lib/control.mjs';
+import { appendJobEvent, redact, updateManagedJob } from './lib/control.mjs';
+import { securityPreamble } from './lib/providers.mjs';
 import {
   avoidPercentFor,
   effectiveUsage,
@@ -25,13 +27,6 @@ import {
   setWindow,
   providerEnabled
 } from './lib/state.mjs';
-
-const SECURITY_PREFIX = `Security boundary:
-- Do not read, print, transmit, or modify .env files, credentials, private keys, certificates, tokens, or files matching *secret*, *credential*, *.pem, or *.key unless the task explicitly authorizes that exact path.
-- Preserve pre-existing changes and never revert unrelated work.
-- Stay inside the task's allowed scope. Stop and report if required work falls outside it.
-
-`;
 
 function fail(message, code = 2) {
   console.error(`delegate-cursor: ${message}`);
@@ -100,13 +95,17 @@ function createJobId() {
 
 function launchBackground(originalArgs, options) {
   const id = createJobId();
-  fs.mkdirSync(jobsDir(), { recursive: true });
+  fs.mkdirSync(jobsDir(), { recursive: true, mode: 0o700 });
   const stdoutPath = path.join(jobsDir(), `${id}.out.log`);
   const stderrPath = path.join(jobsDir(), `${id}.err.log`);
-  const stdout = fs.openSync(stdoutPath, 'a');
-  const stderr = fs.openSync(stderrPath, 'a');
-  const forwarded = originalArgs.filter((value) => value !== '--background');
-  forwarded.push('--job-id', id);
+  const stdout = fs.openSync(stdoutPath, 'a', 0o600);
+  const stderr = fs.openSync(stderrPath, 'a', 0o600);
+  // The prompt travels via a private file, never through child argv, where any
+  // local process could read it from the process table.
+  const promptPath = path.join(jobsDir(), `${id}.prompt`);
+  fs.writeFileSync(promptPath, options.prompt, { mode: 0o600 });
+  const forwarded = stripPromptArgs(originalArgs.filter((value) => value !== '--background'));
+  forwarded.push('--prompt-file', promptPath, '--job-id', id);
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...forwarded], {
     cwd: options.cwd,
     detached: true,
@@ -175,7 +174,7 @@ const cursorArgs = buildCursorArgs({
   approval: options.approval,
   resume: options.resume
 });
-const prompt = options.allowSensitive ? options.prompt : `${SECURITY_PREFIX}${options.prompt}`;
+const prompt = `${securityPreamble(options.allowSensitive)}${options.prompt}`;
 
 if (options.dryRun) {
   console.log(JSON.stringify({
@@ -294,8 +293,8 @@ if (options.jobId) {
     updatedAt: Math.floor(Date.now() / 1000),
     completedAt: Math.floor(Date.now() / 1000),
     session,
-    result: outcome.payload,
-    error: outcome.error,
+    result: redact(outcome.payload),
+    error: redact(outcome.error),
     usage: { inputTokens, outputTokens },
     durationMs: Date.now() - started
   });

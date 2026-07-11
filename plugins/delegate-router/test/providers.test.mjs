@@ -63,6 +63,8 @@ test('Cursor ACP maps structured updates and reports correction as restart', () 
   await running;
   const completed = inspectJob(job.id);
   assert.equal(completed.status, 'completed');
+  assert.match(completed.result.text, /answer/);
+  assert.ok(completed.result.stopReason);
   assert.equal(completed.controls['cursor-correction'].state, 'applied');
   assert.equal(completed.controls['cursor-correction-2'].state, 'applied');
   const events = readJobEvents(job.id, { limit: 1000 });
