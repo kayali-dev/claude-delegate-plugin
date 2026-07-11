@@ -66,14 +66,20 @@ export function routeTask({
       : [{ provider: explicitProvider, model, score: 200, reason: 'explicit model override' }];
   }
 
+  const threshold = (value, provider, fallback) => {
+    if (value && typeof value === 'object') return Number.isFinite(value[provider]) ? value[provider] : fallback;
+    return Number.isFinite(value) ? value : fallback;
+  };
   candidates = candidates.map((candidate) => {
     const current = usage[candidate.provider] || { known: false, usedPercent: null };
     const updated = { ...candidate, usage: current.known ? current.usedPercent : null };
+    const avoid = threshold(avoidPercent, candidate.provider, 90);
+    const warn = threshold(warningPercent, candidate.provider, 80);
     if (!availability[candidate.provider]) return { ...updated, eligible: false, excluded: 'provider unavailable' };
-    if (!overrideLimit && current.known && current.usedPercent >= avoidPercent) {
-      return { ...updated, eligible: false, excluded: `provider at ${current.usedPercent}%` };
+    if (!overrideLimit && current.known && current.usedPercent >= avoid) {
+      return { ...updated, eligible: false, excluded: `provider at ${current.usedPercent}% (avoid ${avoid}%)` };
     }
-    if (current.known && current.usedPercent >= warningPercent) {
+    if (current.known && current.usedPercent >= warn) {
       updated.score -= 25;
       updated.reason += `; provider is at ${current.usedPercent}%, so equivalent fallbacks are preferred`;
     }

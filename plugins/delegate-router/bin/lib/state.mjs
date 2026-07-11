@@ -114,8 +114,15 @@ export function setWindow(state, provider, windowName, usedPercent, options = {}
 export function effectiveUsage(state, provider) {
   validateProvider(provider);
   const now = Math.floor(Date.now() / 1000);
+  // Windows with a provider-declared reset expire at that boundary. Windows
+  // without one (manual/dashboard entries, quota-error markers) are only
+  // reliable while fresh: after the TTL they drop back to unknown instead of
+  // silently gating decisions on stale numbers.
+  const ttlDays = Number(process.env.DELEGATE_MANUAL_USAGE_TTL_DAYS ?? 7);
+  const ttlSeconds = Number.isFinite(ttlDays) && ttlDays > 0 ? ttlDays * 86400 : null;
   const windows = Object.entries(state.providers[provider].windows || {})
     .filter(([, value]) => !value.resetsAt || value.resetsAt > now)
+    .filter(([, value]) => value.resetsAt || !ttlSeconds || now - (value.updatedAt || 0) <= ttlSeconds)
     .map(([name, value]) => ({ name, ...value }));
   if (windows.length === 0) return { known: false, usedPercent: null, windows: [] };
   return {
@@ -132,6 +139,28 @@ export function recordEvent(state, event) {
 
 export function providerNames() {
   return [...PROVIDERS];
+}
+
+// Cursor overage is soft (on-demand billing) rather than a hard throttle, so
+// its default guard bands are stricter to protect spend, not just access.
+const AVOID_DEFAULTS = { claude: 90, codex: 90, cursor: 80 };
+const WARNING_DEFAULTS = { claude: 80, codex: 80, cursor: 70 };
+
+function thresholdFor(provider, kind, defaults) {
+  validateProvider(provider);
+  const specific = Number(process.env[`DELEGATE_${provider.toUpperCase()}_${kind}_PERCENT`]);
+  if (Number.isFinite(specific)) return specific;
+  const global = Number(process.env[`DELEGATE_${kind}_PERCENT`]);
+  if (Number.isFinite(global)) return global;
+  return defaults[provider];
+}
+
+export function avoidPercentFor(provider) {
+  return thresholdFor(provider, 'AVOID', AVOID_DEFAULTS);
+}
+
+export function warningPercentFor(provider) {
+  return thresholdFor(provider, 'WARNING', WARNING_DEFAULTS);
 }
 
 function jobPath(id) {

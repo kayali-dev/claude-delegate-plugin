@@ -14,6 +14,7 @@ import {
 import { terminateProcessTree } from './lib/process.mjs';
 import { appendJobEvent, updateManagedJob } from './lib/control.mjs';
 import {
+  avoidPercentFor,
   effectiveUsage,
   jobsDir,
   loadJob,
@@ -43,7 +44,7 @@ function parseArgs(argv) {
     model: 'composer',
     cwd: process.cwd(),
     approval: 'auto',
-    threshold: Number(process.env.DELEGATE_AVOID_PERCENT || 90),
+    threshold: avoidPercentFor('cursor'),
     timeoutSeconds: Number(process.env.DELEGATE_CURSOR_TIMEOUT_SECONDS || 3600),
     prompt: null,
     promptFile: null,

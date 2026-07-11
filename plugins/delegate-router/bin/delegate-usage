@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import {
+  avoidPercentFor,
   effectiveUsage,
   loadState,
   providerNames,
@@ -9,7 +10,8 @@ import {
   saveState,
   setWindow,
   statePath,
-  validateProvider
+  validateProvider,
+  warningPercentFor
 } from './lib/state.mjs';
 
 function option(args, name, fallback = null) {
@@ -85,7 +87,7 @@ function show(state, asJson) {
       console.log(`${name.padEnd(9)} unknown eligible no-provider-snapshot`);
       continue;
     }
-    const status = current.usedPercent >= 98 ? 'blocked' : current.usedPercent >= 90 ? 'avoid' : current.usedPercent >= 80 ? 'prefer-fallback' : 'normal';
+    const status = current.usedPercent >= 98 ? 'blocked' : current.usedPercent >= avoidPercentFor(name) ? 'avoid' : current.usedPercent >= warningPercentFor(name) ? 'prefer-fallback' : 'normal';
     const sources = [...new Set(current.windows.map((window) => window.source))].join(',');
     console.log(`${name.padEnd(9)} ${String(current.usedPercent).padStart(3)}%  ${status.padEnd(16)} ${sources}`);
   }
@@ -130,7 +132,7 @@ try {
     saveState(state);
   } else if (command === 'guard') {
     const provider = validateProvider(args[0]);
-    const threshold = Number(args[1] || process.env.DELEGATE_AVOID_PERCENT || 90);
+    const threshold = args[1] != null ? Number(args[1]) : avoidPercentFor(provider);
     const current = effectiveUsage(state, provider);
     if (current.known && current.usedPercent >= threshold) {
       console.error(`${provider} is at ${current.usedPercent}% (threshold ${threshold}%).`);

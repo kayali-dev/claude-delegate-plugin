@@ -39,13 +39,15 @@ These are routing heuristics, not cross-provider benchmark rankings. Benchmarks 
 
 ## Headroom And Fallback
 
-Use the maximum active-window percentage for a provider.
+Use the maximum active-window percentage for a provider. Default bands for Claude and Codex (Cursor in parentheses — stricter because Cursor overage bills on-demand instead of throttling):
 
-- Below 80%: normal routing.
-- 80-89%: prefer an equally suitable cheaper provider.
-- 90-97%: do not start new work on that provider unless explicitly overridden.
+- Below 80% (70%): normal routing.
+- 80-89% (70-79%): prefer an equally suitable cheaper provider.
+- 90-97% (80-97%): do not start new work on that provider unless explicitly overridden.
 - 98-100%: treat as unavailable.
 - Unknown: eligible, but monitor quota failures; never interpret unknown as 0%.
+
+Bands act only on reliable data: provider-timed windows (Codex app-server, Claude status line) or manual entries fresher than `DELEGATE_MANUAL_USAGE_TTL_DAYS` (default 7). Stale manual entries revert to unknown rather than silently gating decisions.
 
 Fallback order is task-specific, not a fixed provider chain. Recompute model fit after removing providers at or above the avoid threshold. Prefer finishing an already-started bounded task on its current provider when it is below 98%, because migration also consumes allowance.
 

@@ -111,8 +111,11 @@ The default Cursor write policy is Smart Auto review inside Cursor's sandbox. Un
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DELEGATE_WARNING_PERCENT` | `80` | Prefer an equivalent fallback above this usage level |
-| `DELEGATE_AVOID_PERCENT` | `90` | Block new work on a provider at or above this level |
+| `DELEGATE_WARNING_PERCENT` | `80` (Cursor `70`) | Prefer an equivalent fallback above this usage level |
+| `DELEGATE_AVOID_PERCENT` | `90` (Cursor `80`) | Block new work on a provider at or above this level. Cursor defaults are stricter because its overage bills on-demand instead of throttling |
+| `DELEGATE_<PROVIDER>_AVOID_PERCENT` | unset | Per-provider avoid override (e.g. `DELEGATE_CURSOR_AVOID_PERCENT=75`); wins over the global value |
+| `DELEGATE_<PROVIDER>_WARNING_PERCENT` | unset | Per-provider warning override; wins over the global value |
+| `DELEGATE_MANUAL_USAGE_TTL_DAYS` | `7` | Manual/dashboard usage entries without a reset boundary go stale (back to unknown) after this many days; `0` disables |
 | `DELEGATE_ALLOW_OVER_LIMIT` | empty | Comma-separated explicit overrides such as `codex,cursor` |
 | `DELEGATE_ENABLED_PROVIDERS` | installed config | Temporary comma-separated override such as `codex` or `cursor` |
 | `DELEGATE_PROVIDER_CONFIG` | state directory | Override the persistent provider configuration file |

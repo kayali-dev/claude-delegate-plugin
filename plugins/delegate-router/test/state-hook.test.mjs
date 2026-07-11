@@ -82,3 +82,60 @@ test('quota hook blocks Codex above threshold and honors explicit environment ov
   });
   assert.equal(blockedContinuation.status, 2);
 }));
+
+test('per-provider guard bands: cursor defaults stricter, env overrides win', async () => {
+  const { avoidPercentFor, warningPercentFor } = await import('../bin/lib/state.mjs');
+  const saved = { avoid: process.env.DELEGATE_AVOID_PERCENT, cursorAvoid: process.env.DELEGATE_CURSOR_AVOID_PERCENT, warn: process.env.DELEGATE_WARNING_PERCENT };
+  delete process.env.DELEGATE_AVOID_PERCENT;
+  delete process.env.DELEGATE_CURSOR_AVOID_PERCENT;
+  delete process.env.DELEGATE_WARNING_PERCENT;
+  try {
+    assert.equal(avoidPercentFor('cursor'), 80);
+    assert.equal(avoidPercentFor('codex'), 90);
+    assert.equal(warningPercentFor('cursor'), 70);
+    assert.equal(warningPercentFor('codex'), 80);
+    process.env.DELEGATE_AVOID_PERCENT = '95';
+    assert.equal(avoidPercentFor('cursor'), 95);
+    process.env.DELEGATE_CURSOR_AVOID_PERCENT = '60';
+    assert.equal(avoidPercentFor('cursor'), 60);
+    assert.equal(avoidPercentFor('codex'), 95);
+  } finally {
+    for (const [key, value] of Object.entries({ DELEGATE_AVOID_PERCENT: saved.avoid, DELEGATE_CURSOR_AVOID_PERCENT: saved.cursorAvoid, DELEGATE_WARNING_PERCENT: saved.warn })) {
+      if (value == null) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
+test('manual usage without a reset boundary expires after the TTL', () => withStateFile(() => {
+  const state = loadState();
+  setWindow(state, 'cursor', 'first-party', 85, { source: 'dashboard' });
+  state.providers.cursor.windows['first-party'].updatedAt = Math.floor(Date.now() / 1000) - 8 * 86400;
+  setWindow(state, 'codex', 'primary', 50, { resetsAt: Math.floor(Date.now() / 1000) + 3600, source: 'codex-app-server' });
+  state.providers.codex.windows.primary.updatedAt = Math.floor(Date.now() / 1000) - 8 * 86400;
+  saveState(state);
+  assert.equal(effectiveUsage(loadState(), 'cursor').known, false);
+  assert.equal(effectiveUsage(loadState(), 'codex').usedPercent, 50);
+  const savedTtl = process.env.DELEGATE_MANUAL_USAGE_TTL_DAYS;
+  process.env.DELEGATE_MANUAL_USAGE_TTL_DAYS = '30';
+  try { assert.equal(effectiveUsage(loadState(), 'cursor').usedPercent, 85); }
+  finally { if (savedTtl == null) delete process.env.DELEGATE_MANUAL_USAGE_TTL_DAYS; else process.env.DELEGATE_MANUAL_USAGE_TTL_DAYS = savedTtl; }
+}));
+
+test('quota hook applies the stricter cursor band only to fresh known data', () => withStateFile((file) => {
+  const state = loadState();
+  setWindow(state, 'cursor', 'first-party', 85, { source: 'dashboard' });
+  setWindow(state, 'codex', 'primary', 85, { source: 'test' });
+  saveState(state);
+  const cursorStart = JSON.stringify({ tool_name: 'mcp__plugin_delegate-router_delegate_control__delegate_start', tool_input: { provider: 'cursor', prompt: 'task' } });
+  const cursorBlocked = spawnSync(process.execPath, [hook], { input: cursorStart, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
+  assert.equal(cursorBlocked.status, 2);
+  assert.match(cursorBlocked.stderr, /threshold 80%/);
+  const codexStart = JSON.stringify({ tool_name: 'mcp__plugin_delegate-router_delegate_control__delegate_start', tool_input: { provider: 'codex', prompt: 'task' } });
+  const codexAllowed = spawnSync(process.execPath, [hook], { input: codexStart, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
+  assert.equal(codexAllowed.status, 0);
+  const stale = loadState();
+  stale.providers.cursor.windows['first-party'].updatedAt = Math.floor(Date.now() / 1000) - 8 * 86400;
+  saveState(stale);
+  const staleAllowed = spawnSync(process.execPath, [hook], { input: cursorStart, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
+  assert.equal(staleAllowed.status, 0);
+}));

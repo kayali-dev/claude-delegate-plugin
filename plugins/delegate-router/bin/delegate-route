@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import { executableOnPath, resolveCursorBinary } from './lib/cursor.mjs';
 import { routeTask } from './lib/router.mjs';
-import { effectiveUsage, loadState, providerEnabled, providerNames } from './lib/state.mjs';
+import { avoidPercentFor, effectiveUsage, loadState, providerEnabled, providerNames, warningPercentFor } from './lib/state.mjs';
 
 function option(args, name, fallback = null) {
   const index = args.indexOf(name);
@@ -48,8 +48,8 @@ const result = routeTask({
   model: option(args, '--model', 'auto'),
   usage,
   availability,
-  avoidPercent: Number(process.env.DELEGATE_AVOID_PERCENT || 90),
-  warningPercent: Number(process.env.DELEGATE_WARNING_PERCENT || 80),
+  avoidPercent: Object.fromEntries(providerNames().map((name) => [name, avoidPercentFor(name)])),
+  warningPercent: Object.fromEntries(providerNames().map((name) => [name, warningPercentFor(name)])),
   overrideLimit: args.includes('--override-limit')
 });
 

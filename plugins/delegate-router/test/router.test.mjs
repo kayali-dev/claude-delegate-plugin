@@ -39,3 +39,21 @@ test('keeps small contextual work in Claude', () => {
   assert.equal(route.primary.provider, 'claude');
   assert.equal(route.delegate, false);
 });
+
+test('per-provider avoid map excludes cursor at its stricter band while codex stays eligible', () => {
+  const route = routeTask({
+    task: 'Implement the multi-file refactor and update tests',
+    usage: {
+      claude: { known: false, usedPercent: null },
+      codex: { known: true, usedPercent: 85 },
+      cursor: { known: true, usedPercent: 85 }
+    },
+    availability: { claude: true, codex: true, cursor: true },
+    avoidPercent: { claude: 90, codex: 90, cursor: 80 },
+    warningPercent: { claude: 80, codex: 80, cursor: 70 }
+  });
+  const excludedProviders = route.excluded.map((item) => item.provider);
+  assert.ok(excludedProviders.includes('cursor'));
+  assert.ok(route.excluded.find((item) => item.provider === 'cursor').excluded.includes('avoid 80%'));
+  assert.ok([route.primary, ...route.fallbacks].some((item) => item.provider === 'codex'));
+});

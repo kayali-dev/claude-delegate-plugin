@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerEnabled, saveJob, validateProvider } from './state.mjs';
+import { avoidPercentFor, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerEnabled, saveJob, validateProvider } from './state.mjs';
 import { isProcessAlive } from './process.mjs';
 
 const EVENT_VERSION = 1;
@@ -489,7 +489,7 @@ export function launchManagedJob(options) {
   const overrides = String(process.env.DELEGATE_ALLOW_OVER_LIMIT || '')
     .split(',').map((value) => value.trim()).filter(Boolean);
   const usage = effectiveUsage(loadState(), provider);
-  const threshold = options.providerSessionId ? 98 : Number(process.env.DELEGATE_AVOID_PERCENT || 90);
+  const threshold = options.providerSessionId ? 98 : avoidPercentFor(provider);
   if (!options.overrideLimit && !overrides.includes(provider) && !overrides.includes('all') && usage.known && usage.usedPercent >= threshold) {
     throw new Error(`QUOTA_GUARD: ${provider} is at ${usage.usedPercent}% (threshold ${threshold}%); route to a fallback or explicitly override`);
   }

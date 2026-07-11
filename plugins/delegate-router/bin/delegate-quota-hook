@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { effectiveUsage, loadState } from './lib/state.mjs';
+import { avoidPercentFor, effectiveUsage, loadState } from './lib/state.mjs';
 
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
@@ -34,7 +34,7 @@ try {
     .split(',').map((value) => value.trim()).filter(Boolean);
   if (overrides.includes(provider) || overrides.includes('all')) process.exit(0);
 
-  const threshold = continuation ? 98 : Number(process.env.DELEGATE_AVOID_PERCENT || 90);
+  const threshold = continuation ? 98 : avoidPercentFor(provider);
   const current = effectiveUsage(loadState(), provider);
   if (current.known && current.usedPercent >= threshold) {
     console.error(
