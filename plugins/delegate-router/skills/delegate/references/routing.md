@@ -53,6 +53,6 @@ The Codex `PreToolUse` hook and Cursor adapter independently enforce the 90% def
 
 ## Cost Discipline
 
-Use Composer standard rather than Composer Fast by default. Use Grok standard rather than Grok Fast. Use Sol only when its verification, terminal, or reasoning advantages justify its higher cost. Staying in the current Claude conversation is often most efficient for small work because it avoids a full context handoff.
+Use Composer standard rather than Composer Fast by default. Use Grok standard rather than Grok Fast. Composer and Grok share one Cursor first-party monthly pool, and Grok drains it roughly 3-4x faster per token — prefer Composer for routine implementation and spend Grok on work that needs its breadth. Use Sol only when its verification, terminal, or reasoning advantages justify its higher cost. Staying in the current Claude conversation is often most efficient for small work because it avoids a full context handoff.
 
 Do not delegate the same question to several expensive models by default. Multiple opinions are justified for high-risk review, uncertain architecture, or explicit comparison; keep them read-only and synthesize the disagreements.
