@@ -283,3 +283,50 @@ test('network option is stored, defaults off, and shapes codex spawn args', asyn
   assert.match(securityPreamble(true), /Preserve pre-existing changes/);
   assert.match(securityPreamble(true), /allowed scope/);
 }));
+
+test('event page cursor parses only the new tail and survives truncation', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+  const file = path.join(directory, 'jobs', `${job.id}.events.jsonl`);
+  const total = 20000;
+  const lines = [];
+  for (let seq = 3; seq <= total; seq += 1) {
+    lines.push(JSON.stringify({ v: 1, seq, at: Date.now(), jobId: job.id, type: 'plan.updated', data: { step: seq } }));
+  }
+  fs.appendFileSync(file, `${lines.join('\n')}\n`);
+
+  let afterSeq = 0;
+  let collected = 0;
+  for (;;) {
+    const page = readJobEventPage(job.id, { afterSeq, limit: 1000 });
+    collected += page.events.length;
+    afterSeq = page.nextSeq;
+    if (!page.hasMore) break;
+  }
+  assert.equal(collected, total);
+  assert.equal(afterSeq, total);
+
+  const quietStart = process.hrtime.bigint();
+  for (let i = 0; i < 200; i += 1) {
+    const page = readJobEventPage(job.id, { afterSeq: total, limit: 1000 });
+    assert.equal(page.events.length, 0);
+    assert.equal(page.hasMore, false);
+  }
+  const quietMs = Number(process.hrtime.bigint() - quietStart) / 1e6;
+  assert.ok(quietMs < 1000, `200 quiet polls took ${quietMs.toFixed(0)}ms; cursor fast path is not engaging`);
+
+  appendJobEvent(job.id, 'error', { message: 'tail event' });
+  const tail = readJobEventPage(job.id, { afterSeq: total, limit: 10 });
+  assert.equal(tail.events.length, 1);
+  assert.equal(tail.events[0].type, 'error');
+
+  const content = fs.readFileSync(file, 'utf8');
+  const thirdLineEnd = content.split('\n').slice(0, 3).join('\n').length + 1;
+  fs.truncateSync(file, thirdLineEnd);
+  const recovered = readJobEventPage(job.id, { afterSeq: 0, limit: 10 });
+  assert.equal(recovered.events.length, 3);
+  assert.deepEqual(recovered.events.map((event) => event.seq), [1, 2, 3]);
+
+  fs.appendFileSync(file, '{"partial":');
+  const partial = readJobEventPage(job.id, { afterSeq: recovered.nextSeq, limit: 10 });
+  assert.equal(partial.hasMore, false);
+}));

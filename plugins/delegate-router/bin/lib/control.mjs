@@ -248,6 +248,34 @@ export function readJobEvents(id, options = {}) {
     .slice(0, limit);
 }
 
+// Long polls hit readJobEventPage every 200ms for a job's whole lifetime, so
+// re-parsing the full journal per call turns quadratic on long heavy jobs.
+// Consumers advance afterSeq monotonically, so one byte cursor per job lets a
+// quiet poll cost a single stat() and a busy poll parse only the new tail.
+const pageCursors = new Map();
+const PAGE_CURSOR_LIMIT = 64;
+
+function rememberPageCursor(id, seq, offset) {
+  pageCursors.delete(id);
+  pageCursors.set(id, { seq, offset });
+  if (pageCursors.size > PAGE_CURSOR_LIMIT) {
+    pageCursors.delete(pageCursors.keys().next().value);
+  }
+}
+
+function lastCompleteSeq(text) {
+  let end = text.lastIndexOf('\n');
+  for (let attempts = 0; attempts < 3 && end >= 0; attempts += 1) {
+    const start = text.lastIndexOf('\n', end - 1) + 1;
+    try {
+      const event = JSON.parse(text.slice(start, end));
+      if (Number.isFinite(event.seq)) return event.seq;
+    } catch {}
+    end = start - 1;
+  }
+  return null;
+}
+
 export function readJobEventPage(id, options = {}) {
   assertJobId(id);
   const afterSeq = Number(options.afterSeq || 0);
@@ -255,16 +283,52 @@ export function readJobEventPage(id, options = {}) {
   const types = options.types ? new Set(options.types) : null;
   return withLock(id, () => {
     if (!loadJob(id)) throw new Error(`job not found: ${id}`);
-    const all = readRawEvents(id);
+    const file = eventPath(id);
+    let size = 0;
+    try {
+      size = fs.statSync(file).size;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (!size) return { events: [], nextSeq: afterSeq, latestSeq: afterSeq, hasMore: false };
+    const cursor = pageCursors.get(id);
+    const resumable = Boolean(cursor && cursor.seq === afterSeq && cursor.offset <= size);
+    const offset = resumable ? cursor.offset : 0;
+    if (offset === size) return { events: [], nextSeq: afterSeq, latestSeq: afterSeq, hasMore: false };
+    const fd = fs.openSync(file, 'r');
+    let text;
+    try {
+      const buffer = Buffer.alloc(size - offset);
+      fs.readSync(fd, buffer, 0, buffer.length, offset);
+      text = buffer.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
     const events = [];
     let nextSeq = afterSeq;
-    for (const event of all) {
-      if (event.seq <= afterSeq) continue;
-      nextSeq = event.seq;
-      if (!types || types.has(event.type)) events.push(event);
-      if (events.length >= limit) break;
+    let lineStart = 0;
+    let limited = false;
+    for (;;) {
+      const newline = text.indexOf('\n', lineStart);
+      if (newline < 0) break;
+      let event = null;
+      try { event = JSON.parse(text.slice(lineStart, newline)); } catch {}
+      lineStart = newline + 1;
+      if (event && Number.isFinite(event.seq) && event.seq > afterSeq) {
+        nextSeq = event.seq;
+        if (!types || types.has(event.type)) events.push(event);
+        if (events.length >= limit) {
+          limited = true;
+          break;
+        }
+      }
     }
-    const latestSeq = all.at(-1)?.seq || afterSeq;
+    rememberPageCursor(id, nextSeq, offset + Buffer.byteLength(text.slice(0, lineStart), 'utf8'));
+    let latestSeq = nextSeq;
+    if (limited) {
+      const last = lastCompleteSeq(text);
+      if (last != null) latestSeq = Math.max(latestSeq, last);
+    }
     return { events, nextSeq, latestSeq, hasMore: nextSeq < latestSeq };
   });
 }

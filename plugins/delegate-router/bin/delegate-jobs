@@ -9,7 +9,7 @@ import {
   jobUsage,
   launchManagedJob,
   pruneJobs,
-  readJobEvents,
+  readJobEventPage,
   reconcileJob,
   resumeManagedJob,
   submitControl
@@ -80,10 +80,11 @@ try {
     let afterSeq = Number(value(args, '--after', 0));
     const limit = Number(value(args, '--limit', 200));
     do {
-      const events = readJobEvents(id, { afterSeq, limit });
+      const page = readJobEventPage(id, { afterSeq, limit });
+      const events = page.events;
       if (args.includes('--json')) for (const event of events) console.log(JSON.stringify(event));
       else for (const event of events) console.log(`${String(event.seq).padStart(5)} ${new Date(event.at).toISOString()} ${event.type} ${JSON.stringify(event.data)}`);
-      if (events.length) afterSeq = events.at(-1).seq;
+      afterSeq = page.nextSeq;
       const job = requireJob(id);
       if (!args.includes('--follow') || terminal(job.status)) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
