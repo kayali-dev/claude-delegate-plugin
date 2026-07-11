@@ -1,0 +1,113 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createManagedJob, inspectJob, readJobEvents, submitControl } from '../bin/lib/control.mjs';
+import { runManagedProvider } from '../bin/lib/providers.mjs';
+
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
+const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
+const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
+
+async function isolated(fn) {
+  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, crash: process.env.FAKE_CODEX_CRASH };
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-provider-test-'));
+  process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
+  try { await fn(directory); }
+  finally {
+    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CODEX_CRASH: old.crash })) {
+      if (value == null) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+}
+
+async function waitFor(jobId, predicate) {
+  for (let i = 0; i < 300; i += 1) {
+    const job = inspectJob(jobId);
+    if (predicate(job)) return job;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out waiting for job state');
+}
+
+test('Codex app-server maps events and applies true same-turn steering', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'implement' });
+  const running = runManagedProvider(job);
+  const active = await waitFor(job.id, (current) => Boolean(current.providerTurnId));
+  submitControl(job.id, { type: 'steer', correctionId: 'codex-correction', strategy: 'same-turn', text: 'add a test' }, active.revision);
+  await running;
+  assert.equal(inspectJob(job.id).status, 'completed');
+  const types = readJobEvents(job.id, { limit: 1000 }).map((event) => event.type);
+  for (const type of ['turn.started', 'plan.updated', 'file.changed', 'message.delta', 'message.completed', 'diff.updated', 'usage.updated', 'correction.applied', 'job.completed']) assert.ok(types.includes(type), type);
+}));
+
+test('Cursor ACP maps structured updates and reports correction as restart', () => isolated(async (directory) => {
+  fs.chmodSync(fakeCursor, 0o755);
+  process.env.DELEGATE_CURSOR_BIN = fakeCursor;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'implement', cwd: directory, prompt: 'implement' });
+  const running = runManagedProvider(job);
+  const active = await waitFor(job.id, (current) => Boolean(current.providerSessionId));
+  submitControl(job.id, { type: 'steer', correctionId: 'cursor-correction', strategy: 'auto', text: 'use a different API' }, active.revision);
+  const afterFirst = inspectJob(job.id);
+  submitControl(job.id, { type: 'steer', correctionId: 'cursor-correction-2', strategy: 'auto', text: 'also add a regression test' }, afterFirst.revision);
+  await running;
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.controls['cursor-correction'].state, 'applied');
+  assert.equal(completed.controls['cursor-correction-2'].state, 'applied');
+  const events = readJobEvents(job.id, { limit: 1000 });
+  assert.ok(events.some((event) => event.type === 'correction.restarted' && event.data.appliedAs === 'restart'));
+  assert.ok(events.some((event) => event.type === 'tool.started'));
+  assert.ok(events.some((event) => event.type === 'correction.queued'));
+  assert.ok(events.some((event) => event.type === 'message.delta' && event.data.delta === 'answer-3'));
+}));
+
+test('Cursor falls back to headless only when ACP fails before a session starts', () => isolated(async (directory) => {
+  fs.chmodSync(fakeCursorFallback, 0o755);
+  process.env.DELEGATE_CURSOR_BIN = fakeCursorFallback;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'review', cwd: directory, prompt: 'task' });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.transport, 'headless');
+  assert.ok(readJobEvents(job.id, { limit: 1000 }).some((event) => event.data.providerEvent === 'cursor:acp-fallback'));
+}));
+
+test('Cursor final inventory includes staged and untracked files', () => isolated(async (directory) => {
+  fs.chmodSync(fakeCursor, 0o755);
+  spawnSync('git', ['init', '-q'], { cwd: directory });
+  fs.writeFileSync(path.join(directory, '.env'), 'DATABASE_PASSWORD=hunter2\n');
+  fs.writeFileSync(path.join(directory, 'preexisting.txt'), 'local notes\n');
+  process.env.DELEGATE_CURSOR_BIN = fakeCursor;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  process.env.FAKE_CURSOR_WRITE = '1';
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'implement', cwd: directory, prompt: 'write files' });
+  await runManagedProvider(job);
+  const events = readJobEvents(job.id, { limit: 1000 });
+  const changed = events.filter((event) => event.type === 'file.changed').map((event) => event.data.path);
+  assert.ok(changed.includes('new-file.txt'));
+  assert.ok(changed.includes('staged-file.txt'));
+  const diffEvent = events.filter((event) => event.type === 'diff.updated').at(-1);
+  assert.ok(diffEvent);
+  const diff = diffEvent.data.diff || fs.readFileSync(diffEvent.data.artifactPath, 'utf8');
+  assert.match(diff, /new-file\.txt/);
+  assert.match(diff, /staged-file\.txt/);
+  assert.doesNotMatch(diff, /hunter2|preexisting\.txt/);
+}));
+
+test('Codex provider exit fails immediately instead of waiting for the turn timeout', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_CRASH = '1';
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review' });
+  const started = Date.now();
+  await assert.rejects(() => runManagedProvider(job), /exited before turn completion/);
+  assert.ok(Date.now() - started < 2000);
+  assert.equal(inspectJob(job.id).status, 'failed');
+}));

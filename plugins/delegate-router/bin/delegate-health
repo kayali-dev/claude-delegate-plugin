@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { availableModelIds, executableOnPath, resolveCursorBinary } from './lib/cursor.mjs';
+import { effectiveUsage, enabledProviders, loadState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
+
+function run(command, args, timeout = 12000, maxOutput = 2000) {
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout, windowsHide: true });
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    output: (result.stdout || result.stderr || '').trim().slice(0, maxOutput)
+  };
+}
+
+const args = process.argv.slice(2);
+const quick = args.includes('--quick');
+const state = loadState();
+const cursorBinary = resolveCursorBinary();
+const codexBinary = executableOnPath('codex');
+const claudeBinary = executableOnPath('claude');
+const controlServer = path.join(path.dirname(fileURLToPath(import.meta.url)), 'delegate-control-mcp');
+const configuredProviders = enabledProviders();
+const report = {
+  ok: true,
+  stateFile: statePath(),
+  providerConfigFile: providerConfigPath(),
+  enabledProviders: configuredProviders,
+  node: { ok: Number(process.versions.node.split('.')[0]) >= 18, version: process.versions.node },
+  claude: { installed: Boolean(claudeBinary), path: claudeBinary },
+  codex: { enabled: providerEnabled('codex'), installed: Boolean(codexBinary), path: codexBinary },
+  cursor: { enabled: providerEnabled('cursor'), installed: Boolean(cursorBinary), path: cursorBinary },
+  control: { installed: fs.existsSync(controlServer), path: controlServer, protocol: 'MCP stdio' },
+  usage: Object.fromEntries(providerNames().map((name) => [name, effectiveUsage(state, name)]))
+};
+
+if (report.codex.enabled && codexBinary) report.codex.version = run(codexBinary, ['--version'], 5000);
+if (report.cursor.enabled && cursorBinary) {
+  report.cursor.version = run(cursorBinary, ['--version'], 5000);
+  if (!quick) {
+    report.cursor.acp = run(cursorBinary, ['acp', '--help'], 10000);
+    report.cursor.status = run(cursorBinary, ['status'], 15000);
+    const models = availableModelIds(cursorBinary, 15000);
+    report.cursor.models = {
+      ok: models.length > 0,
+      count: models.length,
+      composer: models.filter((id) => /^composer-/.test(id)),
+      grok: models.filter((id) => /^grok-/.test(id))
+    };
+  }
+}
+if (claudeBinary && !quick) {
+  const plugins = run(claudeBinary, ['plugin', 'list', '--json'], 15000, 200000);
+  report.claude.pluginsQuery = { ok: plugins.ok };
+  if (plugins.ok) {
+    try {
+      const parsed = JSON.parse(plugins.output);
+      const serialized = JSON.stringify(parsed);
+      report.claude.officialCodexPlugin = serialized.includes('codex@openai-codex');
+    } catch {
+      report.claude.officialCodexPlugin = null;
+    }
+  }
+}
+
+report.ok = report.node.ok && report.claude.installed && report.control.installed
+  && (!report.codex.enabled || report.codex.installed)
+  && (!report.cursor.enabled || report.cursor.installed);
+if (!quick && report.cursor.enabled && report.cursor.installed) {
+  report.ok = report.ok && report.cursor.status?.ok === true && report.cursor.models?.ok === true;
+}
+if (args.includes('--json')) console.log(JSON.stringify(report, null, 2));
+else {
+  console.log(`Delegate Router: ${report.ok ? 'ready' : 'degraded'}`);
+  console.log(`Claude: ${report.claude.installed ? 'installed' : 'missing'}`);
+  console.log(`Enabled providers: ${configuredProviders.join(', ')}`);
+  console.log(`Codex: ${report.codex.enabled ? report.codex.installed ? 'installed' : 'missing' : 'disabled'}`);
+  console.log(`Cursor: ${report.cursor.enabled ? report.cursor.installed ? 'installed' : 'missing' : 'disabled'}${report.cursor.enabled && cursorBinary ? ` (${path.basename(cursorBinary)})` : ''}`);
+  console.log(`Control MCP: ${report.control.installed ? 'installed' : 'missing'}`);
+  if (report.cursor.acp) console.log(`Cursor ACP: ${report.cursor.acp.ok ? 'available' : 'unavailable (headless fallback)'}`);
+  if (report.cursor.models) console.log(`Cursor models: ${report.cursor.models.count}`);
+  for (const name of providerNames()) {
+    const current = report.usage[name];
+    console.log(`${name} usage: ${current.known ? `${current.usedPercent}%` : 'unknown'}`);
+  }
+}

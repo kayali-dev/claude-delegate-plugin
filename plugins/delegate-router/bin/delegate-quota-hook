@@ -1,0 +1,47 @@
+#!/usr/bin/env node
+import { effectiveUsage, loadState } from './lib/state.mjs';
+
+let input = '';
+for await (const chunk of process.stdin) input += chunk;
+
+try {
+  const event = JSON.parse(input || '{}');
+  const toolName = event.tool_name || event.toolName || '';
+  const toolInput = event.tool_input || event.toolInput || {};
+  let provider = null;
+  let continuation = false;
+  if (toolName === 'mcp__delegate_codex__codex') provider = 'codex';
+  if (toolName === 'mcp__delegate_codex__codex-reply') {
+    provider = 'codex';
+    continuation = true;
+  }
+  if (toolName === 'mcp__delegate_control__delegate_start') provider = toolInput.provider || null;
+  if (toolName === 'mcp__delegate_control__delegate_resume') {
+    const jobId = String(toolInput.jobId || '');
+    provider = jobId.startsWith('codex-') ? 'codex' : jobId.startsWith('cursor-') ? 'cursor' : null;
+    continuation = true;
+  }
+  if (toolName === 'Skill') {
+    const skill = String(toolInput.skill || toolInput.name || '');
+    if (/^codex:(?:review|adversarial-review|rescue)$/.test(skill)) provider = 'codex';
+    continuation = /(?:^|\s)--resume(?:\s|$)/.test(String(toolInput.args || toolInput.arguments || ''));
+  }
+  if (!provider) process.exit(0);
+
+  const overrides = String(process.env.DELEGATE_ALLOW_OVER_LIMIT || '')
+    .split(',').map((value) => value.trim()).filter(Boolean);
+  if (overrides.includes(provider) || overrides.includes('all')) process.exit(0);
+
+  const threshold = continuation ? 98 : Number(process.env.DELEGATE_AVOID_PERCENT || 90);
+  const current = effectiveUsage(loadState(), provider);
+  if (current.known && current.usedPercent >= threshold) {
+    console.error(
+      `Blocked ${provider} ${continuation ? 'continuation' : 'delegation'} at ${current.usedPercent}% usage (threshold ${threshold}%). ` +
+      `Choose an eligible fallback. The user can explicitly override with DELEGATE_ALLOW_OVER_LIMIT=${provider}.`
+    );
+    process.exit(2);
+  }
+} catch (error) {
+  console.error(`Delegate quota hook could not read usage state: ${error.message}`);
+  process.exit(2);
+}

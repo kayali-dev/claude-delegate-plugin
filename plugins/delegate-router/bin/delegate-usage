@@ -1,0 +1,159 @@
+#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import readline from 'node:readline';
+import {
+  effectiveUsage,
+  loadState,
+  providerNames,
+  recordEvent,
+  saveState,
+  setWindow,
+  statePath,
+  validateProvider
+} from './lib/state.mjs';
+
+function option(args, name, fallback = null) {
+  const index = args.indexOf(name);
+  return index >= 0 && index + 1 < args.length ? args[index + 1] : fallback;
+}
+
+function usage() {
+  console.log(`Usage:
+  delegate-usage show [--json]
+  delegate-usage refresh codex
+  delegate-usage set <provider> <0-100> [--window name] [--reset epoch] [--source label]
+  delegate-usage clear <provider>
+  delegate-usage guard <provider> [threshold]
+  delegate-usage record <provider> <model> <started|ok|failed> [--mode mode] [--thread id]
+  delegate-usage history [count]`);
+}
+
+async function readCodexLimits() {
+  return new Promise((resolve, reject) => {
+    const child = spawn('codex', ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const lines = readline.createInterface({ input: child.stdout });
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error('Codex usage refresh timed out')), 12000);
+
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      lines.close();
+      child.kill();
+      if (error) reject(error); else resolve(value);
+    }
+
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => finish(error));
+    child.on('exit', (code) => {
+      if (!settled && code !== 0) finish(new Error(stderr.trim() || `codex app-server exited ${code}`));
+    });
+    lines.on('line', (line) => {
+      let message;
+      try { message = JSON.parse(line); } catch { return; }
+      if (message.id === 1 && message.result) {
+        child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`);
+        child.stdin.write(`${JSON.stringify({ method: 'account/rateLimits/read', id: 2 })}\n`);
+      } else if (message.id === 1 && message.error) {
+        finish(new Error(message.error.message || 'Codex initialization failed'));
+      } else if (message.id === 2 && message.result) {
+        finish(null, message.result.rateLimits || {});
+      } else if (message.id === 2 && message.error) {
+        finish(new Error(message.error.message || 'Codex rate-limit query failed'));
+      }
+    });
+    child.stdin.write(`${JSON.stringify({
+      method: 'initialize',
+      id: 1,
+      params: { clientInfo: { name: 'delegate_router', title: 'Delegate Router', version: '0.1.0' } }
+    })}\n`);
+  });
+}
+
+function show(state, asJson) {
+  const providers = Object.fromEntries(providerNames().map((name) => [name, effectiveUsage(state, name)]));
+  if (asJson) {
+    console.log(JSON.stringify({ stateFile: statePath(), providers }, null, 2));
+    return;
+  }
+  console.log('Provider  Used  Status   Source');
+  for (const name of providerNames()) {
+    const current = providers[name];
+    if (!current.known) {
+      console.log(`${name.padEnd(9)} unknown eligible no-provider-snapshot`);
+      continue;
+    }
+    const status = current.usedPercent >= 98 ? 'blocked' : current.usedPercent >= 90 ? 'avoid' : current.usedPercent >= 80 ? 'prefer-fallback' : 'normal';
+    const sources = [...new Set(current.windows.map((window) => window.source))].join(',');
+    console.log(`${name.padEnd(9)} ${String(current.usedPercent).padStart(3)}%  ${status.padEnd(16)} ${sources}`);
+  }
+}
+
+const args = process.argv.slice(2);
+const command = args.shift() || 'show';
+const state = loadState();
+
+try {
+  if (command === 'show') {
+    show(state, args.includes('--json'));
+  } else if (command === 'refresh') {
+    const provider = validateProvider(args[0]);
+    if (provider !== 'codex') throw new Error('Only Codex has an automated provider quota query.');
+    const limits = await readCodexLimits();
+    state.providers.codex.windows = {};
+    for (const name of ['primary', 'secondary']) {
+      const value = limits[name];
+      if (value && Number.isFinite(value.usedPercent)) {
+        setWindow(state, 'codex', name, value.usedPercent, { resetsAt: value.resetsAt, source: 'codex-app-server' });
+      }
+    }
+    saveState(state);
+    show(state, args.includes('--json'));
+  } else if (command === 'set') {
+    const provider = validateProvider(args[0]);
+    const percent = Number(args[1]);
+    const reset = option(args, '--reset');
+    setWindow(state, provider, option(args, '--window', 'manual'), percent, {
+      resetsAt: reset ? Number(reset) : null,
+      source: option(args, '--source', 'manual')
+    });
+    saveState(state);
+    show(state, args.includes('--json'));
+  } else if (command === 'clear') {
+    const provider = validateProvider(args[0]);
+    state.providers[provider] = { windows: {} };
+    saveState(state);
+  } else if (command === 'guard') {
+    const provider = validateProvider(args[0]);
+    const threshold = Number(args[1] || process.env.DELEGATE_AVOID_PERCENT || 90);
+    const current = effectiveUsage(state, provider);
+    if (current.known && current.usedPercent >= threshold) {
+      console.error(`${provider} is at ${current.usedPercent}% (threshold ${threshold}%).`);
+      process.exit(75);
+    }
+  } else if (command === 'record') {
+    const provider = validateProvider(args[0]);
+    const model = args[1];
+    const status = args[2];
+    if (!model || !['started', 'ok', 'failed'].includes(status)) throw new Error('record requires provider, model, and started|ok|failed');
+    recordEvent(state, {
+      provider,
+      model,
+      status,
+      mode: option(args, '--mode'),
+      thread: option(args, '--thread')
+    });
+    saveState(state);
+  } else if (command === 'history') {
+    const count = Number(args[0] || 20);
+    console.log(JSON.stringify(state.history.slice(-count), null, 2));
+  } else {
+    usage();
+    process.exit(command === 'help' ? 0 : 2);
+  }
+} catch (error) {
+  console.error(`delegate-usage: ${error.message}`);
+  process.exit(1);
+}

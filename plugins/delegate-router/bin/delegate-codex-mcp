@@ -1,0 +1,41 @@
+#!/usr/bin/env node
+import readline from 'node:readline';
+import { spawn } from 'node:child_process';
+import { providerEnabled } from './lib/state.mjs';
+
+if (providerEnabled('codex')) {
+  const child = spawn(process.env.DELEGATE_CODEX_BIN || 'codex', [
+    'mcp-server',
+    '-c', 'approval_policy="on-request"',
+    '-c', 'approvals_reviewer="auto_review"',
+    '-c', 'sandbox_mode="workspace-write"',
+    '-c', 'sandbox_workspace_write.network_access=false',
+    '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]'
+  ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  process.stdin.pipe(child.stdin);
+  child.stdout.pipe(process.stdout);
+  child.stderr.pipe(process.stderr);
+  child.once('error', (error) => { console.error(`delegate-codex-mcp: ${error.message}`); process.exitCode = 1; });
+  child.once('exit', (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
+  process.once('SIGINT', () => child.kill('SIGINT'));
+  process.once('SIGTERM', () => child.kill('SIGTERM'));
+} else {
+  const lines = readline.createInterface({ input: process.stdin });
+  const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
+  lines.on('line', (line) => {
+    let request;
+    try { request = JSON.parse(line); } catch { return; }
+    if (request.id == null) return;
+    if (request.method === 'initialize') {
+      send({ jsonrpc: '2.0', id: request.id, result: {
+        protocolVersion: request.params?.protocolVersion || '2025-11-25',
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: 'delegate-codex-disabled', version: '0.4.0' }
+      } });
+    } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: [] } });
+    else if (request.method === 'resources/list') send({ jsonrpc: '2.0', id: request.id, result: { resources: [] } });
+    else if (request.method === 'prompts/list') send({ jsonrpc: '2.0', id: request.id, result: { prompts: [] } });
+    else if (request.method === 'ping') send({ jsonrpc: '2.0', id: request.id, result: {} });
+    else send({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Codex provider is disabled for this installation' } });
+  });
+}

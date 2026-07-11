@@ -1,0 +1,66 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import { executableOnPath, resolveCursorBinary } from './lib/cursor.mjs';
+import { routeTask } from './lib/router.mjs';
+import { effectiveUsage, loadState, providerEnabled, providerNames } from './lib/state.mjs';
+
+function option(args, name, fallback = null) {
+  const index = args.indexOf(name);
+  return index >= 0 && index + 1 < args.length ? args[index + 1] : fallback;
+}
+
+async function stdinText() {
+  if (process.stdin.isTTY) return '';
+  let value = '';
+  for await (const chunk of process.stdin) value += chunk;
+  return value;
+}
+
+const args = process.argv.slice(2);
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(`Usage: delegate-route [--json] [--mode mode] [--kind kind]
+  [--provider auto|claude|codex|cursor] [--model model]
+  [--task text|--task-file path] [--override-limit]`);
+  process.exit(0);
+}
+
+let task = option(args, '--task', '');
+const taskFile = option(args, '--task-file');
+if (taskFile) task = fs.readFileSync(taskFile, 'utf8');
+if (!task) task = await stdinText();
+if (!task.trim()) {
+  console.error('delegate-route: task text is required');
+  process.exit(2);
+}
+
+const state = loadState();
+const usage = Object.fromEntries(providerNames().map((name) => [name, effectiveUsage(state, name)]));
+const availability = {
+  claude: true,
+  codex: providerEnabled('codex') && Boolean(executableOnPath('codex')),
+  cursor: providerEnabled('cursor') && Boolean(resolveCursorBinary())
+};
+const result = routeTask({
+  task,
+  mode: option(args, '--mode', 'implement'),
+  kind: option(args, '--kind', 'auto'),
+  provider: option(args, '--provider', 'auto'),
+  model: option(args, '--model', 'auto'),
+  usage,
+  availability,
+  avoidPercent: Number(process.env.DELEGATE_AVOID_PERCENT || 90),
+  warningPercent: Number(process.env.DELEGATE_WARNING_PERCENT || 80),
+  overrideLimit: args.includes('--override-limit')
+});
+
+if (args.includes('--json')) console.log(JSON.stringify(result, null, 2));
+else if (!result.primary) {
+  console.log('No eligible provider. Refresh usage or explicitly override a provider limit.');
+  process.exit(75);
+} else {
+  console.log(`${result.primary.provider}/${result.primary.model} (${result.kind})`);
+  console.log(result.primary.reason);
+  if (result.fallbacks.length) {
+    console.log(`Fallbacks: ${result.fallbacks.map((item) => `${item.provider}/${item.model}`).join(', ')}`);
+  }
+}

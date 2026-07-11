@@ -1,0 +1,160 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import { terminatePid } from './lib/process.mjs';
+import {
+  inspectJob,
+  jobDiff,
+  jobFiles,
+  jobTranscript,
+  jobUsage,
+  launchManagedJob,
+  pruneJobs,
+  readJobEvents,
+  reconcileJob,
+  resumeManagedJob,
+  submitControl
+} from './lib/control.mjs';
+import { listJobs, saveJob } from './lib/state.mjs';
+
+function usage() {
+  console.log(`Usage:
+  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--timeout-seconds N] [--override-writer]
+  delegate-jobs status [job-id] [--json]
+  delegate-jobs inspect <job-id> [--json]
+  delegate-jobs events <job-id> [--after N] [--limit N] [--follow] [--json]
+  delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
+  delegate-jobs wait <job-id> [--timeout-seconds N]   # blocks until terminal; exit 0 completed, 3 failed, 4 cancelled, 75 timeout
+  delegate-jobs diff <job-id>
+  delegate-jobs files <job-id> [--json]
+  delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
+  delegate-jobs cancel <job-id> [--expected-revision N]
+  delegate-jobs resume <job-id> --prompt <text>
+  delegate-jobs usage <job-id> [--json]
+  delegate-jobs result <job-id>
+  delegate-jobs logs <job-id> [--stderr]
+  delegate-jobs prune [--max-age-days N]`);
+}
+
+function value(args, flag, fallback = undefined) {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : fallback;
+}
+
+function prompt(args) {
+  const file = value(args, '--prompt-file');
+  return file ? fs.readFileSync(file, 'utf8') : value(args, '--prompt');
+}
+
+function requireJob(id) {
+  if (!id) throw new Error('job id is required');
+  return reconcileJob(id);
+}
+
+function json(value) { console.log(JSON.stringify(value, null, 2)); }
+function terminal(status) { return ['completed', 'failed', 'cancelled'].includes(status); }
+
+const args = process.argv.slice(2);
+const command = args.shift() || 'status';
+
+try {
+  if (command === 'start') {
+    const rawTimeout = value(args, '--timeout-seconds');
+    json(launchManagedJob({
+      provider: value(args, '--provider'), model: value(args, '--model', 'auto'), mode: value(args, '--mode', 'consult'),
+      cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
+      timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout), overrideWriter: args.includes('--override-writer')
+    }));
+  } else if (command === 'status') {
+    const id = args.find((item) => !item.startsWith('--'));
+    const jobs = id ? [requireJob(id)] : listJobs().slice(0, 20).map((job) => (job.status === 'running' ? reconcileJob(job.id) : job));
+    if (args.includes('--json')) json(jobs);
+    else if (!jobs.length) console.log('No delegation jobs.');
+    else {
+      console.log('Job ID                         Provider Status     Phase       Model');
+      for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${job.model || job.requestedModel || ''}`);
+    }
+  } else if (command === 'inspect') {
+    json(inspectJob(args[0]));
+  } else if (command === 'events') {
+    const id = args[0];
+    let afterSeq = Number(value(args, '--after', 0));
+    const limit = Number(value(args, '--limit', 200));
+    do {
+      const events = readJobEvents(id, { afterSeq, limit });
+      if (args.includes('--json')) for (const event of events) console.log(JSON.stringify(event));
+      else for (const event of events) console.log(`${String(event.seq).padStart(5)} ${new Date(event.at).toISOString()} ${event.type} ${JSON.stringify(event.data)}`);
+      if (events.length) afterSeq = events.at(-1).seq;
+      const job = requireJob(id);
+      if (!args.includes('--follow') || terminal(job.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } while (true);
+  } else if (command === 'transcript') {
+    json(jobTranscript(args[0], {
+      afterSeq: Number(value(args, '--after', 0)),
+      limit: Number(value(args, '--limit', 1000)),
+      verbose: args.includes('--verbose')
+    }));
+  } else if (command === 'wait') {
+    const id = args.find((item) => !item.startsWith('--'));
+    const timeoutSeconds = Number(value(args, '--timeout-seconds', 0));
+    const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : null;
+    let job = requireJob(id);
+    while (!terminal(job.status)) {
+      if (deadline && Date.now() > deadline) {
+        console.error(`${job.id} is still ${job.status} after ${timeoutSeconds}s`);
+        process.exit(75);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      job = requireJob(id);
+    }
+    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, result: job.result, error: job.error });
+    process.exit(job.status === 'completed' ? 0 : job.status === 'failed' ? 3 : 4);
+  } else if (command === 'prune') {
+    const rawDays = value(args, '--max-age-days');
+    json(pruneJobs(rawDays == null ? {} : { maxAgeDays: Number(rawDays) }));
+  } else if (command === 'diff') {
+    process.stdout.write(jobDiff(args[0]));
+  } else if (command === 'files') {
+    json(jobFiles(args[0]));
+  } else if (command === 'steer') {
+    const rawRevision = value(args, '--expected-revision');
+    const expectedRevision = rawRevision == null ? null : Number(rawRevision);
+    json(submitControl(args[0], {
+      type: 'steer', correctionId: value(args, '--correction-id'), strategy: value(args, '--strategy', 'auto'),
+      expectedTurnId: value(args, '--expected-turn'), text: prompt(args)
+    }, expectedRevision));
+  } else if (command === 'cancel') {
+    const job = requireJob(args[0]);
+    if (job.managedBy === 'delegate-control') {
+      const raw = value(args, '--expected-revision');
+      json(submitControl(job.id, { type: 'cancel', commandId: value(args, '--command-id') }, raw == null ? null : Number(raw)));
+    } else if (job.status !== 'running') console.log(`${job.id} is already ${job.status}.`);
+    else {
+      terminatePid(job.pid);
+      job.status = 'cancelled';
+      job.updatedAt = Math.floor(Date.now() / 1000);
+      job.completedAt = job.updatedAt;
+      saveJob(job);
+      console.log(`Cancellation requested for legacy job ${job.id}.`);
+    }
+  } else if (command === 'resume') {
+    json(resumeManagedJob(args[0], { prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd') }));
+  } else if (command === 'usage') {
+    json(jobUsage(args[0]));
+  } else if (command === 'result') {
+    const job = requireJob(args[0]);
+    if (!terminal(job.status)) { console.error(`${job.id} is still ${job.status}.`); process.exit(75); }
+    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, result: job.result, error: job.error });
+  } else if (command === 'logs') {
+    const job = requireJob(args[0]);
+    const file = args.includes('--stderr') ? job.stderrPath : job.stdoutPath;
+    if (!file || !fs.existsSync(file)) throw new Error('job log is unavailable');
+    process.stdout.write(fs.readFileSync(file, 'utf8'));
+  } else {
+    usage();
+    process.exit(command === 'help' ? 0 : 2);
+  }
+} catch (error) {
+  console.error(`delegate-jobs: ${error.message}`);
+  process.exit(1);
+}

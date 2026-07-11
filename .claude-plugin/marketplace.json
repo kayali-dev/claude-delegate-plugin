@@ -1,0 +1,15 @@
+{
+  "name": "delegate-skill",
+  "description": "Portable quota-aware delegation and live agent supervision for Claude Code.",
+  "owner": {
+    "name": "Mahmoud Kayyali",
+    "email": "mahmoud@kayali.dev"
+  },
+  "plugins": [
+    {
+      "name": "delegate-router",
+      "source": "./plugins/delegate-router",
+      "description": "Route and supervise bounded work across Claude, Codex, and Cursor with quota-aware fallbacks."
+    }
+  ]
+}

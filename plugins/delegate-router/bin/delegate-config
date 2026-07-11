@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+import { enabledProviders, providerConfigPath, saveEnabledProviders } from './lib/state.mjs';
+
+const args = process.argv.slice(2);
+const command = args.shift() || 'show';
+
+try {
+  if (command === 'show') {
+    console.log(JSON.stringify({ configFile: providerConfigPath(), enabled: enabledProviders() }, null, 2));
+  } else if (command === 'providers') {
+    const mode = args[0];
+    const providers = mode === 'both' ? ['codex', 'cursor'] : mode === 'codex' ? ['codex'] : mode === 'cursor' ? ['cursor'] : null;
+    if (!providers) throw new Error('expected codex, cursor, or both');
+    console.log(JSON.stringify({ configFile: providerConfigPath(), enabled: saveEnabledProviders(providers) }, null, 2));
+  } else {
+    console.error('Usage: delegate-config show | providers <codex|cursor|both>');
+    process.exit(command === 'help' ? 0 : 2);
+  }
+} catch (error) {
+  console.error(`delegate-config: ${error.message}`);
+  process.exit(1);
+}

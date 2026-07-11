@@ -1,0 +1,42 @@
+# Usage Tracking
+
+`delegate-usage` maintains a small JSON state file and append-only invocation history. It does not store prompts or source code. Managed supervision is separate: it stores local user-visible transcripts, tool activity, and diffs in user-only job artifacts so Claude can inspect delegated work.
+
+Default path:
+
+```text
+${DELEGATE_STATE_FILE}
+or ${XDG_STATE_HOME}/delegate-router/usage.json
+or ~/.local/state/delegate-router/usage.json
+```
+
+## Provider Truth
+
+- Codex: `delegate-usage refresh codex` queries the official app-server `account/rateLimits/read` method and stores primary and secondary windows.
+- Claude: `delegate-claude-usage` parses the official status-line `rate_limits.five_hour` and `rate_limits.seven_day` fields. Manual values are also accepted.
+- Cursor: no stable public quota CLI/API is assumed. Enter the dashboard percentage with `delegate-usage set cursor <percent> --source dashboard`. Invocation history is an estimate and never converted into a fake quota percentage.
+
+## Commands
+
+```bash
+delegate-usage show [--json]
+delegate-usage refresh codex
+delegate-usage set <claude|codex|cursor> <0-100> [--window name] [--reset epoch] [--source label]
+delegate-usage clear <provider>
+delegate-usage guard <provider> [threshold]
+delegate-usage record <provider> <model> <started|ok|failed> [--mode mode] [--thread id]
+delegate-usage history [count]
+delegate-route --json --mode <mode> --task <summary>
+delegate-health [--quick] [--json]
+delegate-config show
+delegate-config providers <codex|cursor|both>
+delegate-jobs start|status|inspect|events|transcript|diff|files|steer|cancel|resume|usage|result <job-id>
+```
+
+The default avoid threshold is 90%, configurable with `DELEGATE_AVOID_PERCENT`. `guard` exits 75 when the provider is at or above the threshold so the router can choose a fallback.
+
+The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex work at that threshold. Set `DELEGATE_ALLOW_OVER_LIMIT=codex` only for a deliberate user override. Cursor enforces the threshold inside its adapter and accepts `--override-limit` for the same explicit case.
+
+Per-job observed tokens or context usage are evidence about that execution, not a subscription allowance percentage. `delegate_usage` reports those values separately. Routing continues to use the provider windows in `usage.json`.
+
+Sources: https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md, https://code.claude.com/docs/en/statusline, and https://docs.cursor.com/account/pricing

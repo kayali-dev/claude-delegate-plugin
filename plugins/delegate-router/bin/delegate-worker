@@ -1,0 +1,17 @@
+#!/usr/bin/env node
+import { inspectJob } from './lib/control.mjs';
+import { runManagedProvider } from './lib/providers.mjs';
+
+const args = process.argv.slice(2);
+const index = args.indexOf('--job-id');
+if (index < 0 || !args[index + 1]) {
+  console.error('delegate-worker: --job-id is required');
+  process.exit(2);
+}
+
+try {
+  await runManagedProvider(inspectJob(args[index + 1]));
+} catch (error) {
+  console.error(`delegate-worker: ${error.stack || error.message}`);
+  process.exitCode = 1;
+}

@@ -1,0 +1,18 @@
+Delegate Router incorporates design ideas observed in these open-source projects:
+
+- openai/codex-plugin-cc, Apache-2.0
+- greenpolo/cc-multi-cli-plugin, Apache-2.0
+- Robbyfuu/codex-plugin-cc (peer), Apache-2.0
+- qmediat/cursor-mcp, MIT
+- ching-kuo/claude-codex, MIT
+- agentclientprotocol/agent-client-protocol, Apache-2.0
+- a2aproject/A2A, Apache-2.0
+- ag-ui-protocol/ag-ui, MIT
+- coder/agentapi, MIT
+- rivet-dev/sandbox-agent, Apache-2.0
+- BloopAI/vibe-kanban, Apache-2.0
+- slopus/happy, MIT
+- happier-dev/happier, MIT
+
+No third-party source files are vendored. See README.md and the skill references
+for project links and the behavior independently implemented here.

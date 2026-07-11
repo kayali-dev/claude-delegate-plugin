@@ -1,0 +1,305 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import {
+  availableModelIds,
+  buildCursorArgs,
+  findValue,
+  resolveCursorBinary,
+  resolveCursorModel,
+  runCursor
+} from './lib/cursor.mjs';
+import { terminateProcessTree } from './lib/process.mjs';
+import { appendJobEvent, updateManagedJob } from './lib/control.mjs';
+import {
+  effectiveUsage,
+  jobsDir,
+  loadJob,
+  loadState,
+  recordEvent,
+  saveJob,
+  saveState,
+  setWindow,
+  providerEnabled
+} from './lib/state.mjs';
+
+const SECURITY_PREFIX = `Security boundary:
+- Do not read, print, transmit, or modify .env files, credentials, private keys, certificates, tokens, or files matching *secret*, *credential*, *.pem, or *.key unless the task explicitly authorizes that exact path.
+- Preserve pre-existing changes and never revert unrelated work.
+- Stay inside the task's allowed scope. Stop and report if required work falls outside it.
+
+`;
+
+function fail(message, code = 2) {
+  console.error(`delegate-cursor: ${message}`);
+  process.exit(code);
+}
+
+function parseArgs(argv) {
+  const result = {
+    mode: 'consult',
+    model: 'composer',
+    cwd: process.cwd(),
+    approval: 'auto',
+    threshold: Number(process.env.DELEGATE_AVOID_PERCENT || 90),
+    timeoutSeconds: Number(process.env.DELEGATE_CURSOR_TIMEOUT_SECONDS || 900),
+    prompt: null,
+    promptFile: null,
+    resume: null,
+    overrideLimit: false,
+    allowSensitive: false,
+    background: false,
+    dryRun: false,
+    jobId: null
+  };
+  const rest = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const value = argv[i];
+    if (value === '--override-limit') result.overrideLimit = true;
+    else if (value === '--allow-sensitive') result.allowSensitive = true;
+    else if (value === '--background') result.background = true;
+    else if (value === '--dry-run') result.dryRun = true;
+    else if (value === '--model') result.model = argv[++i];
+    else if (value === '--mode') result.mode = argv[++i];
+    else if (value === '--cwd') result.cwd = argv[++i];
+    else if (value === '--approval') result.approval = argv[++i];
+    else if (value === '--threshold') result.threshold = Number(argv[++i]);
+    else if (value === '--timeout-seconds') result.timeoutSeconds = Number(argv[++i]);
+    else if (value === '--resume') result.resume = argv[++i];
+    else if (value === '--prompt') result.prompt = argv[++i];
+    else if (value === '--prompt-file') result.promptFile = argv[++i];
+    else if (value === '--job-id') result.jobId = argv[++i];
+    else if (value === '--help' || value === '-h') result.help = true;
+    else rest.push(value);
+  }
+  if (!result.prompt && rest.length) result.prompt = rest.join(' ');
+  return result;
+}
+
+function usage() {
+  console.log(`Usage: delegate-cursor [options] --prompt <task packet>
+  --model composer|grok|grok-xhigh|auto|<cursor-model-id>
+  --mode consult|plan|review|implement|verify
+  --approval auto|force
+  --cwd <path>
+  --resume <chat-id>
+  --prompt-file <path>
+  --timeout-seconds <10-3600>
+  --background
+  --dry-run
+  --allow-sensitive
+  --override-limit`);
+}
+
+function createJobId() {
+  return `cursor-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function launchBackground(originalArgs, options) {
+  const id = createJobId();
+  fs.mkdirSync(jobsDir(), { recursive: true });
+  const stdoutPath = path.join(jobsDir(), `${id}.out.log`);
+  const stderrPath = path.join(jobsDir(), `${id}.err.log`);
+  const stdout = fs.openSync(stdoutPath, 'a');
+  const stderr = fs.openSync(stderrPath, 'a');
+  const forwarded = originalArgs.filter((value) => value !== '--background');
+  forwarded.push('--job-id', id);
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...forwarded], {
+    cwd: options.cwd,
+    detached: true,
+    stdio: ['ignore', stdout, stderr],
+    windowsHide: true,
+    env: process.env
+  });
+  fs.closeSync(stdout);
+  fs.closeSync(stderr);
+  saveJob({
+    id,
+    provider: 'cursor',
+    requestedModel: options.model,
+    mode: options.mode,
+    status: 'running',
+    pid: child.pid,
+    cwd: options.cwd,
+    createdAt: Math.floor(Date.now() / 1000),
+    updatedAt: Math.floor(Date.now() / 1000),
+    stdoutPath,
+    stderrPath
+  });
+  child.unref();
+  console.log(JSON.stringify({ jobId: id, status: 'running', command: `delegate-jobs status ${id}` }, null, 2));
+}
+
+const originalArgs = process.argv.slice(2);
+const options = parseArgs(originalArgs);
+if (!providerEnabled('cursor')) fail('Cursor is disabled for this installation');
+const limitOverrides = String(process.env.DELEGATE_ALLOW_OVER_LIMIT || '')
+  .split(',').map((value) => value.trim()).filter(Boolean);
+if (limitOverrides.includes('cursor') || limitOverrides.includes('all')) options.overrideLimit = true;
+if (options.help) { usage(); process.exit(0); }
+if (!['consult', 'plan', 'review', 'implement', 'verify'].includes(options.mode)) fail(`invalid mode: ${options.mode}`);
+if (!['auto', 'force'].includes(options.approval)) fail(`invalid approval: ${options.approval}`);
+if (!Number.isFinite(options.threshold)) fail('threshold must be a number');
+if (!Number.isFinite(options.timeoutSeconds) || options.timeoutSeconds < 10 || options.timeoutSeconds > 3600) {
+  fail('timeout-seconds must be between 10 and 3600');
+}
+if (options.promptFile) options.prompt = fs.readFileSync(options.promptFile, 'utf8');
+if (!options.prompt) fail('a prompt or prompt file is required');
+if (!fs.existsSync(options.cwd)) fail(`cwd does not exist: ${options.cwd}`);
+
+const binary = resolveCursorBinary();
+if (!binary) fail('neither agent nor cursor-agent is executable');
+
+const state = loadState();
+const cursorUsage = effectiveUsage(state, 'cursor');
+const effectiveThreshold = options.resume ? Math.max(options.threshold, 98) : options.threshold;
+if (!options.overrideLimit && cursorUsage.known && cursorUsage.usedPercent >= effectiveThreshold) {
+  fail(`Cursor is at ${cursorUsage.usedPercent}% (threshold ${effectiveThreshold}%); route to a fallback or pass --override-limit`, 75);
+}
+
+if (options.background && !options.jobId) {
+  launchBackground(originalArgs, options);
+  process.exit(0);
+}
+
+const ids = availableModelIds(binary);
+let model;
+try { model = resolveCursorModel(options.model, ids); } catch (error) { fail(error.message); }
+const cursorArgs = buildCursorArgs({
+  mode: options.mode,
+  model,
+  cwd: options.cwd,
+  approval: options.approval,
+  resume: options.resume
+});
+const prompt = options.allowSensitive ? options.prompt : `${SECURITY_PREFIX}${options.prompt}`;
+
+if (options.dryRun) {
+  console.log(JSON.stringify({
+    binary,
+    model,
+    mode: options.mode,
+    approval: options.approval,
+    cwd: options.cwd,
+    resume: options.resume,
+    timeoutSeconds: options.timeoutSeconds,
+    promptTransport: 'stdin',
+    sensitiveFileGuard: !options.allowSensitive,
+    commandArgs: cursorArgs
+  }, null, 2));
+  process.exit(0);
+}
+
+const started = Date.now();
+recordEvent(state, {
+  provider: 'cursor', model, mode: options.mode, status: 'started',
+  promptChars: options.prompt.length, jobId: options.jobId
+});
+saveState(state);
+
+let activeChild = null;
+let stopping = false;
+async function stop() {
+  if (stopping) return;
+  stopping = true;
+  if (activeChild) await terminateProcessTree(activeChild);
+}
+process.once('SIGINT', stop);
+process.once('SIGTERM', stop);
+
+if (options.jobId) {
+  const now = Math.floor(Date.now() / 1000);
+  const existing = loadJob(options.jobId) || {};
+  saveJob({
+    ...existing,
+    id: options.jobId,
+    provider: 'cursor',
+    model,
+    requestedModel: options.model,
+    mode: options.mode,
+    status: 'running',
+    pid: process.pid,
+    cwd: options.cwd,
+    createdAt: now,
+    updatedAt: now
+  });
+}
+
+const seenProgress = new Set();
+const outcome = await runCursor({
+  binary,
+  args: cursorArgs,
+  cwd: options.cwd,
+  prompt,
+  timeoutMs: options.timeoutSeconds * 1000,
+  onChild: (child) => { activeChild = child; },
+  onEvent: (event) => {
+    if (!options.jobId) return;
+    appendJobEvent(options.jobId, 'provider.event', {
+      providerEvent: `cursor:${event.type || 'unknown'}`,
+      subtype: event.subtype
+    });
+    const earlySession = findValue(event, ['session_id', 'sessionId', 'chat_id', 'chatId']);
+    if (earlySession) {
+      updateManagedJob(options.jobId, (job) => {
+        job.providerSessionId = earlySession;
+        job.session = earlySession;
+      }, { incrementRevision: false });
+    }
+  },
+  onProgress: (message) => {
+    if (!seenProgress.has(message)) {
+      seenProgress.add(message);
+      console.error(`[delegate-cursor] ${message}`);
+    }
+  }
+});
+
+const session = findValue(outcome.payload, ['session_id', 'sessionId', 'chat_id', 'chatId']);
+const inputTokens = findValue(outcome.payload, ['input_tokens', 'inputTokens']);
+const outputTokens = findValue(outcome.payload, ['output_tokens', 'outputTokens']);
+recordEvent(state, {
+  provider: 'cursor', model, mode: options.mode,
+  status: outcome.status === 0 ? 'ok' : 'failed',
+  exitCode: outcome.exitCode,
+  durationMs: Date.now() - started,
+  session,
+  inputTokens,
+  outputTokens,
+  jobId: options.jobId,
+  timedOut: outcome.timedOut,
+  cancelled: outcome.cancelled || stopping
+});
+if (outcome.status !== 0 && /(?:quota|usage limit|rate limit|allowance)/i.test(outcome.stderr || outcome.error || '')) {
+  setWindow(state, 'cursor', 'quota-error', 100, { source: 'quota-error' });
+}
+saveState(state);
+
+if (options.jobId) {
+  const existing = loadJob(options.jobId) || {};
+  saveJob({
+    ...existing,
+    id: options.jobId,
+    provider: 'cursor',
+    model,
+    requestedModel: options.model,
+    mode: options.mode,
+    status: outcome.status === 0 ? 'completed' : outcome.cancelled || stopping ? 'cancelled' : 'failed',
+    pid: process.pid,
+    cwd: options.cwd,
+    createdAt: existing.createdAt || Math.floor(started / 1000),
+    updatedAt: Math.floor(Date.now() / 1000),
+    completedAt: Math.floor(Date.now() / 1000),
+    session,
+    result: outcome.payload,
+    error: outcome.error,
+    usage: { inputTokens, outputTokens },
+    durationMs: Date.now() - started
+  });
+}
+
+if (outcome.payload) console.log(JSON.stringify(outcome.payload));
+if (outcome.error) console.error(`delegate-cursor: ${outcome.error}`);
+process.exitCode = outcome.status;

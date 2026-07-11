@@ -1,0 +1,32 @@
+#!/usr/bin/env node
+import { loadState, saveState, setWindow } from './lib/state.mjs';
+
+let input = '';
+for await (const chunk of process.stdin) input += chunk;
+
+try {
+  const payload = JSON.parse(input);
+  const state = loadState();
+  const limits = payload.rate_limits || {};
+  const mappings = [['five_hour', 'five_hour'], ['seven_day', 'seven_day']];
+  for (const [key, windowName] of mappings) {
+    const value = limits[key];
+    if (value && Number.isFinite(value.used_percentage)) {
+      setWindow(state, 'claude', windowName, value.used_percentage, {
+        resetsAt: value.resets_at || null,
+        source: 'claude-statusline'
+      });
+    }
+  }
+  saveState(state);
+  if (!process.argv.includes('--quiet')) {
+    const pieces = [];
+    if (limits.five_hour?.used_percentage != null) pieces.push(`5h ${Math.round(limits.five_hour.used_percentage)}%`);
+    if (limits.seven_day?.used_percentage != null) pieces.push(`7d ${Math.round(limits.seven_day.used_percentage)}%`);
+    const model = payload.model?.display_name || 'Claude';
+    console.log(pieces.length ? `${model} | ${pieces.join(' | ')}` : model);
+  }
+} catch (error) {
+  if (!process.argv.includes('--quiet')) console.log('Claude');
+  process.exitCode = 0;
+}
