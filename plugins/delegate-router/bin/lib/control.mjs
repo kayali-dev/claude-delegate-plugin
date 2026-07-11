@@ -502,6 +502,13 @@ function gitBaseline(cwd) {
 
 const TIMEOUT_MIN_SECONDS = 60;
 const TIMEOUT_MAX_SECONDS = 86400;
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+
+function validatedEffort(value) {
+  if (value == null) return null;
+  if (!EFFORT_LEVELS.has(value)) throw new Error(`effort must be one of ${[...EFFORT_LEVELS].join(', ')}`);
+  return value;
+}
 
 function validatedTimeoutSeconds(value) {
   if (value == null) return null;
@@ -534,7 +541,7 @@ export function createManagedJob(options) {
     model: options.model || 'auto',
     mode: options.mode || 'consult',
     approval: options.approval || 'auto',
-    effort: options.effort || null,
+    effort: validatedEffort(options.effort || null),
     timeoutSeconds,
     network: options.network === true,
     allowSensitive: options.allowSensitive === true,

@@ -18,7 +18,7 @@ import { listJobs, saveJob } from './lib/state.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--timeout-seconds N] [--network] [--override-writer]
+  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--network] [--override-writer]
   delegate-jobs status [job-id] [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--follow] [--json]
@@ -62,7 +62,8 @@ try {
     json(launchManagedJob({
       provider: value(args, '--provider'), model: value(args, '--model', 'auto'), mode: value(args, '--mode', 'consult'),
       cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
-      timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout), network: args.includes('--network'), overrideWriter: args.includes('--override-writer')
+      effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
+      network: args.includes('--network'), overrideWriter: args.includes('--override-writer')
     }));
   } else if (command === 'status') {
     const id = args.find((item) => !item.startsWith('--'));

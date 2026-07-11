@@ -330,3 +330,11 @@ test('event page cursor parses only the new tail and survives truncation', () =>
   const partial = readJobEventPage(job.id, { afterSeq: recovered.nextSeq, limit: 10 });
   assert.equal(partial.hasMore, false);
 }));
+
+test('effort is validated against the known reasoning ladder', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', effort: 'xhigh' });
+  assert.equal(inspectJob(job.id).effort, 'xhigh');
+  const unset = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+  assert.equal(inspectJob(unset.id).effort, null);
+  assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', effort: 'turbo' }), /effort must be one of/);
+}));
