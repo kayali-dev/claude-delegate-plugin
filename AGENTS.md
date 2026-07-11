@@ -18,10 +18,13 @@ Provider configuration is authoritative. Installations may enable Codex only, Cu
 
 ## Layout
 
-- `install.sh`: validates prerequisites, persists provider selection, registers marketplaces, installs plugins, and links user-facing commands.
+- `install.sh`: validates prerequisites, persists provider selection, registers marketplaces (GitHub source first, checkout fallback), installs plugins, and runs the shim bootstrap.
+- `release.sh`: standard rollout — tests, validates, pushes `main`, and updates the installed plugin from the marketplace.
 - `plugins/delegate-router/.claude-plugin/plugin.json`: Claude plugin manifest and release version.
 - `plugins/delegate-router/.mcp.json`: managed control and conditional native Codex MCP registrations.
-- `plugins/delegate-router/hooks/hooks.json`: quota guard hooks.
+- `plugins/delegate-router/hooks/hooks.json`: quota guard (PreToolUse) and shim bootstrap (SessionStart) hooks. The quota matcher and hook match tool names by suffix because harnesses may prefix plugin MCP tool names.
+- `plugins/delegate-router/bin/delegate-shim`: stable PATH entry point; resolves the installed plugin from `installed_plugins.json` at run time with a checkout fallback.
+- `plugins/delegate-router/bin/delegate-bootstrap`: creates and self-heals the `~/.local/bin` command symlinks; run by SessionStart and `install.sh`.
 - `plugins/delegate-router/skills/delegate/`: routing instructions and protocol, model, control, and usage references.
 - `plugins/delegate-router/bin/delegate-control-mcp`: MCP tool surface for supervised jobs.
 - `plugins/delegate-router/bin/delegate-worker`: detached provider worker entrypoint.
@@ -93,6 +96,7 @@ Test ownership follows the implementation boundaries:
 - JSON-RPC framing, deadlines, and process failure: `jsonrpc.test.mjs`.
 - Provider event mapping, steering, cancellation, and fallback: `providers.test.mjs`.
 - Cursor discovery and command behavior: `cursor.test.mjs`.
+- PATH shim and bootstrap linking: `shim.test.mjs`.
 - Manifest portability and release alignment: `package.test.mjs`.
 
 ## Release And Installation
@@ -109,15 +113,13 @@ Keep these version locations aligned:
 
 Search for the old version before finishing so no runtime metadata is missed. Do not change the independent `delegate-usage` client version unless its protocol identity actually changes.
 
-After tests and validation pass, reinstall from the marketplace root with the user's intended mode:
+After tests and validation pass, the standard rollout is one command from the marketplace root:
 
 ```bash
-./install.sh --both
-./install.sh --codex-only
-./install.sh --cursor-only
+./release.sh
 ```
 
-Add `--lean` only when the optional official OpenAI Codex Claude plugin should be skipped. Preserve the user's provider choice rather than assuming `--both`. Reload Claude plugins or start a new Claude session, then verify the installed version, enabled providers, MCP tool exposure, and health. Never delete `~/delegate-skill` after installation while the marketplace and `~/.local/bin/delegate-*` symlinks still point to it.
+It requires a clean tree, runs the suite and manifest validation, pushes `main`, refreshes the GitHub-sourced marketplace, and updates the installed plugin. Use `./install.sh --both|--codex-only|--cursor-only` only for first-time setup or provider-mode changes; add `--lean` when the optional official OpenAI Codex Claude plugin should be skipped, and preserve the user's provider choice rather than assuming `--both`. Reload Claude plugins or start a new Claude session, then verify the installed version, enabled providers, MCP tool exposure, and health. The `~/.local/bin/delegate-*` symlinks point at `delegate-shim`, which resolves the installed plugin at run time; the checkout is the development source and the shim's fallback, so keep it intact on machines where it is linked.
 
 ## Documentation And Research
 

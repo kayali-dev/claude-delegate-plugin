@@ -48,6 +48,15 @@ test('quota hook blocks Codex above threshold and honors explicit environment ov
   const managedInput = JSON.stringify({ tool_name: 'mcp__delegate_control__delegate_start', tool_input: { provider: 'codex', prompt: 'task' } });
   const managedBlocked = spawnSync(process.execPath, [hook], { input: managedInput, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
   assert.equal(managedBlocked.status, 2);
+  const prefixedInput = JSON.stringify({ tool_name: 'mcp__plugin_delegate-router_delegate_control__delegate_start', tool_input: { provider: 'codex', prompt: 'task' } });
+  const prefixedBlocked = spawnSync(process.execPath, [hook], { input: prefixedInput, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
+  assert.equal(prefixedBlocked.status, 2);
+  const prefixedDirect = JSON.stringify({ tool_name: 'mcp__plugin_delegate-router_delegate_codex__codex', tool_input: { prompt: 'task' } });
+  const prefixedDirectBlocked = spawnSync(process.execPath, [hook], { input: prefixedDirect, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
+  assert.equal(prefixedDirectBlocked.status, 2);
+  const unrelated = JSON.stringify({ tool_name: 'mcp__other_server__codex_helper', tool_input: {} });
+  const unrelatedAllowed = spawnSync(process.execPath, [hook], { input: unrelated, encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: file } });
+  assert.equal(unrelatedAllowed.status, 0);
   const allowed = spawnSync(process.execPath, [hook], {
     input,
     encoding: 'utf8',

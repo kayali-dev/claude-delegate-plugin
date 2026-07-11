@@ -13,7 +13,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__delegate_codex__codex|mcp__delegate_codex__codex-reply|mcp__delegate_control__delegate_start|mcp__delegate_control__delegate_resume|Skill",
+        "matcher": "(^|_)delegate_codex__codex(-reply)?$|(^|_)delegate_control__delegate_(start|resume)$|^Skill$",
         "hooks": [
           {
             "type": "command",

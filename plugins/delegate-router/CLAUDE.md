@@ -8,4 +8,4 @@ Read `../../CLAUDE.md`, `../../AGENTS.md`, and this directory's `AGENTS.md` befo
 - Preserve redaction, private persistence, provider gating, optimistic concurrency, timeout, cancellation, and transport-honesty guarantees.
 - Keep MCP stdout machine-readable and place diagnostics on stderr.
 - Run `npm test`, then `../../install.sh --check`.
-- Bump all version locations before reinstalling an installable behavior change. Reinstall or switch provider modes only when requested, then reload plugins and verify health.
+- Bump all version locations before shipping an installable behavior change, then commit and run `../../release.sh` to push and update the installed plugin. Switch provider modes only when requested, then reload plugins and verify health.

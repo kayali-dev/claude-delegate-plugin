@@ -10,13 +10,15 @@ try {
   const toolInput = event.tool_input || event.toolInput || {};
   let provider = null;
   let continuation = false;
-  if (toolName === 'mcp__delegate_codex__codex') provider = 'codex';
-  if (toolName === 'mcp__delegate_codex__codex-reply') {
+  // Match by suffix: harnesses may prefix plugin MCP tools (for example
+  // mcp__plugin_delegate-router_delegate_control__delegate_start).
+  if (/(?:^|_)delegate_codex__codex$/.test(toolName)) provider = 'codex';
+  if (/(?:^|_)delegate_codex__codex-reply$/.test(toolName)) {
     provider = 'codex';
     continuation = true;
   }
-  if (toolName === 'mcp__delegate_control__delegate_start') provider = toolInput.provider || null;
-  if (toolName === 'mcp__delegate_control__delegate_resume') {
+  if (/(?:^|_)delegate_control__delegate_start$/.test(toolName)) provider = toolInput.provider || null;
+  if (/(?:^|_)delegate_control__delegate_resume$/.test(toolName)) {
     const jobId = String(toolInput.jobId || '');
     provider = jobId.startsWith('codex-') ? 'codex' : jobId.startsWith('cursor-') ? 'cursor' : null;
     continuation = true;

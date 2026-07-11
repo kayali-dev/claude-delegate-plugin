@@ -44,7 +44,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     approval: 'auto',
     threshold: Number(process.env.DELEGATE_AVOID_PERCENT || 90),
-    timeoutSeconds: Number(process.env.DELEGATE_CURSOR_TIMEOUT_SECONDS || 900),
+    timeoutSeconds: Number(process.env.DELEGATE_CURSOR_TIMEOUT_SECONDS || 3600),
     prompt: null,
     promptFile: null,
     resume: null,
@@ -86,7 +86,7 @@ function usage() {
   --cwd <path>
   --resume <chat-id>
   --prompt-file <path>
-  --timeout-seconds <10-3600>
+  --timeout-seconds <10-86400>
   --background
   --dry-run
   --allow-sensitive
@@ -142,8 +142,8 @@ if (options.help) { usage(); process.exit(0); }
 if (!['consult', 'plan', 'review', 'implement', 'verify'].includes(options.mode)) fail(`invalid mode: ${options.mode}`);
 if (!['auto', 'force'].includes(options.approval)) fail(`invalid approval: ${options.approval}`);
 if (!Number.isFinite(options.threshold)) fail('threshold must be a number');
-if (!Number.isFinite(options.timeoutSeconds) || options.timeoutSeconds < 10 || options.timeoutSeconds > 3600) {
-  fail('timeout-seconds must be between 10 and 3600');
+if (!Number.isFinite(options.timeoutSeconds) || options.timeoutSeconds < 10 || options.timeoutSeconds > 86400) {
+  fail('timeout-seconds must be between 10 and 86400');
 }
 if (options.promptFile) options.prompt = fs.readFileSync(options.promptFile, 'utf8');
 if (!options.prompt) fail('a prompt or prompt file is required');

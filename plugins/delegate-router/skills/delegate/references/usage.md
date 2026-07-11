@@ -30,7 +30,7 @@ delegate-route --json --mode <mode> --task <summary>
 delegate-health [--quick] [--json]
 delegate-config show
 delegate-config providers <codex|cursor|both>
-delegate-jobs start|status|inspect|events|transcript|diff|files|steer|cancel|resume|usage|result <job-id>
+delegate-jobs start|status|inspect|events|transcript|wait|diff|files|steer|cancel|resume|usage|result|logs|prune <job-id>
 ```
 
 The default avoid threshold is 90%, configurable with `DELEGATE_AVOID_PERCENT`. `guard` exits 75 when the provider is at or above the threshold so the router can choose a fallback.

@@ -103,7 +103,8 @@ async function runCodex(job) {
     'app-server', '--stdio',
     '-c', 'approval_policy="on-request"',
     '-c', 'approvals_reviewer="auto_review"',
-    '-c', 'sandbox_workspace_write.network_access=false'
+    '-c', 'sandbox_workspace_write.network_access=false',
+    '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]'
   ], {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text }),
@@ -150,7 +151,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.4.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.4.2' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -405,7 +406,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.4.1' }
+      clientInfo: { name: 'delegate-router', version: '0.4.2' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
