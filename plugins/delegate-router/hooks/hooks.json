@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/delegate-bootstrap\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "mcp__delegate_codex__codex|mcp__delegate_codex__codex-reply|mcp__delegate_control__delegate_start|mcp__delegate_control__delegate_resume|Skill",

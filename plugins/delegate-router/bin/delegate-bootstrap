@@ -1,0 +1,31 @@
+#!/usr/bin/env node
+// SessionStart bootstrap: keep ~/.local/bin delegate-* symlinks pointed at this
+// plugin copy's delegate-shim so a marketplace-only install needs no manual
+// setup and links self-heal after every plugin update. Always exits 0.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const COMMANDS = [
+  'delegate-config', 'delegate-route', 'delegate-health', 'delegate-cursor',
+  'delegate-jobs', 'delegate-usage', 'delegate-claude-usage'
+];
+
+try {
+  const binDir = path.dirname(fs.realpathSync(fileURLToPath(import.meta.url)));
+  const shim = path.join(binDir, 'delegate-shim');
+  const userBin = process.env.DELEGATE_USER_BIN || path.join(os.homedir(), '.local', 'bin');
+  fs.mkdirSync(userBin, { recursive: true });
+  for (const name of COMMANDS) {
+    const link = path.join(userBin, name);
+    try {
+      if (fs.readlinkSync(link) === shim) continue;
+    } catch {}
+    try {
+      fs.rmSync(link, { force: true });
+      fs.symlinkSync(shim, link);
+    } catch {}
+  }
+} catch {}
+process.exit(0);

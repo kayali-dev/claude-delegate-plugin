@@ -81,7 +81,7 @@ node -e 'if (Number(process.versions.node.split(".")[0]) < 18) process.exit(1)' 
 }
 
 node "$PLUGIN/bin/delegate-config" providers "$PROVIDER_MODE" >/dev/null
-claude plugin marketplace add "$ROOT" || true
+claude plugin marketplace add kayali-dev/claude-delegate-plugin || claude plugin marketplace add "$ROOT" || true
 
 if [[ "$PROVIDER_MODE" != cursor && "$LEAN" == false ]]; then
   claude plugin marketplace add openai/codex-plugin-cc || true
@@ -94,10 +94,7 @@ claude plugin install delegate-router@delegate-skill
 claude plugin update delegate-router@delegate-skill --scope user || true
 
 USER_BIN="${DELEGATE_USER_BIN:-$HOME/.local/bin}"
-mkdir -p "$USER_BIN"
-for executable in delegate-config delegate-route delegate-health delegate-cursor delegate-jobs delegate-usage delegate-claude-usage; do
-  ln -sfn "$PLUGIN/bin/$executable" "$USER_BIN/$executable"
-done
+node "$PLUGIN/bin/delegate-bootstrap"
 
 printf '\nInstalled delegate-router with providers: %s.\n' "$PROVIDER_MODE"
 if [[ "$PROVIDER_MODE" != cursor ]]; then

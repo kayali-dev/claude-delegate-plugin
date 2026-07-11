@@ -1,0 +1,41 @@
+#!/usr/bin/env node
+// Stable PATH entry point: resolves the *installed* delegate-router plugin from
+// Claude Code's plugin registry and execs the matching binary, so ~/.local/bin
+// symlinks keep working across plugin versions. Falls back to the sibling
+// binary in this checkout when no installed copy is available.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const name = path.basename(process.argv[1]);
+const self = fs.realpathSync(fileURLToPath(import.meta.url));
+if (name === 'delegate-shim') {
+  console.error('delegate-shim is not invoked directly; symlink a delegate-* command name to it');
+  process.exit(2);
+}
+
+function installedTarget() {
+  try {
+    const registryPath = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+    const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    const entries = registry.plugins?.['delegate-router@delegate-skill'] || [];
+    const entry = entries.find((item) => item.scope === 'user') || entries[0];
+    if (!entry?.installPath) return null;
+    const candidate = path.join(entry.installPath, 'bin', name);
+    return fs.existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+const fallback = path.join(path.dirname(self), name);
+const target = installedTarget() || (fs.existsSync(fallback) ? fallback : null);
+if (!target) {
+  console.error(`delegate-shim: cannot resolve ${name}: plugin is not installed and no checkout sibling exists`);
+  process.exit(127);
+}
+if (process.env.DELEGATE_SHIM_DEBUG === '1') console.error(`delegate-shim: ${name} -> ${target}`);
+const result = spawnSync(process.execPath, [target, ...process.argv.slice(2)], { stdio: 'inherit' });
+process.exit(result.status ?? 1);

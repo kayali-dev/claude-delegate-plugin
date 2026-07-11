@@ -19,38 +19,26 @@ Managed Codex and Cursor jobs support durable event journals, live inspection, u
 
 ## Install
 
-From this directory:
+One step, no clone required:
 
 ```bash
-./install.sh
+claude plugin marketplace add kayali-dev/claude-delegate-plugin && claude plugin install delegate-router@delegate-skill
 ```
 
-The default enables both Codex and Cursor and requests OpenAI's optional official Codex Claude plugin. Provider selection is persistent:
+Or from inside Claude Code:
+
+```text
+/plugin marketplace add kayali-dev/claude-delegate-plugin
+/plugin install delegate-router@delegate-skill
+```
+
+Start a new Claude Code session, or run `/reload-plugins`. That is all: on session start the plugin links the `delegate-*` commands into `${DELEGATE_USER_BIN:-~/.local/bin}` automatically (links self-heal after every update — keep that directory on `PATH`). Both providers are enabled by default; to restrict:
 
 ```bash
-./install.sh --both
-./install.sh --codex-only
-./install.sh --cursor-only
+delegate-config providers codex     # or: cursor, both
 ```
 
-`--lean` is independent of provider selection. It skips only the optional official OpenAI Codex Claude plugin, which supplies its own background review/rescue commands. Managed Codex app-server supervision and the native Codex MCP remain available. Examples:
-
-```bash
-./install.sh --both --lean
-./install.sh --codex-only --lean
-```
-
-In Cursor-only mode, `--lean` has no additional effect because no Codex plugin is requested. An already-installed official Codex plugin is not uninstalled, but Delegate Router will not route to it while Codex is disabled.
-
-Or install manually:
-
-```bash
-claude plugin marketplace add "$HOME/delegate-skill"
-claude plugin install delegate-router@delegate-skill
-node "$HOME/delegate-skill/plugins/delegate-router/bin/delegate-config" providers both
-```
-
-Start a new Claude Code session, or run `/reload-plugins`. Invoke explicitly with:
+Invoke explicitly with:
 
 ```text
 /delegate-router:delegate mode=review scope=src task="Review the authentication changes"
@@ -58,7 +46,15 @@ Start a new Claude Code session, or run `/reload-plugins`. Invoke explicitly wit
 
 Claude may also select the skill automatically when a task matches its description.
 
-For local development without installation:
+Codex users can optionally add OpenAI's official Claude Code plugin for its background review/rescue commands; managed Codex app-server supervision and the native Codex MCP work without it:
+
+```bash
+claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex
+```
+
+### Advanced: scripted install from a checkout
+
+`./install.sh` wraps the same steps for a cloned checkout and adds provider-mode presets (`--both`, `--codex-only`, `--cursor-only`), prerequisite checks, and the optional official Codex plugin (skip it with `--lean`). For local development without installation:
 
 ```bash
 claude --plugin-dir "$HOME/delegate-skill/plugins/delegate-router"
@@ -89,18 +85,20 @@ delegate-cursor --dry-run --model grok --mode review --cwd "$PWD" --prompt "Revi
 Start and supervise a managed task directly from a normal terminal:
 
 ```bash
-delegate-jobs start --provider codex --model sol --mode review --cwd "$PWD" --prompt "Review the current diff"
+delegate-jobs start --provider codex --model sol --mode review --cwd "$PWD" --prompt "Review the current diff" --timeout-seconds 7200
 delegate-jobs start --provider cursor --model composer --mode implement --cwd "$PWD" --prompt-file ./plan.md
 delegate-jobs status
 delegate-jobs inspect <job-id>
 delegate-jobs events <job-id> --after 0 --follow
-delegate-jobs transcript <job-id>
+delegate-jobs transcript <job-id> --limit 200
+delegate-jobs wait <job-id> --timeout-seconds 3600
 delegate-jobs diff <job-id>
 delegate-jobs files <job-id>
 delegate-jobs steer <job-id> --expected-revision <n> --strategy auto --prompt "Correction"
 delegate-jobs usage <job-id>
 delegate-jobs result <job-id>
 delegate-jobs cancel <job-id> --expected-revision <n>
+delegate-jobs prune --max-age-days 14
 ```
 
 Within Claude Code, the skill uses the `delegate_control` MCP server. `delegate_start` returns immediately; Claude advances the `afterSeq` cursor only when monitoring is useful and uses the latest revision for steering or cancellation. Workers are detached from the MCP process, so plugin reloads do not erase their job state.
@@ -118,8 +116,9 @@ The default Cursor write policy is Smart Auto review inside Cursor's sandbox. Un
 | `DELEGATE_ALLOW_OVER_LIMIT` | empty | Comma-separated explicit overrides such as `codex,cursor` |
 | `DELEGATE_ENABLED_PROVIDERS` | installed config | Temporary comma-separated override such as `codex` or `cursor` |
 | `DELEGATE_PROVIDER_CONFIG` | state directory | Override the persistent provider configuration file |
-| `DELEGATE_CURSOR_TIMEOUT_SECONDS` | `900` | Cursor hard timeout, bounded to 10-3600 seconds |
-| `DELEGATE_CODEX_TIMEOUT_SECONDS` | `1800` | Managed Codex turn timeout, bounded to 10-7200 seconds |
+| `DELEGATE_CURSOR_TIMEOUT_SECONDS` | `3600` | Cursor hard timeout when a job sets no `timeoutSeconds`, bounded to 10-86400 seconds |
+| `DELEGATE_CODEX_TIMEOUT_SECONDS` | `3600` | Managed Codex job timeout when a job sets no `timeoutSeconds`, bounded to 10-86400 seconds |
+| `DELEGATE_JOB_RETENTION_DAYS` | `14` | Prune terminal job records older than this many days |
 | `DELEGATE_RPC_TIMEOUT_MS` | `30000` | Startup and control JSON-RPC request deadline |
 | `DELEGATE_ACP_GRACE_MS` | `250` | Bounded 0-2000ms grace period for late Cursor ACP events |
 | `DELEGATE_CURSOR_BIN` | auto | Override `agent` / `cursor-agent` discovery |
@@ -141,7 +140,7 @@ Do not replace an existing status line solely for this plugin. Manual `delegate-
 
 ## Portability
 
-Copy or clone the complete `delegate-skill` directory to another machine, then run the installer with the desired provider mode. The installer registers the marketplace and creates refreshable command symlinks under `${DELEGATE_USER_BIN:-~/.local/bin}`. Provider selection and runtime state live under `${XDG_STATE_HOME:-~/.local/state}/delegate-router` unless overridden. No source file embeds the installation directory.
+On any machine, run the one-step install above — no clone needed. The session-start bootstrap creates and refreshes the command symlinks under `${DELEGATE_USER_BIN:-~/.local/bin}`; the shim they point at resolves the currently installed plugin version at run time. Provider selection and runtime state live under `${XDG_STATE_HOME:-~/.local/state}/delegate-router` unless overridden. No source file embeds the installation directory.
 
 Managed transcript and diff artifacts remain local and use user-only permissions. Credential assignments and values are redacted, strings are bounded, and hidden reasoning is never journaled. Cursor Git inventory is baseline-aware: sensitive paths, pre-existing untracked files, internal delegation state, binary payloads, and oversized untracked contents are never copied into diff events. Shared dirty worktrees still have best-effort attribution; the coordinator must inspect the actual diff before integration.
 
@@ -155,3 +154,5 @@ npm test
 ```
 
 The runtime has no npm dependencies.
+
+To ship a change: commit, then run `./release.sh` — it tests, validates, pushes `main`, and updates the installed plugin from the marketplace in one step. Running Claude Code sessions keep the old version; new sessions pick up the release.
