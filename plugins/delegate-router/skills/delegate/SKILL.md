@@ -12,7 +12,7 @@ Keep Claude as coordinator, integrator, and final reviewer. Delegate only a boun
 ## Route
 
 1. Parse explicit provider, model, mode, scope, effort, approval, network, background, timeout, and budget controls. Explicit user choices win unless unavailable or unsafe.
-2. Run `delegate-health --quick` once per session. Its `enabledProviders` is authoritative: never invoke or recommend a disabled provider, including optional external plugins. Run `delegate-usage refresh codex` only when Codex is enabled and a candidate. Treat missing usage as unknown, not zero.
+2. Run `delegate-health --quick` once per session. Its `enabledProviders` is authoritative: never invoke or recommend a disabled provider, including optional external plugins. Run `delegate-usage refresh codex` only when Codex is enabled and a candidate. Treat missing usage as unknown, not zero. If Claude usage is unknown, suggest `delegate-config statusline enable` once (official status-line capture); never query Claude usage any other way — Anthropic prohibits third-party OAuth-token use.
 3. Call `delegate-route --json --mode <mode> --provider <provider-or-auto> --model <model-or-auto> --task '<bounded summary>'`. Use its eligible primary and fallbacks unless the user explicitly overrides.
 4. Read [routing.md](references/routing.md) when the route is surprising or model fit is ambiguous. Read [models.md](references/models.md) for detailed model strengths.
 5. Keep work in the current Claude session when the route returns Claude. Do not delegate merely because external tools are available.

@@ -144,6 +144,21 @@ async function runCodex(job) {
         appendJobEvent(job.id, 'turn.completed', { turn: params.turn }, options);
         updateManagedJob(job.id, (current) => { current.providerTurnId = null; }, { incrementRevision: false });
         turnResolve?.(params.turn);
+      } else if (method === 'account/rateLimits/updated') {
+        appendJobEvent(job.id, 'provider.event', { providerEvent: method }, options);
+        try {
+          const limits = params.rateLimits || {};
+          const state = loadState();
+          let changed = false;
+          for (const name of ['primary', 'secondary']) {
+            const value = limits[name];
+            if (value && Number.isFinite(value.usedPercent)) {
+              setWindow(state, 'codex', name, value.usedPercent, { resetsAt: value.resetsAt, source: 'codex-app-server' });
+              changed = true;
+            }
+          }
+          if (changed) saveState(state);
+        } catch {}
       } else if (method === 'error') appendJobEvent(job.id, 'error', params, options);
       else if (!method.includes('reasoning')) appendJobEvent(job.id, 'provider.event', { providerEvent: method }, options);
     }
@@ -151,7 +166,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.4.2' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.5.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -406,7 +421,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.4.2' }
+      clientInfo: { name: 'delegate-router', version: '0.5.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })

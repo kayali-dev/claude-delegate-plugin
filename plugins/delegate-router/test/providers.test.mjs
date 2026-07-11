@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createManagedJob, inspectJob, readJobEvents, submitControl } from '../bin/lib/control.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
+import { effectiveUsage, loadState } from '../bin/lib/state.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
@@ -44,6 +45,9 @@ test('Codex app-server maps events and applies true same-turn steering', () => i
   assert.equal(inspectJob(job.id).status, 'completed');
   const types = readJobEvents(job.id, { limit: 1000 }).map((event) => event.type);
   for (const type of ['turn.started', 'plan.updated', 'file.changed', 'message.delta', 'message.completed', 'diff.updated', 'usage.updated', 'correction.applied', 'job.completed']) assert.ok(types.includes(type), type);
+  const codexUsage = effectiveUsage(loadState(), 'codex');
+  assert.equal(codexUsage.usedPercent, 41);
+  assert.deepEqual(codexUsage.windows.map((window) => window.name).sort(), ['primary', 'secondary']);
 }));
 
 test('Cursor ACP maps structured updates and reports correction as restart', () => isolated(async (directory) => {

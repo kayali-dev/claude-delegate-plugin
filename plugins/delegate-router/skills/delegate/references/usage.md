@@ -12,9 +12,9 @@ or ~/.local/state/delegate-router/usage.json
 
 ## Provider Truth
 
-- Codex: `delegate-usage refresh codex` queries the official app-server `account/rateLimits/read` method and stores primary and secondary windows.
-- Claude: `delegate-claude-usage` parses the official status-line `rate_limits.five_hour` and `rate_limits.seven_day` fields. Manual values are also accepted.
-- Cursor: no stable public quota CLI/API is assumed. Enter the dashboard percentage with `delegate-usage set cursor <percent> --source dashboard`. Invocation history is an estimate and never converted into a fake quota percentage.
+- Codex: `delegate-usage refresh codex` queries the official app-server `account/rateLimits/read` method and stores primary (five-hour) and secondary (weekly) windows. Managed Codex jobs also capture pushed `account/rateLimits/updated` notifications, so the snapshot stays fresh during every job.
+- Claude: `delegate-config statusline enable` wraps (or installs) the Claude Code status line so the official `rate_limits.five_hour` and `rate_limits.seven_day` payload flows into usage state on every render; `delegate-config statusline disable` restores the previous configuration. Manual values are also accepted. Anthropic's Consumer Terms prohibit using Claude OAuth tokens in any third-party tool, so this plugin deliberately does not query any usage endpoint directly — the status line is the sanctioned channel.
+- Cursor: no stable public quota CLI/API is assumed. Enter the dashboard percentage with `delegate-usage set cursor <percent> --source dashboard`. Invocation history is an estimate and never converted into a fake quota percentage. Local token-counting tools (ccusage, tokscale, TokenTracker) estimate from transcripts and must not be treated as quota truth.
 
 ## Commands
 
@@ -30,6 +30,7 @@ delegate-route --json --mode <mode> --task <summary>
 delegate-health [--quick] [--json]
 delegate-config show
 delegate-config providers <codex|cursor|both>
+delegate-config statusline <enable|disable|show>
 delegate-jobs start|status|inspect|events|transcript|wait|diff|files|steer|cancel|resume|usage|result|logs|prune <job-id>
 ```
 

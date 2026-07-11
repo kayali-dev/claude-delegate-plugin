@@ -54,3 +54,66 @@ test('installer rejects conflicting provider modes without changing configuratio
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Choose only one provider mode/);
 });
+
+test('statusline enable wraps an existing command, captures usage, and disable restores it', () => isolated((directory) => {
+  const configBin = path.join(plugin, 'bin', 'delegate-config');
+  const settingsFile = path.join(directory, 'settings.json');
+  const userBin = path.join(directory, 'bin');
+  fs.mkdirSync(userBin, { recursive: true });
+  fs.symlinkSync(path.join(plugin, 'bin', 'delegate-claude-usage'), path.join(userBin, 'delegate-claude-usage'));
+  fs.writeFileSync(settingsFile, `${JSON.stringify({ statusLine: { type: 'command', command: `printf 'original-line'` }, otherSetting: true })}\n`);
+  const env = { ...process.env, DELEGATE_CLAUDE_SETTINGS: settingsFile, DELEGATE_USER_BIN: userBin };
+
+  const enabled = spawnSync(process.execPath, [configBin, 'statusline', 'enable'], { encoding: 'utf8', env });
+  assert.equal(enabled.status, 0, enabled.stderr);
+  const report = JSON.parse(enabled.stdout);
+  assert.equal(report.status, 'enabled');
+  assert.equal(report.wrappedExisting, true);
+  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  assert.equal(settings.statusLine.command, report.wrapper);
+  assert.equal(settings.otherSetting, true);
+
+  const payload = JSON.stringify({
+    model: { display_name: 'Fable' },
+    rate_limits: {
+      five_hour: { used_percentage: 42.4, resets_at: Math.floor(Date.now() / 1000) + 3600 },
+      seven_day: { used_percentage: 9.1, resets_at: Math.floor(Date.now() / 1000) + 86400 }
+    }
+  });
+  const rendered = spawnSync('bash', [report.wrapper], { input: payload, encoding: 'utf8', env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.equal(rendered.stdout, 'original-line');
+  const claude = JSON.parse(fs.readFileSync(process.env.DELEGATE_STATE_FILE, 'utf8')).providers.claude;
+  assert.equal(claude.windows.five_hour.usedPercent, 42.4);
+  assert.equal(claude.windows.seven_day.usedPercent, 9.1);
+
+  const again = spawnSync(process.execPath, [configBin, 'statusline', 'enable'], { encoding: 'utf8', env });
+  assert.equal(JSON.parse(again.stdout).status, 'already-enabled');
+
+  const disabled = spawnSync(process.execPath, [configBin, 'statusline', 'disable'], { encoding: 'utf8', env });
+  assert.equal(JSON.parse(disabled.stdout).status, 'disabled');
+  const restored = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  assert.equal(restored.statusLine.command, `printf 'original-line'`);
+  assert.ok(!fs.existsSync(report.wrapper));
+}));
+
+test('statusline enable without an existing status line installs the minimal renderer', () => isolated((directory) => {
+  const configBin = path.join(plugin, 'bin', 'delegate-config');
+  const settingsFile = path.join(directory, 'settings.json');
+  const userBin = path.join(directory, 'bin');
+  fs.mkdirSync(userBin, { recursive: true });
+  fs.symlinkSync(path.join(plugin, 'bin', 'delegate-claude-usage'), path.join(userBin, 'delegate-claude-usage'));
+  const env = { ...process.env, DELEGATE_CLAUDE_SETTINGS: settingsFile, DELEGATE_USER_BIN: userBin };
+
+  const enabled = spawnSync(process.execPath, [configBin, 'statusline', 'enable'], { encoding: 'utf8', env });
+  assert.equal(enabled.status, 0, enabled.stderr);
+  const report = JSON.parse(enabled.stdout);
+  assert.equal(report.wrappedExisting, false);
+  const payload = JSON.stringify({ model: { display_name: 'Fable' }, rate_limits: { five_hour: { used_percentage: 12 } } });
+  const rendered = spawnSync('bash', [report.wrapper], { input: payload, encoding: 'utf8', env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.match(rendered.stdout, /Fable \| 5h 12%/);
+  const disabled = spawnSync(process.execPath, [configBin, 'statusline', 'disable'], { encoding: 'utf8', env });
+  assert.equal(JSON.parse(disabled.stdout).status, 'disabled');
+  assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(settingsFile, 'utf8')), 'statusLine'), false);
+}));

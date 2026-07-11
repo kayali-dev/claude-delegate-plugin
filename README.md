@@ -128,15 +128,15 @@ The default Cursor write policy is Smart Auto review inside Cursor's sandbox. Un
 | `DELEGATE_EVENT_MAX_STRING` | `65536` | Maximum persisted length of any event string before truncation |
 | `DELEGATE_STATE_FILE` | XDG state path | Override usage and job state location |
 
-To capture Claude subscription windows automatically, compose `delegate-claude-usage --quiet` into an existing status-line script:
+To capture Claude subscription windows (five-hour and weekly) automatically, run:
 
 ```bash
-input=$(cat)
-printf '%s' "$input" | delegate-claude-usage --quiet
-# Render the rest of your existing status line from "$input".
+delegate-config statusline enable
 ```
 
-Do not replace an existing status line solely for this plugin. Manual `delegate-usage set claude ...` remains valid.
+This uses Claude Code's official status-line channel: if a status line is already configured it is wrapped — the payload is forwarded to `delegate-claude-usage --quiet` and the original renders unchanged; if none is configured, a minimal usage status line is installed. `delegate-config statusline disable` restores the previous configuration exactly. Manual `delegate-usage set claude ...` remains valid.
+
+Compliance note: Anthropic's Consumer Terms prohibit using Claude OAuth tokens in any third-party product or service, so this plugin never reads Claude credentials or queries usage endpoints directly. The status line is the sanctioned data channel. Similarly, local token-estimation tools (ccusage, tokscale, and similar) are useful dashboards but are never treated as provider quota.
 
 ## Portability
 

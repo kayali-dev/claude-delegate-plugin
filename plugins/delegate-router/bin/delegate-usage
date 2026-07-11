@@ -100,16 +100,19 @@ try {
     show(state, args.includes('--json'));
   } else if (command === 'refresh') {
     const provider = validateProvider(args[0]);
-    if (provider !== 'codex') throw new Error('Only Codex has an automated provider quota query.');
-    const limits = await readCodexLimits();
-    state.providers.codex.windows = {};
-    for (const name of ['primary', 'secondary']) {
-      const value = limits[name];
-      if (value && Number.isFinite(value.usedPercent)) {
-        setWindow(state, 'codex', name, value.usedPercent, { resetsAt: value.resetsAt, source: 'codex-app-server' });
+    if (provider === 'codex') {
+      const limits = await readCodexLimits();
+      state.providers.codex.windows = {};
+      for (const name of ['primary', 'secondary']) {
+        const value = limits[name];
+        if (value && Number.isFinite(value.usedPercent)) {
+          setWindow(state, 'codex', name, value.usedPercent, { resetsAt: value.resetsAt, source: 'codex-app-server' });
+        }
       }
+      saveState(state);
+    } else {
+      throw new Error('refresh supports codex only. Claude usage is captured from the official status line (run: delegate-config statusline enable); Anthropic prohibits third-party use of consumer OAuth tokens, so no direct endpoint query is offered. Enter Cursor usage manually from its dashboard.');
     }
-    saveState(state);
     show(state, args.includes('--json'));
   } else if (command === 'set') {
     const provider = validateProvider(args[0]);
