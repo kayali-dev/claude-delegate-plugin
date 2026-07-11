@@ -54,3 +54,13 @@ If Codex requests interactive user input, managed v1 records the request and fai
 ## Attribution
 
 Codex app-server produces provider-level file and aggregated diff events. Cursor ACP reports tool locations when available and the broker records a final Git diff. In a shared dirty worktree that diff may include pre-existing work, so attribution is `best-effort`. Worktree-isolated jobs can later report high-confidence ownership without changing this protocol.
+
+`baselineFiles` on the job record is the attribution baseline — files already dirty when the job started — not files the job changed. On write-mode completion the broker records `changedFiles` (count plus up to 50 paths) from its own file-change tracking, so the job record is grounded in observation even when the worker's final message misstates what it did. `resolvedModel` records the provider-confirmed model when available.
+
+## Completion Semantics
+
+`completed` means the provider turn ended, not that the objective was met. Read `result`, `changedFiles`, and the diff before treating a job as successful. `delegate-jobs wait` exits 5 when a write-mode job completes with zero observed file changes — a strong signal the objective was not met. Codex threads that engaged the multi-agent review flow may refuse direct resume; that surfaces as `RESUME_UNSUPPORTED`, and the recovery is a fresh job whose packet folds in the prior findings.
+
+## Response Bounds
+
+Event pages are additionally capped by serialized size (not just event count); a truncated page sets `truncated: "response-size"` and a valid `nextSeq`. Large diffs are windowed: `delegate_diff` accepts `offset`/`maxChars` and returns `totalChars`/`nextOffset`, or `statOnly` for per-file addition/deletion counts.

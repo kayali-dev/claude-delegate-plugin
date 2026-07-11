@@ -399,7 +399,11 @@ export function listManagedJobs(options = {}) {
       createdAt: job.createdAt || null,
       updatedAt: job.updatedAt || null,
       completedAt: job.completedAt || null,
-      resultPreview: typeof job.result === 'string' ? job.result.slice(0, 200) : null,
+      resultPreview: typeof job.result === 'string'
+        ? job.result.slice(0, 200)
+        : typeof job.result?.text === 'string' ? job.result.text.slice(0, 200) : null,
+      changedFiles: job.changedFiles || null,
+      resolvedModel: job.resolvedModel || null,
       error: job.error || null
     });
     if (jobs.length >= limit) break;
@@ -459,11 +463,70 @@ export function jobFiles(id) {
   return [...files.values()];
 }
 
+export function diffStat(diff) {
+  const files = [];
+  let current = null;
+  for (const line of String(diff || '').split('\n')) {
+    const header = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+    if (header) {
+      current = { path: header[2], additions: 0, deletions: 0 };
+      files.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith('+') && !line.startsWith('+++')) current.additions += 1;
+    else if (line.startsWith('-') && !line.startsWith('---')) current.deletions += 1;
+  }
+  return {
+    files,
+    totalFiles: files.length,
+    totalAdditions: files.reduce((sum, file) => sum + file.additions, 0),
+    totalDeletions: files.reduce((sum, file) => sum + file.deletions, 0)
+  };
+}
+
+export function sliceDiff(diff, options = {}) {
+  const text = String(diff || '');
+  const offset = Math.max(Number(options.offset || 0), 0);
+  const maxChars = Math.min(Math.max(Number(options.maxChars || 60000), 1000), 200000);
+  const chunk = text.slice(offset, offset + maxChars);
+  const nextOffset = offset + chunk.length;
+  return {
+    diff: chunk,
+    offset,
+    totalChars: text.length,
+    nextOffset: nextOffset < text.length ? nextOffset : null
+  };
+}
+
+// Bound a tool response by serialized size: verbose tool-output events can
+// individually be tens of KB, so an event-count limit alone cannot protect
+// MCP clients from oversized replies.
+export function capEventsBySize(page, budget = 60000) {
+  let used = 0;
+  const kept = [];
+  for (const event of page.events) {
+    const size = JSON.stringify(event).length;
+    if (kept.length && used + size > budget) break;
+    used += size;
+    kept.push(event);
+  }
+  if (kept.length === page.events.length) return page;
+  const nextSeq = kept.at(-1)?.seq ?? page.nextSeq;
+  return { events: kept, nextSeq, latestSeq: page.latestSeq, hasMore: true, truncated: 'response-size' };
+}
+
 export function jobUsage(id) {
   const job = inspectJob(id);
   const events = readRawEvents(id).filter((event) => event.type === 'usage.updated');
   const quota = effectiveUsage(loadState(), job.provider);
-  return { observed: events.at(-1)?.data || job.usage || null, providerAllowance: quota };
+  const observed = events.at(-1)?.data || job.usage || null;
+  return {
+    observed,
+    observedAvailable: Boolean(observed),
+    ...(observed ? {} : { note: 'the provider did not emit usage data for this job; Cursor ACP does not always report it' }),
+    providerAllowance: quota
+  };
 }
 
 function jobId(provider) {
@@ -672,6 +735,9 @@ export function submitControl(id, command, expectedRevision) {
       throw error;
     }
     if (command.type === 'steer' && !command.text?.trim()) throw new Error('steering text is required');
+    if (command.type === 'steer' && command.strategy === 'same-turn' && job.provider === 'cursor') {
+      throw new Error('UNSUPPORTED_STRATEGY: Cursor ACP has no same-turn steering; use strategy=auto or restart (applied as a cancel-and-resume restart)');
+    }
     const record = { ...command, commandId, expectedRevision, requestedAt: Date.now() };
     fs.mkdirSync(paths(id).commands, { recursive: true, mode: 0o700 });
     writePrivate(path.join(paths(id).commands, `${commandId}.json`), `${JSON.stringify(record, null, 2)}\n`);

@@ -90,10 +90,14 @@ export function buildCursorArgs({ mode, model, cwd, approval = 'auto', resume = 
   if (!readOnly) args.push('--stream-partial-output');
   args.push('--model', model, '--workspace', cwd);
   if (resume) args.push('--resume', resume);
+  // Headless runs are non-interactive and cannot answer the workspace-trust
+  // prompt; trust is granted explicitly while sandbox/mode flags still bound
+  // what the agent may do.
+  args.push('--trust');
   if (mode === 'consult') args.push('--mode', 'ask');
   else if (mode === 'plan' || mode === 'review') args.push('--mode', 'plan');
   else {
-    args.push('--trust', '--sandbox', 'enabled');
+    args.push('--sandbox', 'enabled');
     if (approval === 'force') args.push('--force');
     else args.push('--auto-review');
   }

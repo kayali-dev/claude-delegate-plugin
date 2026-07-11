@@ -19,11 +19,11 @@ import { listJobs, saveJob } from './lib/state.mjs';
 function usage() {
   console.log(`Usage:
   delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--network] [--override-writer]
-  delegate-jobs status [job-id] [--json]
+  delegate-jobs status|list [job-id] [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--follow] [--json]
   delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
-  delegate-jobs wait <job-id> [--timeout-seconds N]   # blocks until terminal; exit 0 completed, 3 failed, 4 cancelled, 75 timeout
+  delegate-jobs wait <job-id> [--timeout-seconds N]   # blocks until terminal; exit 0 completed, 3 failed, 4 cancelled, 5 completed-but-no-changes (write modes), 75 timeout
   delegate-jobs diff <job-id>
   delegate-jobs files <job-id> [--json]
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
@@ -54,7 +54,8 @@ function json(value) { console.log(JSON.stringify(value, null, 2)); }
 function terminal(status) { return ['completed', 'failed', 'cancelled'].includes(status); }
 
 const args = process.argv.slice(2);
-const command = args.shift() || 'status';
+const rawCommand = args.shift() || 'status';
+const command = rawCommand === 'list' ? 'status' : rawCommand;
 
 try {
   if (command === 'start') {
@@ -109,8 +110,16 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       job = requireJob(id);
     }
-    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, result: job.result, error: job.error });
-    process.exit(job.status === 'completed' ? 0 : job.status === 'failed' ? 3 : 4);
+    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, changedFiles: job.changedFiles || null, result: job.result, error: job.error });
+    if (job.status !== 'completed') process.exit(job.status === 'failed' ? 3 : 4);
+    // "completed" means the turn ended, not that the objective was met. A
+    // write-mode job that finished with zero observed changes is a strong
+    // signal the objective was not met; give it a distinct exit code.
+    if (['implement', 'verify'].includes(job.mode) && !(job.changedFiles?.count > 0)) {
+      console.error(`${job.id} completed but no file changes were observed`);
+      process.exit(5);
+    }
+    process.exit(0);
   } else if (command === 'prune') {
     const rawDays = value(args, '--max-age-days');
     json(pruneJobs(rawDays == null ? {} : { maxAgeDays: Number(rawDays) }));

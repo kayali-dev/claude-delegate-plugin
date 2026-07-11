@@ -89,7 +89,7 @@ function show(state, asJson) {
     }
     const status = current.usedPercent >= 98 ? 'blocked' : current.usedPercent >= avoidPercentFor(name) ? 'avoid' : current.usedPercent >= warningPercentFor(name) ? 'prefer-fallback' : 'normal';
     const sources = [...new Set(current.windows.map((window) => window.source))].join(',');
-    console.log(`${name.padEnd(9)} ${String(current.usedPercent).padStart(3)}%  ${status.padEnd(16)} ${sources}`);
+    console.log(`${name.padEnd(9)} ${String(+current.usedPercent.toFixed(2)).padStart(3)}%  ${status.padEnd(16)} ${sources}`);
   }
 }
 

@@ -52,6 +52,14 @@ Codex users can optionally add OpenAI's official Claude Code plugin for its back
 claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex
 ```
 
+### Update
+
+```bash
+claude plugin marketplace update delegate-skill && claude plugin update delegate-router@delegate-skill
+```
+
+Then start a new Claude Code session or run `/reload-plugins`. Running sessions keep the version they loaded; command symlinks re-resolve to the updated install automatically.
+
 ### Advanced: scripted install from a checkout
 
 `./install.sh` wraps the same steps for a cloned checkout and adds provider-mode presets (`--both`, `--codex-only`, `--cursor-only`), prerequisite checks, and the optional official Codex plugin (skip it with `--lean`). For local development without installation:

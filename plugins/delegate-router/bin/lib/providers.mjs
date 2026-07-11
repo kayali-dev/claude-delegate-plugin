@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, inspectJob, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, inspectJob, jobFiles, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -60,10 +60,21 @@ function acpGraceMs() {
 }
 
 function terminal(job, status, phase, extra = {}) {
+  // The worker's final message is self-reported and can contradict what it
+  // actually did; record the plugin's own observation of changed files so the
+  // coordinator's first read of the job record is grounded.
+  let changedFiles = null;
+  if (['implement', 'verify'].includes(job.mode)) {
+    try {
+      const files = jobFiles(job.id).map((file) => file.path);
+      changedFiles = { count: files.length, files: files.slice(0, 50) };
+    } catch {}
+  }
   updateManagedJob(job.id, (current) => {
     current.status = status;
     current.phase = phase;
     current.completedAt = Math.floor(Date.now() / 1000);
+    if (changedFiles) current.changedFiles = changedFiles;
     Object.assign(current, redact(extra));
   });
   appendJobEvent(job.id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', extra);
@@ -176,7 +187,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.7.2' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.8.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -190,22 +201,35 @@ async function runCodex(job) {
       developerInstructions: securityPreamble(job.allowSensitive),
       config: job.effort ? { model_reasoning_effort: job.effort } : {}
     };
-    const thread = job.providerSessionId
-      ? await rpc.request('thread/resume', { threadId: job.providerSessionId, ...common, excludeTurns: true })
-      : await rpc.request('thread/start', common);
+    let thread;
+    try {
+      thread = job.providerSessionId
+        ? await rpc.request('thread/resume', { threadId: job.providerSessionId, ...common, excludeTurns: true })
+        : await rpc.request('thread/start', common);
+    } catch (error) {
+      throw mapCodexResumeError(error, Boolean(job.providerSessionId));
+    }
     const threadId = thread.thread.id;
     recordSession(job.id, threadId, null);
+    if (thread.model) {
+      updateManagedJob(job.id, (current) => { current.resolvedModel = thread.model; }, { incrementRevision: false });
+    }
 
     const startTurn = async (text) => {
       turnDone = new Promise((resolve) => { turnResolve = resolve; });
-      const result = await rpc.request('turn/start', {
-        threadId,
-        input: [{ type: 'text', text, text_elements: [] }],
-        cwd: job.cwd,
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'auto_review',
-        model
-      });
+      let result;
+      try {
+        result = await rpc.request('turn/start', {
+          threadId,
+          input: [{ type: 'text', text, text_elements: [] }],
+          cwd: job.cwd,
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'auto_review',
+          model
+        });
+      } catch (error) {
+        throw mapCodexResumeError(error, Boolean(job.providerSessionId));
+      }
       recordSession(job.id, threadId, result.turn.id);
       return result.turn.id;
     };
@@ -296,23 +320,55 @@ async function runCodex(job) {
   }
 }
 
-function cursorCommand(binary, args) {
+function cursorCommand(binary, args, interactive = true) {
   if (process.platform !== 'darwin' || process.env.DELEGATE_CURSOR_LOGIN_SHELL === '0') return { command: binary, args };
   const shell = process.env.SHELL || '/bin/zsh';
-  return { command: shell, args: ['-lic', 'exec "$@"', 'delegate-cursor-acp', binary, ...args] };
+  // Headless must not use -i: an interactive zsh reads the NDJSON stream as
+  // shell commands. ACP keeps -i for keychain-backed login environments.
+  const flags = interactive ? '-lic' : '-lc';
+  return { command: shell, args: [flags, 'exec "$@"', 'delegate-cursor-shell', binary, ...args] };
 }
 
-function cursorModel(options, requested) {
-  if (!requested || requested === 'auto') return options.find((item) => item.value === 'default[]')?.value || null;
-  const base = requested === 'composer' ? 'composer-' : requested.startsWith('grok') ? 'grok-' : requested;
-  const candidates = options.filter((item) => item.value === requested || item.value.startsWith(base));
-  candidates.sort((a, b) => {
-    const fastA = /fast=true/.test(a.value) ? 1 : 0;
-    const fastB = /fast=true/.test(b.value) ? 1 : 0;
-    if (fastA !== fastB) return fastA - fastB;
-    return b.value.localeCompare(a.value, undefined, { numeric: true });
-  });
-  return candidates[0]?.value || requested;
+// Fail closed on unknown model ids: a silent fallback would report
+// "completed" for a model the caller never requested. Shorthands (composer,
+// grok, grok-xhigh, auto) resolve against the session's advertised options;
+// anything else must match an advertised id exactly. Without an advertised
+// list there is nothing to validate against, so legacy resolution applies.
+export function cursorModel(options, requested) {
+  const values = options.map((item) => item.value);
+  if (!values.length) return resolveCursorModel(requested, []);
+  const newest = (predicate) => {
+    const candidates = values.filter((value) => predicate(value));
+    candidates.sort((a, b) => {
+      const fastA = /fast/.test(a) ? 1 : 0;
+      const fastB = /fast/.test(b) ? 1 : 0;
+      if (fastA !== fastB) return fastA - fastB;
+      return b.localeCompare(a, undefined, { numeric: true });
+    });
+    return candidates[0] || null;
+  };
+  if (!requested || requested === 'auto') return values.find((value) => value === 'default[]') || null;
+  if (values.includes(requested)) return requested;
+  let resolved = null;
+  if (requested === 'composer') resolved = newest((value) => value.startsWith('composer-'));
+  else if (requested === 'grok' || requested === 'grok-high') resolved = newest((value) => value.startsWith('grok-') && value.endsWith('-high'));
+  else if (requested === 'grok-xhigh') resolved = newest((value) => value.startsWith('grok-') && value.endsWith('-xhigh'));
+  if (resolved) return resolved;
+  const error = new Error(`INVALID_MODEL: '${requested}' is not in this account's model list; run agent models or cursor-agent models. Available: ${values.slice(0, 25).join(', ')}`);
+  error.code = 'INVALID_MODEL';
+  throw error;
+}
+
+// Codex threads that engaged the auto-review sub-agent (write-mode approval
+// flows) may refuse direct resume with a multi-agent v2 error; surface that as
+// an actionable code instead of a cryptic provider message.
+function mapCodexResumeError(error, isResume) {
+  if (isResume && /multi-agent v2|not allowed for .*sub-agents/i.test(error?.message || '')) {
+    const mapped = new Error('RESUME_UNSUPPORTED: this Codex thread cannot be resumed directly (it engaged the multi-agent review flow); start a fresh job with a full task packet that folds in prior findings');
+    mapped.code = 'RESUME_UNSUPPORTED';
+    return mapped;
+  }
+  return error;
 }
 
 function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas) {
@@ -333,6 +389,11 @@ function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas) {
   } else if (kind === 'usage_update') {
     appendJobEvent(jobId, 'usage.updated', update, options);
     updateManagedJob(jobId, (job) => { job.usage = update; }, { incrementRevision: false });
+  } else if (kind === 'session_info_update') {
+    appendJobEvent(jobId, 'provider.event', { providerEvent: 'session/update:session_info_update' }, options);
+    if (update.model) {
+      updateManagedJob(jobId, (job) => { job.resolvedModel = update.model; }, { incrementRevision: false });
+    }
   } else if (kind !== 'agent_thought_chunk' && kind !== 'user_message_chunk') {
     appendJobEvent(jobId, 'provider.event', { providerEvent: `session/update:${kind}` }, options);
   }
@@ -432,7 +493,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.7.2' }
+      clientInfo: { name: 'delegate-router', version: '0.8.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -442,9 +503,14 @@ async function runCursorAcp(job) {
     const config = session.configOptions || [];
     const modelOption = config.find((item) => item.id === 'model');
     const modeOption = config.find((item) => item.id === 'mode');
-    if (modelOption) await rpc.request('session/set_config_option', {
-      sessionId, configId: 'model', value: cursorModel(modelOption.options || [], job.model)
-    });
+    if (modelOption) {
+      const resolvedModel = cursorModel(modelOption.options || [], job.model);
+      await rpc.request('session/set_config_option', { sessionId, configId: 'model', value: resolvedModel });
+      updateManagedJob(job.id, (current) => {
+        current.model = resolvedModel;
+        current.resolvedModel = resolvedModel;
+      }, { incrementRevision: false });
+    }
     if (modeOption) await rpc.request('session/set_config_option', {
       sessionId, configId: 'mode', value: readOnly(job) ? (job.mode === 'consult' ? 'ask' : 'plan') : 'agent'
     });
@@ -546,7 +612,7 @@ async function runCursorHeadless(job) {
   while (true) {
     let activeChild = null;
     appendJobEvent(job.id, 'turn.started', { transport: 'headless', resume }, { sessionId: resume });
-    const headless = cursorCommand(binary, buildCursorArgs({ mode: job.mode, model, cwd: job.cwd, approval: job.approval, resume }));
+    const headless = cursorCommand(binary, buildCursorArgs({ mode: job.mode, model, cwd: job.cwd, approval: job.approval, resume }), false);
     const running = runCursor({
       binary: headless.command,
       args: headless.args,

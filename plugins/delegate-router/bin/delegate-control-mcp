@@ -2,6 +2,8 @@
 import readline from 'node:readline';
 import { enabledProviders } from './lib/state.mjs';
 import {
+  capEventsBySize,
+  diffStat,
   inspectJob,
   jobDiff,
   jobFiles,
@@ -12,13 +14,14 @@ import {
   maybePruneJobs,
   readJobEventPage,
   resumeManagedJob,
+  sliceDiff,
   submitControl
 } from './lib/control.mjs';
 
 const TOOLS = [
   {
     name: 'delegate_start',
-    description: 'Start a supervised Codex or Cursor job and return immediately with a job ID. Write modes (implement, verify) are refused while another writer is active in the same cwd unless overrideWriter is set.',
+    description: 'Start a supervised Codex or Cursor job and return immediately with a job ID. Write modes (implement, verify) are refused while another MANAGED writer is active in the same cwd unless overrideWriter is set; the guard cannot see unmanaged editors (this session, other agents), so coordinate those separately.',
     inputSchema: { type: 'object', required: ['provider', 'prompt'], properties: {
       provider: { enum: enabledProviders() }, model: { type: 'string' }, mode: { enum: ['consult', 'plan', 'review', 'implement', 'verify'] },
       cwd: { type: 'string' }, prompt: { type: 'string' }, approval: { enum: ['auto', 'force'] }, effort: { enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
@@ -30,7 +33,7 @@ const TOOLS = [
   { name: 'delegate_list', description: 'List recent delegation jobs, newest first, so running work can be rediscovered without a stored job ID.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, activeOnly: { type: 'boolean' }, status: { type: 'array', items: { enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] } } } } },
   { name: 'delegate_events', description: 'Read normalized live events using a monotonic sequence cursor, with optional bounded long polling.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, waitMs: { type: 'integer', minimum: 0, maximum: 30000 }, types: { type: 'array', items: { type: 'string' } } } } },
   { name: 'delegate_transcript', description: 'Read user-visible messages, plans, tool activity, and errors, paginated by sequence cursor. Streaming deltas and raw tool output are omitted unless verbose is set. Hidden reasoning is never returned.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, verbose: { type: 'boolean' } } } },
-  { name: 'delegate_diff', description: 'Return the latest recorded unified diff and attribution warning.', inputSchema: jobOnly() },
+  { name: 'delegate_diff', description: 'Return the latest recorded unified diff (windowed by offset/maxChars for large diffs) or a per-file stat summary with statOnly.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, statOnly: { type: 'boolean' }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } },
   { name: 'delegate_files', description: 'Return files reported as changed by the provider.', inputSchema: jobOnly() },
   { name: 'delegate_steer', description: 'Correct an active job. Codex can steer the same turn; Cursor explicitly cancels and resumes.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision', 'text'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, expectedTurnId: { type: 'string' }, correctionId: { type: 'string' }, strategy: { enum: ['auto', 'same-turn', 'restart', 'next-turn'] }, text: { type: 'string' } } } },
   { name: 'delegate_cancel', description: 'Request provider-aware cancellation using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
@@ -52,11 +55,16 @@ async function dispatch(name, args) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(200, deadline - Date.now())));
       page = readJobEventPage(args.jobId, { ...args, afterSeq: page.nextSeq });
     }
-    return page;
+    return capEventsBySize(page);
   }
   if (name === 'delegate_list') return listManagedJobs(args);
   if (name === 'delegate_transcript') return jobTranscriptPage(args.jobId, args);
-  if (name === 'delegate_diff') return { diff: jobDiff(args.jobId), attributionConfidence: inspectJob(args.jobId).attributionConfidence };
+  if (name === 'delegate_diff') {
+    const attributionConfidence = inspectJob(args.jobId).attributionConfidence;
+    const diff = jobDiff(args.jobId);
+    if (args.statOnly) return { ...diffStat(diff), attributionConfidence };
+    return { ...sliceDiff(diff, args), attributionConfidence };
+  }
   if (name === 'delegate_files') return { files: jobFiles(args.jobId), attributionConfidence: inspectJob(args.jobId).attributionConfidence };
   if (name === 'delegate_steer') return submitControl(args.jobId, { type: 'steer', correctionId: args.correctionId, strategy: args.strategy || 'auto', text: args.text, expectedTurnId: args.expectedTurnId }, args.expectedRevision);
   if (name === 'delegate_cancel') return submitControl(args.jobId, { type: 'cancel', commandId: args.commandId }, args.expectedRevision);
@@ -79,7 +87,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.7.2' }
+        serverInfo: { name: 'delegate-control', version: '0.8.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

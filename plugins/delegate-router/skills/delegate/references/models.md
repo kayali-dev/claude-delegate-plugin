@@ -45,7 +45,7 @@ Source: https://cursor.com/blog/grok-4-5
 
 Composer is Cursor's coding specialist for sustained multi-file changes, refactors, tests, and clear implementation work. Composer 2.5 improved long-running coding, complex instruction following, and effort calibration. It is subscription-included as a first-party model and is the cheapest draw on the shared first-party pool, which makes it the default efficiency route; Fast costs materially more.
 
-The adapter defaults to `composer-2.5`. Override `DELEGATE_CURSOR_COMPOSER_MODEL` when a later Composer ID is available. Run `agent models` or `cursor-agent models` to verify account-specific availability.
+The adapter defaults to `composer-2.5`. Override `DELEGATE_CURSOR_COMPOSER_MODEL` when a later Composer ID is available. `agent models` (or `cursor-agent models`) is the source of truth for account-specific ids: catalogs expose fully-qualified tier ids (for example `grok-4.5-high`, `grok-4.5-xhigh`, `composer-2.5`) and may include cross-provider models. The managed adapter resolves the shorthands `composer`, `grok`, and `grok-xhigh` against the session's advertised list and fails closed with `INVALID_MODEL` on anything unknown, recording the resolved id on the job.
 
 Sources: https://cursor.com/blog/composer-2-5 and https://cursor.com/blog/composer-2-technical-report
 

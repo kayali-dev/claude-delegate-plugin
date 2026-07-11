@@ -88,7 +88,8 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `delegate_inspect` for lifecycle, capabilities, continuation IDs, the final `result`, and current revision. A running job whose worker process died is reconciled to `failed` with an `ORPHANED` error event.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
-- `delegate_diff` and `delegate_files` to inspect actual work. Shared-worktree Cursor attribution is best-effort; never claim exact ownership of pre-existing changes.
+- `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Shared-worktree Cursor attribution is best-effort; never claim exact ownership of pre-existing changes.
+- `completed` means the turn ended, not that the objective was met: check `changedFiles` on the record (mechanical, from broker observation) against the worker's claims, and treat a write-mode job with zero changed files as a failed objective (`delegate-jobs wait` exits 5 for this).
 - `delegate_usage` for observed job usage and provider allowance as separate values.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
 

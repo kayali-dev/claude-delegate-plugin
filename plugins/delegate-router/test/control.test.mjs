@@ -11,6 +11,7 @@ import {
   jobFiles,
   jobTranscript,
   jobTranscriptPage,
+  jobUsage,
   launchManagedJob,
   listManagedJobs,
   pruneJobs,
@@ -337,4 +338,75 @@ test('effort is validated against the known reasoning ladder', () => isolated((d
   const unset = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
   assert.equal(inspectJob(unset.id).effort, null);
   assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', effort: 'turbo' }), /effort must be one of/);
+}));
+
+test('cursor same-turn steering is rejected at the control boundary', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'implement', cwd: directory, prompt: 'implement' });
+  const revision = inspectJob(job.id).revision;
+  assert.throws(
+    () => submitControl(job.id, { type: 'steer', correctionId: 'st', strategy: 'same-turn', text: 'change' }, revision),
+    /UNSUPPORTED_STRATEGY/
+  );
+  const auto = submitControl(job.id, { type: 'steer', correctionId: 'st2', strategy: 'auto', text: 'change' }, revision);
+  assert.equal(auto.accepted, true);
+}));
+
+test('list previews object results and exposes provenance fields', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', cwd: directory, prompt: 'task' });
+  updateManagedJob(job.id, (current) => {
+    current.status = 'completed';
+    current.completedAt = Math.floor(Date.now() / 1000);
+    current.result = { text: 'the final answer text', stopReason: 'end_turn' };
+    current.resolvedModel = 'composer-2.5';
+    current.changedFiles = { count: 2, files: ['a.js', 'b.js'] };
+  });
+  const listed = listManagedJobs().jobs.find((item) => item.id === job.id);
+  assert.equal(listed.resultPreview, 'the final answer text');
+  assert.equal(listed.resolvedModel, 'composer-2.5');
+  assert.equal(listed.changedFiles.count, 2);
+}));
+
+test('diff stat and windowing bound large diffs', async () => {
+  const { diffStat, sliceDiff } = await import('../bin/lib/control.mjs');
+  const diff = [
+    'diff --git a/src/one.js b/src/one.js',
+    '--- a/src/one.js', '+++ b/src/one.js',
+    '+added line', '+another added', '-removed line',
+    'diff --git a/src/two.js b/src/two.js',
+    '--- a/src/two.js', '+++ b/src/two.js',
+    '+only addition'
+  ].join('\n');
+  const stat = diffStat(diff);
+  assert.equal(stat.totalFiles, 2);
+  assert.deepEqual(stat.files[0], { path: 'src/one.js', additions: 2, deletions: 1 });
+  assert.equal(stat.totalAdditions, 3);
+  const first = sliceDiff(diff, { offset: 0, maxChars: 1000 });
+  assert.equal(first.nextOffset, null);
+  assert.equal(first.totalChars, diff.length);
+  const window = sliceDiff('x'.repeat(5000), { offset: 0, maxChars: 1000 });
+  assert.equal(window.diff.length, 1000);
+  assert.equal(window.nextOffset, 1000);
+  const next = sliceDiff('x'.repeat(5000), { offset: 4500, maxChars: 1000 });
+  assert.equal(next.diff.length, 500);
+  assert.equal(next.nextOffset, null);
+});
+
+test('event responses are capped by serialized size, preserving the cursor', async () => {
+  const { capEventsBySize } = await import('../bin/lib/control.mjs');
+  const big = (seq) => ({ seq, type: 'tool.output', data: { delta: 'y'.repeat(30000) } });
+  const page = { events: [big(1), big(2), big(3)], nextSeq: 3, latestSeq: 3, hasMore: false };
+  const capped = capEventsBySize(page, 65000);
+  assert.equal(capped.events.length, 2);
+  assert.equal(capped.nextSeq, 2);
+  assert.equal(capped.hasMore, true);
+  assert.equal(capped.truncated, 'response-size');
+  const small = { events: [{ seq: 1, type: 'x', data: {} }], nextSeq: 1, latestSeq: 1, hasMore: false };
+  assert.equal(capEventsBySize(small, 65000), small);
+});
+
+test('usage reports distinguish missing provider data from zero', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', cwd: directory, prompt: 'task' });
+  const usage = jobUsage(job.id);
+  assert.equal(usage.observedAvailable, false);
+  assert.match(usage.note, /did not emit usage/);
 }));

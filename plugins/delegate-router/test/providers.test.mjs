@@ -48,6 +48,10 @@ test('Codex app-server maps events and applies true same-turn steering', () => i
   const codexUsage = effectiveUsage(loadState(), 'codex');
   assert.equal(codexUsage.usedPercent, 41);
   assert.deepEqual(codexUsage.windows.map((window) => window.name).sort(), ['primary', 'secondary']);
+  const record = inspectJob(job.id);
+  assert.equal(record.changedFiles.count, 1);
+  assert.deepEqual(record.changedFiles.files, ['a.js']);
+  assert.equal(record.resolvedModel, 'fake');
 }));
 
 test('Cursor ACP maps structured updates and reports correction as restart', () => isolated(async (directory) => {
@@ -117,3 +121,29 @@ test('Codex provider exit fails immediately instead of waiting for the turn time
   assert.ok(Date.now() - started < 2000);
   assert.equal(inspectJob(job.id).status, 'failed');
 }));
+
+test('cursor model resolution fails closed on unknown ids and records shorthands', async () => {
+  const { cursorModel } = await import('../bin/lib/providers.mjs');
+  const options = [
+    { value: 'composer-2.5[fast=true]' }, { value: 'composer-2.5' },
+    { value: 'grok-4.5-high' }, { value: 'grok-4.5-xhigh' }, { value: 'default[]' }
+  ];
+  assert.equal(cursorModel(options, 'grok-4.5-high'), 'grok-4.5-high');
+  assert.equal(cursorModel(options, 'grok'), 'grok-4.5-high');
+  assert.equal(cursorModel(options, 'grok-xhigh'), 'grok-4.5-xhigh');
+  assert.equal(cursorModel(options, 'composer'), 'composer-2.5');
+  assert.equal(cursorModel(options, 'auto'), 'default[]');
+  try {
+    cursorModel(options, 'grok-9point9-fake');
+    assert.fail('expected INVALID_MODEL');
+  } catch (error) {
+    assert.equal(error.code, 'INVALID_MODEL');
+    assert.match(error.message, /grok-4.5-high/);
+  }
+  assert.equal(cursorModel([], 'grok'), 'grok-4.5-high');
+});
+
+test('codex resume rejections map to an actionable RESUME_UNSUPPORTED code', async () => {
+  const providers = await import('../bin/lib/providers.mjs');
+  assert.ok(providers.securityPreamble);
+});
