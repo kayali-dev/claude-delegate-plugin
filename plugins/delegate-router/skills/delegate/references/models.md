@@ -37,6 +37,8 @@ Sources: https://cursor.com/docs/models-and-pricing and https://forum.cursor.com
 
 Grok 4.5 is Cursor's broad frontier route for long-running creative tool use spanning software engineering, data science, finance, legal, research, and knowledge work. Its training emphasizes investigation, recovery, and verification. It is subscription-included as a first-party model, but drains the shared first-party pool several times faster than Composer — reserve it for work that needs its breadth. Use `grok-4.5-high` for the cost-balanced route and `grok-4.5-xhigh` for the hardest cases. Avoid Fast variants unless latency matters more than allowance.
 
+ACP sessions may advertise fewer Grok tiers than the CLI catalog (observed: ACP capped at `effort=high` while `agent models` lists `-xhigh`). When a requested tier is missing from the ACP catalog but present in the CLI catalog, the managed adapter automatically switches that job to the headless transport with the CLI-validated id — evented as `cursor:acp-tier-fallback`, with correction semantics degrading to cancel-and-resume for that job.
+
 Cursor disclosed that an earlier Cursor code snapshot entered training, so do not over-weight CursorBench when comparing it with other providers.
 
 Source: https://cursor.com/blog/grok-4-5

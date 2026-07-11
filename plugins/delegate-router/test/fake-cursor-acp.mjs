@@ -3,6 +3,11 @@ import readline from 'node:readline';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
+if (process.argv.includes('models')) {
+  console.log('composer-2.5 - Composer');
+  process.exit(0);
+}
+
 const lines = readline.createInterface({ input: process.stdin });
 let pending = null;
 let count = 0;

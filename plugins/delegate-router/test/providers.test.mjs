@@ -195,3 +195,20 @@ test('Cursor ACP fails closed on a bogus model id end-to-end', () => isolated(as
   await assert.rejects(() => runManagedProvider(job), /INVALID_MODEL/);
   assert.equal(inspectJob(job.id).status, 'failed');
 }));
+
+test('ACP tier gaps fall back to headless with the CLI-resolved model, explicitly evented', () => isolated(async (directory) => {
+  const fakeCursorTier = path.join(testDir, 'fake-cursor-tier.mjs');
+  fs.chmodSync(fakeCursorTier, 0o755);
+  process.env.DELEGATE_CURSOR_BIN = fakeCursorTier;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  const job = createManagedJob({ provider: 'cursor', model: 'grok-xhigh', mode: 'consult', cwd: directory, prompt: 'hard question' });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.transport, 'headless');
+  assert.equal(completed.model, 'grok-4.5-xhigh');
+  assert.equal(completed.resolvedModel, 'grok-4.5-xhigh');
+  assert.equal(completed.providerSessionId, 'headless-tier-session');
+  const events = readJobEvents(job.id, { limit: 1000 });
+  assert.ok(events.some((event) => event.data.providerEvent === 'cursor:acp-tier-fallback' && event.data.cliModel === 'grok-4.5-xhigh'));
+}));

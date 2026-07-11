@@ -187,7 +187,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.8.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.8.2' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -538,7 +538,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.8.1' }
+      clientInfo: { name: 'delegate-router', version: '0.8.2' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -549,7 +549,27 @@ async function runCursorAcp(job) {
     const modelOption = config.find((item) => item.id === 'model');
     const modeOption = config.find((item) => item.id === 'mode');
     if (modelOption) {
-      const resolvedModel = cursorModel(modelOption.options || [], job.model);
+      let resolvedModel;
+      try {
+        resolvedModel = cursorModel(modelOption.options || [], job.model);
+      } catch (error) {
+        if (error.code !== 'INVALID_MODEL') throw error;
+        // ACP sessions can advertise fewer tiers than the CLI catalog (for
+        // example Grok capped at effort=high while the CLI lists -xhigh).
+        // When the requested tier exists in the CLI catalog, signal a
+        // deliberate transport fallback instead of failing the job.
+        let cliModel = null;
+        try {
+          const ids = availableModelIds(binary);
+          const candidate = resolveCursorModel(job.model, ids);
+          if (ids.includes(candidate)) cliModel = candidate;
+        } catch {}
+        if (!cliModel) throw error;
+        const tierError = new Error(`ACP_TIER_UNAVAILABLE: '${job.model}' resolves to '${cliModel}' in the CLI catalog, but this ACP session does not advertise that tier`);
+        tierError.code = 'ACP_TIER_UNAVAILABLE';
+        tierError.cliModel = cliModel;
+        throw tierError;
+      }
       await rpc.request('session/set_config_option', { sessionId, configId: 'model', value: resolvedModel });
       updateManagedJob(job.id, (current) => {
         current.model = resolvedModel;
@@ -731,9 +751,25 @@ export async function runManagedProvider(job) {
       try { await runCursorAcp(current); }
       catch (error) {
         const started = inspectJob(job.id).providerSessionId;
-        if (started) throw error;
-        appendJobEvent(job.id, 'provider.event', { providerEvent: 'cursor:acp-fallback', error: error.message });
-        updateManagedJob(job.id, (next) => { next.transport = 'headless'; next.capabilities.correction = 'cancel-resume'; });
+        const tierFallback = error.code === 'ACP_TIER_UNAVAILABLE';
+        if (started && !tierFallback) throw error;
+        appendJobEvent(job.id, 'provider.event', {
+          providerEvent: tierFallback ? 'cursor:acp-tier-fallback' : 'cursor:acp-fallback',
+          error: error.message,
+          ...(error.cliModel ? { cliModel: error.cliModel } : {})
+        });
+        updateManagedJob(job.id, (next) => {
+          next.transport = 'headless';
+          next.capabilities.correction = 'cancel-resume';
+          if (tierFallback) {
+            // The ACP session id is not a headless chat id; the requested
+            // model is honored exactly via the CLI-validated id.
+            next.providerSessionId = null;
+            next.session = null;
+            next.model = error.cliModel;
+            next.resolvedModel = error.cliModel;
+          }
+        });
         await runCursorHeadless(loadJob(job.id));
       }
     }

@@ -55,7 +55,7 @@ Provider configuration is authoritative. Installations may enable Codex only, Cu
 - Steering and cancellation require `expectedRevision`. A stale revision is a conflict to reinspect, never an invitation to overwrite.
 - Correction IDs and command IDs must remain idempotent across retries.
 - Codex app-server supports genuine same-turn `turn/steer`. Cursor ACP does not: its correction is cancel-and-resume and must be reported as a restart.
-- Cursor may fall back to headless only when ACP fails before a session has started. Do not silently downgrade an active ACP session.
+- Cursor may fall back to headless only when ACP fails before a session has started, or when the requested model tier is absent from the ACP catalog but present in the CLI catalog (explicitly evented as `cursor:acp-tier-fallback`, with the CLI-validated id recorded as the job's model). Never silently downgrade an active ACP session, and never substitute a different model.
 - A parent provider session cannot be resumed concurrently while its job remains active.
 - Cancellation becomes terminal only after provider acknowledgement or confirmed process exit.
 - Allow one writer per shared worktree. Shared-worktree changed-file attribution is best-effort and must be described honestly.
