@@ -187,7 +187,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.8.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.8.1' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -330,29 +330,74 @@ function cursorCommand(binary, args, interactive = true) {
 }
 
 // Fail closed on unknown model ids: a silent fallback would report
-// "completed" for a model the caller never requested. Shorthands (composer,
-// grok, grok-xhigh, auto) resolve against the session's advertised options;
-// anything else must match an advertised id exactly. Without an advertised
-// list there is nothing to validate against, so legacy resolution applies.
+// "completed" for a model the caller never requested. Advertised ACP option
+// values may be attribute-serialized ("grok-4.5[effort=high,fast=true]")
+// while callers use CLI-style suffixed ids ("grok-4.5-high"), bare bases, or
+// shorthands; both sides are normalized to {base, effort, fast} and matched
+// structurally. Anything that cannot be matched raises INVALID_MODEL. Without
+// an advertised list there is nothing to validate against, so legacy
+// resolution applies.
+const EFFORT_RANK = { xhigh: 4, high: 3, medium: 2, low: 1 };
+
+function parseCursorModelId(value) {
+  const attrMatch = String(value).match(/^(.*?)\[(.*)\]$/);
+  let base = attrMatch ? attrMatch[1] : String(value);
+  const attrs = {};
+  if (attrMatch && attrMatch[2]) {
+    for (const pair of attrMatch[2].split(',')) {
+      const [key, raw] = pair.split('=');
+      if (key) attrs[key.trim()] = (raw ?? '').trim();
+    }
+  }
+  let effort = attrs.effort || null;
+  const suffix = base.match(/^(.*)-(xhigh|high|medium|low)$/);
+  if (!effort && suffix) {
+    base = suffix[1];
+    effort = suffix[2];
+  }
+  let fast = attrs.fast === 'true';
+  const fastSuffix = base.match(/^(.*)-fast$/);
+  if (fastSuffix) {
+    base = fastSuffix[1];
+    fast = true;
+  }
+  return { value: String(value), base, effort, fast };
+}
+
 export function cursorModel(options, requested) {
   const values = options.map((item) => item.value);
   if (!values.length) return resolveCursorModel(requested, []);
-  const newest = (predicate) => {
-    const candidates = values.filter((value) => predicate(value));
-    candidates.sort((a, b) => {
-      const fastA = /fast/.test(a) ? 1 : 0;
-      const fastB = /fast/.test(b) ? 1 : 0;
-      if (fastA !== fastB) return fastA - fastB;
-      return b.localeCompare(a, undefined, { numeric: true });
-    });
-    return candidates[0] || null;
-  };
-  if (!requested || requested === 'auto') return values.find((value) => value === 'default[]') || null;
   if (values.includes(requested)) return requested;
+  const parsed = values.map(parseCursorModelId);
+  const pick = (candidates, wantEffort) => {
+    let pool = candidates.filter((item) => !item.fast);
+    if (!pool.length) pool = candidates;
+    if (wantEffort) {
+      pool = pool.filter((item) => item.effort === wantEffort);
+      if (!pool.length) return null;
+    }
+    pool = [...pool].sort((a, b) =>
+      ((EFFORT_RANK[b.effort] || 0) - (EFFORT_RANK[a.effort] || 0))
+      || b.base.localeCompare(a.base, undefined, { numeric: true }));
+    return pool[0]?.value || null;
+  };
+  if (!requested || requested === 'auto') {
+    return values.find((value) => value === 'default[]')
+      || parsed.find((item) => item.base === 'auto' || item.base === 'default')?.value
+      || null;
+  }
   let resolved = null;
-  if (requested === 'composer') resolved = newest((value) => value.startsWith('composer-'));
-  else if (requested === 'grok' || requested === 'grok-high') resolved = newest((value) => value.startsWith('grok-') && value.endsWith('-high'));
-  else if (requested === 'grok-xhigh') resolved = newest((value) => value.startsWith('grok-') && value.endsWith('-xhigh'));
+  if (requested === 'composer') {
+    resolved = pick(parsed.filter((item) => item.base.startsWith('composer-')), null);
+  } else if (requested === 'grok' || requested === 'grok-high') {
+    resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'high');
+  } else if (requested === 'grok-xhigh') {
+    resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'xhigh');
+  } else {
+    const want = parseCursorModelId(requested);
+    const family = parsed.filter((item) => item.base === want.base);
+    if (family.length) resolved = pick(family, want.effort);
+  }
   if (resolved) return resolved;
   const error = new Error(`INVALID_MODEL: '${requested}' is not in this account's model list; run agent models or cursor-agent models. Available: ${values.slice(0, 25).join(', ')}`);
   error.code = 'INVALID_MODEL';
@@ -493,7 +538,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.8.0' }
+      clientInfo: { name: 'delegate-router', version: '0.8.1' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })

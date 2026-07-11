@@ -122,24 +122,51 @@ test('Codex provider exit fails immediately instead of waiting for the turn time
   assert.equal(inspectJob(job.id).status, 'failed');
 }));
 
-test('cursor model resolution fails closed on unknown ids and records shorthands', async () => {
+test('cursor model resolution matches attribute-serialized catalogs (REG-1)', async () => {
   const { cursorModel } = await import('../bin/lib/providers.mjs');
-  const options = [
-    { value: 'composer-2.5[fast=true]' }, { value: 'composer-2.5' },
-    { value: 'grok-4.5-high' }, { value: 'grok-4.5-xhigh' }, { value: 'default[]' }
+  // Realistic ACP catalog: attribute-serialized values, as advertised by the
+  // live agent. Every id recommended by references/models.md must resolve
+  // here; this test is the doc-drift guard.
+  const acp = [
+    { value: 'default[]' },
+    { value: 'composer-2.5[fast=true]' }, { value: 'composer-2.5[fast=false]' },
+    { value: 'grok-4.5[effort=xhigh,fast=false]' }, { value: 'grok-4.5[effort=xhigh,fast=true]' },
+    { value: 'grok-4.5[effort=high,fast=false]' }, { value: 'grok-4.5[effort=high,fast=true]' },
+    { value: 'grok-4.5[effort=medium,fast=false]' },
+    { value: 'gpt-5.6-sol[effort=xhigh,context=272k]' }
   ];
-  assert.equal(cursorModel(options, 'grok-4.5-high'), 'grok-4.5-high');
-  assert.equal(cursorModel(options, 'grok'), 'grok-4.5-high');
-  assert.equal(cursorModel(options, 'grok-xhigh'), 'grok-4.5-xhigh');
-  assert.equal(cursorModel(options, 'composer'), 'composer-2.5');
-  assert.equal(cursorModel(options, 'auto'), 'default[]');
-  try {
-    cursorModel(options, 'grok-9point9-fake');
-    assert.fail('expected INVALID_MODEL');
-  } catch (error) {
-    assert.equal(error.code, 'INVALID_MODEL');
-    assert.match(error.message, /grok-4.5-high/);
+  assert.equal(cursorModel(acp, 'grok-4.5-high'), 'grok-4.5[effort=high,fast=false]');
+  assert.equal(cursorModel(acp, 'grok-4.5-xhigh'), 'grok-4.5[effort=xhigh,fast=false]');
+  assert.equal(cursorModel(acp, 'grok'), 'grok-4.5[effort=high,fast=false]');
+  assert.equal(cursorModel(acp, 'grok-xhigh'), 'grok-4.5[effort=xhigh,fast=false]');
+  assert.equal(cursorModel(acp, 'grok-4.5'), 'grok-4.5[effort=xhigh,fast=false]');
+  assert.equal(cursorModel(acp, 'composer'), 'composer-2.5[fast=false]');
+  assert.equal(cursorModel(acp, 'composer-2.5'), 'composer-2.5[fast=false]');
+  assert.equal(cursorModel(acp, 'gpt-5.6-sol-xhigh'), 'gpt-5.6-sol[effort=xhigh,context=272k]');
+  assert.equal(cursorModel(acp, 'auto'), 'default[]');
+  assert.equal(cursorModel(acp, 'grok-4.5[effort=high,fast=true]'), 'grok-4.5[effort=high,fast=true]');
+  for (const bogus of ['grok-9point9-fake', 'grok-4.5-turbo', 'claude-fable-5']) {
+    try {
+      cursorModel(acp, bogus);
+      assert.fail(`expected INVALID_MODEL for ${bogus}`);
+    } catch (error) {
+      assert.equal(error.code, 'INVALID_MODEL', bogus);
+    }
   }
+});
+
+test('cursor model resolution also matches suffix-style catalogs and empty lists', async () => {
+  const { cursorModel } = await import('../bin/lib/providers.mjs');
+  const cli = [
+    { value: 'grok-4.5-xhigh' }, { value: 'grok-4.5-fast-xhigh' },
+    { value: 'grok-4.5-high' }, { value: 'grok-4.5-medium' },
+    { value: 'composer-2.5' }, { value: 'default[]' }
+  ];
+  assert.equal(cursorModel(cli, 'grok-4.5-high'), 'grok-4.5-high');
+  assert.equal(cursorModel(cli, 'grok'), 'grok-4.5-high');
+  assert.equal(cursorModel(cli, 'grok-xhigh'), 'grok-4.5-xhigh');
+  assert.equal(cursorModel(cli, 'grok-4.5'), 'grok-4.5-xhigh');
+  assert.equal(cursorModel(cli, 'composer'), 'composer-2.5');
   assert.equal(cursorModel([], 'grok'), 'grok-4.5-high');
 });
 
@@ -147,3 +174,24 @@ test('codex resume rejections map to an actionable RESUME_UNSUPPORTED code', asy
   const providers = await import('../bin/lib/providers.mjs');
   assert.ok(providers.securityPreamble);
 });
+
+test('Cursor ACP resolves a grok tier request against the advertised catalog end-to-end', () => isolated(async (directory) => {
+  fs.chmodSync(fakeCursor, 0o755);
+  process.env.DELEGATE_CURSOR_BIN = fakeCursor;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  const job = createManagedJob({ provider: 'cursor', model: 'grok', mode: 'consult', cwd: directory, prompt: 'question' });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.resolvedModel, 'grok-4.5[effort=high,fast=false]');
+  assert.equal(completed.model, 'grok-4.5[effort=high,fast=false]');
+}));
+
+test('Cursor ACP fails closed on a bogus model id end-to-end', () => isolated(async (directory) => {
+  fs.chmodSync(fakeCursor, 0o755);
+  process.env.DELEGATE_CURSOR_BIN = fakeCursor;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  const job = createManagedJob({ provider: 'cursor', model: 'grok-9point9-fake', mode: 'consult', cwd: directory, prompt: 'question' });
+  await assert.rejects(() => runManagedProvider(job), /INVALID_MODEL/);
+  assert.equal(inspectJob(job.id).status, 'failed');
+}));
