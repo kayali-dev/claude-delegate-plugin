@@ -54,6 +54,9 @@ lines.on('line', (line) => {
       fs.writeFileSync('staged-file.txt', 'staged file\n');
       spawnSync('git', ['add', 'staged-file.txt']);
     }
+    if (count === 1 && process.env.FAKE_CURSOR_OVERLAP === '1') {
+      fs.appendFileSync('tracked-overlap.txt', 'agent line\n');
+    }
     pending = request.id;
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'tool_call', toolCallId: `tool-${count}`, title: 'Edit a.js', status: 'in_progress', locations: [{ path: 'a.js' }] } } });
     setTimeout(finish, count === 1 ? 500 : 50);

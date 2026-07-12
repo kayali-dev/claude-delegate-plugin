@@ -33,6 +33,10 @@ Both pools are token-metered at per-model rates, so model choice changes how fas
 
 Track the **first-party pool** percentage from the dashboard: `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>`.
 
+**Auto mode** (`auto`, advertised as `default[]` over ACP) lets Cursor route within the first-party pool itself and is the default for non-complex Cursor tasks when the user has not named a model — the router emits it in that case. Pin `composer` or `grok` explicitly when the task is complex or consistent single-model behavior matters.
+
+**Fast variants are opt-in.** When a catalog advertises fast and non-fast forms of the same model, resolution defaults to non-fast; a fast variant is selected only when the request itself says fast (`composer-2.5-fast`, `grok-fast`, `grok-4.5-fast-high`, or an exact attributed token with `fast=true`). Never choose fast on the user's behalf — it trades allowance for latency.
+
 Sources: https://cursor.com/docs/models-and-pricing and https://forum.cursor.com/t/grok-4-5-pricing-for-subscription-plans/165207
 
 ## Cursor Grok 4.5

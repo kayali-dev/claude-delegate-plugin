@@ -88,10 +88,12 @@ ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|
 - `terra` — the daily external default: routine feature development, straightforward multi-file coding, technical writing, ordinary review. Half Sol's price but markedly chattier per task — on long agentic runs, measure before assuming it is cheaper.
 - `sol` — escalation, not default: security review, architecture, high-stakes changes, complex debugging, repository-wide refactors, final judgment. Sol completes hard agentic tasks with far fewer retries and output tokens than Terra, so on difficult work it is often both better and cheaper than its sticker price suggests. At `effort=xhigh`, Sol is exceptionally strong at surfacing issues, gaps, and bugs — the first-choice configuration for review sessions and independent second opinions.
 
-**Cursor** (`composer` / `grok` / `grok-xhigh`):
+**Cursor** (`auto` / `composer` / `grok` / `grok-xhigh`):
 
-- `composer` — clear, well-specified implementation: multi-file changes, refactors, tests, and especially frontend/web-framework work (it beats Grok on Next.js-style evals and multilingual code). Cheapest draw on the shared first-party pool; the default Cursor route.
+- `auto` — Cursor Auto mode, the default for non-complex Cursor work when the user has not named a model: Cursor routes within the first-party pool itself. The router emits it automatically for such tasks.
+- `composer` — clear, well-specified implementation: multi-file changes, refactors, tests, and especially frontend/web-framework work (it beats Grok on Next.js-style evals and multilingual code). Cheapest draw on the shared first-party pool; pin it explicitly when consistent Composer behavior matters.
 - `grok` — broad agentic and research work: investigation, recovery from messy states, cross-domain analysis, and tasks needing its larger context window. Substantially stronger than Composer on agentic benchmarks but drains the shared pool roughly 4x faster — reserve it for work that needs that breadth. `grok-xhigh` (reaches the job via headless fallback) only for the hardest cases.
+- Fast variants (`-fast`) are opt-in: never select one unless the user explicitly asks for fast. When a catalog offers fast and non-fast forms of the same model, resolution defaults to non-fast.
 
 **Effort** (Codex `effort`; Claude expresses effort via model tier, Cursor via model variant):
 
@@ -108,7 +110,7 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `delegate_inspect` for lifecycle, capabilities, continuation IDs, the final `result`, and current revision. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. A running job whose worker process died is reconciled to `failed` with an `ORPHANED` error event.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
-- `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Shared-worktree Cursor attribution is best-effort; never claim exact ownership of pre-existing changes.
+- `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.
 - `completed` means the turn ended, not that the objective was met: check `changedFiles` on the record (mechanical, from broker observation) against the worker's claims, and treat a write-mode job with zero changed files as a failed objective (`delegate-jobs wait` exits 5 for this).
 - `delegate_usage` for observed job usage and provider allowance as separate values.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.

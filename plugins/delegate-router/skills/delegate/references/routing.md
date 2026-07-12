@@ -17,7 +17,7 @@ Delegate when the objective is independently specifiable and one or more are tru
 | Task shape | First choice | Efficient fallback | Strong fallback |
 | --- | --- | --- | --- |
 | Small or context-heavy change | Current Claude | Claude Sonnet | Composer |
-| Clear multi-file implementation, refactor, or tests | Composer 2.5+ | GPT-5.6 Terra | GPT-5.6 Sol |
+| Clear multi-file implementation, refactor, or tests | Cursor Auto (Composer when explicitly pinned) | GPT-5.6 Terra | GPT-5.6 Sol |
 | Difficult debugging, terminal-heavy engineering, code review, security, frontend verification | GPT-5.6 Sol (`xhigh` for review/second opinions) | Claude Opus | Grok 4.5 |
 | Broad research plus tools, data/science/finance/legal context, creative recovery | Grok 4.5 | Claude Opus | GPT-5.6 Sol |
 | Very ambiguous long-horizon migration, vision-heavy work, or task tied to conversation judgment | Current Claude / Opus (Fable only with explicit per-task authorization) | GPT-5.6 Sol | Grok 4.5 |
@@ -57,6 +57,6 @@ The Codex `PreToolUse` hook and Cursor adapter independently enforce the 90% def
 
 ## Cost Discipline
 
-Use Composer standard rather than Composer Fast by default. Use Grok standard rather than Grok Fast. Composer and Grok share one Cursor first-party monthly pool, and Grok drains it roughly 3-4x faster per token — prefer Composer for routine implementation and spend Grok on work that needs its breadth. Use Sol only when its verification, terminal, or reasoning advantages justify its higher cost. Staying in the current Claude conversation is often most efficient for small work because it avoids a full context handoff.
+Fast variants (Composer Fast, Grok Fast) are opt-in: select one only when the user explicitly asks for fast; resolution otherwise defaults to the non-fast form. For non-complex Cursor work with no user-named model, default to Cursor Auto mode and let the first-party pool route it. Composer and Grok share one Cursor first-party monthly pool, and Grok drains it roughly 3-4x faster per token — prefer Auto or Composer for routine implementation and spend Grok on work that needs its breadth. Use Sol only when its verification, terminal, or reasoning advantages justify its higher cost. Staying in the current Claude conversation is often most efficient for small work because it avoids a full context handoff.
 
 Do not delegate the same question to several expensive models by default. Multiple opinions are justified for high-risk review, uncertain architecture, or explicit comparison; keep them read-only and synthesize the disagreements.

@@ -549,11 +549,33 @@ function providerCapabilities(provider, transport) {
   };
 }
 
+const BASELINE_HASH_MAX_BYTES = 10 * 1024 * 1024;
+
+// Content fingerprint of a working-tree file for baseline comparison. 'absent'
+// is a real state (deleted at baseline vs deleted now compares equal); null
+// means unknown (too large, unreadable), which callers must treat as
+// "cannot prove unchanged" and fall back to including the file.
+export function hashWorkingFile(cwd, file) {
+  const absolute = path.join(cwd, file);
+  let stat;
+  try {
+    stat = fs.statSync(absolute);
+  } catch {
+    return 'absent';
+  }
+  if (!stat.isFile() || stat.size > BASELINE_HASH_MAX_BYTES) return null;
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(absolute)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 function gitBaseline(cwd) {
   const result = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
     cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 8 * 1024 * 1024
   });
-  if (result.status !== 0) return [];
+  if (result.status !== 0) return { files: [], hashes: {} };
   const entries = result.stdout.split('\0').filter(Boolean);
   const files = [];
   for (let i = 0; i < entries.length; i += 1) {
@@ -562,7 +584,13 @@ function gitBaseline(cwd) {
     if (file) files.push(file);
     if (/[RC]/.test(status) && entries[i + 1]) files.push(entries[++i]);
   }
-  return [...new Set(files)];
+  const unique = [...new Set(files)];
+  const hashes = {};
+  for (const file of unique) {
+    const hash = hashWorkingFile(cwd, file);
+    if (hash) hashes[file] = hash;
+  }
+  return { files: unique, hashes };
 }
 
 const TIMEOUT_MIN_SECONDS = 60;
@@ -598,6 +626,7 @@ export function createManagedJob(options) {
   if (provider === 'codex' && options.transport && options.transport !== 'app-server') throw new Error(`Invalid Codex transport: ${options.transport}`);
   const p = paths(id);
   writePrivate(p.prompt, options.prompt);
+  const baseline = gitBaseline(cwd);
   const job = {
     schemaVersion: 2,
     id,
@@ -627,7 +656,8 @@ export function createManagedJob(options) {
     updatedAt: now,
     isolation: options.isolation || 'shared',
     attributionConfidence: options.isolation === 'worktree' ? 'high' : 'best-effort',
-    baselineFiles: gitBaseline(cwd)
+    baselineFiles: baseline.files,
+    baselineHashes: baseline.hashes
   };
   saveJob(job);
   appendJobEvent(id, 'job.created', { provider, model: job.model, mode: job.mode, transport, isolation: job.isolation });

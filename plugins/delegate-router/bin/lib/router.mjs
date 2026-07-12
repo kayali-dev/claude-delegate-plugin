@@ -56,6 +56,16 @@ export function routeTask({
 }) {
   const resolvedKind = kind === 'auto' ? inferKind(task, mode) : kind;
   let candidates = candidatesFor(resolvedKind, mode);
+  // Owner policy: when the user did not name a model, non-complex Cursor work
+  // runs in Cursor Auto mode (the first-party pool routes it) instead of
+  // pinning Composer. Complex kinds keep pinned models, and an explicit
+  // model request below always wins.
+  const NON_COMPLEX_KINDS = new Set(['implementation', 'general', 'small-contextual']);
+  if (model === 'auto' && NON_COMPLEX_KINDS.has(resolvedKind)) {
+    candidates = candidates.map((item) => item.provider === 'cursor' && item.model === 'composer'
+      ? { ...item, model: 'auto', reason: 'Cursor Auto mode routes non-complex work within the first-party pool; request composer explicitly to pin it' }
+      : item);
+  }
   const explicitProvider = provider !== 'auto' ? provider : model !== 'auto' ? MODEL_PROVIDER[model] : null;
   if (explicitProvider) candidates = candidates.filter((item) => item.provider === explicitProvider);
   if (model !== 'auto') {

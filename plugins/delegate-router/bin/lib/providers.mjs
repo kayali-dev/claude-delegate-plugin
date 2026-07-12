@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, inspectJob, jobFiles, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -187,7 +187,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.9.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.10.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -369,8 +369,12 @@ export function cursorModel(options, requested) {
   if (!values.length) return resolveCursorModel(requested, []);
   if (values.includes(requested)) return requested;
   const parsed = values.map(parseCursorModelId);
-  const pick = (candidates, wantEffort) => {
-    let pool = candidates.filter((item) => !item.fast);
+  // Fast variants are opt-in: the default pool is non-fast, and a fast
+  // variant is selected only when the request itself says fast. When the
+  // preferred pool is empty the other variant still resolves — fast/non-fast
+  // is a latency preference, not a model identity, so it must not fail closed.
+  const pick = (candidates, wantEffort, wantFast = false) => {
+    let pool = candidates.filter((item) => item.fast === wantFast);
     if (!pool.length) pool = candidates;
     if (wantEffort) {
       pool = pool.filter((item) => item.effort === wantEffort);
@@ -393,10 +397,13 @@ export function cursorModel(options, requested) {
     resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'high');
   } else if (requested === 'grok-xhigh') {
     resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'xhigh');
+  } else if (requested === 'grok-fast') {
+    resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'high', true);
   } else {
     const want = parseCursorModelId(requested);
-    const family = parsed.filter((item) => item.base === want.base);
-    if (family.length) resolved = pick(family, want.effort);
+    let family = parsed.filter((item) => item.base === want.base);
+    if (!family.length) family = parsed.filter((item) => item.base.startsWith(`${want.base}-`));
+    if (family.length) resolved = pick(family, want.effort, want.fast);
   }
   if (resolved) return resolved;
   const error = new Error(`INVALID_MODEL: '${requested}' is not in this account's model list; run agent models or cursor-agent models. Available: ${values.slice(0, 25).join(', ')}`);
@@ -480,14 +487,29 @@ function gitWorkspaceState(job) {
     }
   }
   let diff = '';
+  let includesPreexisting = false;
   const errors = [];
+  const baselineHashes = job.baselineHashes || {};
   const limit = Math.min(files.length, 1000);
   if (files.length > limit) errors.push(`file inventory capped at ${limit} of ${files.length}`);
   for (const item of files.slice(0, limit)) {
     if (item.contentExcluded) continue;
+    if (item.preexisting) {
+      // A path-only baseline cannot distinguish "job merely read this dirty
+      // file" from "job added to it"; the content hash captured at job start
+      // can. Unknown hashes (large/unreadable, or pre-upgrade job records)
+      // fall through to the old include-everything behavior.
+      const before = baselineHashes[item.path];
+      const now = before ? hashWorkingFile(cwd, item.path) : null;
+      if (before && now && before === now) {
+        item.unchangedSinceBaseline = true;
+        continue;
+      }
+      if (before && now) item.overlapsPreexisting = true;
+    }
     let result;
     if (item.status === '??') {
-      if (item.preexisting) continue;
+      if (item.preexisting && !item.overlapsPreexisting) continue;
       try {
         if (fs.statSync(path.join(cwd, item.path)).size > 5 * 1024 * 1024) {
           errors.push(`untracked file too large to diff: ${item.path}`);
@@ -505,15 +527,24 @@ function gitWorkspaceState(job) {
       }
       if (result.status !== 0) errors.push((result.stderr || `cannot diff tracked file ${item.path}`).trim());
     }
-    if (result?.stdout) diff += result.stdout;
+    if (result?.stdout) {
+      diff += result.stdout;
+      if (item.preexisting) includesPreexisting = true;
+    }
   }
-  return { diff, files, error: errors.filter(Boolean).join('; ') || null };
+  return { diff, files, includesPreexisting, error: errors.filter(Boolean).join('; ') || null };
 }
 
 function recordGitState(job, sessionId) {
   const state = gitWorkspaceState(job);
-  for (const file of state.files) appendJobEvent(job.id, 'file.changed', file, { sessionId });
-  if (state.diff) appendJobEvent(job.id, 'diff.updated', { diff: state.diff, includesPreexistingChanges: job.isolation !== 'worktree' }, { sessionId });
+  for (const file of state.files) {
+    // Pre-existing files proven byte-identical to the job-start baseline were
+    // at most read, never changed — emitting file.changed for them is exactly
+    // the attribution noise this filter removes.
+    if (file.unchangedSinceBaseline) continue;
+    appendJobEvent(job.id, 'file.changed', file, { sessionId });
+  }
+  if (state.diff) appendJobEvent(job.id, 'diff.updated', { diff: state.diff, includesPreexistingChanges: state.includesPreexisting === true }, { sessionId });
   if (state.error) appendJobEvent(job.id, 'provider.event', { providerEvent: 'git-inventory-warning', error: state.error }, { sessionId });
 }
 
@@ -552,7 +583,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.9.0' }
+      clientInfo: { name: 'delegate-router', version: '0.10.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })

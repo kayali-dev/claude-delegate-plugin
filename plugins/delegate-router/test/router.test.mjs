@@ -7,9 +7,20 @@ const clear = {
   claude: { known: false }, codex: { known: false }, cursor: { known: false }
 };
 
-test('routes clear implementation work to Composer', () => {
+test('routes clear implementation work to Cursor Auto when no model is named', () => {
   const route = routeTask({ task: 'Implement the multi-file refactor and update tests', usage: clear, availability: available });
+  assert.deepEqual([route.primary.provider, route.primary.model], ['cursor', 'auto']);
+  assert.match(route.primary.reason, /Auto mode/);
+});
+
+test('an explicit composer request still pins Composer', () => {
+  const route = routeTask({ task: 'Implement the multi-file refactor and update tests', model: 'composer', usage: clear, availability: available });
   assert.deepEqual([route.primary.provider, route.primary.model], ['cursor', 'composer']);
+});
+
+test('complex kinds keep pinned Cursor models instead of Auto', () => {
+  const route = routeTask({ task: 'Research the legal and financial implications with sources', mode: 'consult', usage: clear, availability: available });
+  assert.ok(![route.primary, ...route.fallbacks].some((item) => item.provider === 'cursor' && item.model === 'auto'));
 });
 
 test('routes hard debugging and review work to Sol', () => {

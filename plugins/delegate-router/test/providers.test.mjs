@@ -15,12 +15,12 @@ const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
 const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
 
 async function isolated(fn) {
-  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, crash: process.env.FAKE_CODEX_CRASH };
+  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH };
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-provider-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
   try { await fn(directory); }
   finally {
-    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CODEX_CRASH: old.crash })) {
+    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash })) {
       if (value == null) delete process.env[key]; else process.env[key] = value;
     }
   }
@@ -114,6 +114,43 @@ test('Cursor final inventory includes staged and untracked files', () => isolate
   assert.doesNotMatch(diff, /hunter2|preexisting\.txt/);
 }));
 
+test('Cursor diff excludes pre-existing dirty files the job never changed and flags overlap', () => isolated(async (directory) => {
+  fs.chmodSync(fakeCursor, 0o755);
+  const git = (...args) => spawnSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', ...args], { cwd: directory });
+  git('init', '-q');
+  fs.writeFileSync(path.join(directory, 'tracked-unchanged.txt'), 'committed\n');
+  fs.writeFileSync(path.join(directory, 'tracked-overlap.txt'), 'committed\n');
+  git('add', '.');
+  git('commit', '-qm', 'init');
+  // Both files are dirty BEFORE the job starts; the job appends only to
+  // tracked-overlap.txt. The unchanged one must vanish from diff, inventory,
+  // and changedFiles; the overlapping one must stay, flagged.
+  fs.appendFileSync(path.join(directory, 'tracked-unchanged.txt'), 'my local edit\n');
+  fs.appendFileSync(path.join(directory, 'tracked-overlap.txt'), 'my local edit\n');
+  process.env.DELEGATE_CURSOR_BIN = fakeCursor;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  delete process.env.FAKE_CURSOR_WRITE;
+  process.env.FAKE_CURSOR_OVERLAP = '1';
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'implement', cwd: directory, prompt: 'append to overlap file' });
+  await runManagedProvider(job);
+  const events = readJobEvents(job.id, { limit: 1000 });
+  const fileEvents = events.filter((event) => event.type === 'file.changed');
+  assert.ok(!fileEvents.some((event) => event.data.path === 'tracked-unchanged.txt'));
+  const overlap = fileEvents.find((event) => event.data.path === 'tracked-overlap.txt');
+  assert.ok(overlap);
+  assert.equal(overlap.data.preexisting, true);
+  assert.equal(overlap.data.overlapsPreexisting, true);
+  const diffEvent = events.filter((event) => event.type === 'diff.updated').at(-1);
+  assert.ok(diffEvent);
+  assert.equal(diffEvent.data.includesPreexistingChanges, true);
+  const diff = diffEvent.data.diff || fs.readFileSync(diffEvent.data.artifactPath, 'utf8');
+  assert.match(diff, /agent line/);
+  assert.doesNotMatch(diff, /tracked-unchanged\.txt/);
+  const record = inspectJob(job.id);
+  assert.ok(record.changedFiles.files.includes('tracked-overlap.txt'));
+  assert.ok(!record.changedFiles.files.includes('tracked-unchanged.txt'));
+}));
+
 test('Codex provider exit fails immediately instead of waiting for the turn timeout', () => isolated(async (directory) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   process.env.FAKE_CODEX_CRASH = '1';
@@ -147,6 +184,11 @@ test('cursor model resolution matches attribute-serialized catalogs (REG-1)', as
   assert.equal(cursorModel(acp, 'gpt-5.6-sol-xhigh'), 'gpt-5.6-sol[effort=xhigh,context=272k]');
   assert.equal(cursorModel(acp, 'auto'), 'default[]');
   assert.equal(cursorModel(acp, 'grok-4.5[effort=high,fast=true]'), 'grok-4.5[effort=high,fast=true]');
+  // Fast is opt-in: explicit fast requests resolve to the fast variant,
+  // everything else stays non-fast (asserted above).
+  assert.equal(cursorModel(acp, 'composer-2.5-fast'), 'composer-2.5[fast=true]');
+  assert.equal(cursorModel(acp, 'grok-4.5-fast-high'), 'grok-4.5[effort=high,fast=true]');
+  assert.equal(cursorModel(acp, 'grok-fast'), 'grok-4.5[effort=high,fast=true]');
   for (const bogus of ['grok-9point9-fake', 'grok-4.5-turbo', 'claude-fable-5']) {
     try {
       cursorModel(acp, bogus);
