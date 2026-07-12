@@ -80,6 +80,8 @@ For long work inside Claude Code, run the foreground `delegate-cursor` command w
 
 ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|restart` cancels the current prompt, waits for it to settle, and sends the correction to the same session. It reports `appliedAs=restart`; never describe this as same-turn steering. `strategy=same-turn` must be rejected for Cursor. Continue completed work with `delegate_resume`, which loads the same Cursor session. Use sensitive paths only when explicitly authorized.
 
+Known Grok-via-Cursor pattern (observed repeatedly on review work): the first turn can end with narration about filing or preparing the report without pasting the findings themselves. Mitigate in the task packet — "End your final message with the complete findings inline; a description of the report is not the report" — and when it still happens, treat the turn as incomplete and `delegate_resume` with "paste the full findings now".
+
 ## Choose The External Model And Effort
 
 **Codex GPT-5.6** (`luna` / `terra` / `sol`):
