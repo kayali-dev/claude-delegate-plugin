@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import { terminatePid } from './lib/process.mjs';
 import {
+  diffStat,
   inspectJob,
   jobDiff,
   jobFiles,
@@ -9,6 +10,7 @@ import {
   jobUsage,
   launchManagedJob,
   pruneJobs,
+  sliceDiff,
   readJobEventPage,
   reconcileJob,
   resumeManagedJob,
@@ -18,17 +20,17 @@ import { listJobs, saveJob } from './lib/state.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--network] [--override-writer]
-  delegate-jobs status|list [job-id] [--json]
+  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane]
+  delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--json]
   delegate-jobs inspect <job-id> [--json]
-  delegate-jobs events <job-id> [--after N] [--limit N] [--follow] [--json]
+  delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
   delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
   delegate-jobs wait <job-id> [--timeout-seconds N]   # blocks until terminal; exit 0 completed, 3 failed, 4 cancelled, 5 completed-but-no-changes (write modes), 75 timeout
-  delegate-jobs diff <job-id>
+  delegate-jobs diff <job-id> [--stat] [--offset N] [--max-chars N]
   delegate-jobs files <job-id> [--json]
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
   delegate-jobs cancel <job-id> [--expected-revision N]
-  delegate-jobs resume <job-id> --prompt <text>
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs usage <job-id> [--json]
   delegate-jobs result <job-id>
   delegate-jobs logs <job-id> [--stderr]
@@ -64,11 +66,25 @@ try {
       provider: value(args, '--provider'), model: value(args, '--model', 'auto'), mode: value(args, '--mode', 'consult'),
       cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
-      network: args.includes('--network'), overrideWriter: args.includes('--override-writer')
+      network: args.includes('--network'), sandbox: value(args, '--sandbox'),
+      allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
+      overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane')
     }));
   } else if (command === 'status') {
-    const id = args.find((item) => !item.startsWith('--'));
-    const jobs = id ? [requireJob(id)] : listJobs().slice(0, 20).map((job) => (job.status === 'running' ? reconcileJob(job.id) : job));
+    // A bare positional is a job id — but flag values (--limit 3) must not be
+    // mistaken for one.
+    const valueFlags = new Set(['--limit', '--status']);
+    let id;
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i].startsWith('--')) { if (valueFlags.has(args[i])) i += 1; continue; }
+      id = args[i];
+      break;
+    }
+    const statusFilter = value(args, '--status');
+    let jobs = id ? [requireJob(id)] : listJobs().map((job) => (job.status === 'running' ? reconcileJob(job.id) : job));
+    if (args.includes('--active')) jobs = jobs.filter((job) => !terminal(job.status));
+    if (statusFilter) jobs = jobs.filter((job) => job.status === statusFilter);
+    if (!id) jobs = jobs.slice(0, Number(value(args, '--limit', 20)));
     if (args.includes('--json')) json(jobs);
     else if (!jobs.length) console.log('No delegation jobs.');
     else {
@@ -82,7 +98,8 @@ try {
     let afterSeq = Number(value(args, '--after', 0));
     const limit = Number(value(args, '--limit', 200));
     do {
-      const page = readJobEventPage(id, { afterSeq, limit });
+      const types = value(args, '--types');
+      const page = readJobEventPage(id, { afterSeq, limit, ...(types ? { types: types.split(',') } : {}) });
       const events = page.events;
       if (args.includes('--json')) for (const event of events) console.log(JSON.stringify(event));
       else for (const event of events) console.log(`${String(event.seq).padStart(5)} ${new Date(event.at).toISOString()} ${event.type} ${JSON.stringify(event.data)}`);
@@ -98,7 +115,13 @@ try {
       verbose: args.includes('--verbose')
     }));
   } else if (command === 'wait') {
-    const id = args.find((item) => !item.startsWith('--'));
+    const waitValueFlags = new Set(['--timeout-seconds']);
+    let id;
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i].startsWith('--')) { if (waitValueFlags.has(args[i])) i += 1; continue; }
+      id = args[i];
+      break;
+    }
     const timeoutSeconds = Number(value(args, '--timeout-seconds', 0));
     const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : null;
     let job = requireJob(id);
@@ -124,7 +147,11 @@ try {
     const rawDays = value(args, '--max-age-days');
     json(pruneJobs(rawDays == null ? {} : { maxAgeDays: Number(rawDays) }));
   } else if (command === 'diff') {
-    process.stdout.write(jobDiff(args[0]));
+    const full = jobDiff(args[0]);
+    if (args.includes('--stat')) json(diffStat(full));
+    else if (value(args, '--offset') != null || value(args, '--max-chars') != null) {
+      json(sliceDiff(full, { offset: Number(value(args, '--offset', 0)), maxChars: Number(value(args, '--max-chars', 100000)) }));
+    } else process.stdout.write(full);
   } else if (command === 'files') {
     json(jobFiles(args[0]));
   } else if (command === 'steer') {
@@ -149,7 +176,14 @@ try {
       console.log(`Cancellation requested for legacy job ${job.id}.`);
     }
   } else if (command === 'resume') {
-    json(resumeManagedJob(args[0], { prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd') }));
+    const rawTimeout = value(args, '--timeout-seconds');
+    json(resumeManagedJob(args[0], {
+      prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd'),
+      effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? undefined : Number(rawTimeout),
+      network: args.includes('--network') ? true : undefined, sandbox: value(args, '--sandbox'),
+      allowSensitive: args.includes('--allow-sensitive') ? true : undefined,
+      overrideLimit: args.includes('--override-limit'), overrideWriter: args.includes('--override-writer')
+    }));
   } else if (command === 'usage') {
     json(jobUsage(args[0]));
   } else if (command === 'result') {

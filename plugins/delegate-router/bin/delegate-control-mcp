@@ -27,7 +27,9 @@ const TOOLS = [
       cwd: { type: 'string' }, prompt: { type: 'string' }, approval: { enum: ['auto', 'force'] }, effort: { enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
       timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, network: { type: 'boolean' },
       sandbox: { enum: ['auto', 'off'], description: 'off disables provider sandboxing (Codex danger-full-access, Cursor --sandbox disabled) so the worker can use git, host CLIs, and live web search/fetch. Judge necessity from the task; if unsure whether the sandbox can stay on, ask the user before setting off.' },
-      allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' }, transport: { enum: ['app-server', 'acp', 'headless'] }
+      allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' },
+      overrideLane: { type: 'boolean', description: 'GPT models on provider=cursor are refused (WRONG_LANE) while Codex is enabled and under its avoid threshold — they route natively through Codex. Set true only when the user explicitly asked to run a GPT model through Cursor.' },
+      transport: { enum: ['app-server', 'acp', 'headless'] }
     } }
   },
   { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: jobOnly() },
@@ -88,7 +90,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.11.1' }
+        serverInfo: { name: 'delegate-control', version: '0.12.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

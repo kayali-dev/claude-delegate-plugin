@@ -709,6 +709,16 @@ export function launchManagedJob(options) {
     throw new Error(`QUOTA_GUARD: ${provider} is at ${usage.usedPercent}% (threshold ${threshold}%); route to a fallback or explicitly override`);
   }
   try { maybePruneJobs(); } catch {}
+  // GPT models have a native lane (Codex app-server); running them through
+  // Cursor burns the Cursor API pool and loses the Codex harness. Allowed only
+  // when the user explicitly asked (overrideLane), Codex is disabled, or Codex
+  // is at/above its avoid band. Resumes skip the check — their lane is set.
+  if (provider === 'cursor' && /^gpt-/i.test(options.model || '') && options.overrideLane !== true && !options.providerSessionId && providerEnabled('codex')) {
+    const codexUsage = effectiveUsage(loadState(), 'codex');
+    if (!(codexUsage.known && codexUsage.usedPercent >= avoidPercentFor('codex'))) {
+      throw new Error(`WRONG_LANE: '${options.model}' routes natively through Codex (provider=codex); use Cursor for GPT models only when the user explicitly asks for that (set overrideLane=true) or Codex is disabled or at its avoid threshold`);
+    }
+  }
   // The guard check and the job-record creation must be atomic per cwd, or two
   // concurrent write-mode launches can both pass the check before either
   // persists its record.

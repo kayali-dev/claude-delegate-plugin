@@ -285,6 +285,28 @@ test('network option is stored, defaults off, and shapes codex spawn args', asyn
   assert.match(securityPreamble(true), /allowed scope/);
 }));
 
+test('GPT models are refused on cursor while codex is enabled and under its avoid band', () => isolated((directory) => {
+  // Codex enabled, usage unknown (not exhausted): the native lane is available.
+  assert.throws(
+    () => launchManagedJob({ provider: 'cursor', model: 'gpt-5.6-sol-xhigh', mode: 'review', cwd: directory, prompt: 'review' }),
+    /WRONG_LANE/
+  );
+  // Explicit user request bypasses the lane guard.
+  process.env.DELEGATE_CURSOR_BIN = '/usr/bin/false';
+  try {
+    const overridden = launchManagedJob({ provider: 'cursor', model: 'gpt-5.6-sol-xhigh', mode: 'review', cwd: directory, prompt: 'review', overrideLane: true });
+    assert.equal(overridden.provider, 'cursor');
+    // Codex at its avoid band frees the cursor lane without an override.
+    const state = loadState();
+    setWindow(state, 'codex', 'primary', 95, { resetsAt: Math.floor(Date.now() / 1000) + 3600, source: 'test' });
+    saveState(state);
+    const fallback = launchManagedJob({ provider: 'cursor', model: 'gpt-5.6-terra', mode: 'review', cwd: directory, prompt: 'review' });
+    assert.equal(fallback.provider, 'cursor');
+  } finally {
+    delete process.env.DELEGATE_CURSOR_BIN;
+  }
+}));
+
 test('sandbox off is validated, stored, and maps to full access across providers', async () => isolated(async (directory) => {
   const { codexSandboxMode, codexSpawnArgs } = await import('../bin/lib/providers.mjs');
   const defaulted = createManagedJob({ provider: 'codex', mode: 'review', cwd: directory, prompt: 'task' });

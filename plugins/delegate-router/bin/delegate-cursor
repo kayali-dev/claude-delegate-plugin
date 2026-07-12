@@ -45,6 +45,7 @@ function parseArgs(argv) {
     promptFile: null,
     resume: null,
     overrideLimit: false,
+    overrideLane: false,
     allowSensitive: false,
     sandbox: null,
     background: false,
@@ -55,6 +56,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const value = argv[i];
     if (value === '--override-limit') result.overrideLimit = true;
+    else if (value === '--override-lane') result.overrideLane = true;
     else if (value === '--allow-sensitive') result.allowSensitive = true;
     else if (value === '--background') result.background = true;
     else if (value === '--dry-run') result.dryRun = true;
@@ -89,7 +91,8 @@ function usage() {
   --background
   --dry-run
   --allow-sensitive
-  --override-limit`);
+  --override-limit
+  --override-lane           (permit an explicitly user-requested GPT model via Cursor)`);
 }
 
 function createJobId() {
@@ -156,6 +159,15 @@ const binary = resolveCursorBinary();
 if (!binary) fail('neither agent nor cursor-agent is executable');
 
 const state = loadState();
+// Same WRONG_LANE rule as the managed broker: GPT models route natively
+// through Codex unless the user explicitly asked for Cursor, or Codex is
+// disabled or at its avoid band. Resumes continue their existing lane.
+if (/^gpt-/i.test(options.model || '') && !options.overrideLane && !options.resume && providerEnabled('codex')) {
+  const codexUsage = effectiveUsage(state, 'codex');
+  if (!(codexUsage.known && codexUsage.usedPercent >= avoidPercentFor('codex'))) {
+    fail(`WRONG_LANE: '${options.model}' routes natively through Codex; use Cursor for GPT models only when the user explicitly asks (pass --override-lane) or Codex is disabled or at its avoid threshold`);
+  }
+}
 const cursorUsage = effectiveUsage(state, 'cursor');
 const effectiveThreshold = options.resume ? Math.max(options.threshold, 98) : options.threshold;
 if (!options.overrideLimit && cursorUsage.known && cursorUsage.usedPercent >= effectiveThreshold) {

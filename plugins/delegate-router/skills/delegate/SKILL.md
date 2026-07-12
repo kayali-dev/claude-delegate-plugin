@@ -96,6 +96,7 @@ Known Grok-via-Cursor pattern (observed repeatedly on review work): the first tu
 - `composer` — clear, well-specified implementation: multi-file changes, refactors, tests, and especially frontend/web-framework work (it beats Grok on Next.js-style evals and multilingual code). Cheapest draw on the shared first-party pool; pin it explicitly when consistent Composer behavior matters.
 - `grok` — broad agentic and research work: investigation, recovery from messy states, cross-domain analysis, and tasks needing its larger context window. Substantially stronger than Composer on agentic benchmarks but drains the shared pool roughly 4x faster — reserve it for work that needs that breadth. `grok-xhigh` (reaches the job via headless fallback) only for the hardest cases.
 - Fast variants (`-fast`) are opt-in: never select one unless the user explicitly asks for fast. When a catalog offers fast and non-fast forms of the same model, resolution defaults to non-fast.
+- Cursor catalogs may also advertise cross-provider models (GPT, Claude) from the API pool. Use the right tool for the model: GPT models route natively through Codex, never through Cursor, unless the user explicitly asks for that or Codex is disabled or at its avoid threshold. The broker enforces this (`WRONG_LANE`); `overrideLane=true` is reserved for the explicit-user-request case. The same logic already applies to Claude models (see Use Claude).
 
 **Effort** (Codex `effort`; Claude expresses effort via model tier, Cursor via model variant):
 
@@ -106,7 +107,7 @@ Known Grok-via-Cursor pattern (observed repeatedly on review work): the first tu
 
 ## Decide Whether The Sandbox Stays On
 
-Jobs run sandboxed by default, and the default is correct for most work. `sandbox=off` on `delegate_start` (or `--sandbox off` for headless Cursor) disables provider sandboxing — Codex `danger-full-access`, Cursor `--sandbox disabled` — so the worker can use git and `gh`, install packages, run host CLIs and Docker, and reach the live web; Codex web search is enabled automatically when the job has network or the sandbox is off.
+Jobs run sandboxed by default, and the default is correct for most work. `sandbox=off` on `delegate_start` (`--sandbox off` on `delegate-jobs start` and `delegate-cursor`) disables provider sandboxing — Codex `danger-full-access`, Cursor `--sandbox disabled` — so the worker can use git and `gh`, install packages, run host CLIs and Docker, and reach the live web; Codex web search is enabled automatically when the job has network or the sandbox is off.
 
 Judge from the task packet, not from habit:
 

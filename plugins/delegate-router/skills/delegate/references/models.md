@@ -27,7 +27,7 @@ Sources: https://openai.com/index/gpt-5-6/, https://www.vellum.ai/blog/gpt-5-6-b
 Cursor subscriptions (Pro $20, Pro+ $60, Ultra $200 per month; Teams Standard $40 and Premium $120 per user) meter usage in two separate monthly pools:
 
 - **First-party pool**: Auto, Composer 2.5, and Grok 4.5 draw from a dedicated, more generous allocation. This is the pool Delegate Router consumes, because it routes to Composer and Grok.
-- **API pool**: third-party models charged at API price against a tier-based inclusion ($20 / $70 / $400).
+- **API pool**: third-party models charged at API price against a tier-based inclusion ($20 / $70 / $400). Cursor catalogs can therefore advertise GPT and Claude models — do not select them through Cursor while their native lane is available: GPT models belong on Codex (better harness, no API-pool burn) unless the user explicitly asks, or Codex is disabled or at its avoid threshold. The broker refuses such starts with `WRONG_LANE`; `overrideLane=true` exists for the explicit-request case.
 
 Both pools are token-metered at per-model rates, so model choice changes how fast the shared first-party pool drains: Grok 4.5 ($2/$6 per 1M in/out) consumes it roughly 3-4x faster than Composer 2.5 ($0.5/$2.5). There are no five-hour or weekly windows; the cycle is monthly, and exhausted included usage falls through to on-demand billing rather than a hard block.
 
