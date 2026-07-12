@@ -1,24 +1,26 @@
 # Model Notes
 
-Research snapshot: 2026-07-11 (Cursor plans re-verified same day). Model availability and pricing can change; query installed CLIs before relying on a model ID.
+Research snapshot: 2026-07-12 (Cursor plans verified 07-11; GPT-5.6 GA, Fable subscription status, and tier benchmarks verified 07-12). Model availability and pricing can change; query installed CLIs before relying on a model ID.
 
 ## Claude
 
-- Fable 5 is Anthropic's most capable route for the hardest long-running work, broad knowledge, vision, science, and large autonomous software tasks. Prefer it when ambiguity, visual input, or the current conversation context dominates.
-- Opus 4.8 is the complex-reasoning fallback when Fable is unavailable or unnecessary.
-- Sonnet 5 is the daily coding and coordination default.
-- Haiku is appropriate for simple, bounded, low-risk work.
+- Fable 5 is Anthropic's most capable route for the hardest long-running work, broad knowledge, vision, science, and large autonomous software tasks — but **it is not included in subscription usage as of 2026-07-12**: it bills through opt-in usage credits at API-tier rates ($10/$50 per MTok), runs minutes-long turns, and applies stricter safety classifiers. Never auto-select it; the router refuses to, and explicit requests carry `requiresAuthorization` so the skill obtains per-task user approval first. Anthropic has said the removal is temporary ("once capacity allows"), with no date — re-verify before relying on this status.
+- Opus 4.8 is the default hard-task route and the most capable subscription-included model: long-horizon agentic work, difficult debugging, review, architecture, memory.
+- Sonnet 5 is the daily coding and coordination default — near-Opus quality on coding and agentic work at Sonnet cost.
+- Haiku 4.5 is for deterministic, mechanical, precisely specified work only: it is explicitly weak on complex reasoning and large-codebase analysis, has a 200K context window (vs 1M for the rest of the family), and the oldest knowledge cutoff (2025-02). Never route judgment or ambiguity to it.
 
-Sources: https://code.claude.com/docs/en/model-config and https://www.anthropic.com/news/claude-fable-5-mythos-5
+Sources: https://code.claude.com/docs/en/model-config, https://www.anthropic.com/news/claude-fable-5-mythos-5, https://www.bleepingcomputer.com/news/artificial-intelligence/claude-fable-5-isnt-permanently-leaving-subscriptions-anthropic-says/, https://theaicareerlab.com/blog/which-claude-model-should-you-use
 
 ## Codex GPT-5.6
 
-- Sol is the strongest Codex coding route for terminal-heavy work, difficult debugging, code review, frontend and computer-use workflows, defensive security, and long-horizon verified execution.
-- Terra is the cost-balanced route for substantial routine coding.
-- Luna is the fast route for bounded low-risk work.
-- Max is for unusually hard single-agent work. Ultra is for demanding independent workstreams and has a much larger usage footprint.
+GA across ChatGPT, Codex, and the API since 2026-07-09 (after a two-week limited preview).
 
-Sources: https://openai.com/index/gpt-5-6/ and https://developers.openai.com/api/docs/models/gpt-5.6-sol
+- Sol is the escalation tier, not the default: security review, architecture, high-stakes changes, complex debugging, repository-wide refactors, and final judgment. Benchmarks show why it earns hard work: ~64% of repo tasks completed with zero trial-and-error (vs ~41% for Terra), and roughly 21k output tokens per completed task vs Terra's ~56k — on difficult agentic work Sol is often both better and cheaper than its 2x sticker price suggests. At `effort=xhigh` it is exceptionally strong at surfacing issues, gaps, and bugs — the first-choice configuration for review sessions and independent second opinions (field-verified by this plugin's own external reviews).
+- Terra is the daily external default: routine feature development, straightforward multi-file coding, technical writing, ordinary review. Markedly chattier per task than Sol — measure before assuming the lower price wins on long runs.
+- Luna is for high-volume, well-scoped, low-risk work: summarizing, labeling, extraction, scaffolds, simple fixes.
+- `max` effort is for unusually hard single-agent work; compare against `xhigh` before adopting. `ultra` is a different topology, not a bigger max: Codex delegates to parallel internal agents and synthesizes, multiplying token spend by design — only for genuinely independent parallelizable workstreams with explicit budget acceptance.
+
+Sources: https://openai.com/index/gpt-5-6/, https://www.vellum.ai/blog/gpt-5-6-benchmarks-explained, https://www.coderabbit.ai/blog/gpt-5-6-sol-and-terra-benchmark, https://www.toolcolumn.com/learn/gpt-5-6-max-vs-ultra
 
 ## Cursor Plans And Pools
 
@@ -35,7 +37,7 @@ Sources: https://cursor.com/docs/models-and-pricing and https://forum.cursor.com
 
 ## Cursor Grok 4.5
 
-Grok 4.5 is Cursor's broad frontier route for long-running creative tool use spanning software engineering, data science, finance, legal, research, and knowledge work. Its training emphasizes investigation, recovery, and verification. It is subscription-included as a first-party model, but drains the shared first-party pool several times faster than Composer — reserve it for work that needs its breadth. Use `grok-4.5-high` for the cost-balanced route and `grok-4.5-xhigh` for the hardest cases. Avoid Fast variants unless latency matters more than allowance.
+Grok 4.5 is Cursor's broad frontier route for long-running creative tool use spanning software engineering, data science, finance, legal, research, and knowledge work. Its training emphasizes investigation, recovery, and verification, and it substantially outscores Composer on agentic benchmarks (SWE-Bench Pro ~65% vs ~54%) with a larger context window (500K vs 200K). It is subscription-included as a first-party model, but drains the shared first-party pool several times faster than Composer — reserve it for work that needs its breadth. Use `grok-4.5-high` for the cost-balanced route and `grok-4.5-xhigh` for the hardest cases. Avoid Fast variants unless latency matters more than allowance.
 
 ACP sessions may advertise fewer Grok tiers than the CLI catalog (observed: ACP capped at `effort=high` while `agent models` lists `-xhigh`). When a requested tier is missing from the ACP catalog but present in the CLI catalog, the managed adapter automatically switches that job to the headless transport with the CLI-validated id — evented as `cursor:acp-tier-fallback`, with correction semantics degrading to cancel-and-resume for that job.
 
@@ -45,7 +47,7 @@ Source: https://cursor.com/blog/grok-4-5
 
 ## Cursor Composer 2.5+
 
-Composer is Cursor's coding specialist for sustained multi-file changes, refactors, tests, and clear implementation work. Composer 2.5 improved long-running coding, complex instruction following, and effort calibration. It is subscription-included as a first-party model and is the cheapest draw on the shared first-party pool, which makes it the default efficiency route; Fast costs materially more.
+Composer is Cursor's coding specialist for sustained multi-file changes, refactors, tests, and clear implementation work — and it beats Grok on web-framework evals (Next.js-style ~92% vs ~83%) and multilingual code, at roughly a quarter of Grok's token cost. Composer 2.5 improved long-running coding, complex instruction following, and effort calibration. It is subscription-included as a first-party model and is the cheapest draw on the shared first-party pool, which makes it the default efficiency route; Fast costs materially more.
 
 The adapter defaults to `composer-2.5`. Override `DELEGATE_CURSOR_COMPOSER_MODEL` when a later Composer ID is available. `agent models` (or `cursor-agent models`) is the source of truth for account-specific ids: catalogs expose fully-qualified tier ids (for example `grok-4.5-high`, `grok-4.5-xhigh`, `composer-2.5`) and may include cross-provider models. ACP sessions advertise the same models as attribute-serialized values (`grok-4.5[effort=high,fast=true]`); the managed adapter normalizes both forms, so suffixed ids, bare bases, full attributed tokens, and the shorthands `composer`, `grok`, and `grok-xhigh` all resolve against the session's advertised list. Anything unmatched fails closed with `INVALID_MODEL`, and the resolved advertised value is recorded on the job as `resolvedModel`. The ids recommended in this file are pinned by a regression test against a realistic attributed catalog so docs and matcher cannot drift apart.
 

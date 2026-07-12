@@ -80,6 +80,26 @@ For long work inside Claude Code, run the foreground `delegate-cursor` command w
 
 ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|restart` cancels the current prompt, waits for it to settle, and sends the correction to the same session. It reports `appliedAs=restart`; never describe this as same-turn steering. `strategy=same-turn` must be rejected for Cursor. Continue completed work with `delegate_resume`, which loads the same Cursor session. Use sensitive paths only when explicitly authorized.
 
+## Choose The External Model And Effort
+
+**Codex GPT-5.6** (`luna` / `terra` / `sol`):
+
+- `luna` — high-volume, well-scoped, low-risk work: summarizing, labeling, extraction, scaffolds, simple fixes. Cheapest and fastest; never where judgment or deep verification matters.
+- `terra` — the daily external default: routine feature development, straightforward multi-file coding, technical writing, ordinary review. Half Sol's price but markedly chattier per task — on long agentic runs, measure before assuming it is cheaper.
+- `sol` — escalation, not default: security review, architecture, high-stakes changes, complex debugging, repository-wide refactors, final judgment. Sol completes hard agentic tasks with far fewer retries and output tokens than Terra, so on difficult work it is often both better and cheaper than its sticker price suggests. At `effort=xhigh`, Sol is exceptionally strong at surfacing issues, gaps, and bugs — the first-choice configuration for review sessions and independent second opinions.
+
+**Cursor** (`composer` / `grok` / `grok-xhigh`):
+
+- `composer` — clear, well-specified implementation: multi-file changes, refactors, tests, and especially frontend/web-framework work (it beats Grok on Next.js-style evals and multilingual code). Cheapest draw on the shared first-party pool; the default Cursor route.
+- `grok` — broad agentic and research work: investigation, recovery from messy states, cross-domain analysis, and tasks needing its larger context window. Substantially stronger than Composer on agentic benchmarks but drains the shared pool roughly 4x faster — reserve it for work that needs that breadth. `grok-xhigh` (reaches the job via headless fallback) only for the hardest cases.
+
+**Effort** (Codex `effort`; Claude expresses effort via model tier, Cursor via model variant):
+
+- Start one level lower than instinct suggests and escalate on measured need — most tasks hold quality one level down, and output tokens are the expensive direction.
+- `low` lookups and mechanical edits · `medium` routine implementation and review · `high` multi-file debugging, risky changes, architecture · `xhigh` hardest ambiguous reasoning and difficult review (the coding-agent sweet spot; `sol` at `xhigh` is the review/second-opinion configuration) · `max` quality-first exceptional cases — compare against `xhigh` before adopting.
+- `ultra` is a different topology, not a bigger `max`: Codex delegates to parallel internal agents and synthesizes. Use only for genuinely independent, parallelizable workstreams with explicit user budget acceptance — it multiplies token spend by design.
+- Effort compounds with allowance: when a provider is at or above its warning band, drop one effort level or route elsewhere before starting new work.
+
 ## Supervise Managed Work
 
 After `delegate_start`, retain the job ID and revision. Use:
@@ -105,9 +125,19 @@ Read [protocol.md](references/protocol.md) when implementing a controller, diagn
 
 ## Use Claude
 
-Do not recursively launch `claude -p`. Keep the work in the current session when possible. Use a built-in `Agent` only when a fresh Claude context or parallel read-only investigation is worth the handoff; choose `haiku` for simple bounded work, `sonnet` for daily coding, `opus` for complex reasoning, or `fable`/`inherit` when supported and the hardest long-running work justifies it.
+Do not recursively launch `claude -p`. Keep the work in the current session when possible; a Claude subagent spends the same five-hour and weekly windows as this session, so parallelism through Agents is not extra allowance. When Claude's own windows are at or above the warning band, prefer routing bounded work to Codex or Cursor headroom over spawning additional Claude contexts.
 
-When the router returns `claude/fable`, stay in the current session if it is already using Fable. Otherwise use a built-in Fable agent when supported, fall back to Opus/current Claude, or tell the user that switching the parent model would improve fit. Do not route Claude models through Cursor merely to satisfy this choice; that would consume Cursor allowance without gaining Cursor-specialist behavior.
+Use a built-in `Agent` only when a fresh context, an independent second opinion, parallel read-only investigation, or worktree-isolated parallel write work is worth the handoff. Route by task shape:
+
+- `haiku` — only deterministic, mechanical, precisely specified work with mechanically verifiable output (format conversion, mechanical renames, extraction against an exact spec). Never for judgment, ambiguity, or multi-step reasoning, and never against content near its 200K context limit.
+- `sonnet` — the default for bounded coding, exploration, and coordination subtasks.
+- `opus` — complex reasoning, difficult debugging, architecture, and review; the default hard-task route and the most capable subscription-included model.
+- omit the model to inherit the parent session's model — never assume what the parent is running.
+- `fable` — **never auto-select.** Fable 5 is not included in subscription usage (since 2026-07-12 it bills through opt-in usage credits at API-tier rates), runs minutes-long turns, and applies stricter safety classifiers. Propose it with the reason and expected cost, and use it only after the user explicitly authorizes that specific task; authorization is per-task, not standing. The router flags explicit Fable routes with `requiresAuthorization`.
+
+When the router recommends the highest Claude tier, read that as "opus — or fable only with explicit per-task user authorization." If the parent session already runs the recommended tier, stay in the session. Do not route Claude models through Cursor to satisfy a tier choice: Cursor catalogs list Claude ids as first-class models, but that path spends the Cursor pool for a model the Claude subscription already covers, loses native harness behavior and continuation, and gains no Cursor-specialist ability.
+
+A Claude agent that writes files is an unmanaged writer, invisible to the managed `WRITER_ACTIVE` guard — never run one alongside a managed write job in the same cwd; give parallel Claude write work worktree isolation or coordinate it manually.
 
 ## Verify And Recover
 

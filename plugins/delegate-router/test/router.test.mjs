@@ -22,9 +22,17 @@ test('routes broad cross-domain research to Grok', () => {
   assert.deepEqual([route.primary.provider, route.primary.model], ['cursor', 'grok']);
 });
 
-test('routes vision-heavy architecture judgment to Claude Fable', () => {
-  const route = routeTask({ task: 'Evaluate the screenshot and architecture tradeoffs for this migration strategy', mode: 'consult', usage: clear, availability: available });
+test('routes vision-heavy architecture judgment to Claude Opus, never auto-selecting Fable', () => {
+  const route = routeTask({ task: 'Assess the architecture tradeoffs in these screenshots and pick a migration strategy', usage: clear, availability: available });
+  assert.deepEqual([route.primary.provider, route.primary.model], ['claude', 'opus']);
+  assert.ok(![route.primary, ...route.fallbacks].some((item) => item.model === 'fable'));
+});
+
+test('explicit fable requests route but require per-task authorization', () => {
+  const route = routeTask({ task: 'Hardest ambiguous migration', model: 'fable', usage: clear, availability: available });
   assert.deepEqual([route.primary.provider, route.primary.model], ['claude', 'fable']);
+  assert.equal(route.primary.requiresAuthorization, true);
+  assert.match(route.primary.reason, /authorization/);
 });
 
 test('removes a provider at the avoid threshold and selects a fallback', () => {

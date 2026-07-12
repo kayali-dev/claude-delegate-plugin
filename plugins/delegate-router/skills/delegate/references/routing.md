@@ -18,11 +18,11 @@ Delegate when the objective is independently specifiable and one or more are tru
 | --- | --- | --- | --- |
 | Small or context-heavy change | Current Claude | Claude Sonnet | Composer |
 | Clear multi-file implementation, refactor, or tests | Composer 2.5+ | GPT-5.6 Terra | GPT-5.6 Sol |
-| Difficult debugging, terminal-heavy engineering, code review, security, frontend verification | GPT-5.6 Sol | Claude Fable/Opus | Grok 4.5 |
-| Broad research plus tools, data/science/finance/legal context, creative recovery | Grok 4.5 | Claude Fable/Opus | GPT-5.6 Sol |
-| Very ambiguous long-horizon migration, vision-heavy work, or task tied to conversation judgment | Current Claude Fable/Opus | GPT-5.6 Sol | Grok 4.5 |
+| Difficult debugging, terminal-heavy engineering, code review, security, frontend verification | GPT-5.6 Sol (`xhigh` for review/second opinions) | Claude Opus | Grok 4.5 |
+| Broad research plus tools, data/science/finance/legal context, creative recovery | Grok 4.5 | Claude Opus | GPT-5.6 Sol |
+| Very ambiguous long-horizon migration, vision-heavy work, or task tied to conversation judgment | Current Claude / Opus (Fable only with explicit per-task authorization) | GPT-5.6 Sol | Grok 4.5 |
 | Fast bounded low-risk coding | GPT-5.6 Luna or Claude Haiku | Composer | Current Claude |
-| Architecture or product tradeoff | Current Claude Fable/Opus | Grok 4.5 | GPT-5.6 Sol |
+| Architecture or product tradeoff | Current Claude / Opus (Fable only with explicit per-task authorization) | Grok 4.5 | GPT-5.6 Sol |
 
 These are routing heuristics, not cross-provider benchmark rankings. Benchmarks use different harnesses and tool environments.
 
@@ -30,12 +30,14 @@ These are routing heuristics, not cross-provider benchmark rankings. Benchmarks 
 
 ## Effort
 
+Start one level lower than instinct suggests and escalate on measured need — most tasks hold quality one level down, and output tokens are the expensive direction.
+
 - `low`: lookup, formatting, narrow mechanical change.
 - `medium`: normal implementation and review.
 - `high`: multi-file debugging, risky behavior, architecture.
-- `xhigh`: hard ambiguous reasoning or difficult review.
-- `max`: exceptional single-agent work where latency and usage are acceptable.
-- `ultra`: Codex only; use for genuinely independent demanding workstreams with explicit budget headroom. Never use merely to make a routine task faster.
+- `xhigh`: hard ambiguous reasoning or difficult review; the coding-agent sweet spot. Sol at `xhigh` is the review/second-opinion configuration — exceptionally strong at surfacing issues, gaps, and bugs.
+- `max`: exceptional single-agent work where latency and usage are acceptable; compare against `xhigh` before adopting.
+- `ultra`: Codex only, and a different topology rather than a bigger `max` — parallel internal delegation plus synthesis, multiplying token spend by design. Use only for genuinely independent demanding workstreams with explicit user budget acceptance. Never use merely to make a routine task faster.
 
 ## Headroom And Fallback
 

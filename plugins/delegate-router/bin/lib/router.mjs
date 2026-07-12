@@ -24,7 +24,6 @@ function candidatesFor(kind, mode) {
     { provider: 'cursor', model: 'grok', score: 38, reason: 'broad cross-domain tool user with strong recovery behavior' },
     { provider: 'codex', model: 'terra', score: 37, reason: 'cost-balanced substantial coding route' },
     { provider: 'claude', model: 'opus', score: 36, reason: 'complex reasoning with no external-provider handoff' },
-    { provider: 'claude', model: 'fable', score: 34, reason: 'highest-capability Claude route for ambiguous long-horizon work' },
     { provider: 'codex', model: 'luna', score: 30, reason: 'fast bounded Codex route' },
     { provider: 'claude', model: 'haiku', score: 28, reason: 'cheap route for simple bounded work' }
   ];
@@ -36,7 +35,7 @@ function candidatesFor(kind, mode) {
   if (kind === 'hard-engineering') { boost('codex', 'sol', 50); boost('claude', 'opus', 20); }
   if (kind === 'verification') { boost('codex', 'sol', 55); boost('claude', 'opus', 20); }
   if (kind === 'broad-research') { boost('cursor', 'grok', 55); boost('claude', 'opus', 25); boost('codex', 'sol', 10); }
-  if (kind === 'judgment') { boost('claude', 'fable', 60); boost('claude', 'opus', 45); boost('cursor', 'grok', 25); }
+  if (kind === 'judgment') { boost('claude', 'opus', 60); boost('cursor', 'grok', 25); }
   if (kind === 'small-contextual') { boost('claude', 'sonnet', 55); boost('claude', 'haiku', 35); }
   if (mode === 'implement') boost('cursor', 'composer', 15);
   if (mode === 'review' || mode === 'verify') boost('codex', 'sol', 20);
@@ -64,6 +63,17 @@ export function routeTask({
     candidates = matching
       ? [{ ...matching, score: matching.score + 100, reason: 'explicit model override' }]
       : [{ provider: explicitProvider, model, score: 200, reason: 'explicit model override' }];
+    // Fable is deliberately absent from the auto-candidate pool: it is no
+    // longer included in subscription usage (credit-billed since 2026-07-12),
+    // so it must never be auto-selected. An explicit request still routes,
+    // flagged so the skill obtains per-task user authorization first.
+    if (model === 'fable') {
+      candidates = candidates.map((item) => ({
+        ...item,
+        requiresAuthorization: true,
+        reason: `${item.reason}; Fable bills usage credits outside the subscription — obtain explicit per-task user authorization before starting`
+      }));
+    }
   }
 
   const threshold = (value, provider, fallback) => {
