@@ -110,12 +110,21 @@ function mapCodexItem(jobId, phase, params) {
   }
 }
 
+// sandbox: 'off' maps to Codex danger-full-access — the job explicitly needs
+// host tools (git, CLIs, live web). Web search follows the same intent: it is
+// enabled whenever the job has any form of outside access.
+export function codexSandboxMode(job) {
+  if (job.sandbox === 'off') return 'danger-full-access';
+  return readOnly(job) ? 'read-only' : 'workspace-write';
+}
+
 export function codexSpawnArgs(job) {
   return [
     'app-server', '--stdio',
     '-c', 'approval_policy="on-request"',
     '-c', 'approvals_reviewer="auto_review"',
     '-c', `sandbox_workspace_write.network_access=${job.network === true}`,
+    '-c', `tools.web_search=${job.network === true || job.sandbox === 'off'}`,
     '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]'
   ];
 }
@@ -187,7 +196,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.10.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.11.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -197,7 +206,7 @@ async function runCodex(job) {
       cwd: job.cwd,
       approvalPolicy: 'on-request',
       approvalsReviewer: 'auto_review',
-      sandbox: readOnly(job) ? 'read-only' : 'workspace-write',
+      sandbox: codexSandboxMode(job),
       developerInstructions: securityPreamble(job.allowSensitive),
       config: job.effort ? { model_reasoning_effort: job.effort } : {}
     };
@@ -551,7 +560,8 @@ function recordGitState(job, sessionId) {
 async function runCursorAcp(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw new Error('neither agent nor cursor-agent is executable');
-  const rootArgs = readOnly(job) ? ['--sandbox', 'enabled', 'acp'] : ['--auto-review', '--sandbox', 'enabled', 'acp'];
+  const sandboxValue = job.sandbox === 'off' ? 'disabled' : 'enabled';
+  const rootArgs = readOnly(job) ? ['--sandbox', sandboxValue, 'acp'] : ['--auto-review', '--sandbox', sandboxValue, 'acp'];
   const launch = cursorCommand(binary, rootArgs);
   let sessionId = job.providerSessionId;
   let cancelRequested = false;
@@ -583,7 +593,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.10.0' }
+      clientInfo: { name: 'delegate-router', version: '0.11.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -727,7 +737,7 @@ async function runCursorHeadless(job) {
   while (true) {
     let activeChild = null;
     appendJobEvent(job.id, 'turn.started', { transport: 'headless', resume }, { sessionId: resume });
-    const headless = cursorCommand(binary, buildCursorArgs({ mode: job.mode, model, cwd: job.cwd, approval: job.approval, resume }), false);
+    const headless = cursorCommand(binary, buildCursorArgs({ mode: job.mode, model, cwd: job.cwd, approval: job.approval, resume, sandbox: job.sandbox }), false);
     const running = runCursor({
       binary: headless.command,
       args: headless.args,

@@ -83,7 +83,7 @@ export function isReadOnlyMode(mode) {
   return mode === 'consult' || mode === 'plan' || mode === 'review';
 }
 
-export function buildCursorArgs({ mode, model, cwd, approval = 'auto', resume = null }) {
+export function buildCursorArgs({ mode, model, cwd, approval = 'auto', resume = null, sandbox = null }) {
   const readOnly = isReadOnlyMode(mode);
   const outputFormat = readOnly ? 'json' : 'stream-json';
   const args = ['--print', '--output-format', outputFormat];
@@ -94,10 +94,14 @@ export function buildCursorArgs({ mode, model, cwd, approval = 'auto', resume = 
   // prompt; trust is granted explicitly while sandbox/mode flags still bound
   // what the agent may do.
   args.push('--trust');
+  // sandbox 'off' is a deliberate caller decision (host CLIs, git, live web);
+  // it disables sandboxing for read modes too, since those still need the
+  // network the sandbox blocks.
+  if (sandbox === 'off') args.push('--sandbox', 'disabled');
   if (mode === 'consult') args.push('--mode', 'ask');
   else if (mode === 'plan' || mode === 'review') args.push('--mode', 'plan');
   else {
-    args.push('--sandbox', 'enabled');
+    if (sandbox !== 'off') args.push('--sandbox', 'enabled');
     if (approval === 'force') args.push('--force');
     else args.push('--auto-review');
   }

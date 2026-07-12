@@ -102,6 +102,18 @@ ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|
 - `ultra` is a different topology, not a bigger `max`: Codex delegates to parallel internal agents and synthesizes. Use only for genuinely independent, parallelizable workstreams with explicit user budget acceptance — it multiplies token spend by design.
 - Effort compounds with allowance: when a provider is at or above its warning band, drop one effort level or route elsewhere before starting new work.
 
+## Decide Whether The Sandbox Stays On
+
+Jobs run sandboxed by default, and the default is correct for most work. `sandbox=off` on `delegate_start` (or `--sandbox off` for headless Cursor) disables provider sandboxing — Codex `danger-full-access`, Cursor `--sandbox disabled` — so the worker can use git and `gh`, install packages, run host CLIs and Docker, and reach the live web; Codex web search is enabled automatically when the job has network or the sandbox is off.
+
+Judge from the task packet, not from habit:
+
+- Sandbox stays on when the objective is code reading, editing, tests, or anything satisfiable inside the workspace. Prefer `network=true` (Codex write modes) when the only missing capability is network.
+- Turn it off when the objective *requires* host access to succeed: pushing branches or opening PRs, installing or upgrading dependencies, invoking authenticated CLIs (gh, gcloud, docker), or researching live web sources beyond what the sandbox permits.
+- If you cannot tell whether the sandbox would block the task, ask the user before starting instead of guessing in either direction — a sandbox failure mid-job wastes the run, and an unnecessary `sandbox=off` widens the blast radius for no benefit.
+
+An unsandboxed worker has your user's host privileges: state `sandbox=off` in the pre-delegation update, keep the allowed scope tight, never combine it with `approval=force` unless the user explicitly accepts both, and review the resulting diff and transcript with proportionately more care.
+
 ## Supervise Managed Work
 
 After `delegate_start`, retain the job ID and revision. Use:

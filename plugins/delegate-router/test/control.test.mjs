@@ -285,6 +285,22 @@ test('network option is stored, defaults off, and shapes codex spawn args', asyn
   assert.match(securityPreamble(true), /allowed scope/);
 }));
 
+test('sandbox off is validated, stored, and maps to full access across providers', async () => isolated(async (directory) => {
+  const { codexSandboxMode, codexSpawnArgs } = await import('../bin/lib/providers.mjs');
+  const defaulted = createManagedJob({ provider: 'codex', mode: 'review', cwd: directory, prompt: 'task' });
+  assert.equal(inspectJob(defaulted.id).sandbox, null);
+  assert.equal(codexSandboxMode(defaulted), 'read-only');
+  assert.equal(codexSandboxMode({ ...defaulted, mode: 'implement' }), 'workspace-write');
+  assert.ok(codexSpawnArgs(defaulted).includes('tools.web_search=false'));
+  const off = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task', sandbox: 'off' });
+  assert.equal(inspectJob(off.id).sandbox, 'off');
+  assert.equal(codexSandboxMode(off), 'danger-full-access');
+  assert.ok(codexSpawnArgs(off).includes('tools.web_search=true'));
+  const events = readJobEvents(off.id, { limit: 10 });
+  assert.equal(events.find((event) => event.type === 'job.created').data.sandbox, 'off');
+  assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', sandbox: 'yolo' }), /sandbox must be/);
+}));
+
 test('event page cursor parses only the new tail and survives truncation', () => isolated((directory) => {
   const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
   const file = path.join(directory, 'jobs', `${job.id}.events.jsonl`);

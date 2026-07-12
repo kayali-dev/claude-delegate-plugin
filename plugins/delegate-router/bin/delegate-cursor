@@ -46,6 +46,7 @@ function parseArgs(argv) {
     resume: null,
     overrideLimit: false,
     allowSensitive: false,
+    sandbox: null,
     background: false,
     dryRun: false,
     jobId: null
@@ -63,6 +64,7 @@ function parseArgs(argv) {
     else if (value === '--approval') result.approval = argv[++i];
     else if (value === '--threshold') result.threshold = Number(argv[++i]);
     else if (value === '--timeout-seconds') result.timeoutSeconds = Number(argv[++i]);
+    else if (value === '--sandbox') result.sandbox = argv[++i];
     else if (value === '--resume') result.resume = argv[++i];
     else if (value === '--prompt') result.prompt = argv[++i];
     else if (value === '--prompt-file') result.promptFile = argv[++i];
@@ -83,6 +85,7 @@ function usage() {
   --resume <chat-id>
   --prompt-file <path>
   --timeout-seconds <10-86400>
+  --sandbox auto|off        (off disables Cursor sandboxing: host CLIs, git, live web)
   --background
   --dry-run
   --allow-sensitive
@@ -167,12 +170,16 @@ if (options.background && !options.jobId) {
 const ids = availableModelIds(binary);
 let model;
 try { model = resolveCursorModel(options.model, ids); } catch (error) { fail(error.message); }
+if (options.sandbox != null && options.sandbox !== 'auto' && options.sandbox !== 'off') {
+  fail("--sandbox must be 'auto' or 'off'");
+}
 const cursorArgs = buildCursorArgs({
   mode: options.mode,
   model,
   cwd: options.cwd,
   approval: options.approval,
-  resume: options.resume
+  resume: options.resume,
+  sandbox: options.sandbox === 'off' ? 'off' : null
 });
 const prompt = `${securityPreamble(options.allowSensitive)}${options.prompt}`;
 

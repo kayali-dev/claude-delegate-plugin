@@ -16,6 +16,7 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 - Cursor write modes use `--auto-review --trust`. Use `--force` only for an explicit `approval=force` override.
 - New Codex starts are blocked by a `PreToolUse` quota hook at or above the avoid threshold. Users can deliberately override with `DELEGATE_ALLOW_OVER_LIMIT=codex`.
 - Network remains off unless the task needs current external information and the user permits it; the explicit control is `network=true` on `delegate_start` (Codex workspace-write sandbox only).
+- `sandbox=off` disables provider sandboxing entirely (Codex `danger-full-access`, Cursor `--sandbox disabled`) for jobs that require host tools: git push, gh/PR flows, package installs, authenticated CLIs, live web. It is a per-job caller judgment — decide from the task packet, surface to the user when unsure, record the choice in the pre-delegation update, and never pair it with `approval=force` without explicit user acceptance. Codex web search turns on automatically when `network=true` or `sandbox=off`.
 - Consult, plan, and review modes are read-only.
 - Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. `allowSensitive=true` relaxes only that rule; the base security packet (scope control, preserve existing changes) is always sent.
 

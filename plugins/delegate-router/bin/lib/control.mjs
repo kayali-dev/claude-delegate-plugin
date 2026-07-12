@@ -597,6 +597,15 @@ const TIMEOUT_MIN_SECONDS = 60;
 const TIMEOUT_MAX_SECONDS = 86400;
 const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 
+// 'off' disables provider sandboxing for the job (Codex danger-full-access,
+// Cursor --sandbox disabled) so the worker can use git, host CLIs, and live
+// web tools. It is a deliberate, per-job caller decision — never a default.
+export function validatedSandbox(value) {
+  if (value == null || value === 'auto') return null;
+  if (value === 'off') return 'off';
+  throw new Error("sandbox must be 'auto' or 'off'");
+}
+
 function validatedEffort(value) {
   if (value == null) return null;
   if (!EFFORT_LEVELS.has(value)) throw new Error(`effort must be one of ${[...EFFORT_LEVELS].join(', ')}`);
@@ -638,6 +647,7 @@ export function createManagedJob(options) {
     effort: validatedEffort(options.effort || null),
     timeoutSeconds,
     network: options.network === true,
+    sandbox: validatedSandbox(options.sandbox),
     allowSensitive: options.allowSensitive === true,
     status: 'queued',
     phase: 'queued',
@@ -660,7 +670,7 @@ export function createManagedJob(options) {
     baselineHashes: baseline.hashes
   };
   saveJob(job);
-  appendJobEvent(id, 'job.created', { provider, model: job.model, mode: job.mode, transport, isolation: job.isolation });
+  appendJobEvent(id, 'job.created', { provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, ...(job.sandbox === 'off' ? { sandbox: 'off' } : {}) });
   appendJobEvent(id, 'message.user', { text: options.prompt });
   return inspectJob(id);
 }
@@ -863,6 +873,7 @@ export function resumeManagedJob(id, options) {
     isolation: parent.isolation,
     timeoutSeconds: options.timeoutSeconds ?? parent.timeoutSeconds ?? null,
     network: options.network ?? parent.network ?? false,
+    sandbox: options.sandbox ?? parent.sandbox ?? null,
     overrideLimit: options.overrideLimit,
     overrideWriter: options.overrideWriter
   });

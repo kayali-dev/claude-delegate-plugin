@@ -33,6 +33,16 @@ test('read-only mode uses plan mode without write approval flags', () => {
   assert.ok(!args.includes('--force'));
 });
 
+test('sandbox off disables cursor sandboxing in write and read modes', () => {
+  const write = buildCursorArgs({ mode: 'implement', model: 'composer-2.5', cwd: '/tmp/p', sandbox: 'off' });
+  assert.deepEqual(write.filter((value, i) => value === '--sandbox' || write[i - 1] === '--sandbox'), ['--sandbox', 'disabled']);
+  assert.ok(write.includes('--auto-review'));
+  const read = buildCursorArgs({ mode: 'review', model: 'composer-2.5', cwd: '/tmp/p', sandbox: 'off' });
+  assert.deepEqual(read.filter((value, i) => value === '--sandbox' || read[i - 1] === '--sandbox'), ['--sandbox', 'disabled']);
+  const defaulted = buildCursorArgs({ mode: 'implement', model: 'composer-2.5', cwd: '/tmp/p' });
+  assert.deepEqual(defaulted.filter((value, i) => value === '--sandbox' || defaulted[i - 1] === '--sandbox'), ['--sandbox', 'enabled']);
+});
+
 test('runCursor delivers the prompt over stdin and parses the result', async () => {
   const outcome = await runCursor({
     binary: process.execPath,
