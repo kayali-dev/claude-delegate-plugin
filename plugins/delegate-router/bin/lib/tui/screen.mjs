@@ -154,12 +154,10 @@ export class Screen extends EventEmitter {
   start() {
     if (this.started) return;
     this.started = true;
-    this.restored = false;
+    this.restored = true;
     this.installLifecycle();
     try {
-      if (this.input.isTTY && typeof this.input.setRawMode === 'function') this.input.setRawMode(true);
-      if (typeof this.input.resume === 'function') this.input.resume();
-      this.output.write(`${sequences.alternateScreenOn}${mouseReportingOn}${sequences.cursorHide}${sequences.clearScreen}${sequences.home}`);
+      this.resume();
     } catch (error) {
       this.restore();
       this.removeLifecycle();
@@ -231,13 +229,35 @@ export class Screen extends EventEmitter {
     return output;
   }
 
-  restore() {
-    if (this.restored) return;
+  suspend() {
+    if (!this.started || this.restored) return false;
     this.restored = true;
     try {
       if (this.input.isTTY && typeof this.input.setRawMode === 'function') this.input.setRawMode(false);
     } catch {}
+    try { if (typeof this.input.pause === 'function') this.input.pause(); } catch {}
     try { this.output.write(`${sequences.reset}${mouseReportingOff}${sequences.cursorShow}${sequences.alternateScreenOff}`); } catch {}
+    this.previous = null;
+    return true;
+  }
+
+  resume() {
+    if (!this.started || !this.restored) return false;
+    this.restored = false;
+    try {
+      if (this.input.isTTY && typeof this.input.setRawMode === 'function') this.input.setRawMode(true);
+      if (typeof this.input.resume === 'function') this.input.resume();
+      this.output.write(`${sequences.alternateScreenOn}${mouseReportingOn}${sequences.cursorHide}${sequences.clearScreen}${sequences.home}`);
+      this.previous = null;
+      return true;
+    } catch (error) {
+      this.restore();
+      throw error;
+    }
+  }
+
+  restore() {
+    this.suspend();
   }
 
   stop() {

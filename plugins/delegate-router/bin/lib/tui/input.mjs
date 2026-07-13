@@ -12,9 +12,10 @@ const FIXED_SEQUENCES = Object.freeze([
 
 const ESCAPE_PREFIXES = FIXED_SEQUENCES.map(([sequence]) => sequence).filter((sequence) => sequence.startsWith(ESC));
 
-function mouseKey(button) {
-  if ((button & 64) === 0) return null;
-  return (button & 1) === 0 ? 'wheel-up' : 'wheel-down';
+function mouseEvent(button, x, y, suffix) {
+  if ((button & 64) !== 0) return suffix === 'M' ? ((button & 1) === 0 ? 'wheel-up' : 'wheel-down') : null;
+  if (suffix !== 'M' || (button & 32) !== 0) return null;
+  return { type: 'click', button: button & 3, x: Math.max(0, x - 1), y: Math.max(0, y - 1) };
 }
 
 export function decodeInput(value, options = {}) {
@@ -26,8 +27,8 @@ export function decodeInput(value, options = {}) {
     if (rest.startsWith(`${ESC}[<`)) {
       const match = rest.match(/^\u001b\[<(\d+);(\d+);(\d+)([Mm])/);
       if (match) {
-        const key = mouseKey(Number(match[1]));
-        if (key && match[4] === 'M') events.push(key);
+        const event = mouseEvent(Number(match[1]), Number(match[2]), Number(match[3]), match[4]);
+        if (event) events.push(event);
         offset += match[0].length;
         continue;
       }

@@ -10,6 +10,8 @@ import {
   HELP_ITEMS,
   detailViewModel,
   fleetViewModel,
+  groupMembersViewModel,
+  groupsViewModel,
   launcherViewModel,
   providersViewModel,
   statsViewModel
@@ -55,6 +57,7 @@ function syntheticStore() {
     ],
     writerLocks: [{ cwd: '/work/alpha', jobId: active.id, provider: 'codex', mode: 'implement', status: 'running', phase: 'working' }],
     profiles: ['independent-review'],
+    groups: [{ groupId: 'wave-a', total: 1, running: 1, terminal: 0, stalled: 0, allTerminal: false, newestActivityAt: NOW - 5000, memberIds: [active.id] }],
     stats: { since: '7d', jobs: 2, groups: [{ provider: 'codex', model: 'sol', mode: 'implement', jobs: 2, successRate: 0.5, resumedJobs: 1, nudgeCount: 0, meanDurationMs: 1234, meanOutputTokens: 2000, budgetCount: 0, timeoutCount: 1, violationCount: 1 }] }
   };
 }
@@ -131,6 +134,8 @@ test('stats and launcher frames use seven days and show the exact dry-run packet
   const stats = statsViewModel(store, {}, { width: 100, height: 30 });
   assert.match(stats.title.text, /last 7d/);
   assert.equal(stats.panes[0].content.rows[0].success, '50%');
+  const filteredStats = statsViewModel(store, { statsFilter: 'cursor' }, { width: 100, height: 30 });
+  assert.equal(filteredStats.meta.visibleStatsCount, 0);
   const launcher = launcherViewModel(store, {
     launcher: {
       fieldIndex: 5, provider: 'codex', model: 'sol', mode: 'review', effort: 'xhigh', prompt: 'Review it', allowedPaths: ['src'],
@@ -138,13 +143,15 @@ test('stats and launcher frames use seven days and show the exact dry-run packet
     }
   }, { width: 100, height: 30 });
   assert.equal(launcher.meta.previewReady, true);
+  assert.ok(launcher.meta.fields.includes('verifyCommand'));
+  assert.ok(launcher.meta.fields.includes('ingestFiles'));
   assert.match(launcher.panes[1].content.lines.join('\n'), /# Objective\nReview it/);
   assert.match(launcher.panes[1].content.lines.join('\n'), /WARNING: missing section: Return/);
 });
 
 test('help lists mouse, viewport, and edge navigation alongside every action group', () => {
   const keys = HELP_ITEMS.map((item) => item.key).join(' ');
-  for (const key of ['wheel', 'PgUp', 'PgDn', 'Home', 'End', 'g/G', 'j/k', '1…5', 's / r / R', 'n / c / v', 'q']) {
+  for (const key of ['wheel', 'PgUp', 'PgDn', 'Home', 'End', 'G / p', 'j/k', '1…6', 's / r / R', 'c / v / w', 'q']) {
     assert.match(keys, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   const frame = fleetViewModel(syntheticStore(), { now: NOW, help: true }, { width: 80, height: 24 });
@@ -184,6 +191,8 @@ test('every screen paints at realistic resize breakpoints with filters, follow, 
       eventFilter: detailTab === 4 ? 'message' : '', diffSelection: 0
     }, viewport))),
     (viewport) => providersViewModel(store, { providerScroll: 0 }, viewport),
+    (viewport) => groupsViewModel(store, { now: NOW, groupSelection: 0 }, viewport),
+    (viewport) => groupMembersViewModel(store, { now: NOW, groupId: 'wave-a', groupMemberSelection: 0 }, viewport),
     (viewport) => statsViewModel(store, { statsSelection: 0 }, viewport),
     (viewport) => launcherViewModel(store, {
       launcher: {

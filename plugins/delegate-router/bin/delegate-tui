@@ -2,7 +2,9 @@
 import crypto from 'node:crypto';
 import {
   filterDiffPaths,
+  inspectJob,
   launchManagedJob,
+  reviewRoundManagedJob,
   resumeManagedJob,
   revertManagedJob,
   sliceDiff,
@@ -15,20 +17,29 @@ import {
   invalidateWrapCache,
   paintFrame,
   scrollVirtualLog,
+  tableRowIndexAt,
+  tabIndexAtColumn,
+  virtualSearchPosition,
   virtualLogBottomPosition
 } from './lib/tui/components.mjs';
 import { tailAllJobs } from './lib/tui/datasource.mjs';
+import { editTextInEditor } from './lib/tui/editor.mjs';
 import { BufferedInput } from './lib/tui/input.mjs';
+import { NotificationDispatcher } from './lib/tui/notifications.mjs';
+import { LogicalSearchIndex, nextSearchMatch } from './lib/tui/search.mjs';
 import { Screen } from './lib/tui/screen.mjs';
 import { splitGraphemes } from './lib/tui/width.mjs';
 import { createViewModel, nudgeEligible } from './lib/tui/viewmodels.mjs';
+import { routeTask } from './lib/router.mjs';
+import { auditUsageBands } from './lib/stats.mjs';
 
-const USAGE = `Usage: delegate-tui
+const USAGE = `Usage: delegate-tui [--job <id>]
 
 Live ANSI dashboard for Delegate Router's local managed-job store.
 
 Options:
   -h, --help   Show this help without entering the alternate screen
+  --job <id>   Open directly in that managed job's detail
 
 The TUI requires an interactive macOS or Linux terminal. It honors
 DELEGATE_STATE_FILE and the ordinary delegate-router provider configuration.`;
@@ -38,9 +49,22 @@ if (args.includes('--help') || args.includes('-h')) {
   console.log(USAGE);
   process.exit(0);
 }
-if (args.length) {
-  console.error(`delegate-tui: unknown option: ${args[0]}\n${USAGE}`);
+let initialJobId = null;
+if (args[0] === '--job' && args.length === 2) initialJobId = args[1];
+else if (args.length) {
+  console.error(`delegate-tui: ${args[0] === '--job' ? '--job requires exactly one job id' : `unknown option: ${args[0]}`}\n${USAGE}`);
   process.exit(2);
+}
+if (initialJobId) {
+  try {
+    if (!loadJob(initialJobId)) {
+      console.error(`delegate-tui: job not found: ${initialJobId}`);
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error(`delegate-tui: ${normalizeBrokerError(error, { defaultCode: 'INTERNAL' }).message}`);
+    process.exit(1);
+  }
 }
 if (!process.stdout.isTTY) {
   console.error('delegate-tui: stdout is not a TTY; run it from an interactive terminal');
@@ -63,21 +87,27 @@ const CHOICE_FIELDS = new Set(['profile', 'provider', 'mode', 'effort']);
 const screen = new Screen();
 const source = tailAllJobs();
 let store = source.getState();
+const notifier = new NotificationDispatcher();
+notifier.observe(store);
 let quitting = false;
 let inputBatch = false;
 let inputDrawPending = false;
 const ui = {
-  screen: 'fleet', now: Date.now(), selectedIndex: 0, scroll: 0,
+  screen: initialJobId ? 'detail' : 'fleet', jobId: initialJobId, now: Date.now(), selectedIndex: 0, scroll: 0,
   activeOnly: false, filter: '', help: false, input: null, confirm: null,
   status: '', statusKind: 'info', detailTab: 0, detailScroll: 0,
   diffSelection: 0, diffFile: null, diffWindow: null, eventFilter: '', follow: true,
-  providerScroll: 0, statsSelection: 0, statsScroll: 0,
+  chainSelection: 0, search: null, detailReturn: 'fleet',
+  groupSelection: 0, groupScroll: 0, groupId: null, groupMemberSelection: 0, groupMemberScroll: 0,
+  providerScroll: 0, statsSelection: 0, statsScroll: 0, statsFilter: '', notifyEnabled: notifier.enabled,
   launcher: {
     fieldIndex: 0, profile: '<none>', provider: 'codex', model: 'auto',
     mode: 'consult', effort: '<default>', prompt: '', allowedPaths: '',
+    verifyCommand: '', ingestFiles: '', routeAdvice: null,
     preview: null, previewSignature: null, previewScroll: 0
   }
 };
+let routeAdviceTimer = null;
 
 function viewport() {
   return { width: screen.columns, height: screen.rows };
@@ -117,6 +147,7 @@ function quit(code = 0) {
   if (quitting) return;
   quitting = true;
   clearInterval(clock);
+  if (routeAdviceTimer) clearTimeout(routeAdviceTimer);
   source.close();
   bufferedInput.close();
   process.stdin.off('data', onData);
@@ -155,9 +186,156 @@ function beginInput(action, label, value = '', extra = {}) {
   draw();
 }
 
+function searchablePane() {
+  if (ui.screen !== 'detail') return null;
+  const pane = ui.detailTab === 0 ? 'transcript' : ui.detailTab === 4 ? 'events' : ui.detailTab === 1 && ui.diffFile ? 'diff' : null;
+  if (!pane) return null;
+  const content = viewModel().panes?.[0]?.content;
+  return content?.virtual ? { pane, content } : null;
+}
+
+function setSearchQuery(value, options = {}) {
+  if (!ui.search) return;
+  ui.search.query = String(value || '');
+  ui.search.matches = ui.search.index.find(ui.search.query);
+  if (options.preserveCurrent) ui.search.current = Math.min(Math.max(0, ui.search.current || 0), Math.max(0, ui.search.matches.length - 1));
+  else ui.search.current = 0;
+  if (ui.search.matches.length) {
+    const pane = searchablePane();
+    if (pane) {
+      ui.detailScroll = virtualSearchPosition(pane.content, ui.search.matches[ui.search.current], Math.max(1, screen.columns - 2));
+      ui.follow = false;
+    }
+  }
+}
+
+function beginPaneSearch() {
+  const pane = searchablePane();
+  if (!pane) {
+    setStatus('Search is available in Transcript, Events, or an opened Diff file', 'error');
+    draw();
+    return;
+  }
+  const previous = ui.search?.pane === pane.pane ? ui.search.query : '';
+  ui.search = {
+    pane: pane.pane,
+    index: new LogicalSearchIndex(pane.content.entries || [], pane.content.formatEntry),
+    query: '', matches: [], current: 0
+  };
+  setSearchQuery(previous);
+  beginInput('pane-search', `Search ${pane.pane}`, previous, { pane: pane.pane });
+}
+
+function rebuildPaneSearch() {
+  if (!ui.search || ui.screen !== 'detail') return;
+  const pane = searchablePane();
+  if (!pane || pane.pane !== ui.search.pane) {
+    ui.search = null;
+    return;
+  }
+  const query = ui.search.query;
+  const current = ui.search.current;
+  ui.search.index = new LogicalSearchIndex(pane.content.entries || [], pane.content.formatEntry);
+  ui.search.current = current;
+  setSearchQuery(query, { preserveCurrent: true });
+}
+
+function clearSearch() {
+  ui.search = null;
+  if (ui.input?.action === 'pane-search') ui.input = null;
+}
+
+function jumpSearch(direction) {
+  if (!ui.search?.query || !ui.search.matches.length) return false;
+  ui.search.current = nextSearchMatch(ui.search.current, ui.search.matches.length, direction);
+  const pane = searchablePane();
+  if (pane) {
+    ui.detailScroll = virtualSearchPosition(pane.content, ui.search.matches[ui.search.current], Math.max(1, screen.columns - 2));
+    ui.follow = false;
+  }
+  draw();
+  return true;
+}
+
+function handoffText(text) {
+  process.stdin.off('data', onData);
+  try {
+    return editTextInEditor({ screen, text });
+  } catch (error) {
+    return { available: true, accepted: false, text, status: null, signal: null, error };
+  } finally {
+    process.stdin.on('data', onData);
+  }
+}
+
+function editLauncherBody() {
+  const result = handoffText(ui.launcher.prompt);
+  if (!result.available) {
+    setStatus('VISUAL/EDITOR is not set; editing the packet body inline', 'info');
+    const fields = viewModel().meta.fields;
+    ui.launcher.fieldIndex = Math.max(0, fields.indexOf('prompt'));
+    beginInput('launcher-field', 'Packet body', ui.launcher.prompt, { field: 'prompt' });
+    return;
+  }
+  if (!result.accepted) {
+    const reason = result.signal ? `signal ${result.signal}` : `exit ${result.status ?? 'error'}`;
+    setStatus(`Editor failed (${reason}); previous packet body kept`, 'error');
+    draw();
+    return;
+  }
+  ui.launcher.prompt = result.text;
+  invalidatePreview();
+  scheduleRouteAdvice();
+  setStatus('Packet body updated from $EDITOR');
+  draw();
+}
+
+function submitReviewRound(jobId, findings) {
+  if (!String(findings || '').trim()) {
+    setStatus('Review-round findings are required', 'error');
+    draw();
+    return;
+  }
+  runMutation(() => reviewRoundManagedJob(jobId, { prompt: String(findings).trim() }), (child) => `Review round resumed as ${child.id}`);
+}
+
+function beginReviewRound(job) {
+  if (!job || !TERMINAL.has(job.status)) {
+    setStatus('Review round is available only for terminal jobs', 'error');
+    draw();
+    return;
+  }
+  try {
+    const inspected = inspectJob(job.id);
+    if (!inspected.resumable?.ok) {
+      setStatus(`Review round refused: ${inspected.resumable?.reason || 'parent is not resumable'}`, 'error');
+      draw();
+      return;
+    }
+  } catch (error) {
+    const typed = normalizeBrokerError(error, { defaultCode: 'INTERNAL' });
+    setStatus(`[${typed.code}] ${typed.message}`, 'error');
+    draw();
+    return;
+  }
+  const result = handoffText('');
+  if (!result.available) {
+    setStatus('VISUAL/EDITOR is not set; enter review findings inline');
+    beginInput('review-round', 'Review findings', '', { jobId: job.id });
+  } else if (!result.accepted) {
+    const reason = result.signal ? `signal ${result.signal}` : `exit ${result.status ?? 'error'}`;
+    setStatus(`Editor failed (${reason}); enter review findings inline`, 'error');
+    beginInput('review-round', 'Review findings', '', { jobId: job.id });
+  } else {
+    submitReviewRound(job.id, result.text);
+  }
+}
+
 function launchOptions() {
   const launcher = ui.launcher;
   const allowedPaths = String(launcher.allowedPaths || '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  const ingestFiles = String(launcher.ingestFiles || '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  const verifyCommand = String(launcher.verifyCommand || '').trim();
   return {
     provider: launcher.provider,
     model: launcher.model || 'auto',
@@ -166,8 +344,34 @@ function launchOptions() {
     ...(launcher.effort && launcher.effort !== '<default>' ? { effort: launcher.effort } : {}),
     prompt: launcher.prompt,
     cwd: process.cwd(),
-    ...(allowedPaths.length ? { allowedPaths } : {})
+    ...(allowedPaths.length ? { allowedPaths } : {}),
+    ...(verifyCommand ? { verify: { command: verifyCommand } } : {}),
+    ...(ingestFiles.length ? { ingestFiles } : {})
   };
+}
+
+function updateRouteAdvice() {
+  const effort = ui.launcher.effort === '<default>' ? 'medium' : ui.launcher.effort;
+  const usage = Object.fromEntries((store.providers || []).map((provider) => [provider.name, provider.allowance || { known: false }]));
+  const availability = { claude: true, codex: true, cursor: true, ...Object.fromEntries((store.providers || []).map((provider) => [provider.name, provider.enabled !== false])) };
+  try {
+    ui.launcher.routeAdvice = routeTask({
+      task: ui.launcher.prompt || '', mode: ui.launcher.mode, model: ui.launcher.model || 'auto', effort,
+      costBands: auditUsageBands(store.audit || []), usage, availability
+    });
+  } catch {
+    ui.launcher.routeAdvice = null;
+  }
+}
+
+function scheduleRouteAdvice() {
+  if (routeAdviceTimer) clearTimeout(routeAdviceTimer);
+  routeAdviceTimer = setTimeout(() => {
+    routeAdviceTimer = null;
+    updateRouteAdvice();
+    draw();
+  }, 80);
+  routeAdviceTimer.unref?.();
 }
 
 function launcherSignature() {
@@ -211,15 +415,24 @@ function commitInput() {
   const value = input.value;
   if (input.action === 'fleet-filter') {
     ui.filter = value;
-    ui.selectedIndex = 0;
+    if (ui.screen === 'group-members') ui.groupMemberSelection = 0;
+    else ui.selectedIndex = 0;
     clearStatus();
   } else if (input.action === 'event-filter') {
     ui.eventFilter = value;
     ui.detailScroll = 0;
     clearStatus();
+  } else if (input.action === 'stats-filter') {
+    ui.statsFilter = value;
+    ui.statsSelection = 0;
+    clearStatus();
+  } else if (input.action === 'pane-search') {
+    setSearchQuery(value, { preserveCurrent: true });
+    clearStatus();
   } else if (input.action === 'launcher-field') {
     ui.launcher[input.field] = value;
     invalidatePreview();
+    scheduleRouteAdvice();
     clearStatus();
   } else if (input.action === 'steer') {
     if (!value.trim()) setStatus('Steering text is required', 'error');
@@ -230,6 +443,8 @@ function commitInput() {
   } else if (input.action === 'resume') {
     if (!value.trim()) setStatus('Resume text is required', 'error');
     else runMutation(() => resumeManagedJob(input.jobId, { prompt: value.trim() }), (job) => `Resumed as ${job.id}`);
+  } else if (input.action === 'review-round') {
+    submitReviewRound(input.jobId, value);
   }
   draw();
 }
@@ -259,6 +474,7 @@ function editValue(key) {
   if (!target) return false;
   if (key === 'escape') {
     if (ui.confirm) ui.confirm = null;
+    else if (ui.input?.action === 'pane-search') clearSearch();
     else ui.input = null;
     draw();
     return true;
@@ -272,17 +488,23 @@ function editValue(key) {
     const graphemes = splitGraphemes(target.value || '');
     graphemes.pop();
     target.value = graphemes.join('');
+    if (target.action === 'pane-search') setSearchQuery(target.value);
+    if (target.action === 'stats-filter') { ui.statsFilter = target.value; ui.statsSelection = 0; }
     draw();
     return true;
   }
   if (key === 'ctrl-u') {
     target.value = '';
+    if (target.action === 'pane-search') setSearchQuery('');
+    if (target.action === 'stats-filter') { ui.statsFilter = ''; ui.statsSelection = 0; }
     draw();
     return true;
   }
   if (['up', 'down', 'left', 'right', 'tab', 'shift-tab'].includes(key)) return true;
   if (key.length && !/[\u0000-\u001f\u007f]/.test(key)) {
     target.value += key;
+    if (target.action === 'pane-search') setSearchQuery(target.value);
+    if (target.action === 'stats-filter') { ui.statsFilter = target.value; ui.statsSelection = 0; }
     draw();
     return true;
   }
@@ -309,6 +531,7 @@ function cycleLauncher(direction) {
   ui.launcher[field] = choices[(current + direction + choices.length) % choices.length];
   if (field === 'provider' && !ui.launcher.model) ui.launcher.model = 'auto';
   invalidatePreview();
+  scheduleRouteAdvice();
   draw();
 }
 
@@ -316,7 +539,28 @@ function editLauncherField() {
   const fields = viewModel().meta.fields;
   const field = fields[ui.launcher.fieldIndex];
   if (CHOICE_FIELDS.has(field)) cycleLauncher(1);
-  else beginInput('launcher-field', field === 'allowedPaths' ? 'Allowed paths (comma-separated)' : field[0].toUpperCase() + field.slice(1), ui.launcher[field], { field });
+  else {
+    const labels = { allowedPaths: 'Allowed paths (comma-separated)', ingestFiles: 'Ingest files (comma-separated absolute paths)', verifyCommand: 'Verify command', prompt: 'Packet body' };
+    beginInput('launcher-field', labels[field] || field[0].toUpperCase() + field.slice(1), ui.launcher[field], { field });
+  }
+}
+
+function openJobDetail(job, returnScreen = ui.screen) {
+  if (!job) return;
+  ui.screen = 'detail';
+  ui.jobId = job.id;
+  ui.detailReturn = returnScreen === 'group-members' ? 'group-members' : 'fleet';
+  ui.detailTab = 0;
+  ui.detailScroll = 0;
+  ui.chainSelection = 0;
+  ui.diffSelection = 0;
+  ui.diffFile = null;
+  ui.diffWindow = null;
+  ui.follow = true;
+  clearSearch();
+  clearStatus();
+  draw();
+  void source.selectJob(job.id);
 }
 
 function openDiffFile() {
@@ -344,6 +588,7 @@ function pageDiff(direction) {
   if (offset == null) return;
   ui.diffWindow = sliceDiff(diff, { offset, maxChars: DIFF_WINDOW });
   ui.detailScroll = 0;
+  clearSearch();
   draw();
 }
 
@@ -401,6 +646,7 @@ function detailAction(key) {
     else runMutation(() => resumeManagedJob(job.id, { prompt: NUDGE_PROMPT }), (child) => `Nudge resumed as ${child.id}`);
   } else if (key === 'c') beginCancel(job);
   else if (key === 'v') beginRevert(job);
+  else if (key === 'w') beginReviewRound(job);
   draw();
 }
 
@@ -443,6 +689,9 @@ function move(direction) {
     if (ui.detailTab === 1 && !ui.diffFile) {
       const count = viewModel().meta.diffFiles.length;
       ui.diffSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.diffSelection + direction));
+    } else if (ui.detailTab === 5) {
+      const count = viewModel().meta.chainJobIds.length;
+      ui.chainSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.chainSelection + direction));
     } else {
       const model = viewModel();
       const { content, height, width } = detailViewport(model);
@@ -454,9 +703,15 @@ function move(direction) {
         ui.detailScroll = Math.max(0, Math.min(maxScroll, Number(ui.detailScroll || 0) + direction));
       }
     }
+  } else if (ui.screen === 'groups') {
+    const count = store.groups?.length || 0;
+    ui.groupSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.groupSelection + direction));
+  } else if (ui.screen === 'group-members') {
+    const count = viewModel().meta.visibleJobIds.length;
+    ui.groupMemberSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.groupMemberSelection + direction));
   } else if (ui.screen === 'providers') ui.providerScroll = Math.max(0, Math.min(providerScrollMax(), ui.providerScroll + direction));
   else if (ui.screen === 'stats') {
-    const count = store.stats?.groups?.length || 0;
+    const count = viewModel().meta.visibleStatsCount || 0;
     ui.statsSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.statsSelection + direction));
   } else if (ui.screen === 'launcher') {
     const count = viewModel().meta.fields.length;
@@ -476,6 +731,8 @@ function moveEdge(end) {
   } else if (ui.screen === 'detail') {
     if (ui.detailTab === 1 && !ui.diffFile) {
       ui.diffSelection = end ? Math.max(0, model.meta.diffFiles.length - 1) : 0;
+    } else if (ui.detailTab === 5) {
+      ui.chainSelection = end ? Math.max(0, model.meta.chainJobIds.length - 1) : 0;
     } else {
       const { content, height, width } = detailViewport(model);
       if (content?.virtual) {
@@ -486,10 +743,14 @@ function moveEdge(end) {
         ui.detailScroll = end ? maxScroll : 0;
       }
     }
+  } else if (ui.screen === 'groups') {
+    ui.groupSelection = end ? Math.max(0, (store.groups?.length || 0) - 1) : 0;
+  } else if (ui.screen === 'group-members') {
+    ui.groupMemberSelection = end ? Math.max(0, model.meta.visibleJobIds.length - 1) : 0;
   } else if (ui.screen === 'providers') {
     ui.providerScroll = end ? providerScrollMax() : 0;
   } else if (ui.screen === 'stats') {
-    ui.statsSelection = end ? Math.max(0, (store.stats?.groups?.length || 0) - 1) : 0;
+    ui.statsSelection = end ? Math.max(0, (model.meta.visibleStatsCount || 0) - 1) : 0;
   } else if (ui.screen === 'launcher') {
     ui.launcher.fieldIndex = end ? Math.max(0, model.meta.fields.length - 1) : 0;
   }
@@ -498,15 +759,55 @@ function moveEdge(end) {
 
 function goBack() {
   if (ui.help) ui.help = false;
+  else if (ui.search) clearSearch();
   else if (ui.screen === 'detail' && ui.diffFile) {
     ui.diffFile = null;
     ui.diffWindow = null;
     ui.detailScroll = 0;
   } else if (ui.screen !== 'fleet') {
-    if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = 'fleet';
+    if (ui.screen === 'detail') {
+      void source.selectJob(null);
+      ui.screen = ui.detailReturn || 'fleet';
+    } else if (ui.screen === 'group-members') ui.screen = 'groups';
+    else ui.screen = 'fleet';
   }
   clearStatus();
+  draw();
+}
+
+function switchDetailTab(tab) {
+  const model = viewModel();
+  const count = model.meta.tabs?.length || 5;
+  const next = Math.max(0, Math.min(count - 1, tab));
+  if (next === ui.detailTab) return;
+  ui.detailTab = next;
+  ui.detailScroll = 0;
+  ui.diffFile = null;
+  ui.diffWindow = null;
+  ui.chainSelection = 0;
+  clearSearch();
+  draw();
+}
+
+function handleClick(event) {
+  if (event.button !== 0) return;
+  const model = viewModel();
+  if (ui.screen === 'detail' && event.y === model.tabs?.rect?.y) {
+    const tab = tabIndexAtColumn(model.tabs.items, event.x, model.tabs.rect);
+    if (tab != null) switchDetailTab(tab);
+    return;
+  }
+  const pane = model.panes?.find((entry) => event.x >= entry.rect.x && event.x < entry.rect.x + entry.rect.width
+    && event.y >= entry.rect.y && event.y < entry.rect.y + entry.rect.height);
+  const row = tableRowIndexAt(pane, event.x, event.y);
+  if (row == null) return;
+  if (ui.screen === 'fleet') ui.selectedIndex = row;
+  else if (ui.screen === 'groups') ui.groupSelection = row;
+  else if (ui.screen === 'group-members') ui.groupMemberSelection = row;
+  else if (ui.screen === 'stats') ui.statsSelection = row;
+  else if (ui.screen === 'launcher') ui.launcher.fieldIndex = row;
+  else if (ui.screen === 'detail' && ui.detailTab === 1 && !ui.diffFile) ui.diffSelection = row;
+  else if (ui.screen === 'detail' && ui.detailTab === 5) ui.chainSelection = row;
   draw();
 }
 
@@ -520,14 +821,35 @@ function handleKey(key) {
     return;
   }
   if (key && typeof key === 'object' && key.type === 'scroll') return move(key.delta);
+  if (key && typeof key === 'object' && key.type === 'click') return handleClick(key);
   if (key === '?') { ui.help = true; draw(); return; }
   if (key === 'escape') return goBack();
+  if ((key === 'n' || key === 'N') && ui.search?.query) {
+    if (jumpSearch(key === 'n' ? 1 : -1)) return;
+  }
+  if (key === 'b') {
+    const enabled = notifier.toggle();
+    ui.notifyEnabled = notifier.enabled;
+    setStatus(String(process.env.DELEGATE_TUI_NOTIFY ?? '1') === '0'
+      ? 'Notifications are disabled by DELEGATE_TUI_NOTIFY=0'
+      : `Notifications ${enabled ? 'enabled' : 'disabled'} for this session`);
+    draw();
+    return;
+  }
   if (key === 'up' || key === 'k') return move(-1);
   if (key === 'down' || key === 'j') return move(1);
   if (key === 'page-up') return page(-1);
   if (key === 'page-down') return page(1);
   if (key === 'home' || key === 'g') return moveEdge(false);
-  if (key === 'end' || key === 'G') return moveEdge(true);
+  if (key === 'end') return moveEdge(true);
+  if (key === 'G') {
+    if (ui.screen === 'detail') void source.selectJob(null);
+    ui.screen = ui.screen === 'groups' || ui.screen === 'group-members' ? 'fleet' : 'groups';
+    ui.groupSelection = 0;
+    clearStatus();
+    draw();
+    return;
+  }
   if (key === 'p') {
     if (ui.screen === 'detail') void source.selectJob(null);
     ui.screen = ui.screen === 'providers' ? 'fleet' : 'providers'; clearStatus(); draw(); return;
@@ -540,7 +862,30 @@ function handleKey(key) {
     if (ui.screen === 'detail') void source.selectJob(null);
     const enabled = choiceValues('provider');
     if (!enabled.includes(ui.launcher.provider)) ui.launcher.provider = enabled[0];
-    ui.screen = 'launcher'; clearStatus(); draw(); return;
+    ui.screen = 'launcher'; clearStatus(); updateRouteAdvice(); draw(); return;
+  }
+  if (ui.screen === 'groups') {
+    if (key === 'enter') {
+      const id = viewModel().meta.selectedGroupId;
+      if (id) {
+        ui.groupId = id;
+        ui.groupMemberSelection = 0;
+        ui.groupMemberScroll = 0;
+        ui.screen = 'group-members';
+        clearStatus();
+        draw();
+      }
+    }
+    return;
+  }
+  if (ui.screen === 'group-members') {
+    if (key === '/') { beginInput('fleet-filter', 'Filter id/model/cwd', ui.filter); return; }
+    if (key === 'enter') openJobDetail(selectedJob(), 'group-members');
+    return;
+  }
+  if (ui.screen === 'stats') {
+    if (key === '/') { beginInput('stats-filter', 'Filter loaded audit rows', ui.statsFilter); return; }
+    return;
   }
   if (ui.screen === 'fleet') {
     if (key === 'a') { ui.activeOnly = !ui.activeOnly; ui.selectedIndex = 0; draw(); return; }
@@ -548,9 +893,7 @@ function handleKey(key) {
     if (key === 'enter') {
       const job = selectedJob();
       if (job) {
-        ui.screen = 'detail'; ui.jobId = job.id; ui.detailTab = 0; ui.detailScroll = 0;
-        ui.diffSelection = 0; ui.diffFile = null; ui.diffWindow = null; ui.follow = true; clearStatus(); draw();
-        void source.selectJob(job.id);
+        openJobDetail(job, 'fleet');
       }
     }
     return;
@@ -561,15 +904,17 @@ function handleKey(key) {
     else if (key === 'right') cycleLauncher(1);
     else if (key === 'd') dryRunLaunch();
     else if (key === 'y') launchPreviewed();
+    else if (key === 'e') editLauncherBody();
     return;
   }
   if (ui.screen !== 'detail') return;
-  if (/^[1-5]$/.test(key)) {
-    ui.detailTab = Number(key) - 1; ui.detailScroll = 0; ui.diffFile = null; ui.diffWindow = null; draw(); return;
+  if (/^[1-6]$/.test(key)) {
+    switchDetailTab(Number(key) - 1); return;
   }
   if (key === '[' || key === ']') {
-    ui.detailTab = (ui.detailTab + (key === ']' ? 1 : -1) + 5) % 5;
-    ui.detailScroll = 0; ui.diffFile = null; ui.diffWindow = null; draw(); return;
+    const count = viewModel().meta.tabs?.length || 5;
+    switchDetailTab((ui.detailTab + (key === ']' ? 1 : -1) + count) % count);
+    return;
   }
   if (key === 'f' && [0, 4].includes(ui.detailTab)) {
     if (ui.follow) {
@@ -583,11 +928,17 @@ function handleKey(key) {
     draw();
     return;
   }
-  if (key === '/' && ui.detailTab === 4) { beginInput('event-filter', 'Event type filter', ui.eventFilter); return; }
+  if (key === '/' && [0, 1, 4].includes(ui.detailTab)) { beginPaneSearch(); return; }
   if (key === 'enter' && ui.detailTab === 1 && !ui.diffFile) { openDiffFile(); return; }
+  if (key === 'enter' && ui.detailTab === 5) {
+    const id = viewModel().meta.chainJobIds?.[ui.chainSelection];
+    const job = store.jobs.find((entry) => entry.id === id);
+    if (job) openJobDetail(job, ui.detailReturn);
+    return;
+  }
   if (key === 'left' && ui.detailTab === 1) { pageDiff(-1); return; }
   if (key === 'right' && ui.detailTab === 1) { pageDiff(1); return; }
-  if (['s', 'r', 'R', 'n', 'c', 'v'].includes(key)) detailAction(key);
+  if (['s', 'r', 'R', 'n', 'c', 'v', 'w'].includes(key)) detailAction(key);
 }
 
 function onData(buffer) {
@@ -607,7 +958,13 @@ const bufferedInput = new BufferedInput({
   }
 });
 
-source.on('change', (next) => { store = next; draw(); });
+source.on('change', (next) => {
+  store = next;
+  notifier.observe(next);
+  rebuildPaneSearch();
+  if (ui.screen === 'launcher') scheduleRouteAdvice();
+  draw();
+});
 source.on('warning', (error) => { setStatus(`Store warning: ${error.message}`, 'error'); draw(); });
 screen.on('resize', () => { invalidateWrapCache(); draw(); });
 process.stdin.on('data', onData);
@@ -616,3 +973,4 @@ clock.unref?.();
 
 screen.start();
 draw();
+if (initialJobId) void source.selectJob(initialJobId);

@@ -2,6 +2,15 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.20.0 — 2026-07-13
+
+- Added group barrier/member screens and a conditional sixth Chain detail tab with round outcomes, changed-file counts, verification exits, result markers, and direct round jumps.
+- Added incremental, palette-highlighted search for Transcript, Events, and opened Diff panes with lazy wrap-cache hit mapping, plus loaded-audit-row filtering in Stats.
+- Matured the launcher with private `$VISUAL`/`$EDITOR` packet-body handoff, verify and ingest-file fields, and a debounced advisory route pane. Terminal detail now starts diff-aware review rounds through the shared broker assembly.
+- Added privacy-safe, non-blocking terminal/stall/scope/budget desktop notifications with per-job debounce, an in-session toggle, and `DELEGATE_TUI_NOTIFY=0` suppression.
+- Added click-to-select rows and click-to-switch detail tabs, `delegate-tui --job <id>`, and the `DELEGATE_TUI_THEME=light` palette variant.
+- Runtime/plugin versions intentionally remain unchanged until owner interactive validation and release.
+
 ## 0.19.0 — 2026-07-13
 
 First release of `delegate-tui` — a zero-dependency hand-rolled ANSI dashboard over the local job store (fleet board, five-tab job detail with live transcript follow, providers/stats panels, safe controls, profile-aware launcher with mandatory dry-run). Implemented by delegated Codex Sol@xhigh with three owner-tested fix rounds: semantic muted palette + NO_COLOR, fast paint (8ms real-store startup) and instant teardown, transcript history hydration, stale-record reconciliation in the TUI and in pruneJobs, virtualized scrolling with wrap caching and input coalescing (1.3ms mean scroll frame on a 26k-event journal), SGR mouse-wheel support with mouse-off guaranteed on every exit path.

@@ -4,19 +4,19 @@ import { uiPalette as palette } from './palette.mjs';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
 
-export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events']);
+export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
 
 export const HELP_ITEMS = Object.freeze([
   { key: '↑/↓, j/k, wheel', description: 'Move one line; mouse wheel moves three lines' },
   { key: 'PgUp/PgDn', description: 'Move the focused pane by one viewport' },
-  { key: 'Home/End, g/G', description: 'Jump to the start or end of the focused pane' },
+  { key: 'Home/End, g', description: 'Jump to the start or end of the focused pane' },
   { key: 'Enter / Esc', description: 'Open or edit / go back or close an overlay' },
-  { key: 'a / /', description: 'Toggle active jobs / filter fleet or Events' },
-  { key: 'p / t / N', description: 'Providers / seven-day stats / launcher' },
-  { key: '[/], 1…5', description: 'Cycle detail tabs / open a specific tab' },
+  { key: 'a / /', description: 'Toggle active jobs / filter or search the focused pane' },
+  { key: 'G / p / t / N', description: 'Groups / providers / seven-day stats / launcher' },
+  { key: '[/], 1…6', description: 'Cycle detail tabs / open a specific tab' },
   { key: 'f', description: 'Toggle follow mode in Transcript or Events' },
   { key: 's / r / R', description: 'Steer / resume / release a paused start' },
-  { key: 'n / c / v', description: 'Nudge / confirmed cancel / previewed revert' },
+  { key: 'n/N / c / v / w', description: 'Search next/previous, nudge / cancel / revert / review round' },
   { key: '←/→', description: 'Cycle launcher choices or page a file diff' },
   { key: 'd / y', description: 'Build dry-run preview / launch that exact packet' },
   { key: '? / q / Ctrl-C', description: 'Toggle help / quit immediately' }
@@ -152,6 +152,8 @@ function providerBand(provider) {
 }
 
 function commonOverlay(frame, ui) {
+  const notify = ui.notifyEnabled === false ? 'notify:off' : 'notify:on';
+  if (frame.status) frame.status.right = `${notify}${frame.status.right ? ` · ${frame.status.right}` : ''}`;
   if (ui.help) frame.overlay = { kind: 'help', title: 'delegate-tui keys', items: HELP_ITEMS };
   else if (ui.confirm) frame.overlay = { kind: 'confirm', ...ui.confirm };
   else if (ui.input) frame.overlay = { kind: 'input', ...ui.input };
@@ -171,7 +173,8 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
   const now = nowOf(ui);
   const query = String(ui.filter || '').toLowerCase();
   const entries = (store.jobs || []).map((raw) => ({ raw, job: effectiveJobRecord(raw, now) }))
-    .filter(({ job }) => (!ui.activeOnly || active(job))
+    .filter(({ job }) => (!ui.groupId || job.groupId === ui.groupId)
+      && (!ui.activeOnly || active(job))
       && (!query || [job.id, job.resolvedModel || job.model, job.cwd].some((value) => String(value || '').toLowerCase().includes(query))))
     .sort((left, right) => Number(active(right.job)) - Number(active(left.job))
       || Number(right.job.lastActivityAt || right.job.updatedAt * 1000 || 0) - Number(left.job.lastActivityAt || left.job.updatedAt * 1000 || 0));
@@ -210,8 +213,8 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
   const locks = store.writerLocks?.length ? `writers:${store.writerLocks.length}` : 'writers:0';
   const statusOverride = errorStatus(ui);
   const frame = {
-    width, height, screen: 'fleet',
-    title: { text: `Delegate fleet${ui.activeOnly ? ' · active' : ''}${ui.filter ? ` · /${ui.filter}` : ''}`, right: `${entries.length} jobs` },
+    width, height, screen: ui.groupId ? 'group-members' : 'fleet',
+    title: { text: `${ui.groupId ? `Group ${ui.groupId}` : 'Delegate fleet'}${ui.activeOnly ? ' · active' : ''}${ui.filter ? ` · /${ui.filter}` : ''}`, right: `${entries.length} jobs` },
     panes: [{
       rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) },
       title: store.error ? `Store warning: ${store.error}` : 'Managed jobs',
@@ -220,7 +223,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     status: statusOverride || {
       style: palette.bar,
       segments: [...allowance, { text: ` ${locks} `, style: store.writerLocks?.length ? palette.badgeWarn : palette.dim }],
-      right: 'Enter detail  a active  / filter  p providers  t stats  N new  ? help  q quit'
+      right: ui.groupId ? 'Enter detail  Esc groups  / filter' : 'Enter detail  G groups  a active  / filter  p providers  t stats  N new'
     },
     meta: {
       visibleJobIds: entries.map(({ job }) => job.id),
@@ -230,6 +233,47 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     }
   };
   return commonOverlay(frame, ui);
+}
+
+export function groupsViewModel(store, ui = {}, viewport = {}) {
+  const { width, height } = viewportOf(viewport);
+  const now = nowOf(ui);
+  const groups = store.groups || [];
+  const selected = Math.max(0, Math.min(groups.length - 1, Number(ui.groupSelection || 0)));
+  const columns = [
+    { key: 'groupId', title: 'Group', width: Math.max(16, width - 63), selectedStyle: palette.selectedId },
+    { key: 'total', title: 'Members', width: 9, align: 'right' },
+    { key: 'running', title: 'Running', width: 9, align: 'right' },
+    { key: 'terminal', title: 'Terminal', width: 10, align: 'right' },
+    { key: 'stalled', title: 'Stalled', width: 9, align: 'right' },
+    { key: 'barrier', title: 'Barrier', width: 9 },
+    { key: 'activity', title: 'Newest', width: 9, align: 'right' }
+  ];
+  const rows = groups.map((group) => ({
+    ...group,
+    barrier: { text: group.allTerminal ? 'open' : 'waiting', style: group.allTerminal ? palette.completed : palette.paused },
+    activity: duration(group.newestActivityAt == null ? null : now - group.newestActivityAt)
+  }));
+  const frame = {
+    width, height, screen: 'groups',
+    title: { text: 'Delegate groups · barrier progress', right: `${groups.length} groups` },
+    panes: [{
+      rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) }, title: 'Group members and all-terminal barrier',
+      content: { kind: 'table', columns, rows, selected, scroll: ui.groupScroll || 0 }
+    }],
+    status: errorStatus(ui) || { text: 'Esc fleet  ↑/↓ select  Enter members  G close  ? help  q quit' },
+    meta: { groupIds: groups.map((group) => group.groupId), selectedGroupId: groups[selected]?.groupId || null, selected }
+  };
+  return commonOverlay(frame, ui);
+}
+
+export function groupMembersViewModel(store, ui = {}, viewport = {}) {
+  return fleetViewModel(store, {
+    ...ui,
+    groupId: ui.groupId,
+    selectedIndex: ui.groupMemberSelection || 0,
+    scroll: ui.groupMemberScroll || 0
+  }, viewport);
 }
 
 function eventText(event) {
@@ -338,6 +382,87 @@ function usageLines(job, store) {
   ];
 }
 
+const chainIndexCache = new WeakMap();
+
+function chainIndex(store) {
+  const jobs = store.jobs || [];
+  if (chainIndexCache.has(jobs)) return chainIndexCache.get(jobs);
+  const byId = new Map(jobs.map((entry) => [entry.id, entry]));
+  const groups = new Map();
+  const memberRoot = new Map();
+  for (const job of jobs) {
+    let root = job;
+    const seen = new Set([job.id]);
+    while (root.parentJobId && !seen.has(root.parentJobId)) {
+      seen.add(root.parentJobId);
+      const parent = byId.get(root.parentJobId);
+      if (!parent) break;
+      root = parent;
+    }
+    const rootId = job.rootJobId || root.id;
+    memberRoot.set(job.id, rootId);
+    if (!groups.has(rootId)) groups.set(rootId, []);
+    groups.get(rootId).push(job);
+  }
+  for (const chain of groups.values()) chain.sort((left, right) => Number(left.createdAt || 0) - Number(right.createdAt || 0) || String(left.id).localeCompare(String(right.id)));
+  const index = { groups, memberRoot, ids: new Map([...groups].map(([root, chain]) => [root, chain.map((entry) => entry.id)])) };
+  chainIndexCache.set(jobs, index);
+  return index;
+}
+
+function detailChain(store, job) {
+  const index = chainIndex(store);
+  const root = index.memberRoot.get(job.id) || job.rootJobId || job.id;
+  return { jobs: index.groups.get(root) || [job], ids: index.ids.get(root) || [job.id] };
+}
+
+function detailTabs(store, job) {
+  return job.rootJobId || detailChain(store, job).jobs.length > 1 ? DETAIL_TABS : DETAIL_TABS.slice(0, 5);
+}
+
+function searchSuffix(ui, pane) {
+  const search = ui.search;
+  if (!search || search.pane !== pane || !search.query) return '';
+  const total = search.matches?.length || 0;
+  return ` · ${total ? Math.min(total, Number(search.current || 0) + 1) : 0}/${total}`;
+}
+
+function searchQuery(ui, pane) {
+  return ui.search?.pane === pane ? String(ui.search.query || '') : '';
+}
+
+function chainContent(store, job, ui, width) {
+  const chain = detailChain(store, job);
+  const columns = [
+    { key: 'id', title: 'Round', width: 11, selectedStyle: palette.selectedId },
+    { key: 'mode', title: 'Mode', width: 10 },
+    { key: 'files', title: 'Files', width: 7, align: 'right' },
+    { key: 'verify', title: 'Verify', width: 8, align: 'right' },
+    { key: 'marker', title: 'Result marker', width: 20 },
+    { key: 'outcome', title: 'Outcome', width: Math.max(12, width - 58) }
+  ];
+  const rowAt = (index) => {
+    const round = chain.jobs[index];
+    if (!round) return null;
+    const markers = [];
+    if (round.objectiveMet != null) markers.push(`objective:${String(round.objectiveMet)}`);
+    if (round.resultSuspect) markers.push(`suspect:${String(round.resultSuspect)}`);
+    const outcome = String(round.resultText || round.result?.text || round.result || round.error || '—').split(/\r?\n/, 1)[0];
+    return {
+      id: shortId(round), mode: round.mode || '—', files: Number(round.changedFiles?.count ?? round.changedFiles?.files?.length ?? round.changedFiles?.entries?.length ?? 0),
+      verify: round.verification?.exitCode == null ? '—' : String(round.verification.exitCode),
+      marker: { text: markers.join(', ') || '—', style: round.resultSuspect || round.objectiveMet === false ? palette.badgeWarn : palette.dim },
+      outcome
+    };
+  };
+  return {
+    title: `Chain · ${chain.jobs.length} rounds`,
+    content: { kind: 'table', columns, rows: [], rowCount: chain.jobs.length, rowAt, selected: ui.chainSelection || 0, scroll: ui.detailScroll || 0 },
+    scrollItemCount: chain.jobs.length,
+    chainJobIds: chain.ids
+  };
+}
+
 function detailContent(job, store, ui, tab) {
   const events = store.eventsByJob?.[job.id] || [];
   const hydration = store.hydrationByJob?.[job.id];
@@ -351,10 +476,10 @@ function detailContent(job, store, ui, tab) {
     const transcriptTypes = /^(?:message\.|plan\.updated|tool\.|correction\.|error$)/;
     const entries = cachedEventView(events, 'transcript', (event) => transcriptTypes.test(event.type));
     return {
-      title: `Transcript · follow ${ui.follow === false ? 'off' : 'on'}${historyState}`,
+      title: `Transcript · follow ${ui.follow === false ? 'off' : 'on'}${historyState}${searchSuffix(ui, 'transcript')}`,
       content: entries.length ? {
         kind: 'log', virtual: true, entries, formatEntry: transcriptEntry, styleEntry: lineStyleForEvent,
-        follow: ui.follow !== false, scroll: ui.detailScroll || 0
+        follow: ui.follow !== false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'transcript')
       } : { kind: 'log', lines: emptyHistory, follow: true },
       scrollItemCount: entries.length
     };
@@ -362,10 +487,11 @@ function detailContent(job, store, ui, tab) {
   if (tab === 1) {
     if (ui.diffFile) {
       const window = ui.diffWindow || { diff: '', offset: 0, totalChars: 0, nextOffset: null };
+      const lines = String(window.diff || '').split('\n');
       return {
-        title: `Diff · ${ui.diffFile} · ${window.offset}-${window.offset + String(window.diff || '').length}/${window.totalChars}`,
-        content: { kind: 'log', lines: String(window.diff || '').split('\n'), follow: false, scroll: ui.detailScroll || 0 },
-        scrollItemCount: String(window.diff || '').split('\n').length
+        title: `Diff · ${ui.diffFile} · ${window.offset}-${window.offset + String(window.diff || '').length}/${window.totalChars}${searchSuffix(ui, 'diff')}`,
+        content: { kind: 'log', virtual: true, entries: lines, formatEntry: String, follow: false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'diff') },
+        scrollItemCount: lines.length
       };
     }
     const stat = store.diffStatsByJob?.[job.id] || { files: [], totalAdditions: 0, totalDeletions: 0 };
@@ -405,13 +531,14 @@ function detailContent(job, store, ui, tab) {
     const lines = usageLines(job, store);
     return { title: 'Usage · current and continuation chain', content: { kind: 'log', lines, follow: false, scroll: ui.detailScroll || 0 }, scrollItemCount: lines.length };
   }
+  if (tab === 5) return chainContent(store, job, ui, Math.max(1, Number(ui.viewportWidth || 80) - 2));
   const typeFilter = String(ui.eventFilter || '').toLowerCase();
   const filtered = cachedEventView(events, `events:${typeFilter}`, (event) => !typeFilter || String(event.type).toLowerCase().includes(typeFilter));
   return {
-    title: `Events · ${typeFilter ? `type /${typeFilter}` : 'all'} · follow ${ui.follow === false ? 'off' : 'on'}${historyState}`,
+    title: `Events · ${typeFilter ? `type /${typeFilter}` : 'all'} · follow ${ui.follow === false ? 'off' : 'on'}${historyState}${searchSuffix(ui, 'events')}`,
     content: filtered.length ? {
       kind: 'log', virtual: true, entries: filtered, formatEntry: rawEventEntry, styleEntry: lineStyleForEvent,
-      follow: ui.follow !== false, scroll: ui.detailScroll || 0
+      follow: ui.follow !== false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'events')
     } : { kind: 'log', lines: emptyHistory, follow: true },
     scrollItemCount: filtered.length
   };
@@ -422,18 +549,21 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
   const rawJob = (store.jobs || []).find((entry) => entry.id === ui.jobId) || (store.jobs || [])[0];
   if (!rawJob) return fleetViewModel(store, { ...ui, status: 'Job disappeared from the store', statusKind: 'error' }, viewport);
   const job = effectiveJobRecord(rawJob, nowOf(ui));
-  const tab = Math.max(0, Math.min(DETAIL_TABS.length - 1, Number(ui.detailTab || 0)));
-  const body = detailContent(job, store, ui, tab);
+  const tabs = detailTabs(store, job);
+  const tab = Math.max(0, Math.min(tabs.length - 1, Number(ui.detailTab || 0)));
+  const body = detailContent(job, store, { ...ui, viewportWidth: width }, tab);
   const frame = {
     width, height, screen: 'detail',
     title: { text: `${job.id} · ${job.provider} · ${job.resolvedModel || job.model || 'auto'}`, right: jobState(job).text },
-    tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: DETAIL_TABS, active: tab },
+    tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: tabs, active: tab },
     panes: [{ rect: { x: 0, y: 2, width, height: Math.max(3, height - 3) }, title: body.title, content: body.content }],
-    status: errorStatus(ui) || { text: 'Esc fleet  [/] tabs  f follow  s steer  r resume  R release  n nudge  c cancel  v revert  ? help' },
+    status: errorStatus(ui) || { text: 'Esc fleet  [/] tabs  / search  f follow  s steer  r resume  R release  n nudge  w review  c cancel  v revert' },
     meta: {
       jobId: job.id,
       tab,
+      tabs,
       diffFiles: store.diffStatsByJob?.[job.id]?.files?.map((file) => file.path) || [],
+      chainJobIds: body.chainJobIds || [],
       scrollItemCount: body.scrollItemCount || 0
     }
   };
@@ -504,7 +634,9 @@ export function statsViewModel(store, ui = {}, viewport = {}) {
     { key: 'nudgeCount', title: 'Nudge', width: 7, align: 'right' }, { key: 'duration', title: 'Mean ms', width: 10, align: 'right' },
     { key: 'tokens', title: 'Out tok', width: 9, align: 'right' }, { key: 'failures', title: 'B/T/V', width: Math.max(7, width - 83) }
   ];
-  const rows = (stats.groups || []).map((row) => ({
+  const query = String(ui.statsFilter || '').toLocaleLowerCase();
+  const filtered = (stats.groups || []).filter((row) => !query || JSON.stringify(row).toLocaleLowerCase().includes(query));
+  const rows = filtered.map((row) => ({
     ...row,
     success: `${Math.round((row.successRate || 0) * 100)}%`,
     duration: Math.round(row.meanDurationMs || 0),
@@ -513,17 +645,35 @@ export function statsViewModel(store, ui = {}, viewport = {}) {
   }));
   const frame = {
     width, height, screen: 'stats',
-    title: { text: `Delegation stats · last ${stats.since || '7d'}`, right: `${stats.jobs || 0} audited jobs` },
+    title: { text: `Delegation stats · last ${stats.since || '7d'}${query ? ` · /${ui.statsFilter}` : ''}`, right: `${rows.length}/${stats.groups?.length || 0} audit rows` },
     panes: [{ rect: { x: 0, y: 1, width, height: height - 2 }, title: 'Provider / normalized model / mode', content: { kind: 'table', columns, rows, selected: ui.statsSelection || 0, scroll: ui.statsScroll || 0 } }],
-    status: errorStatus(ui) || { text: 'Esc fleet  ↑/↓ select  default window: 7d  ? help  q quit' }
+    status: errorStatus(ui) || { text: 'Esc fleet  ↑/↓ select  / filter loaded audit rows  default window: 7d  ? help  q quit' },
+    meta: { visibleStatsCount: rows.length }
   };
   return commonOverlay(frame, ui);
 }
 
 const LAUNCH_FIELDS = Object.freeze([
   ['profile', 'Profile'], ['provider', 'Provider'], ['model', 'Model'], ['mode', 'Mode'],
-  ['effort', 'Effort'], ['prompt', 'Prompt'], ['allowedPaths', 'Allowed paths']
+  ['effort', 'Effort'], ['prompt', 'Packet body'], ['allowedPaths', 'Allowed paths'],
+  ['verifyCommand', 'Verify command'], ['ingestFiles', 'Ingest files']
 ]);
+
+export function routeAdvisorLines(route) {
+  if (!route) return ['Calculating route advice…'];
+  const candidate = (label, value) => {
+    if (!value) return `${label}: none`;
+    const band = value.usageBand;
+    const usage = band ? ` · p50 ${Math.round(band.p50OutputTokens || 0)} / p90 ${Math.round(band.p90OutputTokens || 0)} out (${band.samples || 0})` : '';
+    return `${label}: ${value.provider}/${value.model} · score ${value.score}${usage}`;
+  };
+  return [
+    `${route.kind || 'general'} · ${route.mode || 'implement'} · effort ${route.effort || 'medium'}`,
+    candidate('Primary', route.primary),
+    candidate('Fallback', route.fallbacks?.[0]),
+    route.primary?.reason || 'Advisory only; dry-run admission remains authoritative.'
+  ];
+}
 
 export function launcherViewModel(store, ui = {}, viewport = {}) {
   const { width, height } = viewportOf(viewport);
@@ -537,15 +687,22 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
     '',
     ...String(preview.packet || '').split('\n')
   ] : ['No preview yet.', '', 'Edit fields, then press d. Launch is disabled until the exact current form has a successful dry run.'];
-  const formHeight = Math.min(12, Math.max(9, Math.floor(height * 0.4)));
+  const wide = width >= 70;
+  const topHeight = wide ? Math.min(13, Math.max(10, Math.floor(height * 0.48))) : Math.min(10, Math.max(7, Math.floor(height * 0.4)));
+  const formWidth = wide ? Math.max(42, Math.floor(width * 0.58)) : width;
+  const advisorRect = wide
+    ? { x: formWidth, y: 1, width: width - formWidth, height: topHeight }
+    : { x: 0, y: 1 + topHeight, width, height: Math.min(5, Math.max(3, height - topHeight - 5)) };
+  const previewY = wide ? 1 + topHeight : advisorRect.y + advisorRect.height;
   const frame = {
     width, height, screen: 'launcher',
     title: { text: 'New managed job', right: preview ? 'preview ready · y launches' : 'dry run required' },
     panes: [
-      { rect: { x: 0, y: 1, width, height: formHeight }, title: `Launcher form · profiles: ${(store.profiles || []).join(', ') || 'none'}`, content: { kind: 'table', columns: [{ key: 'field', title: 'Field', width: 16 }, { key: 'value', title: 'Value', width: Math.max(10, width - 18) }], rows, selected: launcher.fieldIndex || 0 } },
-      { rect: { x: 0, y: 1 + formHeight, width, height: Math.max(3, height - formHeight - 2) }, title: 'Mandatory dry-run preview · exact provider packet', content: { kind: 'log', lines: previewLines, follow: false, scroll: launcher.previewScroll || 0 } }
+      { rect: { x: 0, y: 1, width: formWidth, height: topHeight }, title: `Launcher form · profiles: ${(store.profiles || []).join(', ') || 'none'}`, content: { kind: 'table', columns: [{ key: 'field', title: 'Field', width: 16 }, { key: 'value', title: 'Value', width: Math.max(10, formWidth - 18) }], rows, selected: launcher.fieldIndex || 0 } },
+      { rect: { x: 0, y: previewY, width, height: Math.max(3, height - previewY - 1) }, title: 'Mandatory dry-run preview · exact provider packet', content: { kind: 'log', lines: previewLines, follow: false, scroll: launcher.previewScroll || 0 } },
+      { rect: advisorRect, title: 'Route advisor · advisory only', content: { kind: 'log', lines: routeAdvisorLines(launcher.routeAdvice), follow: false, scroll: 0 } }
     ],
-    status: errorStatus(ui) || { text: 'Esc fleet  ↑/↓ field  ←/→ cycle  Enter edit  d dry run  y launch preview  ? help  q quit' },
+    status: errorStatus(ui) || { text: 'Esc fleet  ↑/↓ field  ←/→ cycle  Enter edit  e $EDITOR body  d dry run  y launch preview  ? help  q quit' },
     meta: { fields: LAUNCH_FIELDS.map(([key]) => key), previewReady: Boolean(preview) }
   };
   return commonOverlay(frame, ui);
@@ -553,6 +710,8 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
 
 export function createViewModel(store, ui = {}, viewport = {}) {
   if (ui.screen === 'detail') return detailViewModel(store, ui, viewport);
+  if (ui.screen === 'groups') return groupsViewModel(store, ui, viewport);
+  if (ui.screen === 'group-members') return groupMembersViewModel(store, ui, viewport);
   if (ui.screen === 'providers') return providersViewModel(store, ui, viewport);
   if (ui.screen === 'stats') return statsViewModel(store, ui, viewport);
   if (ui.screen === 'launcher') return launcherViewModel(store, ui, viewport);

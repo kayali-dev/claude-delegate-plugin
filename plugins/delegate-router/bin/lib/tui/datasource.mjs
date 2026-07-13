@@ -32,6 +32,29 @@ import { aggregateAuditStats, readAuditLog } from '../stats.mjs';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DEFAULT_MAX_EVENTS = 5000;
 
+export function aggregateJobGroups(jobs = []) {
+  const groups = new Map();
+  for (const job of jobs) {
+    if (!job?.groupId) continue;
+    if (!groups.has(job.groupId)) groups.set(job.groupId, {
+      groupId: job.groupId, total: 0, running: 0, terminal: 0, stalled: 0,
+      allTerminal: true, newestActivityAt: null, memberIds: []
+    });
+    const group = groups.get(job.groupId);
+    const terminal = TERMINAL.has(job.status);
+    group.total += 1;
+    group.memberIds.push(job.id);
+    if (terminal) group.terminal += 1;
+    else if (job.stalled) group.stalled += 1;
+    else group.running += 1;
+    group.allTerminal &&= terminal;
+    const activity = Number(job.lastActivityAt || (job.updatedAt || job.createdAt || 0) * 1000 || 0);
+    group.newestActivityAt = Math.max(Number(group.newestActivityAt || 0), activity) || null;
+  }
+  return [...groups.values()].sort((left, right) => Number(right.newestActivityAt || 0) - Number(left.newestActivityAt || 0)
+    || String(left.groupId).localeCompare(String(right.groupId)));
+}
+
 function readDiffArtifact(event) {
   if (typeof event?.data?.diff === 'string') return event.data.diff;
   if (!event?.data?.artifactPath) return '';
@@ -98,6 +121,7 @@ function cloneState(state) {
     })),
     writerLocks: state.writerLocks.map((lock) => ({ ...lock })),
     profiles: [...state.profiles],
+    groups: state.groups.map((group) => ({ ...group, memberIds: [...group.memberIds] })),
     stats: { ...state.stats, groups: [...state.stats.groups] }
   };
 }
@@ -129,7 +153,7 @@ export class DelegateDataSource extends EventEmitter {
     this.metrics = { refreshes: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
     this.state = {
       jobs: [], eventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
-      usage: null, providers: [], writerLocks: [], profiles: [], audit: [], metadataReady: false,
+      usage: null, providers: [], writerLocks: [], profiles: [], groups: [], audit: [], metadataReady: false,
       stats: { since: '7d', jobs: 0, groups: [] }, updatedAt: null, error: null
     };
   }
@@ -230,12 +254,17 @@ export class DelegateDataSource extends EventEmitter {
         this.reconcileAttempts.delete(id);
         this.reconciledByTui.delete(id);
       }
-      const digest = JSON.stringify(jobs.map((job) => [job.id, job.revision, job.status, job.phase, job.updatedAt, job.lastActivityAt, job.stalled, job.workerAlive]));
+      const digest = JSON.stringify(jobs.map((job) => [
+        job.id, job.revision, job.status, job.phase, job.updatedAt, job.lastActivityAt, job.stalled, job.workerAlive,
+        job.groupId || null, Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Number(job.scopeViolations || 0),
+        job.errorCode || null, job.stoppedReason || null
+      ]));
       const changed = options.force || digest !== this.recordsDigest;
       this.recordsDigest = digest;
       this.state = {
         ...this.state,
         jobs,
+        groups: aggregateJobGroups(jobs),
         writerLocks: activeWriterLocks(rawJobs),
         updatedAt: Date.now(),
         error: null

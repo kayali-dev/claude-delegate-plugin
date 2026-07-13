@@ -73,13 +73,14 @@ export function paintPane(grid, pane) {
 export function paintTable(grid, rect, table = {}) {
   const columns = table.columns || [];
   const rows = table.rows || [];
+  const rowCount = Math.max(0, Number(table.rowCount ?? rows.length));
   const headerRows = table.header === false ? 0 : 1;
   const visibleRows = Math.max(0, rect.height - headerRows);
-  const selected = Math.max(0, Math.min(rows.length - 1, Number(table.selected || 0)));
+  const selected = Math.max(0, Math.min(rowCount - 1, Number(table.selected || 0)));
   const requestedScroll = Math.max(0, Number(table.scroll || 0));
   const scroll = Math.max(0, Math.min(
     Math.max(requestedScroll, selected >= requestedScroll + visibleRows ? selected - visibleRows + 1 : requestedScroll),
-    Math.max(0, rows.length - visibleRows)
+    Math.max(0, rowCount - visibleRows)
   ));
   grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', table.style || palette.body);
   const widths = columns.map((column) => Math.max(1, Number(column.width || 1)));
@@ -95,7 +96,7 @@ export function paintTable(grid, rect, table = {}) {
   }
   for (let visual = 0; visual < visibleRows; visual += 1) {
     const rowIndex = scroll + visual;
-    const row = rows[rowIndex];
+    const row = rows[rowIndex] || (typeof table.rowAt === 'function' ? table.rowAt(rowIndex) : null);
     if (!row) continue;
     let x = rect.x;
     const y = rect.y + headerRows + visual;
@@ -115,11 +116,33 @@ export function paintTable(grid, rect, table = {}) {
       x += width;
     }
   }
-  if (rows.length > visibleRows && rect.width > 0) {
-    const marker = `${scroll + 1}-${Math.min(rows.length, scroll + visibleRows)}/${rows.length}`;
+  if (rowCount > visibleRows && rect.width > 0) {
+    const marker = `${scroll + 1}-${Math.min(rowCount, scroll + visibleRows)}/${rowCount}`;
     grid.write(Math.max(rect.x, rect.x + rect.width - displayWidth(marker)), rect.y, marker, palette.dim, Math.min(rect.width, displayWidth(marker)));
   }
   return { scroll, visibleRows };
+}
+
+export function tableRowIndexAt(pane, x, y) {
+  const rect = pane?.rect;
+  const table = pane?.content;
+  if (!rect || table?.kind !== 'table' || x <= rect.x || x >= rect.x + rect.width - 1) return null;
+  const contentY = rect.y + (pane.border === false ? 0 : 1);
+  const headerRows = table.header === false ? 0 : 1;
+  const firstRowY = contentY + headerRows;
+  const contentHeight = Math.max(0, rect.height - (pane.border === false ? 0 : 2));
+  const visibleRows = Math.max(0, contentHeight - headerRows);
+  if (y < firstRowY || y >= firstRowY + visibleRows) return null;
+  const rows = table.rows || [];
+  const rowCount = Math.max(0, Number(table.rowCount ?? rows.length));
+  const selected = Math.max(0, Math.min(rowCount - 1, Number(table.selected || 0)));
+  const requestedScroll = Math.max(0, Number(table.scroll || 0));
+  const scroll = Math.max(0, Math.min(
+    Math.max(requestedScroll, selected >= requestedScroll + visibleRows ? selected - visibleRows + 1 : requestedScroll),
+    Math.max(0, rowCount - visibleRows)
+  ));
+  const index = scroll + y - firstRowY;
+  return index >= 0 && index < rowCount ? index : null;
 }
 
 export function paintTabBar(grid, rect, tabs = [], active = 0) {
@@ -133,33 +156,54 @@ export function paintTabBar(grid, rect, tabs = [], active = 0) {
   }
 }
 
-function wrapLine(value, width) {
+export function tabIndexAtColumn(tabs = [], column, rect = { x: 0, width: Number.MAX_SAFE_INTEGER }) {
+  let x = rect.x || 0;
+  const right = x + Math.max(0, Number(rect.width || 0));
+  for (let index = 0; index < tabs.length && x < right; index += 1) {
+    const width = Math.min(displayWidth(` ${index + 1}:${textOf(tabs[index])} `), right - x);
+    if (column >= x && column < x + width) return index;
+    x += width + 1;
+  }
+  return null;
+}
+
+function wrapLineDetailed(value, width) {
   const text = stripAnsi(value);
-  if (width <= 0) return [];
-  if (!text) return [''];
-  const lines = [];
+  if (width <= 0) return { value: text, lines: [], fragments: [] };
+  if (!text) return { value: text, lines: [''], fragments: [{ text: '', start: 0, end: 0 }] };
+  const fragments = [];
   let current = '';
   let used = 0;
+  let offset = 0;
+  let start = 0;
   for (const grapheme of splitGraphemes(text)) {
     if (grapheme === '\n') {
-      lines.push(current);
+      fragments.push({ text: current, start, end: offset });
       current = '';
       used = 0;
+      offset += grapheme.length;
+      start = offset;
       continue;
     }
     const size = displayWidth(grapheme);
     if (used + size > width && current) {
-      lines.push(current);
+      fragments.push({ text: current, start, end: offset });
       current = '';
       used = 0;
+      start = offset;
     }
     if (size <= width) {
       current += grapheme;
       used += size;
     }
+    offset += grapheme.length;
   }
-  lines.push(current);
-  return lines;
+  fragments.push({ text: current, start, end: offset });
+  return { value: text, lines: fragments.map((fragment) => fragment.text), fragments };
+}
+
+function wrapLine(value, width) {
+  return wrapLineDetailed(value, width).lines;
 }
 
 export class WrapCache {
@@ -179,7 +223,7 @@ export class WrapCache {
     return this.formatters.get(formatter);
   }
 
-  lines(entry, width, formatter = null) {
+  wrap(entry, width, formatter = null) {
     const key = `${Math.max(1, width)}:${this.formatterId(formatter)}`;
     const objectEntry = entry != null && (typeof entry === 'object' || typeof entry === 'function');
     const cache = objectEntry
@@ -191,11 +235,19 @@ export class WrapCache {
       return cache.get(primitiveKey);
     }
     const value = formatter ? formatter(entry) : textOf(entry);
-    const lines = wrapLine(textOf(value), Math.max(1, width));
-    cache.set(primitiveKey, lines);
+    const wrapped = wrapLineDetailed(textOf(value), Math.max(1, width));
+    cache.set(primitiveKey, wrapped);
     this.wrapCalls += 1;
     this.misses += 1;
-    return lines;
+    return wrapped;
+  }
+
+  lines(entry, width, formatter = null) {
+    return this.wrap(entry, width, formatter).lines;
+  }
+
+  fragments(entry, width, formatter = null) {
+    return this.wrap(entry, width, formatter).fragments;
   }
 
   clear() {
@@ -260,6 +312,53 @@ export function compareVirtualPositions(left, right) {
   return Number(left?.entry || 0) - Number(right?.entry || 0) || Number(left?.line || 0) - Number(right?.line || 0);
 }
 
+export function virtualSearchPosition(log, hit, width, cache = defaultWrapCache) {
+  const entries = log.entries || [];
+  if (!entries.length || !hit) return { entry: 0, line: 0 };
+  const entry = Math.max(0, Math.min(entries.length - 1, Number(hit.entry || 0)));
+  const fragments = cache.fragments(entries[entry], width, log.formatEntry);
+  const offset = Math.max(0, Number(hit.offset || 0));
+  let line = fragments.findIndex((fragment) => offset >= fragment.start && (offset < fragment.end || fragment.start === fragment.end));
+  if (line < 0) line = Math.max(0, fragments.length - 1);
+  return { entry, line };
+}
+
+function searchRanges(value, query) {
+  const lower = String(value || '').toLocaleLowerCase();
+  const needle = String(query || '').toLocaleLowerCase();
+  if (!needle) return [];
+  const ranges = [];
+  let offset = 0;
+  while (offset <= lower.length - needle.length) {
+    const start = lower.indexOf(needle, offset);
+    if (start < 0) break;
+    ranges.push({ start, end: start + needle.length });
+    offset = start + Math.max(1, needle.length);
+  }
+  return ranges;
+}
+
+function fragmentSegments(fragment, ranges, style) {
+  const overlaps = ranges
+    .map((range) => ({ start: Math.max(fragment.start, range.start), end: Math.min(fragment.end, range.end) }))
+    .filter((range) => range.end > range.start)
+    .sort((left, right) => left.start - right.start);
+  if (!overlaps.length) return [{ text: fragment.text, style }];
+  const segments = [];
+  let cursor = fragment.start;
+  for (const range of overlaps) {
+    if (range.start > cursor) segments.push({ text: fragment.text.slice(cursor - fragment.start, range.start - fragment.start), style });
+    segments.push({ text: fragment.text.slice(range.start - fragment.start, range.end - fragment.start), style: mergeStyle(style, palette.searchMatch) });
+    cursor = Math.max(cursor, range.end);
+  }
+  if (cursor < fragment.end) segments.push({ text: fragment.text.slice(cursor - fragment.start), style });
+  return segments;
+}
+
+function writeSearchLine(grid, x, y, fragment, ranges, width, style) {
+  writeSegments(grid, x, y, fragmentSegments(fragment, ranges, style), width, style);
+}
+
 function paintVirtualLogPane(grid, rect, log, cache) {
   const entries = log.entries || [];
   const overscan = Math.max(2, Number(log.overscan ?? Math.min(12, rect.height)));
@@ -272,7 +371,9 @@ function paintVirtualLogPane(grid, rect, log, cache) {
       index -= 1;
       const entry = entries[index];
       const style = typeof log.styleEntry === 'function' ? log.styleEntry(entry) : styleOf(entry);
-      const lines = cache.lines(entry, rect.width, log.formatEntry).map((text) => ({ text, style }));
+      const wrapped = cache.wrap(entry, rect.width, log.formatEntry);
+      const ranges = searchRanges(wrapped.value, log.searchQuery);
+      const lines = wrapped.fragments.map((fragment) => ({ fragment, ranges, style }));
       expanded.unshift(...lines);
     }
     start = { entry: Math.max(0, index), line: 0 };
@@ -281,16 +382,19 @@ function paintVirtualLogPane(grid, rect, log, cache) {
     for (let index = start.entry; index < entries.length && expanded.length < targetLines; index += 1) {
       const entry = entries[index];
       const style = typeof log.styleEntry === 'function' ? log.styleEntry(entry) : styleOf(entry);
-      const lines = cache.lines(entry, rect.width, log.formatEntry);
+      const wrapped = cache.wrap(entry, rect.width, log.formatEntry);
+      const lines = wrapped.fragments;
+      const ranges = searchRanges(wrapped.value, log.searchQuery);
       const offset = index === start.entry ? start.line : 0;
-      for (let line = offset; line < lines.length; line += 1) expanded.push({ text: lines[line], style });
+      for (let line = offset; line < lines.length; line += 1) expanded.push({ fragment: lines[line], ranges, style });
     }
   }
   const visible = log.follow !== false ? expanded.slice(Math.max(0, expanded.length - rect.height)) : expanded.slice(0, rect.height);
   grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', log.style || palette.body);
   for (let index = 0; index < visible.length; index += 1) {
     const line = visible[index];
-    writePadded(grid, rect.x, rect.y + index, line.text, rect.width, line.style || log.lineStyle || palette.body);
+    const style = line.style || log.lineStyle || palette.body;
+    writeSearchLine(grid, rect.x, rect.y + index, line.fragment, line.ranges, rect.width, style);
   }
   return { scroll: start, totalEntries: entries.length };
 }
@@ -300,7 +404,9 @@ export function paintLogPane(grid, rect, log = {}, options = {}) {
   const expanded = [];
   for (const raw of log.lines || []) {
     const value = textOf(raw);
-    for (const line of wrapLine(value, rect.width)) expanded.push({ text: line, style: styleOf(raw) });
+    const wrapped = wrapLineDetailed(value, rect.width);
+    const ranges = searchRanges(wrapped.value, log.searchQuery);
+    for (const fragment of wrapped.fragments) expanded.push({ fragment, ranges, style: styleOf(raw) });
   }
   const maxScroll = Math.max(0, expanded.length - rect.height);
   const scroll = log.follow !== false ? maxScroll : Math.max(0, Math.min(maxScroll, Number(log.scroll || 0)));
@@ -308,7 +414,8 @@ export function paintLogPane(grid, rect, log = {}, options = {}) {
   for (let index = 0; index < rect.height; index += 1) {
     const line = expanded[scroll + index];
     if (!line) continue;
-    writePadded(grid, rect.x, rect.y + index, line.text, rect.width, line.style || log.lineStyle || palette.body);
+    const style = line.style || log.lineStyle || palette.body;
+    writeSearchLine(grid, rect.x, rect.y + index, line.fragment, line.ranges, rect.width, style);
   }
   return { scroll, totalLines: expanded.length };
 }

@@ -27,4 +27,4 @@
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- co:42% cu:off  writers:1                        Enter detail  a active  / filter  p providers  t s
+ co:42% cu:off  writers:1                        notify:on · Enter detail  G groups  a active  / fi
