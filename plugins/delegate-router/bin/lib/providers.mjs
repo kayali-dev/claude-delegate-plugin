@@ -13,8 +13,11 @@ import {
 import { compareVersions } from './cursor.mjs';
 import { delay, JsonRpcProcess } from './jsonrpc.mjs';
 import { brokerError, normalizeBrokerError } from './errors.mjs';
+import { assembleProviderPrompt, securityPreamble } from './packet.mjs';
 import { terminateProcessTree } from './process.mjs';
 import { loadJob, mutateState, setWindow } from './state.mjs';
+
+export { securityPreamble } from './packet.mjs';
 
 // Local floors are intentionally conservative and traceable to the CLIs on
 // the release workstation: codex-cli 0.144.1 and Cursor build
@@ -22,32 +25,8 @@ import { loadJob, mutateState, setWindow } from './state.mjs';
 // source change when their fleet has a different validated baseline.
 export const MIN_VERSIONS = Object.freeze({ codex: '0.144.0', cursor: '2026.7.0' });
 
-// The base boundary always applies. allowSensitive only swaps the sensitive-
-// path rule for an explicit authorization line; it never removes scope control
-// or the preserve-existing-changes rule.
-export function securityPreamble(allowSensitive) {
-  const sensitiveRule = allowSensitive
-    ? '- Sensitive-path access is explicitly authorized for this task; touch only the sensitive paths the task names.'
-    : '- Do not read, print, transmit, or modify credentials, private keys, tokens, or .env files unless the task explicitly authorizes the exact path. Running project tooling that consumes them internally (builds, tests, dev servers reading .env) is allowed and expected; never echo, copy, or relocate their contents yourself.';
-  return `Security boundary:
-${sensitiveRule}
-- Preserve pre-existing changes and never revert unrelated work.
-- Stay inside the task's allowed scope. Stop and report if required work falls outside it.
-
-`;
-}
-
 function promptFor(job) {
-  const scope = job.allowedPaths?.length
-    ? `Allowed write scope (hard fence): create or modify files only under: ${job.allowedPaths.join(', ')}. If required work falls outside this set, stop and report instead of editing.\n\n`
-    : '';
-  const ingested = job.stagingDir
-    ? `Ingested files are staged under ${job.stagingDir}; work on those staged copies.\n\n`
-    : '';
-  const structured = job.reportSchema
-    ? `\n\nStructured report contract: End the final message with a fenced \`\`\`json block matching this schema and containing objectiveMet (true, false, or "partial").\n${JSON.stringify(job.reportSchema, null, 2)}`
-    : '';
-  return `${securityPreamble(job.allowSensitive)}${scope}${ingested}${fs.readFileSync(job.promptPath, 'utf8')}${structured}`;
+  return assembleProviderPrompt(job, fs.readFileSync(job.promptPath, 'utf8'));
 }
 
 function codexModel(model) {
@@ -308,6 +287,14 @@ function terminal(job, status, phase, extra = {}) {
       && !current.result?.plan && (!text || text.trim().length < 200)) {
       current.resultSuspect = 'short-final-message';
     }
+    // The write-mode analogue (field-observed: a Codex pre-implementation
+    // audit returned analysis instead of code): completed with zero observed
+    // changes means the objective was not met, on the record itself and not
+    // only via the wait exit code.
+    if (!deferVerification && status === 'completed' && ['implement', 'verify'].includes(job.mode)
+      && changedFiles && changedFiles.count === 0) {
+      current.resultSuspect = 'no-changes-write-mode';
+    }
   });
   appendJobEvent(job.id, deferVerification
     ? 'job.state'
@@ -473,7 +460,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.17.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.18.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -931,7 +918,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.17.0' }
+      clientInfo: { name: 'delegate-router', version: '0.18.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -1311,6 +1298,22 @@ function retryDelayMs(retryNumber) {
   return Math.min(30000, base * (2 ** Math.max(retryNumber - 1, 0)));
 }
 
+function honorCommandsBeforeRetry(job) {
+  let cancelled = false;
+  for (const claimed of claimCommands(job.id)) {
+    if (claimed.command.type === 'cancel') {
+      completeCommand(job.id, claimed, { ok: true, appliedAs: 'cancel-before-retry' });
+      cancelled = true;
+    } else if (claimed.command.type === 'steer') {
+      completeCommand(job.id, claimed, { ok: false, error: 'job is between provider attempts; steering requires an active attempt' });
+    } else {
+      completeCommand(job.id, claimed, { ok: false, error: `job is between provider attempts; ${claimed.command.type} is unavailable` });
+    }
+  }
+  if (cancelled) terminal(loadJob(job.id), 'cancelled', 'cancelled');
+  return cancelled;
+}
+
 export async function runManagedProvider(job) {
   updateManagedJob(job.id, (current) => { current.status = 'running'; current.phase = 'starting'; current.workerPid = process.pid; });
   appendJobEvent(job.id, 'job.state', { status: 'running', phase: 'starting', transport: job.transport });
@@ -1338,7 +1341,9 @@ export async function runManagedProvider(job) {
         });
         appendJobEvent(job.id, 'job.retry', { attempt: attempt + 1, code: typed.code, delayMs });
         await delay(delayMs);
+        if (honorCommandsBeforeRetry(job)) return;
         updateManagedJob(job.id, (current) => { current.phase = 'starting'; }, { incrementRevision: false });
+        if (honorCommandsBeforeRetry(job)) return;
         continue;
       }
       const current = inspectJob(job.id);

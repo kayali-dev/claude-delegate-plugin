@@ -8,6 +8,12 @@ if (process.argv.includes('--version')) {
   process.exit(0);
 }
 
+if (process.env.FAKE_CODEX_SPAWN_COUNT_FILE) {
+  let count = 0;
+  try { count = Number(fs.readFileSync(process.env.FAKE_CODEX_SPAWN_COUNT_FILE, 'utf8')) || 0; } catch {}
+  fs.writeFileSync(process.env.FAKE_CODEX_SPAWN_COUNT_FILE, `${count + 1}\n`);
+}
+
 const lines = readline.createInterface({ input: process.stdin });
 let activeTurn = null;
 let timer = null;
@@ -52,7 +58,7 @@ lines.on('line', (line) => {
     send({ jsonrpc: '2.0', id: request.id, result: { turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-fake', turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-fake', turnId: activeTurn, explanation: null, plan: [{ step: 'test', status: 'inProgress' }] } });
-    const fileChanges = Math.max(1, Number(process.env.FAKE_CODEX_FILE_CHANGES || 1));
+    const fileChanges = Math.max(0, Number(process.env.FAKE_CODEX_FILE_CHANGES ?? 1));
     for (let index = 0; index < fileChanges; index += 1) {
       const changedPath = index === 0 ? 'a.js' : `file-${index}.js`;
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'fileChange', id: `file-${index}`, changes: [{ path: changedPath, kind: 'update' }], status: 'completed' }, completedAtMs: Date.now() } });

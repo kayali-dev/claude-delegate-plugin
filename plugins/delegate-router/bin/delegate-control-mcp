@@ -16,11 +16,13 @@ import {
   listManagedJobs,
   maybePruneJobs,
   readJobEventPage,
+  reviewRoundManagedJob,
   resumeManagedJob,
   sliceDiff,
-  submitControl
+  sliceResultText,
+  submitControl,
+  waitForJob
 } from './lib/control.mjs';
-import { waitForSessionId } from './lib/control.mjs';
 
 const TOOLS = [
   {
@@ -46,14 +48,16 @@ const TOOLS = [
         command: { type: 'string', minLength: 1 }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400, default: 600 }
       }, description: 'Write modes only. Run this coordinator-owned /bin/sh command in the job cwd after provider completion.' },
       allowedPaths: { type: 'array', items: { type: 'string' }, description: 'Repo-relative path prefixes (or * globs) this job may create/modify. Enforced post-hoc: out-of-scope changed files are recorded as scopeViolations on the job and emitted as a scope.violation event; the fence is also injected into the worker prompt.' },
+      waitFor: { enum: ['session', 'turn', 'first-output'], description: 'Bounded wait for provider session establishment, the first turn, or the first visible output event.' },
       waitForSession: { type: 'boolean', description: 'Block (up to ~30s) until the provider session id is recorded before returning, so a plan can be filed under the delegate session id with no race.' },
+      dryRun: { type: 'boolean', description: 'Return the fully resolved launch and exact provider packet without creating a job, staging files, or spawning a provider.' },
       sandbox: { enum: ['auto', 'off'], description: 'off disables provider sandboxing (Codex danger-full-access, Cursor --sandbox disabled) so the worker can use git, host CLIs, and live web search/fetch. Judge necessity from the task; if unsure whether the sandbox can stay on, ask the user before setting off.' },
       allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' },
       overrideLane: { type: 'boolean', description: 'GPT models on provider=cursor are refused (WRONG_LANE) while Codex is enabled and under its avoid threshold — they route natively through Codex. Set true only when the user explicitly asked to run a GPT model through Cursor.' },
       transport: { enum: ['app-server', 'acp', 'headless'] }
     } }
   },
-  { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: jobOnly() },
+  { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, resultWindow: { type: 'object', additionalProperties: false, properties: { find: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } } } },
   { name: 'delegate_list', description: 'List recent delegation jobs, optionally filtered or summarized by fan-out group.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, activeOnly: { type: 'boolean' }, status: { type: 'array', items: { enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] } }, groupId: { type: 'string' }, groupSummary: { type: 'boolean' } } } },
   { name: 'delegate_events', description: 'Read normalized live events using a monotonic sequence cursor, with optional bounded long polling.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, waitMs: { type: 'integer', minimum: 0, maximum: 30000 }, types: { type: 'array', items: { type: 'string' } } } } },
   { name: 'delegate_transcript', description: 'Read user-visible messages, plans, tool activity, and errors, paginated by sequence cursor. Streaming deltas and raw tool output are omitted unless verbose is set. Hidden reasoning is never returned.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, verbose: { type: 'boolean' } } } },
@@ -63,6 +67,7 @@ const TOOLS = [
   { name: 'delegate_cancel', description: 'Request provider-aware cancellation using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
   { name: 'delegate_release', description: 'Release a startPaused job to send its first prompt, using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
   { name: 'delegate_resume', description: 'Start a new supervised job on the same provider session or thread.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, cwd: { type: 'string' }, effort: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, maxOutputTokens: { type: 'integer', minimum: 1 }, retryPolicy: { type: 'object', required: ['maxAttempts', 'retryOn'], additionalProperties: false, properties: { maxAttempts: { type: 'integer', minimum: 1, maximum: 5 }, retryOn: { type: 'array', uniqueItems: true, items: { enum: ['transport', 'rate-limit'] } } } }, verify: { type: 'object', required: ['command'], additionalProperties: false, properties: { command: { type: 'string', minLength: 1 }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400, default: 600 } } }, network: { type: 'boolean' }, sandbox: { enum: ['auto', 'off'] }, allowedPaths: { type: 'array', items: { type: 'string' } }, allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' } } } },
+  { name: 'delegate_review_round', description: 'Resume a terminal job with findings plus its recorded diff stat, changed files, and allowed scope.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string', minLength: 1 } } } },
   { name: 'delegate_usage', description: 'Return per-job observed usage, chain-cumulative token totals, and provider allowance headroom.', inputSchema: jobOnly() }
 ];
 
@@ -73,9 +78,14 @@ function jobOnly() {
 async function dispatch(name, args) {
   if (name === 'delegate_start') {
     const job = launchManagedJob(args);
-    return args.waitForSession === true ? waitForSessionId(job.id) : job;
+    if (job.dryRun) return job;
+    const target = args.waitFor ?? (args.waitForSession === true ? 'session' : null);
+    return target ? waitForJob(job.id, target) : job;
   }
-  if (name === 'delegate_inspect') return inspectJob(args.jobId);
+  if (name === 'delegate_inspect') {
+    const job = inspectJob(args.jobId);
+    return args.resultWindow ? { ...job, ...sliceResultText(job.resultText, args.resultWindow) } : job;
+  }
   if (name === 'delegate_events') {
     const deadline = Date.now() + Math.min(Math.max(Number(args.waitMs || 0), 0), 30000);
     let page = readJobEventPage(args.jobId, args);
@@ -98,6 +108,7 @@ async function dispatch(name, args) {
   if (name === 'delegate_cancel') return submitControl(args.jobId, { type: 'cancel', commandId: args.commandId }, args.expectedRevision);
   if (name === 'delegate_release') return submitControl(args.jobId, { type: 'release', commandId: args.commandId }, args.expectedRevision);
   if (name === 'delegate_resume') return resumeManagedJob(args.jobId, args);
+  if (name === 'delegate_review_round') return reviewRoundManagedJob(args.jobId, args);
   if (name === 'delegate_usage') return jobUsage(args.jobId);
   throw brokerError('INVALID_REQUEST', `Unknown tool: ${name}`);
 }
@@ -116,7 +127,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.17.0' }
+        serverInfo: { name: 'delegate-control', version: '0.18.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

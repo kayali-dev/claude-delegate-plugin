@@ -21,7 +21,7 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 - Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. Outbound task packets are scanned for credential-shaped values and fail with `SECRET_IN_PROMPT`; `allowSensitive=true` explicitly overrides both checks and emits `security.warning`. It never removes scope control or the preserve-existing-changes rule. Project tooling may consume secrets internally, but workers must never echo or relocate their contents.
 
 - `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. Prefer it over prose-only fencing for every bounded write job.
-- `ingestFiles` accepts up to 20 absolute regular files outside cwd, each smaller than 10 MB. The broker copies them into `.delegate-staging/<jobId>`, adds that directory when `allowedPaths` is set, and copies byte-changed staged content back only after `completed`; failures leave staging in place and reference it in the checkpoint. Sensitive names still require `allowSensitive=true`.
+- `ingestFiles` accepts up to 20 absolute regular files outside cwd, each smaller than 10 MB. The broker copies them into `.delegate-staging/<jobId>`, records the source-content hash, and adds that directory when `allowedPaths` is set. Byte-changed staged content copies back only after `completed`; a concurrently changed source is preserved and the staged version is written to `<source>.delegate-new` with `ingest.diverged`. Failures leave staging referenced by the checkpoint. Sensitive names still require `allowSensitive=true`.
 - Cursor read-only modes block the shell entirely, including read-only git commands; a review task that needs `git log`/`git show` history should run on Codex (its read-only sandbox permits read-only shell) or accept the limitation.
 
 ## Writer Ownership
@@ -52,7 +52,7 @@ Store the Codex `threadId` or Cursor chat ID with the task. Resume only for the 
 
 Managed control commands use optimistic concurrency. Read the current job revision immediately before steering or cancelling and send it as `expectedRevision`. A `REVISION_CONFLICT` includes `currentRevision`, so one retry with that value is enough when your command is still appropriate; never overwrite another controller's newer decision. Reuse the same `correctionId` when retrying the same request.
 
-`startPaused=true` opens the provider thread/session and sets phase `paused` before any prompt. Release it with `delegate_release` (or `delegate-jobs release`) at the current revision; cancellation works while paused, `waitForSession` returns as soon as the paused session exists, and `timeoutSeconds` continues counting during the pause.
+`startPaused=true` opens the provider thread/session and sets phase `paused` before any prompt. Release it with `delegate_release` (or `delegate-jobs release`) at the current revision; cancellation works while paused, `waitFor='session'` (and the `waitForSession` alias) returns as soon as the paused session exists, and `timeoutSeconds` continues counting during the pause. `waitFor='turn'` and `waitFor='first-output'` use the same bounded journal-cursor poller.
 
 A steer that reduces the remaining work can finish the job before any follow-up command arrives. Do not design a steer-then-cancel sequence around a shrinking task; cancel first if termination is the goal.
 
@@ -77,6 +77,8 @@ Adapters assert their CLI versions before opening a provider session. `DELEGATE_
 
 Profiles live under `${DELEGATE_PROFILES_DIR:-~/.delegate/profiles}/<name>.md`; simple frontmatter supplies mode/model/effort/allowedPaths defaults and explicit start options win. The body must contain `{{objective}}`. Packet lint warns when Objective, Allowed scope, Acceptance criteria, or Return is missing. The bundled `independent-review` profile is used only when no local override exists. Optional `reportSchema` instructs a final fenced JSON block; the last parseable object becomes `result.structured`, `objectiveMet` is surfaced, and missing output sets `structuredMissing` without changing terminal status.
 
+`delegate_start dryRun=true` / `delegate-jobs start --dry-run` resolves profile and launch options, ingest destinations, lint findings, and the exact final provider packet without creating job or staging state. For a terminal continuation, `delegate_review_round` / `delegate-jobs review-round` prepends the recorded diff stat, changed files, and allowed scope to the caller's findings, then applies the ordinary resume and secret-scan rules.
+
 ## Failure And Quota Recovery
 
 On timeout, output-budget exhaustion, quota exhaustion, or agent failure:
@@ -89,6 +91,8 @@ On timeout, output-budget exhaustion, quota exhaustion, or agent failure:
 6. Tell the fallback it owns an existing partial diff and must not revert unrelated changes.
 
 `delegate_inspect` exposes `resumable: { ok, reason }` from the same predicate used by `delegate_resume`, plus `driftReport: { modified, newFiles, outsideScope }`. For manual rollback, run `delegate-jobs revert <id> --dry-run` first. Revert requires a terminal job, restores only non-overlapping files whose current content still matches the recorded final state, and reports `{ reverted, skipped, conflicts }`; it never overwrites pre-existing or later edits.
+
+Long result text can be read with `delegate_inspect.resultWindow` or `delegate-jobs result --find/--offset/--max-chars`; offsets and `nextOffset` are absolute. A cancel queued during retry backoff is applied as `cancel-before-retry` before another provider starts, while steering between attempts is rejected clearly.
 
 ## Acceptance
 

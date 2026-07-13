@@ -2,6 +2,17 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.18.0 — 2026-07-13
+
+- **`resultSuspect: 'no-changes-write-mode'`** on completed write-mode jobs with zero observed changes — the write-mode analogue of the narration flag, on the record itself and not only via `wait` exit 5 (added by the coordinator from this wave's own failed first round).
+- Generalized bounded start waits to `session`, `turn`, and `first-output`, preserving `waitForSession` / `--wait-for-session` aliases.
+- Windowed terminal `resultText` by case-sensitive find or absolute offset through CLI and MCP inspect.
+- Added review-round continuations that anchor findings with recorded diff stats, changed files, and scope.
+- Added side-effect-free start dry-runs with resolved profiles/options, ingest plans, packet lint, and the exact provider packet.
+- Guarded ingest copy-back with source hashes; divergent provider output lands at `<source>.delegate-new` and emits `ingest.diverged`.
+- Retry backoff now settles cancel before any relaunch and rejects steering between attempts.
+- Added idempotent terminal-audit backfill for retained jobs missing from `audit.jsonl`.
+
 ## 0.17.0 — 2026-07-13
 
 - `delegate-jobs stats [--since]` aggregates the terminal audit log by provider/model/mode; deterministic routes gain advisory historical output-token bands when matching samples exist.

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { normalizeBrokerError } from './lib/errors.mjs';
 import { terminatePid } from './lib/process.mjs';
 import {
+  backfillAuditLog,
   diffStat,
   filterDiffPaths,
   groupSummary,
@@ -13,22 +14,26 @@ import {
   jobUsage,
   launchManagedJob,
   pruneJobs,
-  sliceDiff,
   readJobEventPage,
   reconcileJob,
+  reviewRoundManagedJob,
   revertManagedJob,
   resumeManagedJob,
-  submitControl
+  sliceDiff,
+  sliceResultText,
+  submitControl,
+  waitForJob
 } from './lib/control.mjs';
 import { listJobs, saveJob } from './lib/state.mjs';
 import { aggregateAuditStats, readAuditLog } from './lib/stats.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
   delegate-jobs group <id> [--json]
   delegate-jobs stats [--since 7d|24h] [--json]
+  delegate-jobs audit backfill [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
   delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
@@ -39,9 +44,10 @@ function usage() {
   delegate-jobs cancel <job-id> [--expected-revision N]
   delegate-jobs release <job-id> [--expected-revision N]
   delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs review-round <job-id> --prompt <findings-or-file> [--prompt-file path]
   delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs usage <job-id> [--json]
-  delegate-jobs result <job-id>
+  delegate-jobs result <job-id> [--find text] [--offset N] [--max-chars N] [--json]
   delegate-jobs logs <job-id> [--stderr]
   delegate-jobs prune [--max-age-days N]`);
 }
@@ -109,13 +115,14 @@ try {
       network: args.includes('--network'), sandbox: value(args, '--sandbox'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
-      overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane')
+      overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane'),
+      dryRun: args.includes('--dry-run')
     });
-    if (args.includes('--wait-for-session')) {
-      const { waitForSessionId } = await import('./lib/control.mjs');
-      json(await waitForSessionId(started.id));
-    } else json(started);
-    if (args.includes('--wait')) {
+    const waitFor = value(args, '--wait-for') ?? (args.includes('--wait-for-session') ? 'session' : null);
+    if (started.dryRun) json(started);
+    else if (waitFor) json(await waitForJob(started.id, waitFor));
+    else json(started);
+    if (!started.dryRun && args.includes('--wait')) {
       let job = requireJob(started.id);
       while (!terminal(job.status)) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -162,6 +169,11 @@ try {
         console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.jobs).padStart(4)} ${percent.padStart(7)} ${String(row.resumedJobs).padStart(6)} ${String(row.nudgeCount).padStart(5)} ${String(Math.round(row.meanDurationMs || 0)).padStart(7)} ${String(Math.round(row.medianDurationMs || 0)).padStart(9)} ${String(Math.round(row.meanOutputTokens || 0)).padStart(8)} ${String(row.budgetCount).padStart(6)} ${String(row.timeoutCount).padStart(7)} ${String(row.violationCount).padStart(10)}`);
       }
     }
+  } else if (command === 'audit') {
+    if (args[0] !== 'backfill') throw new Error("audit subcommand must be 'backfill'");
+    const result = backfillAuditLog();
+    if (args.includes('--json')) json(result);
+    else console.log(`Scanned ${result.scanned} terminal jobs; backfilled ${result.backfilled}.`);
   } else if (command === 'inspect') {
     json(inspectJob(args[0]));
   } else if (command === 'events') {
@@ -270,12 +282,23 @@ try {
       allowSensitive: args.includes('--allow-sensitive') ? true : undefined,
       overrideLimit: args.includes('--override-limit'), overrideWriter: args.includes('--override-writer')
     }));
+  } else if (command === 'review-round') {
+    json(reviewRoundManagedJob(args[0], { prompt: prompt(args) }));
   } else if (command === 'usage') {
     json(jobUsage(args[0]));
   } else if (command === 'result') {
     const job = requireJob(args[0]);
     if (!terminal(job.status)) { console.error(`${job.id} is still ${job.status}.`); process.exit(75); }
-    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, result: job.result, error: job.error });
+    const windowed = args.includes('--find') || value(args, '--offset') != null || value(args, '--max-chars') != null;
+    if (windowed) {
+      const window = sliceResultText(job.resultText, {
+        find: args.includes('--find') ? value(args, '--find') : undefined,
+        offset: Number(value(args, '--offset', 0)),
+        maxChars: Number(value(args, '--max-chars', 60000))
+      });
+      if (args.includes('--json')) json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, ...window });
+      else process.stdout.write(window.resultText);
+    } else json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, result: job.result, error: job.error });
   } else if (command === 'logs') {
     const job = requireJob(args[0]);
     const file = args.includes('--stderr') ? job.stderrPath : job.stdoutPath;

@@ -13,7 +13,7 @@ Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.eve
 
 Terminal jobs older than `DELEGATE_JOB_RETENTION_DAYS` (default 14) are pruned opportunistically at broker start and job launch, at most once per six hours; `delegate-jobs prune` runs it on demand. Active jobs are never pruned.
 
-Every first transition into a terminal status appends one redacted, private JSON line to the separate `audit.jsonl` beside the state file. It records actor, provider/model/mode/effort, resume/group provenance, access policy, cwd, observed change/violation counts, verification, nudges, outcome, usage, and duration. Job pruning never removes this log; `delegate-jobs stats` aggregates it and `delegate-health` reports its path.
+Every first transition into a terminal status appends one redacted, private JSON line to the separate `audit.jsonl` beside the state file. It records actor, provider/model/mode/effort, resume/group provenance, access policy, cwd, observed change/violation counts, verification, nudges, outcome, usage, and duration. Job pruning never removes this log; `delegate-jobs stats` aggregates it and `delegate-health` reports its path. `delegate-jobs audit backfill` uses the same record builder to append missing retained terminal jobs with `backfilled: true`, once per job ID.
 
 Inspection reconciles liveness: a job recorded as `running` whose worker process no longer exists is transitioned to `failed` with an `ORPHANED` error event before the snapshot is returned. `delegate_list` rediscovers jobs by recency when an ID is no longer in context.
 
@@ -40,7 +40,7 @@ usage.updated
 approval.requested, approval.resolved
 correction.requested, correction.applied, correction.queued, correction.restarted
 command.applied, command.rejected
-scope.violation
+scope.violation, ingest.diverged
 security.warning, baseline.dirty, budget.exceeded
 job.retry, verification.finished
 error, provider.event
@@ -59,7 +59,7 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 
 `retryable: true` means retrying the same request, possibly after backoff, can succeed. `QUOTA_GUARD` needs a window reset or different provider; `ACP_TIER_UNAVAILABLE` needs a catalog or transport change; `USER_INPUT_REQUIRED` needs new information in a resume; and `BUDGET_EXCEEDED` needs a higher cap. `REVISION_CONFLICT` includes `currentRevision`; budget and timeout failures retain partial state for an explicit resume.
 
-`retryPolicy` is narrower than the taxonomy: only retryable `TRANSPORT_ERROR`, `RPC_TIMEOUT`, or `PROVIDER_ERROR` failures during provider startup/turn execution qualify as `transport`; provider 429/5xx signatures qualify as `rate-limit`. Each retry stays on the same job, reuses a continuation when present, increments `retries`, and emits `job.retry`. The default is no retries.
+`retryPolicy` is narrower than the taxonomy: only retryable `TRANSPORT_ERROR`, `RPC_TIMEOUT`, or `PROVIDER_ERROR` failures during provider startup/turn execution qualify as `transport`; provider 429/5xx signatures qualify as `rate-limit`. Each retry stays on the same job, reuses a continuation when present, increments `retries`, and emits `job.retry`. The default is no retries. Commands are claimed after backoff and immediately before relaunch: cancel terminals the job without another spawn, and steer is rejected because there is no active attempt.
 
 ## Correction Semantics
 
@@ -85,4 +85,4 @@ Codex app-server produces provider-level file and aggregated diff events. Cursor
 
 ## Response Bounds
 
-Event pages are additionally capped by serialized size (not just event count); a truncated page sets `truncated: "response-size"` and a valid `nextSeq`. Large diffs are windowed: `delegate_diff` accepts `offset`/`maxChars` and returns `totalChars`/`nextOffset`, or `statOnly` for per-file addition/deletion counts.
+Event pages are additionally capped by serialized size (not just event count); a truncated page sets `truncated: "response-size"` and a valid `nextSeq`. Large diffs are windowed: `delegate_diff` accepts `offset`/`maxChars` and returns `totalChars`/`nextOffset`, or `statOnly` for per-file addition/deletion counts. Result text uses the same absolute-offset shape through `delegate_inspect.resultWindow` and `delegate-jobs result`; `find` is case-sensitive and chooses the window start.

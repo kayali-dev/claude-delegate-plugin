@@ -21,9 +21,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.equal(responses[0].result.serverInfo.name, 'delegate-control');
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_events', 'delegate_transcript', 'delegate_diff',
-    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_resume', 'delegate_usage'
+    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_resume', 'delegate_review_round', 'delegate_usage'
   ]);
   const start = responses[1].result.tools.find((tool) => tool.name === 'delegate_start');
+  const inspect = responses[1].result.tools.find((tool) => tool.name === 'delegate_inspect');
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
@@ -32,7 +33,12 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   for (const option of ['profile', 'groupId', 'startPaused', 'ingestFiles', 'autoNudge', 'reportSchema']) {
     assert.ok(start.inputSchema.properties[option], option);
   }
+  assert.deepEqual(start.inputSchema.properties.waitFor.enum, ['session', 'turn', 'first-output']);
+  assert.ok(start.inputSchema.properties.waitForSession);
+  assert.ok(start.inputSchema.properties.dryRun);
+  assert.ok(inspect.inputSchema.properties.resultWindow);
   assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_release'));
+  assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_review_round'));
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
   assert.ok(resume.inputSchema.properties.retryPolicy);
   assert.ok(resume.inputSchema.properties.verify);
@@ -55,4 +61,10 @@ test('delegate-jobs help has CLI parity for caller options', () => {
   }
   assert.match(result.stdout, /release <job-id>/);
   assert.match(result.stdout, /stats \[--since/);
+  assert.match(result.stdout, /audit backfill/);
+  assert.match(result.stdout, /--wait-for session\|turn\|first-output/);
+  assert.match(result.stdout, /--wait-for-session/);
+  assert.match(result.stdout, /--dry-run/);
+  assert.match(result.stdout, /review-round <job-id> --prompt/);
+  assert.match(result.stdout, /result <job-id> \[--find text\] \[--offset N\] \[--max-chars N\]/);
 });
