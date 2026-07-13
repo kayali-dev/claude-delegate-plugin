@@ -17,7 +17,7 @@ test('bootstrap links every delegate command to the shim and is idempotent', () 
     const result = spawnSync(process.execPath, [bootstrap], { env, encoding: 'utf8' });
     assert.equal(result.status, 0);
   }
-  for (const name of ['delegate-config', 'delegate-route', 'delegate-health', 'delegate-cursor', 'delegate-jobs', 'delegate-usage', 'delegate-claude-usage']) {
+  for (const name of ['delegate-config', 'delegate-route', 'delegate-health', 'delegate-cursor', 'delegate-jobs', 'delegate-tui', 'delegate-usage', 'delegate-claude-usage']) {
     assert.equal(fs.readlinkSync(path.join(userBin, name)), shim);
   }
 });

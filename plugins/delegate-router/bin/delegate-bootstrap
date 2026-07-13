@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const COMMANDS = [
   'delegate-config', 'delegate-route', 'delegate-health', 'delegate-cursor',
-  'delegate-jobs', 'delegate-usage', 'delegate-claude-usage'
+  'delegate-jobs', 'delegate-tui', 'delegate-usage', 'delegate-claude-usage'
 ];
 
 try {

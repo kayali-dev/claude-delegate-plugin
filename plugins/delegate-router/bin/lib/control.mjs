@@ -299,7 +299,7 @@ function previousNewlineOffset(fd, before) {
   return -1;
 }
 
-function readLastCompleteEvent(file) {
+export function readLastCompleteEvent(file) {
   let fd;
   try { fd = fs.openSync(file, 'r'); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -482,13 +482,19 @@ export function readJobEventPage(id, options = {}) {
   });
 }
 
-const QUEUED_STALE_SECONDS = 600;
+export const QUEUED_STALE_SECONDS = 600;
+
+export function jobNeedsReconciliation(job, options = {}) {
+  const now = Number(options.nowSeconds ?? Math.floor(Date.now() / 1000));
+  const pid = job?.workerPid || job?.pid;
+  const workerAlive = Object.hasOwn(options, 'workerAlive') ? options.workerAlive === true : isProcessAlive(pid);
+  if (job?.status === 'running') return !workerAlive;
+  if (job?.status === 'queued') return !workerAlive && now - (job.createdAt || 0) > QUEUED_STALE_SECONDS;
+  return false;
+}
 
 function isOrphaned(job) {
-  const now = Math.floor(Date.now() / 1000);
-  if (job.status === 'running') return !isProcessAlive(job.workerPid || job.pid);
-  if (job.status === 'queued') return !job.pid && !job.workerPid && now - (job.createdAt || 0) > QUEUED_STALE_SECONDS;
-  return false;
+  return jobNeedsReconciliation(job);
 }
 
 export function reconcileJob(id) {
@@ -621,6 +627,27 @@ export function listManagedJobs(options = {}) {
     if (jobs.length >= limit) break;
   }
   return { jobs };
+}
+
+// Read-only introspection of the durable writer guard. This deliberately uses
+// job records rather than lock files: launch locks are short-lived admission
+// primitives, while active shared-worktree jobs are the ownership record a
+// dashboard or CLI should present.
+export function activeWriterLocks(records = listJobs()) {
+  return records
+    .filter((job) => job?.managedBy === 'delegate-control'
+      && WRITE_MODES.has(job.mode)
+      && job.isolation !== 'worktree'
+      && !TERMINAL_STATUSES.has(job.status))
+    .map((job) => ({
+      cwd: path.resolve(job.cwd || process.cwd()),
+      jobId: job.id,
+      provider: job.provider || null,
+      mode: job.mode,
+      status: job.status,
+      phase: job.phase || null
+    }))
+    .sort((left, right) => left.cwd.localeCompare(right.cwd) || left.jobId.localeCompare(right.jobId));
 }
 
 export function groupSummary(groupId) {
@@ -1783,7 +1810,11 @@ export function pruneJobs(options = {}) {
   if (!Number.isFinite(days) || days <= 0) return { pruned: [], maxAgeDays: days };
   const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
   const pruned = [];
-  for (const job of listJobs()) {
+  for (const record of listJobs()) {
+    let job = record;
+    if (!TERMINAL_STATUSES.has(job.status) && jobNeedsReconciliation(job)) {
+      try { job = reconcileJob(job.id) || job; } catch {}
+    }
     if (!TERMINAL_STATUSES.has(job.status)) continue;
     const finishedAt = job.completedAt || job.updatedAt || job.createdAt || 0;
     if (finishedAt > cutoff) continue;

@@ -139,6 +139,15 @@ test('review-round resumes with diff stat, changed files, scope, and findings, a
   assert.match(packet, /Findings:\nFix the missing boundary check\./);
   await waitUntil(child.id, (job) => ['completed', 'failed'].includes(job.status));
 
+  const cliRound = spawnSync(process.execPath, [cli, 'review-round', parent.id, '--prompt', 'Fix the CLI boundary too.'], {
+    encoding: 'utf8', env: { ...process.env }
+  });
+  assert.equal(cliRound.status, 0, cliRound.stderr);
+  assert.doesNotThrow(() => JSON.parse(cliRound.stdout));
+  assert.doesNotMatch(cliRound.stdout, /packet lint/i);
+  assert.match(cliRound.stderr, /packet lint/i);
+  await waitUntil(JSON.parse(cliRound.stdout).id, (job) => ['completed', 'failed'].includes(job.status));
+
   const beforeSecret = listJobs().length;
   assert.throws(() => reviewRoundManagedJob(parent.id, { prompt: 'API_KEY=abcdefghijklmnop' }), /looks like a credential/);
   assert.equal(listJobs().length, beforeSecret);

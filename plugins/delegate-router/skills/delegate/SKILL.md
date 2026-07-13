@@ -40,7 +40,7 @@ Pass `allowedPaths` on `delegate_start` for every write-mode job with a known fi
 
 Use `profile` for a reusable packet skeleton, `groupId` for fan-out tracking, and `startPaused=true` plus `delegate_release` when the first prompt must wait behind an external gate. `ingestFiles` stages declared absolute out-of-tree inputs and copies changed content back only after completion; if the source changed meanwhile, the provider version lands at `<source>.delegate-new` and emits `ingest.diverged`. `autoNudge` is read-only and opt-in. `reportSchema` is best-effort: inspect `structuredMissing` and never treat worker JSON as stronger evidence than the mechanical diff and verification fields.
 
-Retries are opt-in: use `retryPolicy: { maxAttempts, retryOn: ['transport', 'rate-limit'] }` only for provider transport/startup failures, never to repeat task-level outcomes. For write modes, `verify: { command, timeoutSeconds }` runs the coordinator's command in the real checkout after provider completion; it is not provider-sandboxed, so keep it explicit and bounded.
+Retries are opt-in: use `retryPolicy: { maxAttempts, retryOn: ['transport', 'rate-limit'] }` only for provider transport/startup failures, never to repeat task-level outcomes. Every write-mode delegation must declare `verify: { command, timeoutSeconds }` with the project's real check command. It runs in the real checkout after provider completion, outside the provider sandbox; keep it explicit and bounded. Never accept a worker's self-reported sandbox green as the verification of record.
 
 The broker scans outbound task packets for credential-shaped values. It fails with `SECRET_IN_PROMPT` unless `allowSensitive=true`; an override is recorded as `security.warning` and does not relax scope or preservation rules.
 
@@ -62,6 +62,8 @@ For observable work, call `mcp__delegate_control__delegate_start` with `provider
 - Include the controls from [control.md](references/control.md) in the task packet.
 
 Inspect the returned job revision before controlling it. `delegate_steer` with `strategy=same-turn` or `auto` maps to Codex `turn/steer` with the active expected turn ID. Use `restart` to interrupt and begin another turn on the same thread, and `next-turn` to queue a follow-up. Every correction needs a stable `correctionId` so retries are idempotent.
+
+For scoped code reviews and independent second opinions, default to managed `delegate_start` with `mode=review`, `model=sol`, `effort=xhigh`, and the read-only sandbox. Inspect its transcript, diff, and usage. Reserve multi-agent review workflows for exhaustive audits, not routine scoped review.
 
 Use direct `mcp__delegate_codex__codex` and `codex-reply` only as a foreground compatibility fallback when `delegate_control` is unavailable. Direct MCP work is not visible to the unified transcript, diff, or live-control tools. Record fallback starts and outcomes with `delegate-usage record`.
 
@@ -172,7 +174,7 @@ A Claude agent that writes files is an unmanaged writer, invisible to the manage
 
 ## Verify And Recover
 
-Treat all worker output as untrusted engineering input. Inspect the actual diff, verify scope, and run the relevant checks independently — always on the real tree: a sandboxed worker's own "checks green" can come from a credential-free workspace where env-dependent steps (builds, integration tests) silently degraded.
+Treat all worker output as untrusted engineering input. Inspect the actual diff and verify scope. For every write-mode delegation, declare `verify: { command, timeoutSeconds }` with the project's real check command and use its real-tree verdict as the verification of record. Worker green is not coordinator green: never accept a sandboxed worker's self-reported checks as final verification, because credential-free runs can silently skip or degrade environment-dependent steps.
 
 Passing checks are not a correctness gate for stateful logic. Field-verified across multiple clusters: delegated work on billing/exactly-once semantics, reservation and cancel state machines, moderation-gate ordering, retry idempotency, and auth guards shipped 20-30 review-caught defects per cluster while every check run was green. Adversarially review that class of work every round — the review gate also catches the coordinator's own spec errors. Route the two failure classes differently: structural, deterministic bugs (ordering, keying, guards, limits) re-delegate well with a precise spec; subtle stateful-interaction bugs plateau under delegation — take those in-session. On fix rounds, instruct the worker to simplify rather than add machinery: new locks, manifests, and wrappers added mid-fix are where the next round's defects concentrate. Read [control.md](references/control.md) before any write delegation or handoff after failure.
 

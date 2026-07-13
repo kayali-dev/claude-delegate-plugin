@@ -75,7 +75,7 @@ Codex interruption waits up to `DELEGATE_DRAIN_GRACE_MS` (default 3000, maximum 
 
 `DELEGATE_MAX_CHANGED_FILES` defaults to 200. Codex live `fileChange` paths crossing it interrupt and fail with non-retryable `LARGE_WRITE` plus a checkpoint. Cursor exposes only completion inventory, so its record is flagged `largeWrite: true` and evented `large.write` post-hoc; that asymmetry cannot prevent Cursor's writes.
 
-Write modes may set `verify: { command, timeoutSeconds }` (default 600 seconds). The worker runs `/bin/sh -c` in the real job cwd only after provider success, outside the provider sandbox, and records command, exit code, duration, and a redacted output tail. A nonzero verdict does not rewrite the provider outcome: status remains `completed`, while `delegate-jobs wait` exits 6.
+Every write mode must set `verify: { command, timeoutSeconds }` (default 600 seconds) to the project's real check command. The worker runs `/bin/sh -c` in the real job cwd only after provider success, outside the provider sandbox, and records command, exit code, duration, and a redacted output tail. A nonzero verdict does not rewrite the provider outcome: status remains `completed`, while `delegate-jobs wait` exits 6.
 
 Adapters assert their CLI versions before opening a provider session. `DELEGATE_MIN_CODEX_VERSION` and `DELEGATE_MIN_CURSOR_VERSION` override the validated built-in floors (`0.144.0` and `2026.7.0` respectively); a lower observed version fails with non-retryable `PROVIDER_TOO_OLD` and reports both versions.
 
@@ -100,4 +100,4 @@ Long result text can be read with `delegate_inspect.resultWindow` or `delegate-j
 
 ## Acceptance
 
-Do not report completion solely from an agent message. Inspect changes, verify requested behavior, and identify any checks that could not run. External-agent claims are evidence to validate, not proof.
+Do not report completion solely from an agent message. Require every write-mode delegation to declare `verify: { command, timeoutSeconds }` with the project's real check command. Treat its real-tree verdict as the verification of record; never substitute a worker's self-reported sandbox green. Inspect changes, verify requested behavior, and identify any checks that could not run. External-agent claims are evidence to validate, not proof.

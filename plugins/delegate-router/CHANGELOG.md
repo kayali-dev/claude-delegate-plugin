@@ -2,6 +2,16 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.19.0 — 2026-07-13
+
+First release of `delegate-tui` — a zero-dependency hand-rolled ANSI dashboard over the local job store (fleet board, five-tab job detail with live transcript follow, providers/stats panels, safe controls, profile-aware launcher with mandatory dry-run). Implemented by delegated Codex Sol@xhigh with three owner-tested fix rounds: semantic muted palette + NO_COLOR, fast paint (8ms real-store startup) and instant teardown, transcript history hydration, stale-record reconciliation in the TUI and in pruneJobs, virtualized scrolling with wrap caching and input coalescing (1.3ms mean scroll frame on a 26k-event journal), SGR mouse-wheel support with mouse-off guaranteed on every exit path.
+
+- Added `delegate-tui`, a zero-dependency, hand-rolled ANSI fleet dashboard with cursor-tailed job journals, buffered changed-run repainting, Unicode display-width handling, fleet/detail/provider/stats views, and a dry-run-gated launcher.
+- Added safe interactive controls: revisioned steer/release/cancel, terminal resume and narration nudge, suffix-confirmed cancellation, and dry-run-first safe revert. Dangerous sandbox, approval-force, and concurrent-writer overrides are intentionally absent.
+- Added read-only active-writer introspection in the shared control library, terminal bootstrap/shim exposure, deterministic 100×30 headless snapshots, and focused width/screen/datasource/view-model/CLI coverage.
+- This development scope intentionally leaves runtime and plugin versions at `0.18.1` until interactive owner validation is complete.
+- Docs: made managed Codex `mode=review` with Sol at `xhigh` the default for scoped review and required real-tree `verify` commands as the verification of record for write-mode delegations.
+
 ## 0.18.1 — 2026-07-13
 
 - Docs: general-purpose coordinator lessons from the dogfood run moved into the skill — write-mode packets must state that zero changed files is a failed objective; idempotency replay intentionally returns objective-failed jobs (mint a new key for a changed retry); fold an analysis-only turn's output into the fresh packet as verified context.

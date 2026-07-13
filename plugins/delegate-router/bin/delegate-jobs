@@ -94,6 +94,15 @@ function requireJob(id) {
 function json(value) { console.log(JSON.stringify(value, null, 2)); }
 function terminal(status) { return ['completed', 'failed', 'cancelled'].includes(status); }
 
+// review-round may emit packet-lint diagnostics while it assembles and launches
+// the continuation. Keep stdout exclusively JSON for callers that pipe it.
+function withStdoutDiagnosticsRedirected(action) {
+  const originalWrite = process.stdout.write;
+  process.stdout.write = process.stderr.write.bind(process.stderr);
+  try { return action(); }
+  finally { process.stdout.write = originalWrite; }
+}
+
 const args = process.argv.slice(2);
 const rawCommand = args.shift() || 'status';
 const command = rawCommand === 'list' ? 'status' : rawCommand;
@@ -283,7 +292,8 @@ try {
       overrideLimit: args.includes('--override-limit'), overrideWriter: args.includes('--override-writer')
     }));
   } else if (command === 'review-round') {
-    json(reviewRoundManagedJob(args[0], { prompt: prompt(args) }));
+    const result = withStdoutDiagnosticsRedirected(() => reviewRoundManagedJob(args[0], { prompt: prompt(args) }));
+    json(result);
   } else if (command === 'usage') {
     json(jobUsage(args[0]));
   } else if (command === 'result') {

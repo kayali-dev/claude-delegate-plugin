@@ -28,7 +28,7 @@ import {
   updateManagedJob
 } from '../bin/lib/control.mjs';
 import { filterDiffPaths, pathMatchesScope, validatedAllowedPaths } from '../bin/lib/control.mjs';
-import { auditLogPath, loadState, saveState, setWindow } from '../bin/lib/state.mjs';
+import { auditLogPath, loadJob, loadState, saveJob, saveState, setWindow } from '../bin/lib/state.mjs';
 
 async function isolated(fn) {
   const previous = process.env.DELEGATE_STATE_FILE;
@@ -316,6 +316,28 @@ test('prune removes aged terminal jobs and preserves active ones', () => isolate
   assert.equal(inspectJob(active.id).status, 'queued');
   assert.ok(!fs.existsSync(path.join(directory, 'jobs', `${done.id}.events.jsonl`)));
   assert.ok(!fs.existsSync(path.join(directory, 'jobs', `${done.id}.prompt`)));
+}));
+
+test('prune reconciles stale queued debris before applying terminal retention', () => isolated((directory) => {
+  const stale = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'abandoned queue record' });
+  const old = Math.floor(Date.now() / 1000) - 30 * 86400;
+  const record = loadJob(stale.id);
+  record.createdAt = old;
+  record.updatedAt = old;
+  saveJob(record);
+
+  const reconciled = pruneJobs({ maxAgeDays: 14 });
+  assert.deepEqual(reconciled.pruned, []);
+  assert.equal(loadJob(stale.id).status, 'failed');
+  assert.equal(loadJob(stale.id).errorCode, 'ORPHANED');
+
+  const agedTerminal = loadJob(stale.id);
+  agedTerminal.completedAt = old;
+  agedTerminal.updatedAt = old;
+  saveJob(agedTerminal);
+  const pruned = pruneJobs({ maxAgeDays: 14 });
+  assert.deepEqual(pruned.pruned, [stale.id]);
+  assert.equal(loadJob(stale.id), null);
 }));
 
 test('terminal audit log is one-line-per-transition, redacted, private, and never pruned', () => isolated((directory) => {

@@ -1,0 +1,618 @@
+#!/usr/bin/env node
+import crypto from 'node:crypto';
+import {
+  filterDiffPaths,
+  launchManagedJob,
+  resumeManagedJob,
+  revertManagedJob,
+  sliceDiff,
+  submitControl
+} from './lib/control.mjs';
+import { normalizeBrokerError } from './lib/errors.mjs';
+import { loadJob } from './lib/state.mjs';
+import {
+  compareVirtualPositions,
+  invalidateWrapCache,
+  paintFrame,
+  scrollVirtualLog,
+  virtualLogBottomPosition
+} from './lib/tui/components.mjs';
+import { tailAllJobs } from './lib/tui/datasource.mjs';
+import { BufferedInput } from './lib/tui/input.mjs';
+import { Screen } from './lib/tui/screen.mjs';
+import { splitGraphemes } from './lib/tui/width.mjs';
+import { createViewModel, nudgeEligible } from './lib/tui/viewmodels.mjs';
+
+const USAGE = `Usage: delegate-tui
+
+Live ANSI dashboard for Delegate Router's local managed-job store.
+
+Options:
+  -h, --help   Show this help without entering the alternate screen
+
+The TUI requires an interactive macOS or Linux terminal. It honors
+DELEGATE_STATE_FILE and the ordinary delegate-router provider configuration.`;
+
+const args = process.argv.slice(2);
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+if (args.length) {
+  console.error(`delegate-tui: unknown option: ${args[0]}\n${USAGE}`);
+  process.exit(2);
+}
+if (!process.stdout.isTTY) {
+  console.error('delegate-tui: stdout is not a TTY; run it from an interactive terminal');
+  process.exit(2);
+}
+if (!process.stdin.isTTY) {
+  console.error('delegate-tui: stdin is not a TTY; interactive input is required');
+  process.exit(2);
+}
+if (process.platform === 'win32') {
+  console.error('delegate-tui: v1 supports macOS and Linux terminals only');
+  process.exit(2);
+}
+
+const NUDGE_PROMPT = 'Your final message described the deliverable instead of containing it. Paste the complete findings inline now.';
+const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+const DIFF_WINDOW = 12000;
+const CHOICE_FIELDS = new Set(['profile', 'provider', 'mode', 'effort']);
+
+const screen = new Screen();
+const source = tailAllJobs();
+let store = source.getState();
+let quitting = false;
+let inputBatch = false;
+let inputDrawPending = false;
+const ui = {
+  screen: 'fleet', now: Date.now(), selectedIndex: 0, scroll: 0,
+  activeOnly: false, filter: '', help: false, input: null, confirm: null,
+  status: '', statusKind: 'info', detailTab: 0, detailScroll: 0,
+  diffSelection: 0, diffFile: null, diffWindow: null, eventFilter: '', follow: true,
+  providerScroll: 0, statsSelection: 0, statsScroll: 0,
+  launcher: {
+    fieldIndex: 0, profile: '<none>', provider: 'codex', model: 'auto',
+    mode: 'consult', effort: '<default>', prompt: '', allowedPaths: '',
+    preview: null, previewSignature: null, previewScroll: 0
+  }
+};
+
+function viewport() {
+  return { width: screen.columns, height: screen.rows };
+}
+
+function viewModel() {
+  return createViewModel(store, ui, viewport());
+}
+
+function draw() {
+  if (quitting) return;
+  if (inputBatch) {
+    inputDrawPending = true;
+    return;
+  }
+  const frame = viewModel();
+  screen.render(paintFrame(frame));
+  if (frame.meta?.reconcileJobIds?.length) void source.reconcileVisibleJobs(frame.meta.reconcileJobIds, { limit: 5 });
+}
+
+function setStatus(message, kind = 'info') {
+  ui.status = String(message || '');
+  ui.statusKind = kind;
+}
+
+function clearStatus() {
+  ui.status = '';
+  ui.statusKind = 'info';
+}
+
+function refresh() {
+  store = source.refresh();
+  draw();
+}
+
+function quit(code = 0) {
+  if (quitting) return;
+  quitting = true;
+  clearInterval(clock);
+  source.close();
+  bufferedInput.close();
+  process.stdin.off('data', onData);
+  screen.stop();
+  process.exit(code);
+}
+
+function liveJob(id) {
+  const job = loadJob(id);
+  if (!job) throw Object.assign(new Error(`job not found: ${id}`), { code: 'NOT_FOUND' });
+  return job;
+}
+
+function selectedJob() {
+  if (ui.screen === 'detail') return store.jobs.find((job) => job.id === ui.jobId) || null;
+  const id = viewModel().meta?.selectedJobId;
+  return store.jobs.find((job) => job.id === id) || null;
+}
+
+function runMutation(action, success) {
+  try {
+    const result = action();
+    setStatus(typeof success === 'function' ? success(result) : success);
+    refresh();
+    return result;
+  } catch (error) {
+    const typed = normalizeBrokerError(error, { defaultCode: 'INTERNAL' });
+    setStatus(`[${typed.code}] ${typed.message}`, 'error');
+    refresh();
+    return null;
+  }
+}
+
+function beginInput(action, label, value = '', extra = {}) {
+  ui.input = { action, label, value: String(value || ''), ...extra };
+  draw();
+}
+
+function launchOptions() {
+  const launcher = ui.launcher;
+  const allowedPaths = String(launcher.allowedPaths || '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  return {
+    provider: launcher.provider,
+    model: launcher.model || 'auto',
+    mode: launcher.mode || 'consult',
+    ...(launcher.profile && launcher.profile !== '<none>' ? { profile: launcher.profile } : {}),
+    ...(launcher.effort && launcher.effort !== '<default>' ? { effort: launcher.effort } : {}),
+    prompt: launcher.prompt,
+    cwd: process.cwd(),
+    ...(allowedPaths.length ? { allowedPaths } : {})
+  };
+}
+
+function launcherSignature() {
+  return JSON.stringify(launchOptions());
+}
+
+function invalidatePreview() {
+  ui.launcher.preview = null;
+  ui.launcher.previewSignature = null;
+}
+
+function dryRunLaunch() {
+  runMutation(() => {
+    const options = launchOptions();
+    const preview = launchManagedJob({ ...options, dryRun: true });
+    ui.launcher.preview = preview;
+    ui.launcher.previewSignature = JSON.stringify(options);
+    ui.launcher.previewScroll = 0;
+    return preview;
+  }, (preview) => `Dry run ready: ${preview.provider}/${preview.model}; inspect the exact packet, then press y`);
+}
+
+function launchPreviewed() {
+  if (!ui.launcher.preview || ui.launcher.previewSignature !== launcherSignature()) {
+    setStatus('The current form has no matching dry-run preview; press d first', 'error');
+    draw();
+    return;
+  }
+  const started = runMutation(() => launchManagedJob(launchOptions()), (job) => `Launched ${job.id}`);
+  if (started) {
+    ui.screen = 'fleet';
+    ui.selectedIndex = 0;
+    draw();
+  }
+}
+
+function commitInput() {
+  const input = ui.input;
+  if (!input) return;
+  ui.input = null;
+  const value = input.value;
+  if (input.action === 'fleet-filter') {
+    ui.filter = value;
+    ui.selectedIndex = 0;
+    clearStatus();
+  } else if (input.action === 'event-filter') {
+    ui.eventFilter = value;
+    ui.detailScroll = 0;
+    clearStatus();
+  } else if (input.action === 'launcher-field') {
+    ui.launcher[input.field] = value;
+    invalidatePreview();
+    clearStatus();
+  } else if (input.action === 'steer') {
+    if (!value.trim()) setStatus('Steering text is required', 'error');
+    else runMutation(() => {
+      const job = liveJob(input.jobId);
+      return submitControl(job.id, { type: 'steer', correctionId: crypto.randomUUID(), strategy: 'auto', text: value.trim() }, job.revision);
+    }, (result) => `Steer queued at revision ${result.revision}`);
+  } else if (input.action === 'resume') {
+    if (!value.trim()) setStatus('Resume text is required', 'error');
+    else runMutation(() => resumeManagedJob(input.jobId, { prompt: value.trim() }), (job) => `Resumed as ${job.id}`);
+  }
+  draw();
+}
+
+function commitConfirm() {
+  const confirm = ui.confirm;
+  if (!confirm) return;
+  if (confirm.value !== confirm.expected) {
+    setStatus(`Confirmation did not match ${confirm.expected}`, 'error');
+    draw();
+    return;
+  }
+  ui.confirm = null;
+  if (confirm.action === 'cancel') {
+    runMutation(() => {
+      const job = liveJob(confirm.jobId);
+      return submitControl(job.id, { type: 'cancel', commandId: crypto.randomUUID() }, job.revision);
+    }, (result) => `Cancellation queued at revision ${result.revision}`);
+  } else if (confirm.action === 'revert') {
+    runMutation(() => revertManagedJob(confirm.jobId), (result) => `Revert finished: ${result.reverted.length} reverted, ${result.skipped.length} skipped, ${result.conflicts.length} conflicts`);
+  }
+  draw();
+}
+
+function editValue(key) {
+  const target = ui.confirm || ui.input;
+  if (!target) return false;
+  if (key === 'escape') {
+    if (ui.confirm) ui.confirm = null;
+    else ui.input = null;
+    draw();
+    return true;
+  }
+  if (key === 'enter') {
+    if (ui.confirm) commitConfirm();
+    else commitInput();
+    return true;
+  }
+  if (key === 'backspace') {
+    const graphemes = splitGraphemes(target.value || '');
+    graphemes.pop();
+    target.value = graphemes.join('');
+    draw();
+    return true;
+  }
+  if (key === 'ctrl-u') {
+    target.value = '';
+    draw();
+    return true;
+  }
+  if (['up', 'down', 'left', 'right', 'tab', 'shift-tab'].includes(key)) return true;
+  if (key.length && !/[\u0000-\u001f\u007f]/.test(key)) {
+    target.value += key;
+    draw();
+    return true;
+  }
+  return true;
+}
+
+function choiceValues(field) {
+  if (field === 'profile') return ['<none>', ...(store.profiles || [])];
+  if (field === 'provider') {
+    const enabled = (store.providers || []).filter((provider) => provider.enabled && ['codex', 'cursor'].includes(provider.name)).map((provider) => provider.name);
+    return enabled.length ? enabled : ['codex', 'cursor'];
+  }
+  if (field === 'mode') return ['consult', 'plan', 'review', 'implement', 'verify'];
+  if (field === 'effort') return ['<default>', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  return [];
+}
+
+function cycleLauncher(direction) {
+  const fields = viewModel().meta.fields;
+  const field = fields[ui.launcher.fieldIndex];
+  const choices = choiceValues(field);
+  if (!choices.length) return;
+  const current = Math.max(0, choices.indexOf(ui.launcher[field]));
+  ui.launcher[field] = choices[(current + direction + choices.length) % choices.length];
+  if (field === 'provider' && !ui.launcher.model) ui.launcher.model = 'auto';
+  invalidatePreview();
+  draw();
+}
+
+function editLauncherField() {
+  const fields = viewModel().meta.fields;
+  const field = fields[ui.launcher.fieldIndex];
+  if (CHOICE_FIELDS.has(field)) cycleLauncher(1);
+  else beginInput('launcher-field', field === 'allowedPaths' ? 'Allowed paths (comma-separated)' : field[0].toUpperCase() + field.slice(1), ui.launcher[field], { field });
+}
+
+function openDiffFile() {
+  const model = viewModel();
+  const path = model.meta.diffFiles?.[ui.diffSelection];
+  if (!path) {
+    setStatus('No diff file is selected', 'error');
+    draw();
+    return;
+  }
+  const diff = store.diffsByJob?.[ui.jobId] || '';
+  const filtered = filterDiffPaths(diff, [path]);
+  ui.diffFile = path;
+  ui.diffWindow = sliceDiff(filtered, { offset: 0, maxChars: DIFF_WINDOW });
+  ui.detailScroll = 0;
+  draw();
+}
+
+function pageDiff(direction) {
+  if (!ui.diffFile) return;
+  const diff = filterDiffPaths(store.diffsByJob?.[ui.jobId] || '', [ui.diffFile]);
+  const offset = direction > 0
+    ? ui.diffWindow?.nextOffset
+    : Math.max(0, Number(ui.diffWindow?.offset || 0) - DIFF_WINDOW);
+  if (offset == null) return;
+  ui.diffWindow = sliceDiff(diff, { offset, maxChars: DIFF_WINDOW });
+  ui.detailScroll = 0;
+  draw();
+}
+
+function beginCancel(job) {
+  if (!job || TERMINAL.has(job.status)) return setStatus('Only active jobs can be cancelled', 'error');
+  const expected = job.id.slice(-4);
+  ui.confirm = {
+    action: 'cancel', jobId: job.id, expected, value: '', danger: true,
+    title: `Cancel ${job.id}`,
+    lines: [`Cancellation stays pending until the provider acknowledges or exits.`, `Type the last 4 job-id characters to queue cancel: ${expected}`],
+    label: 'Suffix'
+  };
+  draw();
+}
+
+function beginRevert(job) {
+  if (!job || !TERMINAL.has(job.status)) return setStatus('Revert is available only for terminal jobs', 'error');
+  try {
+    const plan = revertManagedJob(job.id, { dryRun: true });
+    const lines = [
+      `DRY RUN: ${plan.reverted.length} revertable, ${plan.skipped.length} skipped, ${plan.conflicts.length} conflicts`,
+      ...plan.reverted.map((entry) => `${entry.action}: ${entry.path}`),
+      ...plan.skipped.map((entry) => `SKIP ${entry.path}: ${entry.reason}`),
+      ...plan.conflicts.map((entry) => `CONFLICT ${entry.path || '<inventory>'}: ${entry.reason}`)
+    ];
+    if (lines.length > 18) lines.splice(17, lines.length - 17, `… ${lines.length - 17} more plan rows; inspect with delegate-jobs revert --dry-run for the full list`);
+    const expected = job.id.slice(-4);
+    lines.push(`Type the last 4 job-id characters to apply this safe subset: ${expected}`);
+    ui.confirm = { action: 'revert', jobId: job.id, expected, value: '', danger: true, title: `Revert plan · ${job.id}`, lines, label: 'Suffix' };
+    draw();
+  } catch (error) {
+    const typed = normalizeBrokerError(error, { defaultCode: 'INTERNAL' });
+    setStatus(`[${typed.code}] ${typed.message}`, 'error');
+    draw();
+  }
+}
+
+function detailAction(key) {
+  const job = selectedJob();
+  if (!job) return;
+  if (key === 's') {
+    if (TERMINAL.has(job.status)) setStatus('Steer is available only while a job is active', 'error');
+    else beginInput('steer', 'Steer', '', { jobId: job.id });
+  } else if (key === 'r') {
+    if (!TERMINAL.has(job.status)) setStatus('Resume is available only after terminal state', 'error');
+    else beginInput('resume', 'Resume packet', '', { jobId: job.id });
+  } else if (key === 'R') {
+    if (!job.startPaused || job.phase !== 'paused') setStatus('Release is available only while a start-paused job is paused', 'error');
+    else runMutation(() => {
+      const live = liveJob(job.id);
+      return submitControl(live.id, { type: 'release', commandId: crypto.randomUUID() }, live.revision);
+    }, (result) => `Release queued at revision ${result.revision}`);
+  } else if (key === 'n') {
+    if (!nudgeEligible(job)) setStatus('Nudge requires a terminal read-mode job flagged resultSuspect', 'error');
+    else runMutation(() => resumeManagedJob(job.id, { prompt: NUDGE_PROMPT }), (child) => `Nudge resumed as ${child.id}`);
+  } else if (key === 'c') beginCancel(job);
+  else if (key === 'v') beginRevert(job);
+  draw();
+}
+
+function detailViewport(model = viewModel()) {
+  const content = model.panes?.[0]?.content;
+  return {
+    content,
+    height: Math.max(1, screen.rows - 5),
+    width: Math.max(1, screen.columns - 2)
+  };
+}
+
+function moveVirtualDetail(content, direction, width, height) {
+  const bottom = virtualLogBottomPosition(content, width, height);
+  if (ui.follow) {
+    if (direction > 0) return;
+    ui.detailScroll = bottom;
+    ui.follow = false;
+  }
+  const next = scrollVirtualLog(content, ui.detailScroll, direction, width);
+  if (direction > 0 && compareVirtualPositions(next, bottom) >= 0) {
+    ui.detailScroll = bottom;
+    ui.follow = true;
+  } else {
+    ui.detailScroll = next;
+  }
+}
+
+function providerScrollMax() {
+  const providerHeight = Math.max(6, Math.min(10, Math.floor((screen.rows - 2) / 2)));
+  const visible = Math.max(1, screen.rows - providerHeight - 4);
+  return Math.max(0, (store.writerLocks?.length || 0) - visible);
+}
+
+function move(direction) {
+  if (ui.screen === 'fleet') {
+    const count = viewModel().meta.visibleJobIds.length;
+    ui.selectedIndex = Math.max(0, Math.min(Math.max(0, count - 1), ui.selectedIndex + direction));
+  } else if (ui.screen === 'detail') {
+    if (ui.detailTab === 1 && !ui.diffFile) {
+      const count = viewModel().meta.diffFiles.length;
+      ui.diffSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.diffSelection + direction));
+    } else {
+      const model = viewModel();
+      const { content, height, width } = detailViewport(model);
+      if (content?.virtual) {
+        moveVirtualDetail(content, direction, width, height);
+      } else {
+        const count = model.meta.scrollItemCount || 0;
+        const maxScroll = Math.max(0, count - height);
+        ui.detailScroll = Math.max(0, Math.min(maxScroll, Number(ui.detailScroll || 0) + direction));
+      }
+    }
+  } else if (ui.screen === 'providers') ui.providerScroll = Math.max(0, Math.min(providerScrollMax(), ui.providerScroll + direction));
+  else if (ui.screen === 'stats') {
+    const count = store.stats?.groups?.length || 0;
+    ui.statsSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.statsSelection + direction));
+  } else if (ui.screen === 'launcher') {
+    const count = viewModel().meta.fields.length;
+    ui.launcher.fieldIndex = Math.max(0, Math.min(count - 1, ui.launcher.fieldIndex + direction));
+  }
+  draw();
+}
+
+function page(direction) {
+  move(direction * Math.max(3, screen.rows - 6));
+}
+
+function moveEdge(end) {
+  const model = viewModel();
+  if (ui.screen === 'fleet') {
+    ui.selectedIndex = end ? Math.max(0, model.meta.visibleJobIds.length - 1) : 0;
+  } else if (ui.screen === 'detail') {
+    if (ui.detailTab === 1 && !ui.diffFile) {
+      ui.diffSelection = end ? Math.max(0, model.meta.diffFiles.length - 1) : 0;
+    } else {
+      const { content, height, width } = detailViewport(model);
+      if (content?.virtual) {
+        ui.detailScroll = end ? virtualLogBottomPosition(content, width, height) : { entry: 0, line: 0 };
+        ui.follow = end;
+      } else {
+        const maxScroll = Math.max(0, (model.meta.scrollItemCount || 0) - height);
+        ui.detailScroll = end ? maxScroll : 0;
+      }
+    }
+  } else if (ui.screen === 'providers') {
+    ui.providerScroll = end ? providerScrollMax() : 0;
+  } else if (ui.screen === 'stats') {
+    ui.statsSelection = end ? Math.max(0, (store.stats?.groups?.length || 0) - 1) : 0;
+  } else if (ui.screen === 'launcher') {
+    ui.launcher.fieldIndex = end ? Math.max(0, model.meta.fields.length - 1) : 0;
+  }
+  draw();
+}
+
+function goBack() {
+  if (ui.help) ui.help = false;
+  else if (ui.screen === 'detail' && ui.diffFile) {
+    ui.diffFile = null;
+    ui.diffWindow = null;
+    ui.detailScroll = 0;
+  } else if (ui.screen !== 'fleet') {
+    if (ui.screen === 'detail') void source.selectJob(null);
+    ui.screen = 'fleet';
+  }
+  clearStatus();
+  draw();
+}
+
+function handleKey(key) {
+  if (key === 'ctrl-c') return quit(0);
+  if (ui.input || ui.confirm) return editValue(key);
+  if (key === 'q') return quit(0);
+  if (ui.help) {
+    if (key === '?' || key === 'escape') ui.help = false;
+    draw();
+    return;
+  }
+  if (key && typeof key === 'object' && key.type === 'scroll') return move(key.delta);
+  if (key === '?') { ui.help = true; draw(); return; }
+  if (key === 'escape') return goBack();
+  if (key === 'up' || key === 'k') return move(-1);
+  if (key === 'down' || key === 'j') return move(1);
+  if (key === 'page-up') return page(-1);
+  if (key === 'page-down') return page(1);
+  if (key === 'home' || key === 'g') return moveEdge(false);
+  if (key === 'end' || key === 'G') return moveEdge(true);
+  if (key === 'p') {
+    if (ui.screen === 'detail') void source.selectJob(null);
+    ui.screen = ui.screen === 'providers' ? 'fleet' : 'providers'; clearStatus(); draw(); return;
+  }
+  if (key === 't') {
+    if (ui.screen === 'detail') void source.selectJob(null);
+    ui.screen = ui.screen === 'stats' ? 'fleet' : 'stats'; clearStatus(); draw(); return;
+  }
+  if (key === 'N') {
+    if (ui.screen === 'detail') void source.selectJob(null);
+    const enabled = choiceValues('provider');
+    if (!enabled.includes(ui.launcher.provider)) ui.launcher.provider = enabled[0];
+    ui.screen = 'launcher'; clearStatus(); draw(); return;
+  }
+  if (ui.screen === 'fleet') {
+    if (key === 'a') { ui.activeOnly = !ui.activeOnly; ui.selectedIndex = 0; draw(); return; }
+    if (key === '/') { beginInput('fleet-filter', 'Filter id/model/cwd', ui.filter); return; }
+    if (key === 'enter') {
+      const job = selectedJob();
+      if (job) {
+        ui.screen = 'detail'; ui.jobId = job.id; ui.detailTab = 0; ui.detailScroll = 0;
+        ui.diffSelection = 0; ui.diffFile = null; ui.diffWindow = null; ui.follow = true; clearStatus(); draw();
+        void source.selectJob(job.id);
+      }
+    }
+    return;
+  }
+  if (ui.screen === 'launcher') {
+    if (key === 'enter') editLauncherField();
+    else if (key === 'left') cycleLauncher(-1);
+    else if (key === 'right') cycleLauncher(1);
+    else if (key === 'd') dryRunLaunch();
+    else if (key === 'y') launchPreviewed();
+    return;
+  }
+  if (ui.screen !== 'detail') return;
+  if (/^[1-5]$/.test(key)) {
+    ui.detailTab = Number(key) - 1; ui.detailScroll = 0; ui.diffFile = null; ui.diffWindow = null; draw(); return;
+  }
+  if (key === '[' || key === ']') {
+    ui.detailTab = (ui.detailTab + (key === ']' ? 1 : -1) + 5) % 5;
+    ui.detailScroll = 0; ui.diffFile = null; ui.diffWindow = null; draw(); return;
+  }
+  if (key === 'f' && [0, 4].includes(ui.detailTab)) {
+    if (ui.follow) {
+      const model = viewModel();
+      const { content, height, width } = detailViewport(model);
+      ui.detailScroll = content?.virtual ? virtualLogBottomPosition(content, width, height) : ui.detailScroll;
+      ui.follow = false;
+    } else {
+      ui.follow = true;
+    }
+    draw();
+    return;
+  }
+  if (key === '/' && ui.detailTab === 4) { beginInput('event-filter', 'Event type filter', ui.eventFilter); return; }
+  if (key === 'enter' && ui.detailTab === 1 && !ui.diffFile) { openDiffFile(); return; }
+  if (key === 'left' && ui.detailTab === 1) { pageDiff(-1); return; }
+  if (key === 'right' && ui.detailTab === 1) { pageDiff(1); return; }
+  if (['s', 'r', 'R', 'n', 'c', 'v'].includes(key)) detailAction(key);
+}
+
+function onData(buffer) {
+  bufferedInput.push(buffer);
+}
+
+const bufferedInput = new BufferedInput({
+  onFlush(events) {
+    inputBatch = true;
+    inputDrawPending = false;
+    try {
+      for (const event of events) handleKey(event);
+    } finally {
+      inputBatch = false;
+      if (inputDrawPending) draw();
+    }
+  }
+});
+
+source.on('change', (next) => { store = next; draw(); });
+source.on('warning', (error) => { setStatus(`Store warning: ${error.message}`, 'error'); draw(); });
+screen.on('resize', () => { invalidateWrapCache(); draw(); });
+process.stdin.on('data', onData);
+const clock = setInterval(() => { ui.now = Date.now(); draw(); }, 1000);
+clock.unref?.();
+
+screen.start();
+draw();

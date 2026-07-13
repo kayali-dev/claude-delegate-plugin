@@ -11,12 +11,12 @@ test('plugin metadata and MCP registrations stay portable and version-aligned', 
   const manifest = JSON.parse(fs.readFileSync(path.join(plugin, '.claude-plugin', 'plugin.json'), 'utf8'));
   const mcp = JSON.parse(fs.readFileSync(path.join(plugin, '.mcp.json'), 'utf8'));
   assert.equal(runtime.version, manifest.version);
-  assert.equal(manifest.version, '0.18.1');
+  assert.equal(manifest.version, '0.19.0');
   assert.equal(mcp.mcpServers.delegate_control.command, 'node');
   assert.match(mcp.mcpServers.delegate_control.args[0], /^\$\{CLAUDE_PLUGIN_ROOT\}/);
   assert.equal(mcp.mcpServers.delegate_codex.command, 'node');
   assert.match(mcp.mcpServers.delegate_codex.args[0], /delegate-codex-mcp$/);
-  for (const executable of ['delegate-config', 'delegate-codex-mcp', 'delegate-control-mcp', 'delegate-worker', 'delegate-jobs']) {
+  for (const executable of ['delegate-config', 'delegate-codex-mcp', 'delegate-control-mcp', 'delegate-worker', 'delegate-jobs', 'delegate-tui']) {
     assert.match(fs.readFileSync(path.join(plugin, 'bin', executable), 'utf8'), /^#!\/usr\/bin\/env node/);
   }
 });
