@@ -56,6 +56,19 @@ Waves 1-3 were implemented by delegated Codex Sol@xhigh jobs supervised through 
 28. **Cancel honored during retry backoff** (S). A cancel landing in the backoff window between retry attempts is only honored after the next provider spawn. Check pending cancel commands before relaunching.
 29. **Stats backfill** (S). `audit.jsonl` only starts at v0.15.0; terminal job records still in retention are invisible to `stats`. `delegate-jobs audit backfill` appends synthetic audit lines for terminal jobs missing from the log (idempotent by jobId).
 
+## TUI Phase 2 (owner-approved 2026-07-13; three sequential waves, each owner-tested before release)
+
+**P2a — v0.20.0 "fleet depth"** (additive on the existing kernel):
+30. Group & chain screens: a groups screen with barrier progress (total/running/terminal/stalled per group) and member drill-in; a chain timeline for resume arcs — each round's changed-file count, verification verdict, and one-line outcome.
+31. In-pane search: `/` inside transcript/events/diff — incremental highlight, n/N navigation, match counter; a search field over the audit browser in stats.
+32. Launcher maturity: `$EDITOR` handoff for the packet body (full terminal restore → editor → alt-screen resume with repaint; inline input fallback when unset), `verify{}` and `ingestFiles` fields, a live route-advisor pane (routeTask + cost bands beside the form), and review-round from job detail with diff context auto-attached.
+33. macOS notifications via osascript for terminal transitions, stalls, scope violations, and budget events while the TUI runs; toggleable in-session and via DELEGATE_TUI_NOTIFY=0.
+34. Small: mouse click-to-select rows and click-to-switch tabs; `delegate-tui --job <id>` opens straight into detail; light-theme palette variant via DELEGATE_TUI_THEME.
+
+**P2b — v0.21.0 "coordinator layer"**: read-only best-effort ingest of Claude Code session transcripts (~/.claude/projects/*.jsonl) → sessions panel: active coordinators, cwd, writer-lock attribution, which delegate jobs belong to which conversation. Explicitly best-effort (transcript format is not a stable contract); degrades to absent panel on parse failure.
+
+**P2c — v0.22.0 "remote fleets"**: read-only remote export — `delegate-tui --serve` (loopback-only HTTP/SSE with a token file) and `--connect host` federation with a host column. Needs its own security pass before build: read-only guarantee, no control actions remotely in v1 of this feature, SSH tunnel as the documented transport.
+
 ## Declined / deferred, with reasons
 
 - **Native harness notification from the broker** — a detached worker cannot re-invoke the Claude Code harness; that is what background tasks/Monitor are for. `finishedPath` + Monitor stays the canonical long-wait; a bounded `delegate_wait` MCP tool would cap at ~30s long-poll like `delegate_events` and add little.
