@@ -79,7 +79,7 @@ if (!quick && report.cursor.enabled && report.cursor.installed) {
 }
 if (args.includes('--json')) console.log(JSON.stringify(report, null, 2));
 else {
-  console.log(`Delegate Router: ${report.ok ? 'ready' : 'degraded'}`);
+  console.log(`Delegate Router ${report.version}: ${report.ok ? 'ready' : 'degraded'} (CLI tracks the installed plugin; skill/MCP pin at session start)`);
   console.log(`Claude: ${report.claude.installed ? 'installed' : 'missing'}`);
   console.log(`Enabled providers: ${configuredProviders.join(', ')}`);
   console.log(`Codex: ${report.codex.enabled ? report.codex.installed ? 'installed' : 'missing' : 'disabled'}`);

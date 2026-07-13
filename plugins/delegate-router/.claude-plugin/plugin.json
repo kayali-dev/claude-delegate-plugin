@@ -1,7 +1,7 @@
 {
   "name": "delegate-router",
   "displayName": "Delegate Router",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Quota-aware delegation and live supervision for Codex and Cursor agents.",
   "author": {
     "name": "Mahmoud Kayyali",

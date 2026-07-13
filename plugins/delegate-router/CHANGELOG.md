@@ -2,6 +2,10 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.14.1 — 2026-07-13
+
+- `delegate-health` human output leads with the active version and the surface-pinning rule.
+
 ## 0.14.0 — 2026-07-13
 
 Field-report remediation (three independent coordinator evaluations).
