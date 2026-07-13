@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { brokerError, normalizeBrokerError } from '../bin/lib/errors.mjs';
 import {
   appendJobEvent,
   createManagedJob,
+  hashWorkingFile,
   inspectJob,
   jobDiff,
   jobFiles,
@@ -19,6 +22,7 @@ import {
   readJobEventPage,
   readJobEvents,
   redact,
+  revertManagedJob,
   resumeManagedJob,
   submitControl,
   updateManagedJob
@@ -351,6 +355,133 @@ test('timeoutSeconds is validated, stored, and inherited by resume', () => isola
   assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', timeoutSeconds: 1.5 }), /timeoutSeconds/);
   assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', maxOutputTokens: 0 }), /maxOutputTokens/);
   assert.equal(inspectJob(job.id).timeoutSeconds, 7200);
+}));
+
+test('retryPolicy and verify options validate, persist, and default safely', () => isolated((directory) => {
+  const configured = createManagedJob({
+    provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task',
+    retryPolicy: { maxAttempts: 3, retryOn: ['transport', 'rate-limit'] },
+    verify: { command: 'node --version' }
+  });
+  const record = inspectJob(configured.id);
+  assert.deepEqual(record.retryPolicy, { maxAttempts: 3, retryOn: ['transport', 'rate-limit'] });
+  assert.equal(record.retries, 0);
+  assert.deepEqual(record.verify, { command: 'node --version', timeoutSeconds: 600 });
+  assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', retryPolicy: { maxAttempts: 6, retryOn: ['transport'] } }), /maxAttempts/);
+  assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', retryPolicy: { maxAttempts: 2, retryOn: ['budget'] } }), /retryOn/);
+  assert.throws(() => createManagedJob({ provider: 'codex', mode: 'review', cwd: directory, prompt: 'task', verify: { command: 'true' } }), /write modes/);
+}));
+
+test('write jobs launched from a dirty baseline emit baseline.dirty with bounded paths', () => isolated((directory) => {
+  spawnSync('git', ['init', '-q'], { cwd: directory });
+  fs.writeFileSync(path.join(directory, 'local.txt'), 'pre-existing local work\n');
+  const job = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task' });
+  const warning = readJobEvents(job.id).find((event) => event.type === 'baseline.dirty');
+  assert.equal(warning.data.count, 1);
+  assert.deepEqual(warning.data.paths, ['local.txt']);
+}));
+
+test('inspect exposes shared resumability and driftReport derivations', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task', allowedPaths: ['src'] });
+  updateManagedJob(job.id, (current) => {
+    current.status = 'completed';
+    current.providerSessionId = 'thread-drift';
+    current.baselineFiles = ['src/existing.js'];
+    current.changedFiles = {
+      count: 3,
+      files: ['src/existing.js', 'src/new.js', 'outside.js'],
+      entries: [
+        { path: 'src/existing.js', status: ' M' },
+        { path: 'src/new.js', status: '??' },
+        { path: 'outside.js', kind: 'create' }
+      ]
+    };
+  });
+  const inspected = inspectJob(job.id);
+  assert.deepEqual(inspected.resumable, { ok: true, reason: 'the terminal job has a resumable provider session' });
+  assert.deepEqual(inspected.driftReport, {
+    modified: ['src/existing.js'],
+    newFiles: ['src/new.js', 'outside.js'],
+    outsideScope: ['outside.js']
+  });
+  updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; });
+  const blocked = inspectJob(job.id);
+  assert.equal(blocked.resumable.ok, false);
+  assert.match(blocked.resumable.reason, /multi-agent review flow/);
+  assert.throws(() => resumeManagedJob(job.id, { prompt: 'continue' }), /RESUME_UNSUPPORTED/);
+}));
+
+test('delegate-jobs revert restores owned files, skips overlap, and dry-run touches nothing', () => isolated((directory) => {
+  const git = (...args) => spawnSync('git', ['-c', 'user.email=test@example.test', '-c', 'user.name=Test', ...args], { cwd: directory, encoding: 'utf8' });
+  git('init', '-q');
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'baseline\n');
+  fs.writeFileSync(path.join(directory, 'deleted.txt'), 'restore me\n');
+  fs.writeFileSync(path.join(directory, 'overlap.txt'), 'baseline\n');
+  git('add', '.');
+  git('commit', '-qm', 'baseline');
+  fs.appendFileSync(path.join(directory, 'overlap.txt'), 'user edit\n');
+  const job = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task' });
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'job edit\n');
+  fs.writeFileSync(path.join(directory, 'created.txt'), 'job file\n');
+  fs.unlinkSync(path.join(directory, 'deleted.txt'));
+  fs.appendFileSync(path.join(directory, 'overlap.txt'), 'job overlap\n');
+  updateManagedJob(job.id, (current) => {
+    current.status = 'completed';
+    current.completedAt = Math.floor(Date.now() / 1000);
+    current.changedFiles = {
+      count: 4,
+      files: ['tracked.txt', 'created.txt', 'deleted.txt', 'overlap.txt'],
+      entries: [
+        { path: 'tracked.txt', finalHash: hashWorkingFile(directory, 'tracked.txt') },
+        { path: 'created.txt', status: '??', finalHash: hashWorkingFile(directory, 'created.txt') },
+        { path: 'deleted.txt', kind: 'delete', finalHash: hashWorkingFile(directory, 'deleted.txt') },
+        { path: 'overlap.txt', preexisting: true, overlapsPreexisting: true, finalHash: hashWorkingFile(directory, 'overlap.txt') }
+      ]
+    };
+  });
+  const before = {
+    tracked: fs.readFileSync(path.join(directory, 'tracked.txt'), 'utf8'),
+    created: fs.readFileSync(path.join(directory, 'created.txt'), 'utf8'),
+    overlap: fs.readFileSync(path.join(directory, 'overlap.txt'), 'utf8')
+  };
+  const dry = revertManagedJob(job.id, { dryRun: true });
+  assert.equal(dry.reverted.length, 3);
+  assert.equal(dry.skipped.length, 1);
+  assert.equal(fs.readFileSync(path.join(directory, 'tracked.txt'), 'utf8'), before.tracked);
+  assert.equal(fs.readFileSync(path.join(directory, 'created.txt'), 'utf8'), before.created);
+
+  const cli = fileURLToPath(new URL('../bin/delegate-jobs', import.meta.url));
+  const reverted = spawnSync(process.execPath, [cli, 'revert', job.id], {
+    encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE }
+  });
+  assert.equal(reverted.status, 0, reverted.stderr);
+  const summary = JSON.parse(reverted.stdout);
+  assert.equal(summary.reverted.length, 3);
+  assert.equal(summary.skipped[0].path, 'overlap.txt');
+  assert.equal(summary.conflicts.length, 0);
+  assert.equal(fs.readFileSync(path.join(directory, 'tracked.txt'), 'utf8'), 'baseline\n');
+  assert.equal(fs.existsSync(path.join(directory, 'created.txt')), false);
+  assert.equal(fs.readFileSync(path.join(directory, 'deleted.txt'), 'utf8'), 'restore me\n');
+  assert.equal(fs.readFileSync(path.join(directory, 'overlap.txt'), 'utf8'), before.overlap);
+}));
+
+test('revert refuses a file edited after the job final hash was recorded', () => isolated((directory) => {
+  const git = (...args) => spawnSync('git', ['-c', 'user.email=test@example.test', '-c', 'user.name=Test', ...args], { cwd: directory });
+  git('init', '-q');
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'baseline\n');
+  git('add', '.');
+  git('commit', '-qm', 'baseline');
+  const job = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task' });
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'job final\n');
+  updateManagedJob(job.id, (current) => {
+    current.status = 'completed';
+    current.changedFiles = { count: 1, files: ['tracked.txt'], entries: [{ path: 'tracked.txt', finalHash: hashWorkingFile(directory, 'tracked.txt') }] };
+  });
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'later edit\n');
+  const result = revertManagedJob(job.id);
+  assert.equal(result.reverted.length, 0);
+  assert.match(result.conflicts[0].reason, /changed after/);
+  assert.equal(fs.readFileSync(path.join(directory, 'tracked.txt'), 'utf8'), 'later edit\n');
 }));
 
 test('list returns compact summaries newest first with active filtering', () => isolated((directory) => {

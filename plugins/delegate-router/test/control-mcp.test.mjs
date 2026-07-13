@@ -27,14 +27,23 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
+  assert.ok(start.inputSchema.properties.retryPolicy);
+  assert.ok(start.inputSchema.properties.verify);
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
+  assert.ok(resume.inputSchema.properties.retryPolicy);
+  assert.ok(resume.inputSchema.properties.verify);
 });
 
-test('delegate-jobs help has CLI parity for Wave 1 caller options', () => {
+test('delegate-jobs help has CLI parity for Wave 1 and Wave 2 caller options', () => {
   const cli = path.join(root, 'bin', 'delegate-jobs');
   const result = spawnSync(process.execPath, [cli, 'help'], { encoding: 'utf8' });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--idempotency-key/);
   assert.match(result.stdout, /--max-output-tokens/);
   assert.match(result.stdout, /resume[^\n]+--max-output-tokens/);
+  assert.match(result.stdout, /--retry-max-attempts/);
+  assert.match(result.stdout, /--retry-on/);
+  assert.match(result.stdout, /--verify-command/);
+  assert.match(result.stdout, /--verify-timeout-seconds/);
+  assert.match(result.stdout, /revert <job-id> \[--dry-run\]/);
 });

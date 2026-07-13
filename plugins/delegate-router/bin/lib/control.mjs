@@ -18,6 +18,7 @@ const SENSITIVE_VALUE = /(?:sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+\/-]{12
 const USAGE_TOKEN_KEY = /^(?:(?:max|observed)?(?:input|output|total|cached|reasoning|prompt|completion|billable|context)tokens?(?:count|usage)?|tokens?(?:count|usage))$/i;
 const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const WRITE_MODES = new Set(['implement', 'verify']);
 
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -39,6 +40,7 @@ function paths(id) {
     done: path.join(root, `${id}.commands`, 'done'),
     artifacts: path.join(root, `${id}.artifacts`),
     prompt: path.join(root, `${id}.prompt`),
+    verifyCommand: path.join(root, `${id}.verify`),
     stdout: path.join(root, `${id}.out.log`),
     stderr: path.join(root, `${id}.err.log`)
   };
@@ -171,6 +173,45 @@ function readRawEvents(id) {
     if (error.code === 'ENOENT') return [];
     throw error;
   }
+}
+
+function resumabilityFor(job) {
+  if (job.managedBy !== 'delegate-control') {
+    return { ok: false, reason: 'legacy jobs cannot be resumed through delegate_resume', code: 'UNMANAGED_JOB' };
+  }
+  if (!TERMINAL_STATUSES.has(job.status)) {
+    return { ok: false, reason: `job is ${job.status}; only terminal jobs can be resumed`, code: 'PARENT_ACTIVE' };
+  }
+  if (!job.providerSessionId && !job.session) {
+    return { ok: false, reason: 'the job has no provider continuation id', code: 'SESSION_UNAVAILABLE' };
+  }
+  if (job.provider === 'codex' && job.reviewFlowEngaged === true) {
+    return { ok: false, reason: 'the Codex thread engaged the multi-agent review flow and is not directly resumable', code: 'RESUME_UNSUPPORTED' };
+  }
+  return { ok: true, reason: 'the terminal job has a resumable provider session', code: null };
+}
+
+export function jobResumability(job) {
+  const result = resumabilityFor(job);
+  return { ok: result.ok, reason: result.reason };
+}
+
+function checkpointFor(job) {
+  const continuationId = job.providerSessionId || job.session || null;
+  const lastDiffEventSeq = readRawEvents(job.id).filter((event) => event.type === 'diff.updated').at(-1)?.seq || null;
+  const resumable = resumabilityFor(job);
+  return {
+    failureReason: job.errorCode || job.stoppedReason || (job.status === 'cancelled' ? 'cancelled' : 'failed'),
+    continuationId,
+    lastDiffEventSeq,
+    resumeHint: resumable.ok
+      ? 'resume this thread with delegate_resume and a packet folding in the partial diff'
+      : 'start fresh; thread not resumable'
+  };
+}
+
+function ensureCheckpoint(job) {
+  if (['failed', 'cancelled'].includes(job.status)) job.checkpoint = checkpointFor(job);
 }
 
 function repairAndReadLastEvent(file) {
@@ -309,6 +350,7 @@ export function updateManagedJob(id, mutate, options = {}) {
     }
     const wasTerminal = TERMINAL_STATUSES.has(job.status);
     mutate(job);
+    ensureCheckpoint(job);
     if (options.incrementRevision !== false) job.revision = (job.revision || 0) + 1;
     job.updatedAt = Math.floor(Date.now() / 1000);
     saveJob(job);
@@ -437,6 +479,7 @@ export function reconcileJob(id) {
     current.completedAt = Math.floor(Date.now() / 1000);
     current.revision = (current.revision || 0) + 1;
     appendUnlocked(current, 'error', { code: 'ORPHANED', message: current.error, stage: 'reconcile' });
+    ensureCheckpoint(current);
     saveJob(current);
     writeTerminalArtifacts(current, false);
     return current;
@@ -459,10 +502,37 @@ export function inspectJob(id) {
   return {
     ...job,
     ...activityFields(job),
+    resumable: jobResumability(job),
+    driftReport: driftReportFor(job),
     promptPath: undefined,
+    verifyCommandPath: undefined,
     managed: job.managedBy === 'delegate-control',
     legacy: job.managedBy !== 'delegate-control'
   };
+}
+
+function driftReportFor(job) {
+  const changed = job.changedFiles;
+  if (!changed) return { modified: [], newFiles: [], outsideScope: [] };
+  const baseline = new Set(job.baselineFiles || []);
+  const inventory = new Map(jobFiles(job.id).map((entry) => [entry.path, entry]));
+  const entries = Array.isArray(changed.entries) && changed.entries.length
+    ? changed.entries
+    : (changed.files || []).map((file) => ({ path: file, ...inventory.get(file) }));
+  const modified = [];
+  const newFiles = [];
+  const outsideScope = [];
+  for (const entry of entries) {
+    const file = entry?.path;
+    if (!file) continue;
+    const isNew = entry.status === '??' || /^(?:add|added|create|created)$/i.test(entry.kind || '')
+      || (!entry.status && !entry.kind && !baseline.has(file));
+    (isNew ? newFiles : modified).push(file);
+    if (job.allowedPaths?.length && !pathMatchesScope(file, job.allowedPaths)) outsideScope.push(file);
+  }
+  for (const violation of job.scopeViolations || []) if (violation?.path) outsideScope.push(violation.path);
+  const unique = (values) => [...new Set(values)];
+  return { modified: unique(modified), newFiles: unique(newFiles), outsideScope: unique(outsideScope) };
 }
 
 function rootJobIdOf(job) {
@@ -752,9 +822,13 @@ export function hashWorkingFile(cwd, file) {
   const absolute = path.join(cwd, file);
   let stat;
   try {
-    stat = fs.statSync(absolute);
+    stat = fs.lstatSync(absolute);
   } catch {
     return 'absent';
+  }
+  if (stat.isSymbolicLink()) {
+    try { return crypto.createHash('sha256').update(`symlink:${fs.readlinkSync(absolute)}`).digest('hex'); }
+    catch { return null; }
   }
   if (!stat.isFile() || stat.size > BASELINE_HASH_MAX_BYTES) return null;
   try {
@@ -859,6 +933,36 @@ function validatedIdempotencyKey(value) {
   return value;
 }
 
+function validatedRetryPolicy(value) {
+  if (value == null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw brokerError('INVALID_REQUEST', 'retryPolicy must be an object');
+  }
+  const maxAttempts = Number(value.maxAttempts);
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 5) {
+    throw brokerError('INVALID_REQUEST', 'retryPolicy.maxAttempts must be an integer between 1 and 5');
+  }
+  if (!Array.isArray(value.retryOn)) throw brokerError('INVALID_REQUEST', 'retryPolicy.retryOn must be an array');
+  const supported = new Set(['transport', 'rate-limit']);
+  if (!value.retryOn.every((item) => supported.has(item))) {
+    throw brokerError('INVALID_REQUEST', "retryPolicy.retryOn may contain only 'transport' and 'rate-limit'");
+  }
+  return { maxAttempts, retryOn: [...new Set(value.retryOn)] };
+}
+
+function validatedVerify(value, mode) {
+  if (value == null) return null;
+  if (!WRITE_MODES.has(mode)) throw brokerError('INVALID_REQUEST', 'verify is available only for write modes (implement and verify)');
+  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.command !== 'string' || !value.command.trim()) {
+    throw brokerError('INVALID_REQUEST', 'verify.command must be a non-empty string');
+  }
+  const timeoutSeconds = value.timeoutSeconds == null ? 600 : Number(value.timeoutSeconds);
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 86400) {
+    throw brokerError('INVALID_REQUEST', 'verify.timeoutSeconds must be an integer between 1 and 86400');
+  }
+  return { command: value.command, timeoutSeconds };
+}
+
 export function createManagedJob(options) {
   const provider = validateProvider(options.provider);
   if (provider === 'claude') throw brokerError('INVALID_REQUEST', 'Claude stays in the current session; managed jobs support codex and cursor');
@@ -870,6 +974,9 @@ export function createManagedJob(options) {
   const timeoutSeconds = validatedTimeoutSeconds(options.timeoutSeconds);
   const maxOutputTokens = validatedMaxOutputTokens(options.maxOutputTokens);
   const idempotencyKey = validatedIdempotencyKey(options.idempotencyKey);
+  const retryPolicy = validatedRetryPolicy(options.retryPolicy);
+  const mode = options.mode || 'consult';
+  const verify = validatedVerify(options.verify, mode);
   const cwd = path.resolve(options.cwd || process.cwd());
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw brokerError('INVALID_REQUEST', `cwd does not exist or is not a directory: ${cwd}`, { provider });
   const id = jobId(provider);
@@ -878,20 +985,24 @@ export function createManagedJob(options) {
   if (provider === 'cursor' && !['acp', 'headless'].includes(transport)) throw brokerError('INVALID_REQUEST', `Invalid Cursor transport: ${transport}`, { provider });
   if (provider === 'codex' && options.transport && options.transport !== 'app-server') throw brokerError('INVALID_REQUEST', `Invalid Codex transport: ${options.transport}`, { provider });
   const p = paths(id);
-  writePrivate(p.prompt, options.prompt);
   const baseline = gitBaseline(cwd);
+  writePrivate(p.prompt, options.prompt);
+  if (verify) writePrivate(p.verifyCommand, verify.command);
   const job = {
     schemaVersion: 2,
     id,
     provider,
     requestedModel: options.model || 'auto',
     model: options.model || 'auto',
-    mode: options.mode || 'consult',
+    mode,
     approval: options.approval || 'auto',
     effort: validatedEffort(options.effort || null),
     timeoutSeconds,
     maxOutputTokens,
     idempotencyKey,
+    retryPolicy,
+    retries: 0,
+    verify: verify ? { command: redact(verify.command), timeoutSeconds: verify.timeoutSeconds } : null,
     network: options.network === true,
     sandbox: validatedSandbox(options.sandbox),
     allowedPaths: validatedAllowedPaths(options.allowedPaths),
@@ -905,6 +1016,7 @@ export function createManagedJob(options) {
     managedBy: 'delegate-control',
     capabilities: providerCapabilities(provider, transport),
     promptPath: p.prompt,
+    verifyCommandPath: verify ? p.verifyCommand : null,
     stdoutPath: p.stdout,
     stderrPath: p.stderr,
     finishedPath: p.finished,
@@ -925,11 +1037,12 @@ export function createManagedJob(options) {
       message: 'Sensitive-value pattern detected in the task packet; allowSensitive=true authorized dispatch'
     });
   }
+  if (WRITE_MODES.has(job.mode) && baseline.files.length) {
+    appendJobEvent(id, 'baseline.dirty', { count: baseline.files.length, paths: baseline.files.slice(0, 20) });
+  }
   appendJobEvent(id, 'message.user', { text: options.prompt });
   return inspectJob(id);
 }
-
-const WRITE_MODES = new Set(['implement', 'verify']);
 
 function assertNoActiveWriter(options) {
   if (!WRITE_MODES.has(options.mode) || options.isolation === 'worktree' || options.overrideWriter === true) return;
@@ -1131,15 +1244,17 @@ export function settleQueuedControl(id, commandId, outcome) {
 
 export function resumeManagedJob(id, options) {
   const parent = inspectJob(id);
-  if (!TERMINAL_STATUSES.has(parent.status)) {
-    throw brokerError('PARENT_ACTIVE', `cannot resume while ${parent.id} is ${parent.status}`, { provider: parent.provider });
-  }
-  if (!parent.providerSessionId) throw brokerError('SESSION_UNAVAILABLE', 'the original job has no continuation id', { provider: parent.provider });
-  // Detected during the original run (collab-agent items): resuming such a
-  // thread fails provider-side, so fail fast with the recovery instead of
-  // burning a provider round-trip.
-  if (parent.provider === 'codex' && parent.reviewFlowEngaged === true) {
-    throw brokerError('RESUME_UNSUPPORTED', 'this Codex thread engaged the multi-agent review flow and cannot be resumed directly; start a fresh job whose task packet folds in the prior findings', { provider: parent.provider });
+  const resumability = resumabilityFor(parent);
+  if (!resumability.ok) throw brokerError(resumability.code, resumability.reason, { provider: parent.provider });
+  const storedParent = loadJob(id) || parent;
+  let inheritedVerify = null;
+  if (storedParent.verify && storedParent.verifyCommandPath) {
+    try {
+      inheritedVerify = {
+        command: fs.readFileSync(storedParent.verifyCommandPath, 'utf8'),
+        timeoutSeconds: storedParent.verify.timeoutSeconds
+      };
+    } catch {}
   }
   return launchManagedJob({
     provider: parent.provider,
@@ -1156,12 +1271,111 @@ export function resumeManagedJob(id, options) {
     isolation: parent.isolation,
     timeoutSeconds: options.timeoutSeconds ?? parent.timeoutSeconds ?? null,
     maxOutputTokens: options.maxOutputTokens ?? parent.maxOutputTokens ?? null,
+    retryPolicy: options.retryPolicy ?? parent.retryPolicy ?? null,
+    verify: options.verify ?? inheritedVerify,
     network: options.network ?? parent.network ?? false,
     sandbox: options.sandbox ?? parent.sandbox ?? null,
     allowedPaths: options.allowedPaths ?? parent.allowedPaths ?? null,
     overrideLimit: options.overrideLimit,
     overrideWriter: options.overrideWriter
   });
+}
+
+function safeJobFile(file) {
+  if (typeof file !== 'string' || !file || file.includes('\0') || path.isAbsolute(file)) return null;
+  const normalized = path.normalize(file).replaceAll('\\', '/').replace(/^\.\//, '');
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../')) return null;
+  return normalized;
+}
+
+function trackedInHead(cwd, file) {
+  const result = spawnSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD', '--', file], {
+    cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024
+  });
+  return result.status === 0 && result.stdout.split('\0').includes(file);
+}
+
+function trackedInIndex(cwd, file) {
+  return spawnSync('git', ['ls-files', '--error-unmatch', '--', file], {
+    cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024
+  }).status === 0;
+}
+
+export function revertManagedJob(id, options = {}) {
+  const job = inspectJob(id);
+  if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'revert is unavailable for legacy jobs', { provider: job.provider });
+  if (!TERMINAL_STATUSES.has(job.status)) throw brokerError('INVALID_REQUEST', `job must be terminal before revert; current status is ${job.status}`, { provider: job.provider });
+  const eventInventory = new Map(jobFiles(id).map((entry) => [entry.path, entry]));
+  const entries = Array.isArray(job.changedFiles?.entries) && job.changedFiles.entries.length
+    ? job.changedFiles.entries
+    : (job.changedFiles?.files || []).map((file) => ({ path: file, ...eventInventory.get(file), finalHash: job.finalHashes?.[file] }));
+  const baseline = new Set(job.baselineFiles || []);
+  const dryRun = options.dryRun === true;
+  const reverted = [];
+  const skipped = [];
+  const conflicts = [];
+
+  if ((job.changedFiles?.count || 0) > entries.length) {
+    return {
+      dryRun,
+      reverted,
+      skipped,
+      conflicts: [{ path: null, reason: `changed-file inventory is truncated (${entries.length} of ${job.changedFiles.count}); no files touched` }]
+    };
+  }
+
+  for (const raw of entries) {
+    const file = safeJobFile(raw?.path);
+    if (!file) {
+      conflicts.push({ path: raw?.path || null, reason: 'unsafe or invalid job file path' });
+      continue;
+    }
+    const observed = eventInventory.get(file) || {};
+    if (raw.preexisting || raw.overlapsPreexisting || observed.preexisting || observed.overlapsPreexisting || baseline.has(file)) {
+      skipped.push({ path: file, reason: 'overlaps pre-existing work; manual resolution required' });
+      continue;
+    }
+    const finalHash = raw.finalHash ?? job.finalHashes?.[file] ?? null;
+    if (!finalHash) {
+      conflicts.push({ path: file, reason: 'job final-state hash is unavailable; refusing unsafe revert' });
+      continue;
+    }
+    const currentHash = hashWorkingFile(job.cwd, file);
+    if (currentHash !== finalHash) {
+      conflicts.push({ path: file, reason: 'current content changed after the job completed; not touched' });
+      continue;
+    }
+    const tracked = trackedInHead(job.cwd, file);
+    const action = tracked ? 'restore-tracked' : 'delete-created';
+    if (!dryRun) {
+      if (tracked) {
+        const restored = spawnSync('git', ['checkout', 'HEAD', '--', file], {
+          cwd: job.cwd, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024
+        });
+        if (restored.status !== 0) {
+          conflicts.push({ path: file, reason: (restored.stderr || 'git checkout failed').trim() });
+          continue;
+        }
+      } else {
+        if (trackedInIndex(job.cwd, file)) {
+          const unstaged = spawnSync('git', ['rm', '--cached', '--force', '--ignore-unmatch', '--', file], {
+            cwd: job.cwd, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024
+          });
+          if (unstaged.status !== 0) {
+            conflicts.push({ path: file, reason: (unstaged.stderr || 'git index cleanup failed').trim() });
+            continue;
+          }
+        }
+        try { fs.rmSync(path.join(job.cwd, file), { force: true }); }
+        catch (error) {
+          conflicts.push({ path: file, reason: error.message });
+          continue;
+        }
+      }
+    }
+    reverted.push({ path: file, action, ...(dryRun ? { dryRun: true } : {}) });
+  }
+  return { dryRun, reverted, skipped, conflicts };
 }
 
 // Bounded synchronous-ish wait for the provider session id so gated
@@ -1187,7 +1401,7 @@ export function pruneJobs(options = {}) {
     const finishedAt = job.completedAt || job.updatedAt || job.createdAt || 0;
     if (finishedAt > cutoff) continue;
     const p = paths(job.id);
-    for (const file of [p.events, p.prompt, p.stdout, p.stderr, p.lock, p.finished, path.join(jobsDir(), `${job.id}.json`)]) {
+    for (const file of [p.events, p.prompt, p.verifyCommand, p.stdout, p.stderr, p.lock, p.finished, path.join(jobsDir(), `${job.id}.json`)]) {
       try { fs.rmSync(file, { force: true }); } catch {}
     }
     for (const directory of [p.commands, p.artifacts]) {

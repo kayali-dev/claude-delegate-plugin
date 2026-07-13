@@ -30,7 +30,11 @@ Allow only one writer for a path set. A read-only reviewer may inspect a stable 
 
 The broker enforces this for managed jobs: a write-mode start (`implement` or `verify`) in a cwd that already has an active write-mode job fails with `WRITER_ACTIVE` and the blocking job's ID. Orphaned writers (dead worker process) are reconciled to `failed` automatically and stop blocking. Worktree-isolated jobs are exempt. `overrideWriter=true` bypasses the guard; use it only with explicit user acceptance of concurrent writers.
 
+This guard cannot see unmanaged editors, including the current coordinator or a built-in subagent. A write job launched from a non-empty Git baseline emits `baseline.dirty` with a bounded path list; treat it as a coordination warning, not proof that no other editor is active.
+
 Give any start that may be retried a stable `idempotencyKey`. Lookup and job creation are atomic under the per-cwd launch lock, so a replay returns the existing job instead of launching a second worker.
+
+An opt-in `retryPolicy` may set `maxAttempts` from 1–5 and choose `transport` and/or `rate-limit`. Retries reuse the same job and provider session when one exists, are journaled as `job.retry`, and never apply to scope, quota, model, budget, user-input, or other task-level outcomes. The default is one attempt.
 
 Every writer must:
 
@@ -57,7 +61,13 @@ For managed runs, store the job ID and use the `delegate_control` inspection and
 
 Managed jobs are bounded by `timeoutSeconds` (60–86400) or, when unset, `DELEGATE_CODEX_TIMEOUT_SECONDS` / `DELEGATE_CURSOR_TIMEOUT_SECONDS` (default 3600). Defaults are deliberately long — LLM agent jobs legitimately run long — so set an explicit value only when the task warrants a tighter or looser bound. A timeout interrupts the active turn and fails the job with a `TIMEOUT:` error; the thread remains resumable.
 
+Codex interruption waits up to `DELEGATE_DRAIN_GRACE_MS` (default 3000, maximum 15000) for the turn to settle before the provider process is killed. Every terminal failure or cancellation records a `checkpoint` containing `failureReason`, `continuationId`, `lastDiffEventSeq`, and an actionable `resumeHint`.
+
 `maxOutputTokens` is an optional per-job cap on provider-reported output tokens. Crossing it uses the normal provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`; partial events, diff, and continuation remain inspectable. Resumes accept a new cap and otherwise inherit the parent cap.
+
+Write modes may set `verify: { command, timeoutSeconds }` (default 600 seconds). The worker runs `/bin/sh -c` in the real job cwd only after provider success, outside the provider sandbox, and records command, exit code, duration, and a redacted output tail. A nonzero verdict does not rewrite the provider outcome: status remains `completed`, while `delegate-jobs wait` exits 6.
+
+Adapters assert their CLI versions before opening a provider session. `DELEGATE_MIN_CODEX_VERSION` and `DELEGATE_MIN_CURSOR_VERSION` override the validated built-in floors (`0.144.0` and `2026.7.0` respectively); a lower observed version fails with non-retryable `PROVIDER_TOO_OLD` and reports both versions.
 
 ## Failure And Quota Recovery
 
@@ -69,6 +79,8 @@ On timeout, output-budget exhaustion, quota exhaustion, or agent failure:
 4. Build a recovery packet with completed work, partial changes, failed verification, continuation ID, and remaining acceptance criteria.
 5. Select the best eligible fallback from the routing matrix.
 6. Tell the fallback it owns an existing partial diff and must not revert unrelated changes.
+
+`delegate_inspect` exposes `resumable: { ok, reason }` from the same predicate used by `delegate_resume`, plus `driftReport: { modified, newFiles, outsideScope }`. For manual rollback, run `delegate-jobs revert <id> --dry-run` first. Revert requires a terminal job, restores only non-overlapping files whose current content still matches the recorded final state, and reports `{ reverted, skipped, conflicts }`; it never overwrites pre-existing or later edits.
 
 ## Acceptance
 

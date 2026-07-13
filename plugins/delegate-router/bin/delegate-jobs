@@ -15,6 +15,7 @@ import {
   sliceDiff,
   readJobEventPage,
   reconcileJob,
+  revertManagedJob,
   resumeManagedJob,
   submitControl
 } from './lib/control.mjs';
@@ -22,17 +23,18 @@ import { listJobs, saveJob } from './lib/state.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
   delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
-  delegate-jobs wait <job-id> [--timeout-seconds N]   # blocks until terminal; exit 0 completed, 3 failed, 4 cancelled, 5 completed-but-no-changes (write modes), 75 timeout
+  delegate-jobs wait <job-id> [--timeout-seconds N]   # exits 0 completed, 3 failed, 4 cancelled, 5 no changes, 6 verification failed, 75 timeout
   delegate-jobs diff <job-id> [--stat] [--offset N] [--max-chars N] [--paths a,b]
   delegate-jobs files <job-id> [--json]
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
   delegate-jobs cancel <job-id> [--expected-revision N]
-  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs usage <job-id> [--json]
   delegate-jobs result <job-id>
   delegate-jobs logs <job-id> [--stderr]
@@ -47,6 +49,23 @@ function value(args, flag, fallback = undefined) {
 function prompt(args) {
   const file = value(args, '--prompt-file');
   return file ? fs.readFileSync(file, 'utf8') : value(args, '--prompt');
+}
+
+function retryPolicy(args) {
+  const maxAttempts = value(args, '--retry-max-attempts');
+  const retryOn = value(args, '--retry-on');
+  if (maxAttempts == null && retryOn == null) return undefined;
+  return {
+    maxAttempts: maxAttempts == null ? undefined : Number(maxAttempts),
+    retryOn: retryOn == null ? undefined : retryOn.split(',').map((item) => item.trim()).filter(Boolean)
+  };
+}
+
+function verifyOption(args) {
+  const command = value(args, '--verify-command');
+  const timeoutSeconds = value(args, '--verify-timeout-seconds');
+  if (command == null && timeoutSeconds == null) return undefined;
+  return { command, ...(timeoutSeconds == null ? {} : { timeoutSeconds: Number(timeoutSeconds) }) };
 }
 
 function requireJob(id) {
@@ -71,6 +90,7 @@ try {
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
       maxOutputTokens: rawMaxOutputTokens == null ? null : Number(rawMaxOutputTokens),
       idempotencyKey: value(args, '--idempotency-key'),
+      retryPolicy: retryPolicy(args), verify: verifyOption(args),
       network: args.includes('--network'), sandbox: value(args, '--sandbox'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
@@ -87,6 +107,7 @@ try {
         job = requireJob(started.id);
       }
       if (job.status !== 'completed') process.exit(job.status === 'failed' ? 3 : 4);
+      if (job.verification?.exitCode) process.exit(6);
       if (['implement', 'verify'].includes(job.mode) && !(job.changedFiles?.count > 0)) process.exit(5);
     }
   } else if (command === 'status') {
@@ -152,8 +173,12 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       job = requireJob(id);
     }
-    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, changedFiles: job.changedFiles || null, result: job.result, error: job.error });
+    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, changedFiles: job.changedFiles || null, verification: job.verification || null, result: job.result, error: job.error });
     if (job.status !== 'completed') process.exit(job.status === 'failed' ? 3 : 4);
+    if (job.verification?.exitCode) {
+      console.error(`${job.id} completed but verification exited ${job.verification.exitCode}`);
+      process.exit(6);
+    }
     // "completed" means the turn ended, not that the objective was met. A
     // write-mode job that finished with zero observed changes is a strong
     // signal the objective was not met; give it a distinct exit code.
@@ -165,6 +190,8 @@ try {
   } else if (command === 'prune') {
     const rawDays = value(args, '--max-age-days');
     json(pruneJobs(rawDays == null ? {} : { maxAgeDays: Number(rawDays) }));
+  } else if (command === 'revert') {
+    json(revertManagedJob(args[0], { dryRun: args.includes('--dry-run') }));
   } else if (command === 'diff') {
     const full = filterDiffPaths(jobDiff(args[0]), value(args, '--paths')?.split(',').map((item) => item.trim()).filter(Boolean));
     if (args.includes('--stat')) json(diffStat(full));
@@ -201,6 +228,7 @@ try {
       prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? undefined : Number(rawTimeout),
       maxOutputTokens: rawMaxOutputTokens == null ? undefined : Number(rawMaxOutputTokens),
+      retryPolicy: retryPolicy(args), verify: verifyOption(args),
       network: args.includes('--network') ? true : undefined, sandbox: value(args, '--sandbox'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive') ? true : undefined,

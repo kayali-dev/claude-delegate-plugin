@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
+import fs from 'node:fs';
+import path from 'node:path';
+
+if (process.argv.includes('--version')) {
+  console.log('codex-cli 0.144.1');
+  process.exit(0);
+}
 
 const lines = readline.createInterface({ input: process.stdin });
 let activeTurn = null;
@@ -44,7 +51,10 @@ lines.on('line', (line) => {
     if (process.env.FAKE_CODEX_COLLAB === '1') {
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'collabAgentToolCall', id: 'collab-1', status: 'completed' }, completedAtMs: Date.now() } });
     }
-    if (process.env.FAKE_CODEX_CRASH === '1') setTimeout(() => process.exit(7), 50);
+    const crashOnceMarker = path.join(process.cwd(), '.fake-codex-crashed-once');
+    const shouldCrashOnce = process.env.FAKE_CODEX_CRASH_ONCE === '1' && !fs.existsSync(crashOnceMarker);
+    if (shouldCrashOnce) fs.writeFileSync(crashOnceMarker, 'crashed\n');
+    if (process.env.FAKE_CODEX_CRASH === '1' || shouldCrashOnce) setTimeout(() => process.exit(7), 50);
     else if (process.env.FAKE_CODEX_GROWING_USAGE === '1') {
       send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-fake', turnId: activeTurn, itemId: 'message-partial', delta: 'partial work' } });
       send({ jsonrpc: '2.0', method: 'turn/diff/updated', params: { threadId: 'thread-fake', turnId: activeTurn, diff: 'diff --git a/partial.js b/partial.js\n+partial' } });

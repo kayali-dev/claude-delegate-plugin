@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
 import {
   availableModelIds,
@@ -10,10 +10,17 @@ import {
   resolveCursorModel,
   runCursor
 } from './cursor.mjs';
+import { compareVersions } from './cursor.mjs';
 import { delay, JsonRpcProcess } from './jsonrpc.mjs';
 import { brokerError, normalizeBrokerError } from './errors.mjs';
 import { terminateProcessTree } from './process.mjs';
 import { loadJob, mutateState, setWindow } from './state.mjs';
+
+// Local floors are intentionally conservative and traceable to the CLIs on
+// the release workstation: codex-cli 0.144.1 and Cursor build
+// 2026.07.09-a3815c0. Operators can raise or lower either assertion without a
+// source change when their fleet has a different validated baseline.
+export const MIN_VERSIONS = Object.freeze({ codex: '0.144.0', cursor: '2026.7.0' });
 
 // The base boundary always applies. allowSensitive only swaps the sensitive-
 // path rule for an explicit authorization line; it never removes scope control
@@ -63,6 +70,42 @@ function acpGraceMs() {
   return Number.isFinite(value) ? Math.min(Math.max(value, 0), 2000) : 250;
 }
 
+function drainGraceMs() {
+  const value = Number(process.env.DELEGATE_DRAIN_GRACE_MS ?? 3000);
+  return Number.isFinite(value) ? Math.min(Math.max(value, 0), 15000) : 3000;
+}
+
+function minimumVersion(provider) {
+  return process.env[`DELEGATE_MIN_${provider.toUpperCase()}_VERSION`] || MIN_VERSIONS[provider];
+}
+
+function parsedVersion(output) {
+  return String(output || '').match(/\b(\d+\.\d+(?:\.\d+)?)\b/)?.[1] || null;
+}
+
+export function assertProviderVersion(provider, binary) {
+  const configuredMinimum = minimumVersion(provider);
+  const required = parsedVersion(configuredMinimum);
+  if (!required) throw brokerError('INVALID_REQUEST', `invalid minimum ${provider} version: ${configuredMinimum}`, { provider });
+  const launch = provider === 'cursor' ? cursorCommand(binary, ['--version']) : { command: binary, args: ['--version'] };
+  const result = spawnSync(launch.command, launch.args, {
+    encoding: 'utf8', timeout: 10000, windowsHide: true, maxBuffer: 1024 * 1024
+  });
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+  const observed = parsedVersion(output);
+  if (result.status !== 0 || !observed) {
+    throw brokerError('TRANSPORT_ERROR', `could not determine ${provider} CLI version before adapter start${output ? `: ${redact(output, '', 2000)}` : ''}`, { provider });
+  }
+  if (compareVersions(observed, required) < 0) {
+    throw brokerError('PROVIDER_TOO_OLD', `${provider} CLI ${observed} is below required ${required}; update the provider CLI or override DELEGATE_MIN_${provider.toUpperCase()}_VERSION`, {
+      provider,
+      observedVersion: observed,
+      requiredVersion: required
+    });
+  }
+  return { provider, observedVersion: observed, requiredVersion: required };
+}
+
 function recordUsage(job, usage, options = {}) {
   appendJobEvent(job.id, 'usage.updated', usage, options);
   updateManagedJob(job.id, (current) => { current.usage = usage; }, { incrementRevision: false });
@@ -89,14 +132,28 @@ function terminal(job, status, phase, extra = {}) {
   // actually did; record the plugin's own observation of changed files so the
   // coordinator's first read of the job record is grounded.
   let changedFiles = null;
+  let finalHashes = null;
   let scopeViolations = null;
   if (['implement', 'verify'].includes(job.mode)) {
     try {
       const files = jobFiles(job.id);
-      const names = files.map((file) => file.path);
-      changedFiles = { count: names.length, files: names.slice(0, 50) };
+      const baseline = new Set(job.baselineFiles || []);
+      const entries = files.map((file) => {
+        const finalHash = hashWorkingFile(job.cwd, file.path);
+        return {
+          path: file.path,
+          ...(file.status ? { status: file.status } : {}),
+          ...(file.kind ? { kind: file.kind } : {}),
+          ...((file.preexisting || baseline.has(file.path)) ? { preexisting: true } : {}),
+          ...(file.overlapsPreexisting ? { overlapsPreexisting: true } : {}),
+          ...(finalHash ? { finalHash } : {})
+        };
+      });
+      const names = entries.map((file) => file.path);
+      changedFiles = { count: names.length, files: names.slice(0, 50), entries: entries.slice(0, 1000) };
+      finalHashes = Object.fromEntries(entries.filter((entry) => entry.finalHash).map((entry) => [entry.path, entry.finalHash]));
       if (job.allowedPaths?.length) {
-        const violations = files.filter((file) => !pathMatchesScope(file.path, job.allowedPaths));
+        const violations = entries.filter((file) => !pathMatchesScope(file.path, job.allowedPaths));
         if (violations.length) {
           scopeViolations = violations.slice(0, 50).map((file) => ({
             path: file.path,
@@ -108,11 +165,13 @@ function terminal(job, status, phase, extra = {}) {
       }
     } catch {}
   }
+  const deferVerification = status === 'completed' && job.verify && !loadJob(job.id)?.verification;
   updateManagedJob(job.id, (current) => {
-    current.status = status;
-    current.phase = phase;
-    current.completedAt = Math.floor(Date.now() / 1000);
+    current.status = deferVerification ? 'running' : status;
+    current.phase = deferVerification ? 'verifying' : phase;
+    if (!deferVerification) current.completedAt = Math.floor(Date.now() / 1000);
     if (changedFiles) current.changedFiles = changedFiles;
+    if (finalHashes) current.finalHashes = finalHashes;
     if (scopeViolations) current.scopeViolations = scopeViolations;
     Object.assign(current, redact(extra));
     // Providers return three different result shapes (Codex plain string,
@@ -127,12 +186,15 @@ function terminal(job, status, phase, extra = {}) {
     // A read-mode turn that ends with a sentence of narration instead of the
     // findings is a recurring provider pattern; flag it so the coordinator
     // resumes with "paste the full findings now" instead of trusting it.
-    if (status === 'completed' && ['consult', 'plan', 'review'].includes(job.mode)
+    if (!deferVerification && status === 'completed' && ['consult', 'plan', 'review'].includes(job.mode)
       && !current.result?.plan && (!text || text.trim().length < 200)) {
       current.resultSuspect = 'short-final-message';
     }
   });
-  appendJobEvent(job.id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', extra);
+  appendJobEvent(job.id, deferVerification
+    ? 'job.state'
+    : status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error',
+  deferVerification ? { status: 'running', phase: 'verifying' } : extra);
 }
 
 function recordSession(jobId, sessionId, turnId = undefined) {
@@ -196,10 +258,13 @@ async function runCodex(job) {
   let cancelled = false;
   const queuedPrompts = [];
   let interruptRequested = false;
+  let cancelDrainDeadline = null;
   const messages = new Map();
   const deltas = new DeltaRedactor();
   let budgetError = null;
-  const rpc = new JsonRpcProcess(process.env.DELEGATE_CODEX_BIN || 'codex', codexSpawnArgs(job), {
+  const binary = process.env.DELEGATE_CODEX_BIN || 'codex';
+  assertProviderVersion('codex', binary);
+  const rpc = new JsonRpcProcess(binary, codexSpawnArgs(job), {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
     onRequest: async (method, params) => {
@@ -268,7 +333,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.15.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.16.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -321,8 +386,18 @@ async function runCodex(job) {
     while (true) {
       if (Date.now() >= deadline) {
         const active = inspectJob(job.id).providerTurnId;
-        if (active) await rpc.request('turn/interrupt', { threadId, turnId: active });
+        if (active) {
+          const graceMs = drainGraceMs();
+          const interrupted = rpc.request('turn/interrupt', { threadId, turnId: active }, Math.max(graceMs, 1))
+            .catch((error) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'timeout-interrupt-error', error: error.message }));
+          if (graceMs) await Promise.race([Promise.allSettled([interrupted, turnDone]), delay(graceMs)]);
+        }
         throw brokerError('TIMEOUT', `Codex managed job exceeded ${Math.round(timeoutMs / 1000)}s and was interrupted; raise timeoutSeconds for longer work`, { provider: job.provider });
+      }
+      if (cancelled && cancelDrainDeadline != null && Date.now() >= cancelDrainDeadline) {
+        await rpc.stop();
+        terminal(job, 'cancelled', 'cancelled');
+        break;
       }
       const completed = await Promise.race([
         turnDone.then((turn) => ({ turn })),
@@ -343,8 +418,13 @@ async function runCodex(job) {
               settleQueuedControl(job.id, queued.commandId, { ok: false, error: 'job cancelled before correction started' });
             }
             queuedPrompts.length = 0;
-            if (current.providerTurnId) await rpc.request('turn/interrupt', { threadId, turnId: current.providerTurnId });
             cancelled = true;
+            const graceMs = drainGraceMs();
+            cancelDrainDeadline = Date.now() + graceMs;
+            if (current.providerTurnId) {
+              await rpc.request('turn/interrupt', { threadId, turnId: current.providerTurnId }, Math.max(graceMs, 1))
+                .catch((error) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'cancel-interrupt-error', error: error.message }));
+            }
             completeCommand(job.id, claimed, { ok: true, appliedAs: 'interrupt' });
           } else if (command.type === 'steer') {
             if (cancelled) {
@@ -650,6 +730,7 @@ function recordGitState(job, sessionId) {
 async function runCursorAcp(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
+  assertProviderVersion('cursor', binary);
   const sandboxValue = job.sandbox === 'off' ? 'disabled' : 'enabled';
   const rootArgs = readOnly(job) ? ['--sandbox', sandboxValue, 'acp'] : ['--auto-review', '--sandbox', sandboxValue, 'acp'];
   const launch = cursorCommand(binary, rootArgs);
@@ -694,7 +775,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.15.0' }
+      clientInfo: { name: 'delegate-router', version: '0.16.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -858,6 +939,7 @@ function mapHeadlessEvent(job, event, deltas) {
 async function runCursorHeadless(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
+  assertProviderVersion('cursor', binary);
   const ids = process.platform === 'darwin' && process.env.DELEGATE_CURSOR_LOGIN_SHELL !== '0'
     ? []
     : availableModelIds(binary);
@@ -939,7 +1021,11 @@ async function runCursorHeadless(job) {
       text = next.text;
       continue;
     }
-    if (outcome.status !== 0) throw brokerError('PROVIDER_ERROR', outcome.error || 'Cursor headless execution failed', { provider: job.provider });
+    if (outcome.status !== 0) {
+      recordGitState(job, resume);
+      if (outcome.timedOut) throw brokerError('TIMEOUT', outcome.error || 'Cursor headless execution timed out', { provider: job.provider });
+      throw brokerError('PROVIDER_ERROR', outcome.error || 'Cursor headless execution failed', { provider: job.provider });
+    }
     const sessionId = findValue(outcome.payload, ['session_id', 'sessionId', 'chat_id', 'chatId']);
     if (sessionId) recordSession(job.id, sessionId, null);
     recordGitState(job, sessionId);
@@ -948,55 +1034,151 @@ async function runCursorHeadless(job) {
   }
 }
 
+function verificationFailure(job, message, exitCode = 127) {
+  return {
+    command: job.verify?.command || '[unavailable]',
+    exitCode,
+    durationMs: 0,
+    outputTail: redact(message, '', 2000)
+  };
+}
+
+async function executeVerification(job) {
+  let command;
+  try { command = fs.readFileSync(job.verifyCommandPath, 'utf8'); }
+  catch (error) { return verificationFailure(job, `verification command is unavailable: ${error.message}`); }
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const child = spawn('/bin/sh', ['-c', command], {
+      cwd: job.cwd,
+      env: process.env,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+    let output = '';
+    let settled = false;
+    let timedOut = false;
+    let timer;
+    const append = (chunk) => { output = `${output}${String(chunk)}`.slice(-8192); };
+    const finish = (exitCode) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        command: job.verify.command,
+        exitCode,
+        durationMs: Date.now() - started,
+        outputTail: redact(output.slice(-2000), '', 2000)
+      });
+    };
+    child.stdout.on('data', append);
+    child.stderr.on('data', append);
+    child.once('error', (error) => { append(error.message); finish(127); });
+    child.once('exit', (code, signal) => finish(timedOut ? 124 : Number.isInteger(code) ? code : signal ? 128 : 1));
+    timer = setTimeout(async () => {
+      timedOut = true;
+      await terminateProcessTree(child);
+      finish(124);
+    }, job.verify.timeoutSeconds * 1000);
+    timer.unref?.();
+  });
+}
+
+async function finishVerification(job) {
+  const verification = await executeVerification(job);
+  updateManagedJob(job.id, (current) => { current.verification = verification; }, { incrementRevision: false });
+  appendJobEvent(job.id, 'verification.finished', verification);
+  terminal(loadJob(job.id), 'completed', 'completed');
+}
+
+async function runProviderAttempt(job) {
+  if (job.provider === 'codex') await runCodex(job);
+  else if (job.provider === 'cursor' && job.transport === 'headless') await runCursorHeadless(job);
+  else if (job.provider === 'cursor') {
+    try { await runCursorAcp(job); }
+    catch (error) {
+      if (error.code === 'PROVIDER_TOO_OLD') throw error;
+      const started = inspectJob(job.id).providerSessionId;
+      const tierFallback = error.code === 'ACP_TIER_UNAVAILABLE';
+      if (started && !tierFallback) throw error;
+      appendJobEvent(job.id, 'provider.event', {
+        providerEvent: tierFallback ? 'cursor:acp-tier-fallback' : 'cursor:acp-fallback',
+        error: error.message,
+        ...(error.cliModel ? { cliModel: error.cliModel } : {})
+      });
+      updateManagedJob(job.id, (next) => {
+        next.transport = 'headless';
+        next.capabilities.correction = 'cancel-resume';
+        if (tierFallback) {
+          // The ACP session id is not a headless chat id; the requested model
+          // is honored exactly via the CLI-validated id.
+          next.providerSessionId = null;
+          next.session = null;
+          next.model = error.cliModel;
+          next.resolvedModel = error.cliModel;
+        }
+      });
+      await runCursorHeadless(loadJob(job.id));
+    }
+  } else throw brokerError('INVALID_REQUEST', `Unsupported managed provider: ${job.provider}`, { provider: job.provider });
+}
+
+function retryClass(error) {
+  const message = String(error?.message || '');
+  const providerFailure = error?.retryable === true && ['TRANSPORT_ERROR', 'RPC_TIMEOUT', 'PROVIDER_ERROR'].includes(error.code);
+  if (providerFailure && /\b429\b|rate[- ]?limit|too many requests|\b(?:http(?: status)?|status(?: code)?|server(?: error)?)\s*5\d\d\b/i.test(message)) return 'rate-limit';
+  if (providerFailure) return 'transport';
+  return null;
+}
+
+function retryDelayMs(retryNumber) {
+  const configured = Number(process.env.DELEGATE_RETRY_BASE_MS ?? 2000);
+  const base = Number.isFinite(configured) && configured >= 0 ? configured : 2000;
+  return Math.min(30000, base * (2 ** Math.max(retryNumber - 1, 0)));
+}
+
 export async function runManagedProvider(job) {
   updateManagedJob(job.id, (current) => { current.status = 'running'; current.phase = 'starting'; current.workerPid = process.pid; });
   appendJobEvent(job.id, 'job.state', { status: 'running', phase: 'starting', transport: job.transport });
-  try {
-    const current = loadJob(job.id);
-    if (job.provider === 'codex') await runCodex(current);
-    else if (job.provider === 'cursor' && job.transport === 'headless') await runCursorHeadless(current);
-    else if (job.provider === 'cursor') {
-      try { await runCursorAcp(current); }
-      catch (error) {
-        const started = inspectJob(job.id).providerSessionId;
-        const tierFallback = error.code === 'ACP_TIER_UNAVAILABLE';
-        if (started && !tierFallback) throw error;
-        appendJobEvent(job.id, 'provider.event', {
-          providerEvent: tierFallback ? 'cursor:acp-tier-fallback' : 'cursor:acp-fallback',
-          error: error.message,
-          ...(error.cliModel ? { cliModel: error.cliModel } : {})
-        });
-        updateManagedJob(job.id, (next) => {
-          next.transport = 'headless';
-          next.capabilities.correction = 'cancel-resume';
-          if (tierFallback) {
-            // The ACP session id is not a headless chat id; the requested
-            // model is honored exactly via the CLI-validated id.
-            next.providerSessionId = null;
-            next.session = null;
-            next.model = error.cliModel;
-            next.resolvedModel = error.cliModel;
-          }
-        });
-        await runCursorHeadless(loadJob(job.id));
+  const policy = job.retryPolicy || { maxAttempts: 1, retryOn: [] };
+  for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
+    try {
+      await runProviderAttempt(loadJob(job.id));
+      const current = inspectJob(job.id);
+      if (current.status === 'running' && current.phase === 'verifying') await finishVerification(loadJob(job.id));
+      return;
+    } catch (error) {
+      const typed = normalizeBrokerError(error, { provider: job.provider, defaultCode: 'TRANSPORT_ERROR' });
+      if (/(?:quota|usage limit|rate limit|allowance)/i.test(typed.message || '')) {
+        mutateState((state) => setWindow(state, job.provider, 'quota-error', 100, { source: 'quota-error' }));
       }
+      const category = retryClass(typed);
+      const canRetry = attempt < policy.maxAttempts && category && policy.retryOn.includes(category);
+      if (canRetry) {
+        const retryNumber = attempt;
+        const delayMs = retryDelayMs(retryNumber);
+        updateManagedJob(job.id, (current) => {
+          current.retries = retryNumber;
+          current.phase = 'retrying';
+          current.providerTurnId = null;
+        });
+        appendJobEvent(job.id, 'job.retry', { attempt: attempt + 1, code: typed.code, delayMs });
+        await delay(delayMs);
+        updateManagedJob(job.id, (current) => { current.phase = 'starting'; }, { incrementRevision: false });
+        continue;
+      }
+      const current = inspectJob(job.id);
+      if (!['completed', 'cancelled', 'failed'].includes(current.status)) {
+        terminal(loadJob(job.id), 'failed', 'failed', {
+          error: typed.message,
+          errorCode: typed.code,
+          errorRetryable: typed.retryable,
+          ...(typed.provider ? { errorProvider: typed.provider } : {}),
+          ...(typed.code === 'BUDGET_EXCEEDED' ? { stoppedReason: 'budget' } : {})
+        });
+      }
+      throw typed;
     }
-    else throw brokerError('INVALID_REQUEST', `Unsupported managed provider: ${job.provider}`, { provider: job.provider });
-  } catch (error) {
-    const typed = normalizeBrokerError(error, { provider: job.provider, defaultCode: 'TRANSPORT_ERROR' });
-    if (/(?:quota|usage limit|rate limit|allowance)/i.test(typed.message || '')) {
-      mutateState((state) => setWindow(state, job.provider, 'quota-error', 100, { source: 'quota-error' }));
-    }
-    const current = inspectJob(job.id);
-    if (!['completed', 'cancelled', 'failed'].includes(current.status)) {
-      terminal(job, 'failed', 'failed', {
-        error: typed.message,
-        errorCode: typed.code,
-        errorRetryable: typed.retryable,
-        ...(typed.provider ? { errorProvider: typed.provider } : {}),
-        ...(typed.code === 'BUDGET_EXCEEDED' ? { stoppedReason: 'budget' } : {})
-      });
-    }
-    throw typed;
   }
 }

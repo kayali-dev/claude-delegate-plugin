@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
 
+if (process.argv.includes('--version')) {
+  console.log('cursor-agent 2026.07.09-a3815c0');
+  process.exit(0);
+}
+
 if (process.argv.includes('models')) {
   console.log('grok-4.5-xhigh - Cursor Grok 4.5');
   console.log('grok-4.5-high - Cursor Grok 4.5 Medium');

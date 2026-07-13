@@ -2,6 +2,15 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.16.0 — 2026-07-13
+
+- Opt-in `retryPolicy` for transport and provider rate-limit/server failures, with bounded backoff, same-record continuation, `job.retry` events, and retry counts.
+- Write-mode `verify` commands run after provider success with timeout, redacted output tail, structured verdict, and `delegate-jobs wait` exit 6 on nonzero.
+- Failure/cancellation checkpoints formalize continuation and partial-diff recovery; Codex interruption drains briefly before process termination.
+- `delegate-jobs revert <id> [--dry-run]` safely restores job-owned tracked files and removes job-created files while refusing pre-existing overlap and later edits.
+- Inspect now derives `resumable` and `driftReport` from the same resume rules and recorded inventory.
+- Dirty write baselines emit `baseline.dirty`; provider adapters assert overridable minimum CLI versions with `PROVIDER_TOO_OLD`.
+
 ## 0.15.0 — 2026-07-13
 
 - Atomic, per-cwd `idempotencyKey` replay for `delegate_start`, with matching `--idempotency-key` CLI support.

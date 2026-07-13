@@ -3,6 +3,11 @@ import readline from 'node:readline';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
+if (process.argv.includes('--version')) {
+  console.log('cursor-agent 2026.07.09-a3815c0');
+  process.exit(0);
+}
+
 if (process.argv.includes('models')) {
   console.log('composer-2.5 - Composer');
   process.exit(0);

@@ -15,12 +15,12 @@ const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
 const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
 
 async function isolated(fn) {
-  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, collab: process.env.FAKE_CODEX_COLLAB, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE };
+  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, crashOnce: process.env.FAKE_CODEX_CRASH_ONCE, collab: process.env.FAKE_CODEX_COLLAB, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE, retryBase: process.env.DELEGATE_RETRY_BASE_MS, minCodex: process.env.DELEGATE_MIN_CODEX_VERSION, minCursor: process.env.DELEGATE_MIN_CURSOR_VERSION };
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-provider-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
   try { await fn(directory); }
   finally {
-    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_COLLAB: old.collab, FAKE_CODEX_GROWING_USAGE: old.growingUsage })) {
+    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_CRASH_ONCE: old.crashOnce, FAKE_CODEX_COLLAB: old.collab, FAKE_CODEX_GROWING_USAGE: old.growingUsage, DELEGATE_RETRY_BASE_MS: old.retryBase, DELEGATE_MIN_CODEX_VERSION: old.minCodex, DELEGATE_MIN_CURSOR_VERSION: old.minCursor })) {
       if (value == null) delete process.env[key]; else process.env[key] = value;
     }
   }
@@ -212,6 +212,43 @@ test('Codex provider exit fails immediately instead of waiting for the turn time
   assert.equal(inspectJob(job.id).status, 'failed');
 }));
 
+test('retryPolicy retries a transient Codex crash once on the same job and thread', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_CRASH_ONCE = '1';
+  process.env.DELEGATE_RETRY_BASE_MS = '1';
+  const job = createManagedJob({
+    provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review',
+    retryPolicy: { maxAttempts: 2, retryOn: ['transport'] }
+  });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.retries, 1);
+  assert.equal(completed.providerSessionId, 'thread-fake');
+  const retry = readJobEvents(job.id, { limit: 1000 }).find((event) => event.type === 'job.retry');
+  assert.deepEqual({ attempt: retry.data.attempt, code: retry.data.code }, { attempt: 2, code: 'TRANSPORT_ERROR' });
+}));
+
+test('completed write jobs run verification and delegate-jobs wait exits 6 on a nonzero verdict', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const job = createManagedJob({
+    provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'implement',
+    verify: { command: "printf 'verification-tail\\n'; exit 7", timeoutSeconds: 10 }
+  });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.verification.exitCode, 7);
+  assert.match(completed.verification.outputTail, /verification-tail/);
+  assert.ok(readJobEvents(job.id, { limit: 1000 }).some((event) => event.type === 'verification.finished' && event.data.exitCode === 7));
+  const cli = path.join(path.dirname(testDir), 'bin', 'delegate-jobs');
+  const waited = spawnSync(process.execPath, [cli, 'wait', job.id], {
+    encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE }
+  });
+  assert.equal(waited.status, 6, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).verification.exitCode, 7);
+}));
+
 test('Codex output budget interrupts the turn and preserves partial state and continuation', () => isolated(async (directory) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   process.env.FAKE_CODEX_GROWING_USAGE = '1';
@@ -234,11 +271,30 @@ test('Codex output budget interrupts the turn and preserves partial state and co
   assert.match(failed.error, /BUDGET_EXCEEDED/);
   assert.equal(failed.providerSessionId, 'thread-fake');
   assert.equal(failed.usage.total.outputTokens, 6);
+  assert.deepEqual(failed.checkpoint, {
+    failureReason: 'BUDGET_EXCEEDED',
+    continuationId: 'thread-fake',
+    lastDiffEventSeq: readJobEvents(job.id, { limit: 1000 }).filter((event) => event.type === 'diff.updated').at(-1).seq,
+    resumeHint: 'resume this thread with delegate_resume and a packet folding in the partial diff'
+  });
   const events = readJobEvents(job.id, { limit: 1000 });
   assert.ok(events.some((event) => event.type === 'budget.exceeded' && event.data.observedOutputTokens === 6));
   assert.ok(events.some((event) => event.type === 'diff.updated' && /partial\.js/.test(event.data.diff)));
   assert.ok(events.some((event) => event.type === 'message.delta' && /partial work/.test(event.data.delta)));
   assert.ok(events.some((event) => event.type === 'turn.completed' && event.data.turn.status === 'interrupted'));
+}));
+
+test('provider minimum versions fail clearly through an env-forced floor', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.DELEGATE_MIN_CODEX_VERSION = '999.0.0';
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review' });
+  await assert.rejects(
+    () => runManagedProvider(job),
+    (error) => error.code === 'PROVIDER_TOO_OLD' && error.retryable === false && error.observedVersion === '0.144.1'
+  );
+  const failed = inspectJob(job.id);
+  assert.equal(failed.errorCode, 'PROVIDER_TOO_OLD');
+  assert.match(failed.error, /0\.144\.1.*999\.0\.0/);
 }));
 
 test('cursor model resolution matches attribute-serialized catalogs (REG-1)', async () => {
