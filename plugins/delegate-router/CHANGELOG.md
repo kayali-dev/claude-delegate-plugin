@@ -2,6 +2,10 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.18.1 — 2026-07-13
+
+- Docs: general-purpose coordinator lessons from the dogfood run moved into the skill — write-mode packets must state that zero changed files is a failed objective; idempotency replay intentionally returns objective-failed jobs (mint a new key for a changed retry); fold an analysis-only turn's output into the fresh packet as verified context.
+
 ## 0.18.0 — 2026-07-13
 
 - **`resultSuspect: 'no-changes-write-mode'`** on completed write-mode jobs with zero observed changes — the write-mode analogue of the narration flag, on the record itself and not only via `wait` exit 5 (added by the coordinator from this wave's own failed first round).

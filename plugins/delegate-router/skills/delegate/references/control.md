@@ -61,6 +61,10 @@ A steer that reduces the remaining work can finish the job before any follow-up 
 
 For managed runs, store the job ID and use the `delegate_control` inspection and control tools. Direct Cursor jobs remain available through `delegate-jobs`; official Codex plugin jobs retain their own lifecycle commands. Never describe a foreground MCP call or an external-plugin job as a managed control-plane job.
 
+## Idempotency
+
+`idempotencyKey` guards against double-launching the same request (orchestrator restart, lost acknowledgement): a replayed start with the same key and cwd returns the existing job. It deliberately replays terminal jobs too, including ones whose objective failed — the caller must see the failed job, not silently relaunch it. When you intend a changed retry (new packet line, folded-in findings, different scope), that is a new request: use a new key.
+
 ## Timeouts
 
 Managed jobs are bounded by `timeoutSeconds` (60–86400) or, when unset, `DELEGATE_CODEX_TIMEOUT_SECONDS` / `DELEGATE_CURSOR_TIMEOUT_SECONDS` (default 3600). Defaults are deliberately long — LLM agent jobs legitimately run long — so set an explicit value only when the task warrants a tighter or looser bound. A timeout interrupts the active turn and fails the job with a `TIMEOUT:` error; the thread remains resumable.

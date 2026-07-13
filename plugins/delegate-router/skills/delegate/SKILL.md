@@ -44,6 +44,8 @@ Retries are opt-in: use `retryPolicy: { maxAttempts, retryOn: ['transport', 'rat
 
 The broker scans outbound task packets for credential-shaped values. It fails with `SECRET_IN_PROMPT` unless `allowSensitive=true`; an override is recorded as `security.warning` and does not relax scope or preservation rules.
 
+In write-mode packets, state explicitly that a completed job with zero changed files is a failed objective — Codex can engage its internal pre-implementation review flow and return an analysis instead of code (field-observed); the broker flags this on the record as `resultSuspect: 'no-changes-write-mode'`, and the explicit contract line in the packet prevents it up front.
+
 Reference repository paths instead of pasting large files. Include only conversation context the worker cannot discover. Tell every writer to preserve existing changes and never revert unrelated work.
 
 ## Delegate To Codex
@@ -139,7 +141,8 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `delegate_usage` for observed job usage, chain-cumulative token totals, and provider allowance as separate values.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
 - For long waits inside Claude Code, do not rely on a background `delegate-jobs wait` process — the harness can reap it (field-verified across a full multi-cluster run). Watch the job's `finishedPath` instead (on the job record from `delegate_inspect`/`delegate_list`): the broker writes that sentinel file on every terminal transition, so a Monitor until-loop on its existence is the durable wake signal; then read the outcome with `delegate_inspect`. `delegate-jobs wait` remains fine from a real terminal.
-- A Codex job whose transcript shows collab-agent activity has engaged the multi-agent review flow: the record carries `reviewFlowEngaged: true`, and `delegate_resume` will refuse it immediately with `RESUME_UNSUPPORTED` — plan the follow-up as a fresh job whose packet folds in the prior findings instead of attempting resume.
+- A Codex job whose transcript shows collab-agent activity has engaged the multi-agent review flow: the record carries `reviewFlowEngaged: true`, and `delegate_resume` will refuse it immediately with `RESUME_UNSUPPORTED` — plan the follow-up as a fresh job whose packet folds in the prior findings instead of attempting resume. The analysis such a turn produced is often accurate; append it to the fresh packet as verified context.
+- `idempotencyKey` replay returns the existing job even when that job completed without meeting its objective (analysis-only turn, zero changed files, failed verification). A deliberate retry-with-changes is a new request: mint a new key rather than reusing the old one.
 
 `REVISION_CONFLICT` errors carry `currentRevision`; retry once with that value when your command is still appropriate for the newer state, instead of a full re-inspect round-trip.
 
