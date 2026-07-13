@@ -279,6 +279,7 @@ test('network option is stored, defaults off, and shapes codex spawn args', asyn
   assert.equal(inspectJob(on.id).network, true);
   assert.ok(codexSpawnArgs(on).includes('sandbox_workspace_write.network_access=true'));
   assert.match(securityPreamble(false), /Do not read, print, transmit/);
+  assert.match(securityPreamble(false), /tooling that consumes them internally .* is allowed/);
   assert.match(securityPreamble(false), /Preserve pre-existing changes/);
   assert.match(securityPreamble(true), /explicitly authorized/);
   assert.match(securityPreamble(true), /Preserve pre-existing changes/);

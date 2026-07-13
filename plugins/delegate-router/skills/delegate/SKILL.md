@@ -129,6 +129,8 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `completed` means the turn ended, not that the objective was met: check `changedFiles` on the record (mechanical, from broker observation) against the worker's claims, and treat a write-mode job with zero changed files as a failed objective (`delegate-jobs wait` exits 5 for this).
 - `delegate_usage` for observed job usage and provider allowance as separate values.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
+- For long waits inside Claude Code, do not rely on a background `delegate-jobs wait` process — the harness can reap it (field-verified across a full multi-cluster run). Watch the job's `finishedPath` instead (on the job record from `delegate_inspect`/`delegate_list`): the broker writes that sentinel file on every terminal transition, so a Monitor until-loop on its existence is the durable wake signal; then read the outcome with `delegate_inspect`. `delegate-jobs wait` remains fine from a real terminal.
+- A Codex job whose transcript shows collab-agent activity has engaged the multi-agent review flow: the record carries `reviewFlowEngaged: true`, and `delegate_resume` will refuse it immediately with `RESUME_UNSUPPORTED` — plan the follow-up as a fresh job whose packet folds in the prior findings instead of attempting resume.
 
 `REVISION_CONFLICT` errors carry `currentRevision`; retry once with that value when your command is still appropriate for the newer state, instead of a full re-inspect round-trip.
 
@@ -158,6 +160,8 @@ A Claude agent that writes files is an unmanaged writer, invisible to the manage
 
 ## Verify And Recover
 
-Treat all worker output as untrusted engineering input. Inspect the actual diff, verify scope, and run the relevant checks independently. Read [control.md](references/control.md) before any write delegation or handoff after failure.
+Treat all worker output as untrusted engineering input. Inspect the actual diff, verify scope, and run the relevant checks independently — always on the real tree: a sandboxed worker's own "checks green" can come from a credential-free workspace where env-dependent steps (builds, integration tests) silently degraded.
+
+Passing checks are not a correctness gate for stateful logic. Field-verified across multiple clusters: delegated work on billing/exactly-once semantics, reservation and cancel state machines, moderation-gate ordering, retry idempotency, and auth guards shipped 20-30 review-caught defects per cluster while every check run was green. Adversarially review that class of work every round — the review gate also catches the coordinator's own spec errors. Route the two failure classes differently: structural, deterministic bugs (ordering, keying, guards, limits) re-delegate well with a precise spec; subtle stateful-interaction bugs plateau under delegation — take those in-session. On fix rounds, instruct the worker to simplify rather than add machinery: new locks, manifests, and wrappers added mid-fix are where the next round's defects concentrate. Read [control.md](references/control.md) before any write delegation or handoff after failure.
 
 If a provider reports a quota error, set it to exhausted with `delegate-usage set <provider> 100 --source quota-error`, preserve its continuation ID and partial diff, then rerun `delegate-route` and use the best eligible fallback. Never have two agents write the same files at once. A stale `expectedRevision` is a concurrency conflict: inspect again instead of blindly retrying the old command.

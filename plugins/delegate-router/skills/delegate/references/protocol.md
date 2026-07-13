@@ -15,6 +15,8 @@ Terminal jobs older than `DELEGATE_JOB_RETENTION_DAYS` (default 14) are pruned o
 
 Inspection reconciles liveness: a job recorded as `running` whose worker process no longer exists is transitioned to `failed` with an `ORPHANED` error event before the snapshot is returned. `delegate_list` rediscovers jobs by recency when an ID is no longer in context.
 
+Every terminal transition also writes the job's `finishedPath` sentinel file (content: the terminal status). Its existence is the durable "job is done" signal for file watchers, which survive host harnesses that reap background waiter processes. Codex jobs that engaged the multi-agent review flow are marked `reviewFlowEngaged: true` (detected from collab-agent items), and `delegate_resume` refuses them fast with `RESUME_UNSUPPORTED`.
+
 `lastSeq` changes for every event. `revision` changes only for lifecycle and control transitions. Read events after the last observed sequence. Send `expectedRevision` with steering and cancellation so concurrent controllers cannot both mutate stale state.
 
 Event reads return `nextSeq`, `latestSeq`, and `hasMore`. Reuse `nextSeq`, including for filtered streams. `waitMs` provides bounded long polling and is capped at 30 seconds.

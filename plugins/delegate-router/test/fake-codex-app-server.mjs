@@ -30,6 +30,9 @@ lines.on('line', (line) => {
     send({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-fake', turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-fake', turnId: activeTurn, explanation: null, plan: [{ step: 'test', status: 'inProgress' }] } });
     send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'fileChange', id: 'file-1', changes: [{ path: 'a.js', kind: 'update' }], status: 'completed' }, completedAtMs: Date.now() } });
+    if (process.env.FAKE_CODEX_COLLAB === '1') {
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'collabAgentToolCall', id: 'collab-1', status: 'completed' }, completedAtMs: Date.now() } });
+    }
     if (process.env.FAKE_CODEX_CRASH === '1') setTimeout(() => process.exit(7), 50);
     else timer = setTimeout(complete, 500);
   } else if (request.method === 'turn/steer') {

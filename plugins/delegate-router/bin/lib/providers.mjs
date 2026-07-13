@@ -20,7 +20,7 @@ import { loadJob, mutateState, setWindow } from './state.mjs';
 export function securityPreamble(allowSensitive) {
   const sensitiveRule = allowSensitive
     ? '- Sensitive-path access is explicitly authorized for this task; touch only the sensitive paths the task names.'
-    : '- Do not read, print, transmit, or modify credentials, private keys, tokens, or .env files unless the task explicitly authorizes the exact path.';
+    : '- Do not read, print, transmit, or modify credentials, private keys, tokens, or .env files unless the task explicitly authorizes the exact path. Running project tooling that consumes them internally (builds, tests, dev servers reading .env) is allowed and expected; never echo, copy, or relocate their contents yourself.';
   return `Security boundary:
 ${sensitiveRule}
 - Preserve pre-existing changes and never revert unrelated work.
@@ -101,6 +101,12 @@ function mapCodexItem(jobId, phase, params) {
   } else if (item.type === 'plan') {
     appendJobEvent(jobId, 'plan.updated', { id: item.id, text: item.text, phase }, options);
   } else if (item.type === 'commandExecution' || item.type === 'mcpToolCall' || item.type === 'dynamicToolCall' || item.type === 'collabAgentToolCall') {
+    // Collab-agent items mean the thread engaged Codex's multi-agent review
+    // flow; such threads refuse direct resume. Mark the job so delegate_resume
+    // can fail fast with the recovery instead of a provider round-trip.
+    if (item.type === 'collabAgentToolCall') {
+      updateManagedJob(jobId, (job) => { job.reviewFlowEngaged = true; }, { incrementRevision: false });
+    }
     const type = phase === 'started' ? 'tool.started' : 'tool.completed';
     appendJobEvent(jobId, type, { item }, options);
   } else if (item.type === 'fileChange') {
@@ -196,7 +202,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.12.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.13.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -593,7 +599,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.12.0' }
+      clientInfo: { name: 'delegate-router', version: '0.13.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })

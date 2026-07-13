@@ -31,6 +31,7 @@ function paths(id) {
   const root = jobsDir();
   return {
     events: path.join(root, `${id}.events.jsonl`),
+    finished: path.join(root, `${id}.finished`),
     lock: path.join(root, `${id}.lock`),
     commands: path.join(root, `${id}.commands`),
     done: path.join(root, `${id}.commands`, 'done'),
@@ -234,6 +235,16 @@ export function updateManagedJob(id, mutate, options = {}) {
     if (options.incrementRevision !== false) job.revision = (job.revision || 0) + 1;
     job.updatedAt = Math.floor(Date.now() / 1000);
     saveJob(job);
+    // Terminal sentinel: a plain file whose existence means "this job is
+    // done", so callers can wait with a file watcher instead of a polling
+    // process. Background `delegate-jobs wait` processes can be reaped by
+    // the host harness; watching finishedPath is the durable alternative.
+    if (TERMINAL_STATUSES.has(job.status)) {
+      const sentinel = paths(id).finished;
+      if (!fs.existsSync(sentinel)) {
+        try { writePrivate(sentinel, `${job.status}\n`); } catch {}
+      }
+    }
     return job;
   });
 }
@@ -394,6 +405,7 @@ export function listManagedJobs(options = {}) {
       cwd: job.cwd || null,
       transport: job.transport || null,
       managed: job.managedBy === 'delegate-control',
+      reviewFlowEngaged: job.reviewFlowEngaged === true ? true : undefined,
       parentJobId: job.parentJobId || null,
       providerSessionId: job.providerSessionId || job.session || null,
       createdAt: job.createdAt || null,
@@ -660,6 +672,7 @@ export function createManagedJob(options) {
     promptPath: p.prompt,
     stdoutPath: p.stdout,
     stderrPath: p.stderr,
+    finishedPath: p.finished,
     providerSessionId: options.providerSessionId || null,
     parentJobId: options.parentJobId || null,
     createdAt: now,
@@ -868,6 +881,12 @@ export function resumeManagedJob(id, options) {
     throw new Error(`PARENT_ACTIVE: cannot resume while ${parent.id} is ${parent.status}`);
   }
   if (!parent.providerSessionId) throw new Error('SESSION_UNAVAILABLE: the original job has no continuation id');
+  // Detected during the original run (collab-agent items): resuming such a
+  // thread fails provider-side, so fail fast with the recovery instead of
+  // burning a provider round-trip.
+  if (parent.provider === 'codex' && parent.reviewFlowEngaged === true) {
+    throw new Error('RESUME_UNSUPPORTED: this Codex thread engaged the multi-agent review flow and cannot be resumed directly; start a fresh job whose task packet folds in the prior findings');
+  }
   return launchManagedJob({
     provider: parent.provider,
     model: options.model || parent.model,
@@ -899,7 +918,7 @@ export function pruneJobs(options = {}) {
     const finishedAt = job.completedAt || job.updatedAt || job.createdAt || 0;
     if (finishedAt > cutoff) continue;
     const p = paths(job.id);
-    for (const file of [p.events, p.prompt, p.stdout, p.stderr, p.lock, path.join(jobsDir(), `${job.id}.json`)]) {
+    for (const file of [p.events, p.prompt, p.stdout, p.stderr, p.lock, p.finished, path.join(jobsDir(), `${job.id}.json`)]) {
       try { fs.rmSync(file, { force: true }); } catch {}
     }
     for (const directory of [p.commands, p.artifacts]) {

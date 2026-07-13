@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createManagedJob, inspectJob, readJobEvents, submitControl } from '../bin/lib/control.mjs';
+import { createManagedJob, inspectJob, readJobEvents, resumeManagedJob, submitControl } from '../bin/lib/control.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
 import { effectiveUsage, loadState } from '../bin/lib/state.mjs';
 
@@ -15,12 +15,12 @@ const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
 const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
 
 async function isolated(fn) {
-  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH };
+  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, collab: process.env.FAKE_CODEX_COLLAB };
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-provider-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
   try { await fn(directory); }
   finally {
-    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash })) {
+    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_COLLAB: old.collab })) {
       if (value == null) delete process.env[key]; else process.env[key] = value;
     }
   }
@@ -149,6 +149,19 @@ test('Cursor diff excludes pre-existing dirty files the job never changed and fl
   const record = inspectJob(job.id);
   assert.ok(record.changedFiles.files.includes('tracked-overlap.txt'));
   assert.ok(!record.changedFiles.files.includes('tracked-unchanged.txt'));
+}));
+
+test('review-flow threads are flagged and refuse resume fast; terminal jobs write the finished sentinel', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_COLLAB = '1';
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'implement' });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.reviewFlowEngaged, true);
+  assert.ok(completed.finishedPath);
+  assert.equal(fs.readFileSync(completed.finishedPath, 'utf8').trim(), 'completed');
+  assert.throws(() => resumeManagedJob(job.id, { prompt: 'continue' }), /RESUME_UNSUPPORTED/);
 }));
 
 test('Codex provider exit fails immediately instead of waiting for the turn timeout', () => isolated(async (directory) => {
