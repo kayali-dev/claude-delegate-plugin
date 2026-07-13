@@ -11,6 +11,7 @@ if (process.argv.includes('--version')) {
 const lines = readline.createInterface({ input: process.stdin });
 let activeTurn = null;
 let timer = null;
+let turnCount = 0;
 
 function send(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
 function sendUsage(turnId, outputTokens) {
@@ -28,8 +29,11 @@ function complete() {
   if (!activeTurn) return;
   const turnId = activeTurn;
   activeTurn = null;
-  send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-fake', turnId, itemId: 'message-1', delta: 'done' } });
-  send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId, item: { type: 'agentMessage', id: 'message-1', text: 'done', phase: 'final_answer', memoryCitation: null }, completedAtMs: Date.now() } });
+  const reply = process.env.FAKE_CODEX_NUDGE === '1'
+    ? turnCount === 1 ? 'I prepared the requested deliverable.' : `Complete findings inline: ${'evidence '.repeat(30)}`
+    : process.env.FAKE_CODEX_REPLY || 'done';
+  send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-fake', turnId, itemId: 'message-1', delta: reply } });
+  send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId, item: { type: 'agentMessage', id: 'message-1', text: reply, phase: 'final_answer', memoryCitation: null }, completedAtMs: Date.now() } });
   send({ jsonrpc: '2.0', method: 'turn/diff/updated', params: { threadId: 'thread-fake', turnId, diff: 'diff --git a/a.js b/a.js' } });
   sendUsage(turnId, 2);
   send({ jsonrpc: '2.0', method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 41, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, secondary: { usedPercent: 7, resetsAt: Math.floor(Date.now() / 1000) + 604800 } } } });
@@ -43,11 +47,16 @@ lines.on('line', (line) => {
   else if (request.method === 'thread/start' || request.method === 'thread/resume') {
     send({ jsonrpc: '2.0', id: request.id, result: { thread: { id: 'thread-fake' }, model: 'fake', cwd: process.cwd() } });
   } else if (request.method === 'turn/start') {
+    turnCount += 1;
     activeTurn = `turn-${Date.now()}`;
     send({ jsonrpc: '2.0', id: request.id, result: { turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-fake', turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-fake', turnId: activeTurn, explanation: null, plan: [{ step: 'test', status: 'inProgress' }] } });
-    send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'fileChange', id: 'file-1', changes: [{ path: 'a.js', kind: 'update' }], status: 'completed' }, completedAtMs: Date.now() } });
+    const fileChanges = Math.max(1, Number(process.env.FAKE_CODEX_FILE_CHANGES || 1));
+    for (let index = 0; index < fileChanges; index += 1) {
+      const changedPath = index === 0 ? 'a.js' : `file-${index}.js`;
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'fileChange', id: `file-${index}`, changes: [{ path: changedPath, kind: 'update' }], status: 'completed' }, completedAtMs: Date.now() } });
+    }
     if (process.env.FAKE_CODEX_COLLAB === '1') {
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'collabAgentToolCall', id: 'collab-1', status: 'completed' }, completedAtMs: Date.now() } });
     }

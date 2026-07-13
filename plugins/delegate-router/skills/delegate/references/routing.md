@@ -28,6 +28,8 @@ These are routing heuristics, not cross-provider benchmark rankings. Benchmarks 
 
 `delegate-route` implements this matrix deterministically. The skill should call it before selecting a provider; prose reasoning is for interpreting or overriding its result, not replacing the headroom checks.
 
+When terminal audit samples exist for a candidate's provider/model/effort cell, the route includes advisory `usageBand: { p50OutputTokens, p90OutputTokens, samples }`. This history never changes eligibility, score, or ordering. Refresh fleet evidence with `delegate-jobs stats [--since 7d]`.
+
 ## Effort
 
 Start one level lower than instinct suggests and escalate on measured need — most tasks hold quality one level down, and output tokens are the expensive direction.

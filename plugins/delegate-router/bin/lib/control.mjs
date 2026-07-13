@@ -8,6 +8,7 @@ import { brokerError, normalizeBrokerError } from './errors.mjs';
 import { auditLogPath, avoidPercentFor, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerEnabled, saveJob, validateProvider } from './state.mjs';
 import { isProcessAlive } from './process.mjs';
 import { withFileLock } from './lock.mjs';
+import { applyProfile, lintPacket } from './profiles.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -19,6 +20,10 @@ const USAGE_TOKEN_KEY = /^(?:(?:max|observed)?(?:input|output|total|cached|reaso
 const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WRITE_MODES = new Set(['implement', 'verify']);
+const READ_MODES = new Set(['consult', 'plan', 'review']);
+const INGEST_MAX_FILES = 20;
+const INGEST_MAX_BYTES = 10 * 1024 * 1024;
+const SENSITIVE_PATH = /(?:^|\/)(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]*(?:secret|credential|private.?key|token)[^/]*|[^/]+\.(?:pem|key|p12|pfx|crt|cer))$/i;
 
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -110,7 +115,12 @@ function appendTerminalAudit(job) {
     who: job.managedBy || 'legacy',
     provider: job.provider || null,
     model: job.resolvedModel || job.model || job.requestedModel || null,
+    requestedModel: job.requestedModel || job.model || null,
     mode: job.mode || null,
+    effort: job.effort || null,
+    parentJobId: job.parentJobId || null,
+    rootJobId: rootJobIdOf(job) || job.id,
+    groupId: job.groupId || null,
     sandbox: job.sandbox || 'auto',
     network: job.network === true,
     approval: job.approval || 'auto',
@@ -124,6 +134,8 @@ function appendTerminalAudit(job) {
       error: job.error || null
     },
     usage: job.usage || null,
+    verification: job.verification || null,
+    nudgeCount: job.nudgeCount || 0,
     durationMs: job.durationMs ?? Math.max(0, (completedAt - (job.createdAt || completedAt)) * 1000)
   });
   withFileLock(`${file}.lock`, () => {
@@ -204,6 +216,7 @@ function checkpointFor(job) {
     failureReason: job.errorCode || job.stoppedReason || (job.status === 'cancelled' ? 'cancelled' : 'failed'),
     continuationId,
     lastDiffEventSeq,
+    ...(job.stagingDir ? { stagingDir: job.stagingDir, ingested: job.ingested || [] } : {}),
     resumeHint: resumable.ok
       ? 'resume this thread with delegate_resume and a packet folding in the partial diff'
       : 'start fresh; thread not resumable'
@@ -558,6 +571,7 @@ export function listManagedJobs(options = {}) {
     }
     if (options.activeOnly && TERMINAL_STATUSES.has(job.status)) continue;
     if (statuses && !statuses.has(job.status)) continue;
+    if (options.groupId && job.groupId !== options.groupId) continue;
     jobs.push({
       id: job.id,
       provider: job.provider,
@@ -574,6 +588,7 @@ export function listManagedJobs(options = {}) {
       session: job.providerSessionId || job.session || null,
       rootJobId: rootJobIdOf(job),
       parentJobId: job.parentJobId || null,
+      groupId: job.groupId || null,
       providerSessionId: job.providerSessionId || job.session || null,
       createdAt: job.createdAt || null,
       updatedAt: job.updatedAt || null,
@@ -591,6 +606,29 @@ export function listManagedJobs(options = {}) {
     if (jobs.length >= limit) break;
   }
   return { jobs };
+}
+
+export function groupSummary(groupId) {
+  const validated = validatedGroupId(groupId);
+  const jobs = listJobs().filter((job) => job.groupId === validated).map((job) => {
+    if (!TERMINAL_STATUSES.has(job.status)) {
+      try { return reconcileJob(job.id); } catch {}
+    }
+    return job;
+  });
+  const completed = jobs.filter((job) => job.status === 'completed').length;
+  const failed = jobs.filter((job) => job.status === 'failed').length;
+  const cancelled = jobs.filter((job) => job.status === 'cancelled').length;
+  const running = jobs.length - completed - failed - cancelled;
+  return {
+    groupId: validated,
+    total: jobs.length,
+    running,
+    completed,
+    failed,
+    cancelled,
+    allTerminal: jobs.length > 0 && running === 0
+  };
 }
 
 const TRANSCRIPT_TYPES = new Set([
@@ -838,6 +876,20 @@ export function hashWorkingFile(cwd, file) {
   }
 }
 
+export function completeIngestedFiles(job) {
+  if (!job.stagingDir || !job.ingested?.length) return { copiedBack: [], removed: false };
+  const copiedBack = [];
+  for (const item of job.ingested) {
+    const before = job.baselineHashes?.[item.staged] ?? null;
+    const after = hashWorkingFile(job.cwd, item.staged);
+    if (after === 'absent' || after == null || before === after) continue;
+    fs.copyFileSync(path.join(job.cwd, item.staged), item.source);
+    copiedBack.push({ source: item.source, staged: item.staged });
+  }
+  fs.rmSync(path.join(job.cwd, job.stagingDir), { recursive: true, force: true });
+  return { copiedBack, removed: true };
+}
+
 function gitBaseline(cwd) {
   const result = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
     cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 8 * 1024 * 1024
@@ -933,6 +985,83 @@ function validatedIdempotencyKey(value) {
   return value;
 }
 
+function validatedGroupId(value) {
+  if (value == null) return null;
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(value)) {
+    throw brokerError('INVALID_REQUEST', 'groupId must be 1-128 characters using letters, numbers, _, ., :, or -');
+  }
+  return value;
+}
+
+function validatedReportSchema(value) {
+  if (value == null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw brokerError('INVALID_REQUEST', 'reportSchema must be an object');
+  }
+  return redact(value);
+}
+
+function validatedIngestFiles(value, cwd, allowSensitive) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > INGEST_MAX_FILES || !value.every((item) => typeof item === 'string' && path.isAbsolute(item))) {
+    throw brokerError('INVALID_REQUEST', `ingestFiles must be an array of at most ${INGEST_MAX_FILES} absolute file paths`);
+  }
+  const cwdReal = fs.realpathSync(cwd);
+  return value.map((item) => {
+    const source = path.resolve(item);
+    let stat;
+    try { stat = fs.statSync(source); }
+    catch { throw brokerError('INVALID_REQUEST', `ingest file does not exist: ${source}`); }
+    if (!stat.isFile()) throw brokerError('INVALID_REQUEST', `ingest path is not a file: ${source}`);
+    if (stat.size >= INGEST_MAX_BYTES) throw brokerError('INVALID_REQUEST', `ingest file must be smaller than 10 MB: ${source}`);
+    const sourceReal = fs.realpathSync(source);
+    const relative = path.relative(cwdReal, sourceReal);
+    if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+      throw brokerError('INVALID_REQUEST', `ingest file must be outside cwd: ${source}`);
+    }
+    if (!allowSensitive && SENSITIVE_PATH.test(source.replaceAll('\\', '/'))) {
+      throw brokerError('INVALID_REQUEST', `sensitive ingest path requires allowSensitive=true: ${source}`);
+    }
+    return source;
+  });
+}
+
+function stageIngestFiles(cwd, id, sources) {
+  if (!sources.length) return { stagingDir: null, ingested: [] };
+  const stagingDir = `.delegate-staging/${id}`;
+  const absoluteDir = path.join(cwd, stagingDir);
+  fs.mkdirSync(absoluteDir, { recursive: true, mode: 0o700 });
+  const used = new Set();
+  const ingested = [];
+  try {
+    for (const source of sources) {
+      const parsed = path.parse(path.basename(source));
+      let name = parsed.base;
+      let suffix = 2;
+      while (used.has(name)) name = `${parsed.name}-${suffix++}${parsed.ext}`;
+      used.add(name);
+      const staged = `${stagingDir}/${name}`;
+      fs.copyFileSync(source, path.join(cwd, staged));
+      try { fs.chmodSync(path.join(cwd, staged), 0o600); } catch {}
+      ingested.push({ source, staged });
+    }
+    return { stagingDir, ingested };
+  } catch (error) {
+    try { fs.rmSync(absoluteDir, { recursive: true, force: true }); } catch {}
+    throw error;
+  }
+}
+
+function prepareManagedOptions(options) {
+  const prepared = applyProfile(options);
+  const missing = lintPacket(prepared.prompt);
+  if (missing.length) {
+    console.error(`delegate-router packet lint: missing ${missing.join(', ')}`);
+    prepared.packetWarnings = missing.map((section) => `missing section: ${section}`);
+  }
+  return prepared;
+}
+
 function validatedRetryPolicy(value) {
   if (value == null) return null;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -964,6 +1093,7 @@ function validatedVerify(value, mode) {
 }
 
 export function createManagedJob(options) {
+  options = options._profilePrepared ? options : prepareManagedOptions(options);
   const provider = validateProvider(options.provider);
   if (provider === 'claude') throw brokerError('INVALID_REQUEST', 'Claude stays in the current session; managed jobs support codex and cursor');
   if (!options.prompt?.trim()) throw brokerError('INVALID_REQUEST', 'prompt is required', { provider });
@@ -974,18 +1104,31 @@ export function createManagedJob(options) {
   const timeoutSeconds = validatedTimeoutSeconds(options.timeoutSeconds);
   const maxOutputTokens = validatedMaxOutputTokens(options.maxOutputTokens);
   const idempotencyKey = validatedIdempotencyKey(options.idempotencyKey);
+  const groupId = validatedGroupId(options.groupId);
   const retryPolicy = validatedRetryPolicy(options.retryPolicy);
   const mode = options.mode || 'consult';
+  if (options.autoNudge === true && !READ_MODES.has(mode)) throw brokerError('INVALID_REQUEST', 'autoNudge is available only for read modes');
   const verify = validatedVerify(options.verify, mode);
+  const reportSchema = validatedReportSchema(options.reportSchema);
   const cwd = path.resolve(options.cwd || process.cwd());
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw brokerError('INVALID_REQUEST', `cwd does not exist or is not a directory: ${cwd}`, { provider });
+  if (provider === 'cursor' && options.transport === 'headless' && options.startPaused === true) {
+    throw brokerError('INVALID_REQUEST', 'startPaused requires Cursor ACP; headless cannot establish a session before its first prompt', { provider });
+  }
+  const ingestFiles = validatedIngestFiles(options.ingestFiles, cwd, options.allowSensitive === true);
   const id = jobId(provider);
   const now = Math.floor(Date.now() / 1000);
   const transport = provider === 'cursor' ? (options.transport || 'acp') : 'app-server';
   if (provider === 'cursor' && !['acp', 'headless'].includes(transport)) throw brokerError('INVALID_REQUEST', `Invalid Cursor transport: ${transport}`, { provider });
   if (provider === 'codex' && options.transport && options.transport !== 'app-server') throw brokerError('INVALID_REQUEST', `Invalid Codex transport: ${options.transport}`, { provider });
   const p = paths(id);
+  const originalAllowedPaths = validatedAllowedPaths(options.allowedPaths);
+  const staged = stageIngestFiles(cwd, id, ingestFiles);
   const baseline = gitBaseline(cwd);
+  for (const item of staged.ingested) {
+    const hash = hashWorkingFile(cwd, item.staged);
+    if (hash) baseline.hashes[item.staged] = hash;
+  }
   writePrivate(p.prompt, options.prompt);
   if (verify) writePrivate(p.verifyCommand, verify.command);
   const job = {
@@ -1000,13 +1143,25 @@ export function createManagedJob(options) {
     timeoutSeconds,
     maxOutputTokens,
     idempotencyKey,
+    groupId,
     retryPolicy,
     retries: 0,
     verify: verify ? { command: redact(verify.command), timeoutSeconds: verify.timeoutSeconds } : null,
     network: options.network === true,
     sandbox: validatedSandbox(options.sandbox),
-    allowedPaths: validatedAllowedPaths(options.allowedPaths),
+    originalAllowedPaths,
+    allowedPaths: validatedAllowedPaths(originalAllowedPaths == null
+      ? null
+      : [...originalAllowedPaths, ...(staged.stagingDir ? [staged.stagingDir] : [])]),
     allowSensitive: options.allowSensitive === true,
+    profile: options.profile || null,
+    packetWarnings: options.packetWarnings || [],
+    startPaused: options.startPaused === true,
+    autoNudge: options.autoNudge === true,
+    nudgeCount: 0,
+    reportSchema,
+    ingested: staged.ingested,
+    stagingDir: staged.stagingDir,
     status: 'queued',
     phase: 'queued',
     revision: 0,
@@ -1030,7 +1185,8 @@ export function createManagedJob(options) {
     baselineHashes: baseline.hashes
   };
   saveJob(job);
-  appendJobEvent(id, 'job.created', { provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, ...(job.sandbox === 'off' ? { sandbox: 'off' } : {}) });
+  appendJobEvent(id, 'job.created', { provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, groupId, startPaused: job.startPaused, ...(job.sandbox === 'off' ? { sandbox: 'off' } : {}) });
+  if (staged.ingested.length) appendJobEvent(id, 'files.ingested', { stagingDir: staged.stagingDir, files: staged.ingested });
   if (sensitivePromptDetected) {
     appendJobEvent(id, 'security.warning', {
       code: 'SECRET_IN_PROMPT',
@@ -1066,8 +1222,15 @@ function writerLockPath(options) {
 }
 
 export function launchManagedJob(options) {
-  const provider = validateProvider(options.provider);
-  const launchOptions = { ...options, provider, idempotencyKey: validatedIdempotencyKey(options.idempotencyKey) };
+  const prepared = prepareManagedOptions(options);
+  const provider = validateProvider(prepared.provider);
+  const launchOptions = {
+    ...prepared,
+    _profilePrepared: true,
+    provider,
+    idempotencyKey: validatedIdempotencyKey(prepared.idempotencyKey),
+    groupId: validatedGroupId(prepared.groupId)
+  };
   try { maybePruneJobs(); } catch {}
 
   const create = () => {
@@ -1143,6 +1306,7 @@ export function launchManagedJob(options) {
 export function submitControl(id, command, expectedRevision) {
   assertJobId(id);
   if (!command?.type) throw brokerError('INVALID_REQUEST', 'control command type is required');
+  if (!['steer', 'cancel', 'release'].includes(command.type)) throw brokerError('INVALID_REQUEST', `unsupported control command: ${command.type}`);
   return withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
@@ -1167,6 +1331,7 @@ export function submitControl(id, command, expectedRevision) {
       });
     }
     if (command.type === 'steer' && !command.text?.trim()) throw brokerError('INVALID_REQUEST', 'steering text is required', { provider: job.provider });
+    if (command.type === 'release' && !job.startPaused) throw brokerError('INVALID_REQUEST', 'release is available only for startPaused jobs', { provider: job.provider });
     if (command.type === 'steer' && command.strategy === 'same-turn' && job.provider === 'cursor') {
       throw brokerError('UNSUPPORTED_STRATEGY', 'Cursor ACP has no same-turn steering; use strategy=auto or restart (applied as a cancel-and-resume restart)', { provider: job.provider });
     }
@@ -1176,7 +1341,8 @@ export function submitControl(id, command, expectedRevision) {
     job.controls[commandId] = { type: command.type, state: 'queued', requestedAt: record.requestedAt };
     job.revision += 1;
     if (command.type === 'cancel') job.phase = 'cancelling';
-    const type = command.type === 'steer' ? 'correction.requested' : command.type === 'cancel' ? 'job.cancel.requested' : 'job.resume.requested';
+    if (command.type === 'release') job.phase = 'releasing';
+    const type = command.type === 'steer' ? 'correction.requested' : command.type === 'cancel' ? 'job.cancel.requested' : 'job.release.requested';
     appendUnlocked(job, type, { commandId, strategy: command.strategy || null, text: command.text || null });
     saveJob(job);
     return { accepted: true, commandId, revision: job.revision, phase: job.phase };
@@ -1267,6 +1433,7 @@ export function resumeManagedJob(id, options) {
     prompt: options.prompt,
     providerSessionId: parent.providerSessionId,
     parentJobId: parent.id,
+    groupId: options.groupId ?? parent.groupId ?? null,
     transport: parent.transport,
     isolation: parent.isolation,
     timeoutSeconds: options.timeoutSeconds ?? parent.timeoutSeconds ?? null,
@@ -1275,7 +1442,9 @@ export function resumeManagedJob(id, options) {
     verify: options.verify ?? inheritedVerify,
     network: options.network ?? parent.network ?? false,
     sandbox: options.sandbox ?? parent.sandbox ?? null,
-    allowedPaths: options.allowedPaths ?? parent.allowedPaths ?? null,
+    allowedPaths: options.allowedPaths ?? parent.originalAllowedPaths ?? parent.allowedPaths ?? null,
+    autoNudge: options.autoNudge ?? parent.autoNudge ?? false,
+    reportSchema: options.reportSchema ?? parent.reportSchema ?? null,
     overrideLimit: options.overrideLimit,
     overrideWriter: options.overrideWriter
   });

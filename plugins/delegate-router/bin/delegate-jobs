@@ -5,6 +5,7 @@ import { terminatePid } from './lib/process.mjs';
 import {
   diffStat,
   filterDiffPaths,
+  groupSummary,
   inspectJob,
   jobDiff,
   jobFiles,
@@ -20,11 +21,14 @@ import {
   submitControl
 } from './lib/control.mjs';
 import { listJobs, saveJob } from './lib/state.mjs';
+import { aggregateAuditStats, readAuditLog } from './lib/stats.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
-  delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--json]
+  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
+  delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
+  delegate-jobs group <id> [--json]
+  delegate-jobs stats [--since 7d|24h] [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
   delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
@@ -33,6 +37,7 @@ function usage() {
   delegate-jobs files <job-id> [--json]
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
   delegate-jobs cancel <job-id> [--expected-revision N]
+  delegate-jobs release <job-id> [--expected-revision N]
   delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs usage <job-id> [--json]
@@ -68,6 +73,13 @@ function verifyOption(args) {
   return { command, ...(timeoutSeconds == null ? {} : { timeoutSeconds: Number(timeoutSeconds) }) };
 }
 
+function reportSchemaOption(args) {
+  const file = value(args, '--report-schema-file');
+  const raw = file ? fs.readFileSync(file, 'utf8') : value(args, '--report-schema');
+  if (raw == null) return undefined;
+  return JSON.parse(raw);
+}
+
 function requireJob(id) {
   if (!id) throw new Error('job id is required');
   return reconcileJob(id);
@@ -85,11 +97,14 @@ try {
     const rawTimeout = value(args, '--timeout-seconds');
     const rawMaxOutputTokens = value(args, '--max-output-tokens');
     const started = launchManagedJob({
-      provider: value(args, '--provider'), model: value(args, '--model', 'auto'), mode: value(args, '--mode', 'consult'),
+      provider: value(args, '--provider'), model: value(args, '--model'), mode: value(args, '--mode'), profile: value(args, '--profile'),
       cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
       maxOutputTokens: rawMaxOutputTokens == null ? null : Number(rawMaxOutputTokens),
       idempotencyKey: value(args, '--idempotency-key'),
+      groupId: value(args, '--group'), startPaused: args.includes('--start-paused'),
+      ingestFiles: value(args, '--ingest-files')?.split(',').map((item) => item.trim()).filter(Boolean),
+      autoNudge: args.includes('--auto-nudge'), reportSchema: reportSchemaOption(args),
       retryPolicy: retryPolicy(args), verify: verifyOption(args),
       network: args.includes('--network'), sandbox: value(args, '--sandbox'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
@@ -113,7 +128,7 @@ try {
   } else if (command === 'status') {
     // A bare positional is a job id — but flag values (--limit 3) must not be
     // mistaken for one.
-    const valueFlags = new Set(['--limit', '--status']);
+    const valueFlags = new Set(['--limit', '--status', '--group']);
     let id;
     for (let i = 0; i < args.length; i += 1) {
       if (args[i].startsWith('--')) { if (valueFlags.has(args[i])) i += 1; continue; }
@@ -124,12 +139,28 @@ try {
     let jobs = id ? [requireJob(id)] : listJobs().map((job) => (job.status === 'running' ? reconcileJob(job.id) : job));
     if (args.includes('--active')) jobs = jobs.filter((job) => !terminal(job.status));
     if (statusFilter) jobs = jobs.filter((job) => job.status === statusFilter);
+    const groupId = value(args, '--group');
+    if (groupId) jobs = jobs.filter((job) => job.groupId === groupId);
     if (!id) jobs = jobs.slice(0, Number(value(args, '--limit', 20)));
     if (args.includes('--json')) json(jobs);
     else if (!jobs.length) console.log('No delegation jobs.');
     else {
       console.log('Job ID                         Provider Status     Phase       Model');
       for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${job.model || job.requestedModel || ''}`);
+    }
+  } else if (command === 'group') {
+    json(groupSummary(args[0]));
+  } else if (command === 'stats') {
+    const stats = aggregateAuditStats(readAuditLog(), { since: value(args, '--since') });
+    if (args.includes('--json')) json(stats);
+    else if (!stats.groups.length) console.log('No audited delegation jobs in the selected window.');
+    else {
+      console.log(`Delegation stats${stats.since ? ` (last ${stats.since})` : ''}: ${stats.jobs} jobs`);
+      console.log('Provider Model            Mode       Jobs Success Resume Nudge Mean ms Median ms Mean out Budget Timeout Violations');
+      for (const row of stats.groups) {
+        const percent = `${Math.round(row.successRate * 100)}%`;
+        console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.jobs).padStart(4)} ${percent.padStart(7)} ${String(row.resumedJobs).padStart(6)} ${String(row.nudgeCount).padStart(5)} ${String(Math.round(row.meanDurationMs || 0)).padStart(7)} ${String(Math.round(row.medianDurationMs || 0)).padStart(9)} ${String(Math.round(row.meanOutputTokens || 0)).padStart(8)} ${String(row.budgetCount).padStart(6)} ${String(row.timeoutCount).padStart(7)} ${String(row.violationCount).padStart(10)}`);
+      }
     }
   } else if (command === 'inspect') {
     json(inspectJob(args[0]));
@@ -221,6 +252,11 @@ try {
       saveJob(job);
       console.log(`Cancellation requested for legacy job ${job.id}.`);
     }
+  } else if (command === 'release') {
+    const job = requireJob(args[0]);
+    const raw = value(args, '--expected-revision');
+    const expectedRevision = raw == null ? job.revision : Number(raw);
+    json(submitControl(job.id, { type: 'release', commandId: value(args, '--command-id') }, expectedRevision));
   } else if (command === 'resume') {
     const rawTimeout = value(args, '--timeout-seconds');
     const rawMaxOutputTokens = value(args, '--max-output-tokens');

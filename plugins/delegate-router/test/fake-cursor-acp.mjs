@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
 import fs from 'node:fs';
+import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 if (process.argv.includes('--version')) {
@@ -61,6 +62,12 @@ lines.on('line', (line) => {
     }
     if (count === 1 && process.env.FAKE_CURSOR_OVERLAP === '1') {
       fs.appendFileSync('tracked-overlap.txt', 'agent line\n');
+    }
+    if (count === 1 && process.env.FAKE_CURSOR_INGEST === '1') {
+      const staging = path.join(process.cwd(), '.delegate-staging');
+      const jobDirectory = fs.readdirSync(staging).map((name) => path.join(staging, name)).find((item) => fs.statSync(item).isDirectory());
+      const staged = fs.readdirSync(jobDirectory).map((name) => path.join(jobDirectory, name)).find((item) => fs.statSync(item).isFile());
+      fs.appendFileSync(staged, 'changed by provider\n');
     }
     pending = request.id;
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'tool_call', toolCallId: `tool-${count}`, title: 'Edit a.js', status: 'in_progress', locations: [{ path: 'a.js' }] } } });

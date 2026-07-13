@@ -26,12 +26,12 @@ delegate-usage clear <provider>
 delegate-usage guard <provider> [threshold]
 delegate-usage record <provider> <model> <started|ok|failed> [--mode mode] [--thread id]
 delegate-usage history [count]
-delegate-route --json --mode <mode> --task <summary>
-delegate-health [--quick] [--json]
+delegate-route --json --mode <mode> --effort <level> --task <summary>
+delegate-health [--quick] [--deep] [--json]
 delegate-config show
 delegate-config providers <codex|cursor|both>
 delegate-config statusline <enable|disable|show>
-delegate-jobs start|status|inspect|events|transcript|wait|diff|files|steer|cancel|resume|usage|result|logs|prune <job-id>
+delegate-jobs start|status|stats|group|inspect|events|transcript|wait|diff|files|steer|cancel|release|resume|usage|result|logs|prune <job-id>
 ```
 
 The default avoid threshold is 90% for Claude and Codex and 80% for Cursor (stricter because Cursor overage bills on-demand instead of throttling), configurable globally with `DELEGATE_AVOID_PERCENT` or per provider with `DELEGATE_<PROVIDER>_AVOID_PERCENT`. Thresholds act only on reliable data: manual entries without a `--reset` boundary expire after `DELEGATE_MANUAL_USAGE_TTL_DAYS` (default 7) and revert to unknown. `guard` exits 75 when the provider is at or above the threshold so the router can choose a fallback.
@@ -39,6 +39,8 @@ The default avoid threshold is 90% for Claude and Codex and 80% for Cursor (stri
 The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex work at that threshold. Set `DELEGATE_ALLOW_OVER_LIMIT=codex` only for a deliberate user override. Cursor enforces the threshold inside its adapter and accepts `--override-limit` for the same explicit case.
 
 Per-job observed tokens or context usage are evidence about that execution, not a subscription allowance percentage. `delegate_usage` reports those values separately and includes `chainCumulative` input/output/total tokens from the root job through the inspected continuation. Routing continues to use the provider windows in `usage.json`.
+
+`delegate-jobs stats` reads the never-pruned audit log and reports fleet outcomes, resume/nudge counts, durations, tokens, budgets, timeouts, and scope violations. `delegate-health --deep` intentionally spends real allowance on one bounded managed probe per enabled provider and writes its `{ provider, ok, durationMs, cliVersion, at }` result under `lastVerified`; ordinary health remains non-spending.
 
 Sources: https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md, https://code.claude.com/docs/en/statusline, and https://docs.cursor.com/account/pricing
 

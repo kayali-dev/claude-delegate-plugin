@@ -3,8 +3,10 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inspectJob, launchManagedJob } from './lib/control.mjs';
+import { normalizeBrokerError } from './lib/errors.mjs';
 import { availableModelIds, executableOnPath, resolveCursorBinary } from './lib/cursor.mjs';
-import { auditLogPath, effectiveUsage, enabledProviders, loadState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
+import { auditLogPath, effectiveUsage, enabledProviders, loadState, mutateState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout, windowsHide: true });
@@ -17,9 +19,10 @@ function run(command, args, timeout = 12000, maxOutput = 2000) {
 
 const args = process.argv.slice(2);
 const quick = args.includes('--quick');
+const deep = args.includes('--deep');
 const state = loadState();
 const cursorBinary = resolveCursorBinary();
-const codexBinary = executableOnPath('codex');
+const codexBinary = process.env.DELEGATE_CODEX_BIN || executableOnPath('codex');
 const claudeBinary = executableOnPath('claude');
 const controlServer = path.join(path.dirname(fileURLToPath(import.meta.url)), 'delegate-control-mcp');
 const configuredProviders = enabledProviders();
@@ -72,15 +75,65 @@ if (claudeBinary && !quick) {
   }
 }
 
+async function deepProbe(provider) {
+  const startedAt = Date.now();
+  const version = provider === 'codex' ? report.codex.version : report.cursor.version;
+  const cliVersion = String(version?.output || '').match(/\b\d+\.\d+(?:\.\d+)?\b/)?.[0] || null;
+  let entry;
+  try {
+    const available = provider === 'codex' ? report.codex.installed : report.cursor.installed;
+    if (!available) throw Object.assign(new Error(`${provider} CLI is unavailable`), { code: 'TRANSPORT_ERROR' });
+    const job = launchManagedJob({
+      provider,
+      model: 'auto',
+      mode: 'consult',
+      cwd: process.cwd(),
+      timeoutSeconds: 120,
+      maxOutputTokens: 2000,
+      prompt: '# Objective\nHealth probe: Reply with exactly: ok\n\n# Allowed scope\nRead-only; do not write files.\n\n# Acceptance criteria\nThe response is exactly ok.\n\n# Return\nok'
+    });
+    let current = inspectJob(job.id);
+    const deadline = Date.now() + 125000;
+    while (!['completed', 'failed', 'cancelled'].includes(current.status) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      current = inspectJob(job.id);
+    }
+    const ok = current.status === 'completed' && String(current.resultText || '').trim().toLowerCase() === 'ok';
+    entry = {
+      provider,
+      ok,
+      durationMs: Date.now() - startedAt,
+      cliVersion,
+      at: Date.now(),
+      ...(!ok ? { errorCode: current.errorCode || (current.status === 'completed' ? 'PROBE_RESPONSE' : 'TIMEOUT') } : {})
+    };
+  } catch (error) {
+    const typed = normalizeBrokerError(error, { provider, defaultCode: 'TRANSPORT_ERROR' });
+    entry = { provider, ok: false, durationMs: Date.now() - startedAt, cliVersion, at: Date.now(), errorCode: typed.code };
+  }
+  mutateState((current) => {
+    current.lastVerified ||= {};
+    current.lastVerified[provider] = entry;
+  });
+  return entry;
+}
+
+if (deep) {
+  report.deepAllowanceSpend = true;
+  report.lastVerified = [];
+  for (const provider of configuredProviders) report.lastVerified.push(await deepProbe(provider));
+}
+
 report.ok = report.node.ok && report.claude.installed && report.control.installed
   && (!report.codex.enabled || report.codex.installed)
   && (!report.cursor.enabled || report.cursor.installed);
 if (!quick && report.cursor.enabled && report.cursor.installed) {
   report.ok = report.ok && report.cursor.status?.ok === true && report.cursor.models?.ok === true;
 }
+if (deep) report.ok = report.ok && report.lastVerified.every((entry) => entry.ok);
 if (args.includes('--json')) console.log(JSON.stringify(report, null, 2));
 else {
-  console.log(`Delegate Router ${report.version}: ${report.ok ? 'ready' : 'degraded'} (CLI tracks the installed plugin; skill/MCP pin at session start)`);
+  console.log(`Delegate Router ${report.version}${deep ? ' deep health (spends real provider allowance)' : ''}: ${report.ok ? 'ready' : 'degraded'} (CLI tracks the installed plugin; skill/MCP pin at session start)`);
   console.log(`Claude: ${report.claude.installed ? 'installed' : 'missing'}`);
   console.log(`Enabled providers: ${configuredProviders.join(', ')}`);
   console.log(`Codex: ${report.codex.enabled ? report.codex.installed ? 'installed' : 'missing' : 'disabled'}`);
@@ -89,6 +142,7 @@ else {
   console.log(`Audit log: ${report.auditLogFile}`);
   if (report.cursor.acp) console.log(`Cursor ACP: ${report.cursor.acp.ok ? 'available' : 'unavailable (headless fallback)'}`);
   if (report.cursor.models) console.log(`Cursor models: ${report.cursor.models.count}`);
+  for (const entry of report.lastVerified || []) console.log(`${entry.provider} live probe: ${entry.ok ? 'ok' : `failed (${entry.errorCode})`} in ${entry.durationMs}ms, CLI ${entry.cliVersion || 'unknown'}`);
   for (const name of providerNames()) {
     const current = report.usage[name];
     console.log(`${name} usage: ${current.known ? `${+current.usedPercent.toFixed(2)}%` : 'unknown'}`);

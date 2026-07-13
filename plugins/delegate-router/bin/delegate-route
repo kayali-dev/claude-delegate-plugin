@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { executableOnPath, resolveCursorBinary } from './lib/cursor.mjs';
 import { routeTask } from './lib/router.mjs';
 import { avoidPercentFor, effectiveUsage, loadState, providerEnabled, providerNames, warningPercentFor } from './lib/state.mjs';
+import { auditUsageBands, readAuditLog } from './lib/stats.mjs';
 
 function option(args, name, fallback = null) {
   const index = args.indexOf(name);
@@ -19,7 +20,7 @@ async function stdinText() {
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`Usage: delegate-route [--json] [--mode mode] [--kind kind]
-  [--provider auto|claude|codex|cursor] [--model model]
+  [--provider auto|claude|codex|cursor] [--model model] [--effort level]
   [--task text|--task-file path] [--override-limit]`);
   process.exit(0);
 }
@@ -37,7 +38,7 @@ const state = loadState();
 const usage = Object.fromEntries(providerNames().map((name) => [name, effectiveUsage(state, name)]));
 const availability = {
   claude: true,
-  codex: providerEnabled('codex') && Boolean(executableOnPath('codex')),
+  codex: providerEnabled('codex') && Boolean(process.env.DELEGATE_CODEX_BIN || executableOnPath('codex')),
   cursor: providerEnabled('cursor') && Boolean(resolveCursorBinary())
 };
 const result = routeTask({
@@ -46,6 +47,8 @@ const result = routeTask({
   kind: option(args, '--kind', 'auto'),
   provider: option(args, '--provider', 'auto'),
   model: option(args, '--model', 'auto'),
+  effort: option(args, '--effort', 'medium'),
+  costBands: auditUsageBands(readAuditLog()),
   usage,
   availability,
   avoidPercent: Object.fromEntries(providerNames().map((name) => [name, avoidPercentFor(name)])),
@@ -60,6 +63,7 @@ else if (!result.primary) {
 } else {
   console.log(`${result.primary.provider}/${result.primary.model} (${result.kind})`);
   console.log(result.primary.reason);
+  if (result.primary.usageBand) console.log(`Historical output: p50 ${result.primary.usageBand.p50OutputTokens}, p90 ${result.primary.usageBand.p90OutputTokens} tokens (${result.primary.usageBand.samples} samples)`);
   if (result.fallbacks.length) {
     console.log(`Fallbacks: ${result.fallbacks.map((item) => `${item.provider}/${item.model}`).join(', ')}`);
   }

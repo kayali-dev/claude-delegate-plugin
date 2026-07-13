@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, completeIngestedFiles, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -41,7 +41,13 @@ function promptFor(job) {
   const scope = job.allowedPaths?.length
     ? `Allowed write scope (hard fence): create or modify files only under: ${job.allowedPaths.join(', ')}. If required work falls outside this set, stop and report instead of editing.\n\n`
     : '';
-  return `${securityPreamble(job.allowSensitive)}${scope}${fs.readFileSync(job.promptPath, 'utf8')}`;
+  const ingested = job.stagingDir
+    ? `Ingested files are staged under ${job.stagingDir}; work on those staged copies.\n\n`
+    : '';
+  const structured = job.reportSchema
+    ? `\n\nStructured report contract: End the final message with a fenced \`\`\`json block matching this schema and containing objectiveMet (true, false, or "partial").\n${JSON.stringify(job.reportSchema, null, 2)}`
+    : '';
+  return `${securityPreamble(job.allowSensitive)}${scope}${ingested}${fs.readFileSync(job.promptPath, 'utf8')}${structured}`;
 }
 
 function codexModel(model) {
@@ -50,6 +56,96 @@ function codexModel(model) {
 
 function readOnly(job) {
   return ['consult', 'plan', 'review'].includes(job.mode);
+}
+
+const AUTO_NUDGE_PROMPT = 'Your final message described the deliverable instead of containing it. Paste the complete findings inline now.';
+
+function resultText(result) {
+  if (result == null) return null;
+  if (typeof result === 'string') return result;
+  if (typeof result.text === 'string' && result.text) return result.text;
+  if (typeof result.result === 'string') return result.result;
+  return null;
+}
+
+function resultLooksSuspect(job, result) {
+  const text = resultText(result);
+  return readOnly(job) && !result?.plan && (!text || text.trim().length < 200);
+}
+
+function prepareAutoNudge(jobId, result = undefined) {
+  const job = loadJob(jobId);
+  const candidate = result === undefined ? job?.result : result;
+  if (!job?.autoNudge || job.nudgeCount >= 1 || !resultLooksSuspect(job, candidate)) return false;
+  const firstAttemptText = resultText(candidate) || '';
+  updateManagedJob(jobId, (current) => {
+    current.nudgeCount = 1;
+    current.resultSuspect = 'short-final-message';
+    current.resultText = firstAttemptText;
+    current.result = {
+      ...(candidate && typeof candidate === 'object' ? candidate : { text: firstAttemptText }),
+      firstAttemptText
+    };
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, 'job.nudge', { prompt: AUTO_NUDGE_PROMPT, attempt: 1 });
+  return true;
+}
+
+function storeProviderResult(jobId, result) {
+  updateManagedJob(jobId, (job) => {
+    const firstAttemptText = job.result?.firstAttemptText;
+    job.result = firstAttemptText == null
+      ? redact(result)
+      : { ...(result && typeof result === 'object' ? redact(result) : { text: redact(result) }), firstAttemptText };
+  }, { incrementRevision: false });
+}
+
+function largeWriteLimit() {
+  const configured = Number(process.env.DELEGATE_MAX_CHANGED_FILES ?? 200);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : 200;
+}
+
+function codexChangedPaths(item) {
+  if (item?.type !== 'fileChange') return [];
+  return (item.changes || []).map((change) => change?.path || change?.file || change?.filename).filter(Boolean);
+}
+
+function parseLastStructuredResult(text) {
+  const blocks = [...String(text || '').matchAll(/```json\s*([\s\S]*?)```/gi)];
+  if (!blocks.length) return null;
+  try {
+    const parsed = JSON.parse(blocks.at(-1)[1].trim());
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function holdBeforeFirstTurn(job, deadline) {
+  if (!job.startPaused) return true;
+  updateManagedJob(job.id, (current) => { current.phase = 'paused'; });
+  appendJobEvent(job.id, 'job.state', { status: 'running', phase: 'paused' });
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw brokerError('TIMEOUT', `managed job timed out while paused before its first prompt`, { provider: job.provider });
+    }
+    for (const claimed of claimCommands(job.id)) {
+      const command = claimed.command;
+      if (command.type === 'release') {
+        updateManagedJob(job.id, (current) => { current.phase = 'starting'; });
+        completeCommand(job.id, claimed, { ok: true, appliedAs: 'release' });
+        appendJobEvent(job.id, 'job.released', { commandId: command.commandId });
+        return true;
+      }
+      if (command.type === 'cancel') {
+        completeCommand(job.id, claimed, { ok: true, appliedAs: 'cancel-before-first-turn' });
+        terminal(loadJob(job.id), 'cancelled', 'cancelled');
+        return false;
+      }
+      completeCommand(job.id, claimed, { ok: false, error: 'job is paused; release or cancel it before steering' });
+    }
+    await delay(Math.min(100, Math.max(1, deadline - Date.now())));
+  }
 }
 
 function boundedTimeoutMs(name, fallbackSeconds, maximumSeconds = 86400) {
@@ -166,7 +262,13 @@ function terminal(job, status, phase, extra = {}) {
     } catch {}
   }
   const deferVerification = status === 'completed' && job.verify && !loadJob(job.id)?.verification;
+  let ingestOutcome = null;
+  if (status === 'completed' && !deferVerification && job.stagingDir) {
+    try { ingestOutcome = completeIngestedFiles(job); }
+    catch (error) { ingestOutcome = { copiedBack: [], removed: false, error: redact(error.message) }; }
+  }
   updateManagedJob(job.id, (current) => {
+    const firstAttemptText = current.result?.firstAttemptText;
     current.status = deferVerification ? 'running' : status;
     current.phase = deferVerification ? 'verifying' : phase;
     if (!deferVerification) current.completedAt = Math.floor(Date.now() / 1000);
@@ -174,6 +276,12 @@ function terminal(job, status, phase, extra = {}) {
     if (finalHashes) current.finalHashes = finalHashes;
     if (scopeViolations) current.scopeViolations = scopeViolations;
     Object.assign(current, redact(extra));
+    if (firstAttemptText != null) {
+      current.result = current.result && typeof current.result === 'object'
+        ? { ...current.result, firstAttemptText }
+        : { text: current.result == null ? '' : String(current.result), firstAttemptText };
+    }
+    if (ingestOutcome) current.ingestCompletion = ingestOutcome;
     // Providers return three different result shapes (Codex plain string,
     // Cursor ACP {text, plan, stopReason}, Cursor headless CLI envelope);
     // resultText is the one field consumers can always read.
@@ -183,6 +291,16 @@ function terminal(job, status, phase, extra = {}) {
       : typeof current.result.result === 'string' ? current.result.result
       : null;
     if (text != null) current.resultText = text;
+    if (!deferVerification && status === 'completed' && current.reportSchema) {
+      const structured = parseLastStructuredResult(text);
+      if (structured) {
+        current.result = current.result && typeof current.result === 'object'
+          ? { ...current.result, structured }
+          : { text: text || '', structured };
+        delete current.structuredMissing;
+        if (Object.hasOwn(structured, 'objectiveMet')) current.objectiveMet = structured.objectiveMet;
+      } else current.structuredMissing = true;
+    }
     // A read-mode turn that ends with a sentence of narration instead of the
     // findings is a recurring provider pattern; flag it so the coordinator
     // resumes with "paste the full findings now" instead of trusting it.
@@ -214,7 +332,7 @@ function mapCodexItem(jobId, phase, params) {
   const options = { sessionId: params.threadId, turnId: params.turnId };
   if (item.type === 'agentMessage' && phase === 'completed') {
     appendJobEvent(jobId, 'message.completed', { id: item.id, text: item.text, phase: item.phase }, options);
-    updateManagedJob(jobId, (job) => { job.result = redact(item.text); }, { incrementRevision: false });
+    storeProviderResult(jobId, item.text);
   } else if (item.type === 'plan') {
     appendJobEvent(jobId, 'plan.updated', { id: item.id, text: item.text, phase }, options);
   } else if (item.type === 'commandExecution' || item.type === 'mcpToolCall' || item.type === 'dynamicToolCall' || item.type === 'collabAgentToolCall') {
@@ -262,6 +380,10 @@ async function runCodex(job) {
   const messages = new Map();
   const deltas = new DeltaRedactor();
   let budgetError = null;
+  let largeWriteError = null;
+  const liveChangedPaths = new Set();
+  const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CODEX_TIMEOUT_SECONDS', 3600);
+  const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const binary = process.env.DELEGATE_CODEX_BIN || 'codex';
   assertProviderVersion('codex', binary);
   const rpc = new JsonRpcProcess(binary, codexSpawnArgs(job), {
@@ -291,8 +413,26 @@ async function runCodex(job) {
         const text = `${messages.get(params.itemId) || ''}${params.delta || ''}`;
         messages.set(params.itemId, text);
         appendJobEvent(job.id, 'message.delta', { id: params.itemId, delta: deltas.redactDelta(`message:${params.itemId}`, params.delta) }, options);
-      } else if (method === 'item/started') mapCodexItem(job.id, 'started', params);
-      else if (method === 'item/completed') mapCodexItem(job.id, 'completed', params);
+      } else if (method === 'item/started' || method === 'item/completed') {
+        const phase = method === 'item/started' ? 'started' : 'completed';
+        mapCodexItem(job.id, phase, params);
+        for (const file of codexChangedPaths(params.item)) liveChangedPaths.add(file);
+        const limit = largeWriteLimit();
+        if (liveChangedPaths.size > limit && !largeWriteError) {
+          largeWriteError = brokerError('LARGE_WRITE', `Codex reported ${liveChangedPaths.size} changed paths, exceeding DELEGATE_MAX_CHANGED_FILES=${limit}`, {
+            provider: job.provider,
+            retryable: false,
+            changedFilesCount: liveChangedPaths.size,
+            limit
+          });
+          appendJobEvent(job.id, 'large.write', { count: liveChangedPaths.size, limit, enforcement: 'live-interrupt' }, options);
+          const turnId = params.turnId || inspectJob(job.id).providerTurnId;
+          if (turnId) {
+            try { await rpc.request('turn/interrupt', { threadId: params.threadId || job.providerSessionId, turnId }); }
+            catch (error) { appendJobEvent(job.id, 'provider.event', { providerEvent: 'large-write-interrupt-error', error: error.message }, options); }
+          }
+        }
+      }
       else if (method === 'item/commandExecution/outputDelta') appendJobEvent(job.id, 'tool.output', { id: params.itemId, delta: deltas.redactDelta(`tool:${params.itemId}`, params.delta) }, options);
       else if (method === 'turn/plan/updated') appendJobEvent(job.id, 'plan.updated', { explanation: params.explanation, plan: params.plan }, options);
       else if (method === 'turn/diff/updated') appendJobEvent(job.id, 'diff.updated', { diff: params.diff }, options);
@@ -333,7 +473,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.16.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.17.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -380,9 +520,8 @@ async function runCodex(job) {
       return result.turn.id;
     };
 
-    await startTurn(promptFor(job));
-    const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CODEX_TIMEOUT_SECONDS', 3600);
-    const deadline = Date.now() + timeoutMs;
+    if (!await holdBeforeFirstTurn(loadJob(job.id), deadline)) return;
+    await startTurn(promptFor(loadJob(job.id)));
     while (true) {
       if (Date.now() >= deadline) {
         const active = inspectJob(job.id).providerTurnId;
@@ -463,6 +602,7 @@ async function runCodex(job) {
       }
       if (completed) {
         interruptRequested = false;
+        if (largeWriteError) throw largeWriteError;
         if (budgetError) throw budgetError;
         if (cancelled) { terminal(job, 'cancelled', 'cancelled'); break; }
         if (queuedPrompts.length) {
@@ -470,6 +610,10 @@ async function runCodex(job) {
           settleQueuedControl(job.id, next.commandId, { ok: true, appliedAs: next.appliedAs });
           appendJobEvent(job.id, next.appliedAs === 'restart' ? 'correction.restarted' : 'correction.applied', { commandId: next.commandId, appliedAs: next.appliedAs });
           await startTurn(next.text);
+          continue;
+        }
+        if (completed.turn.status !== 'failed' && prepareAutoNudge(job.id)) {
+          await startTurn(AUTO_NUDGE_PROMPT);
           continue;
         }
         const status = completed.turn.status === 'failed' ? 'failed' : 'completed';
@@ -716,6 +860,7 @@ function gitWorkspaceState(job) {
 
 function recordGitState(job, sessionId) {
   const state = gitWorkspaceState(job);
+  const changed = state.files.filter((file) => !file.unchangedSinceBaseline);
   for (const file of state.files) {
     // Pre-existing files proven byte-identical to the job-start baseline were
     // at most read, never changed — emitting file.changed for them is exactly
@@ -725,6 +870,15 @@ function recordGitState(job, sessionId) {
   }
   if (state.diff) appendJobEvent(job.id, 'diff.updated', { diff: state.diff, includesPreexistingChanges: state.includesPreexisting === true }, { sessionId });
   if (state.error) appendJobEvent(job.id, 'provider.event', { providerEvent: 'git-inventory-warning', error: state.error }, { sessionId });
+  const limit = largeWriteLimit();
+  if (changed.length > limit && !loadJob(job.id)?.largeWrite) {
+    updateManagedJob(job.id, (current) => {
+      current.largeWrite = true;
+      current.largeWriteCount = changed.length;
+    }, { incrementRevision: false });
+    appendJobEvent(job.id, 'large.write', { count: changed.length, limit, enforcement: 'post-hoc' }, { sessionId });
+  }
+  return state;
 }
 
 async function runCursorAcp(job) {
@@ -743,6 +897,8 @@ async function runCursorAcp(job) {
   const planHolder = { entries: null };
   const deltas = new DeltaRedactor();
   let budgetError = null;
+  const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
+  const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const rpc = new JsonRpcProcess(launch.command, launch.args, {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
@@ -775,7 +931,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.16.0' }
+      clientInfo: { name: 'delegate-router', version: '0.17.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -837,15 +993,21 @@ async function runCursorAcp(job) {
       sessionId, configId: 'mode', value: readOnly(job) ? (job.mode === 'consult' ? 'ask' : 'plan') : 'agent'
     });
 
+    if (!await holdBeforeFirstTurn(loadJob(job.id), deadline)) return;
+
     const startPrompt = (text) => {
       messageParts.length = 0;
       cancelSignalSent = false;
       appendJobEvent(job.id, 'turn.started', { transport: 'acp' }, { sessionId });
-      promptPromise = rpc.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }, jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600));
+      promptPromise = rpc.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }, Math.max(1, deadline - Date.now()));
     };
-    startPrompt(promptFor(job));
+    startPrompt(promptFor(loadJob(job.id)));
 
     while (true) {
+      if (Date.now() >= deadline) {
+        if (!cancelSignalSent) rpc.notify('session/cancel', { sessionId });
+        throw brokerError('TIMEOUT', `Cursor managed job exceeded ${Math.round(timeoutMs / 1000)}s`, { provider: job.provider });
+      }
       const completed = await Promise.race([
         promptPromise.then((response) => ({ response }), (error) => ({ error })),
         delay(150).then(() => null)
@@ -898,14 +1060,19 @@ async function runCursorAcp(job) {
         startPrompt(next.text);
         continue;
       }
-      recordGitState(job, sessionId);
       const planText = planEntriesText(planHolder.entries);
+      const result = {
+        text: messageParts.join(''),
+        ...(planText ? { plan: planText } : {}),
+        stopReason: completed.response.stopReason
+      };
+      if (prepareAutoNudge(job.id, result)) {
+        startPrompt(AUTO_NUDGE_PROMPT);
+        continue;
+      }
+      recordGitState(job, sessionId);
       terminal(job, 'completed', 'completed', {
-        result: {
-          text: messageParts.join(''),
-          ...(planText ? { plan: planText } : {}),
-          stopReason: completed.response.stopReason
-        },
+        result,
         session: sessionId
       });
       break;
@@ -1028,6 +1195,11 @@ async function runCursorHeadless(job) {
     }
     const sessionId = findValue(outcome.payload, ['session_id', 'sessionId', 'chat_id', 'chatId']);
     if (sessionId) recordSession(job.id, sessionId, null);
+    if (sessionId && prepareAutoNudge(job.id, outcome.payload)) {
+      resume = sessionId;
+      text = AUTO_NUDGE_PROMPT;
+      continue;
+    }
     recordGitState(job, sessionId);
     terminal(job, 'completed', 'completed', { result: redact(outcome.payload), session: sessionId });
     return;
@@ -1099,6 +1271,7 @@ async function runProviderAttempt(job) {
     try { await runCursorAcp(job); }
     catch (error) {
       if (error.code === 'PROVIDER_TOO_OLD') throw error;
+      if (job.startPaused) throw error;
       const started = inspectJob(job.id).providerSessionId;
       const tierFallback = error.code === 'ACP_TIER_UNAVAILABLE';
       if (started && !tierFallback) throw error;
@@ -1175,7 +1348,8 @@ export async function runManagedProvider(job) {
           errorCode: typed.code,
           errorRetryable: typed.retryable,
           ...(typed.provider ? { errorProvider: typed.provider } : {}),
-          ...(typed.code === 'BUDGET_EXCEEDED' ? { stoppedReason: 'budget' } : {})
+          ...(typed.code === 'BUDGET_EXCEEDED' ? { stoppedReason: 'budget' } : {}),
+          ...(typed.code === 'LARGE_WRITE' ? { stoppedReason: 'large-write' } : {})
         });
       }
       throw typed;

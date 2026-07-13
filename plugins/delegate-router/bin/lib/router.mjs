@@ -1,3 +1,5 @@
+import { usageBandKey } from './stats.mjs';
+
 const MODEL_PROVIDER = {
   fable: 'claude', opus: 'claude', sonnet: 'claude', haiku: 'claude', current: 'claude',
   sol: 'codex', terra: 'codex', luna: 'codex',
@@ -48,6 +50,8 @@ export function routeTask({
   kind = 'auto',
   provider = 'auto',
   model = 'auto',
+  effort = 'medium',
+  costBands = {},
   usage = {},
   availability = { claude: true, codex: true, cursor: true },
   avoidPercent = 90,
@@ -92,7 +96,8 @@ export function routeTask({
   };
   candidates = candidates.map((candidate) => {
     const current = usage[candidate.provider] || { known: false, usedPercent: null };
-    const updated = { ...candidate, usage: current.known ? current.usedPercent : null };
+    const band = costBands[usageBandKey(candidate.provider, candidate.model, effort)];
+    const updated = { ...candidate, usage: current.known ? current.usedPercent : null, ...(band ? { usageBand: band } : {}) };
     const avoid = threshold(avoidPercent, candidate.provider, 90);
     const warn = threshold(warningPercent, candidate.provider, 80);
     if (!availability[candidate.provider]) return { ...updated, eligible: false, excluded: 'provider unavailable' };
@@ -108,11 +113,12 @@ export function routeTask({
 
   const eligible = candidates.filter((item) => item.eligible).sort((a, b) => b.score - a.score);
   if (!eligible.length) {
-    return { kind: resolvedKind, mode, primary: null, fallbacks: [], excluded: candidates };
+    return { kind: resolvedKind, mode, effort, primary: null, fallbacks: [], excluded: candidates };
   }
   return {
     kind: resolvedKind,
     mode,
+    effort,
     delegate: eligible[0].provider !== 'claude',
     primary: eligible[0],
     fallbacks: eligible.slice(1, 4),

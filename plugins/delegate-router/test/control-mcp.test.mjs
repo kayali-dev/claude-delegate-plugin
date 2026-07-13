@@ -21,7 +21,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.equal(responses[0].result.serverInfo.name, 'delegate-control');
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_events', 'delegate_transcript', 'delegate_diff',
-    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_resume', 'delegate_usage'
+    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_resume', 'delegate_usage'
   ]);
   const start = responses[1].result.tools.find((tool) => tool.name === 'delegate_start');
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
@@ -29,12 +29,16 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.ok(start.inputSchema.properties.maxOutputTokens);
   assert.ok(start.inputSchema.properties.retryPolicy);
   assert.ok(start.inputSchema.properties.verify);
+  for (const option of ['profile', 'groupId', 'startPaused', 'ingestFiles', 'autoNudge', 'reportSchema']) {
+    assert.ok(start.inputSchema.properties[option], option);
+  }
+  assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_release'));
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
   assert.ok(resume.inputSchema.properties.retryPolicy);
   assert.ok(resume.inputSchema.properties.verify);
 });
 
-test('delegate-jobs help has CLI parity for Wave 1 and Wave 2 caller options', () => {
+test('delegate-jobs help has CLI parity for caller options', () => {
   const cli = path.join(root, 'bin', 'delegate-jobs');
   const result = spawnSync(process.execPath, [cli, 'help'], { encoding: 'utf8' });
   assert.equal(result.status, 0);
@@ -46,4 +50,9 @@ test('delegate-jobs help has CLI parity for Wave 1 and Wave 2 caller options', (
   assert.match(result.stdout, /--verify-command/);
   assert.match(result.stdout, /--verify-timeout-seconds/);
   assert.match(result.stdout, /revert <job-id> \[--dry-run\]/);
+  for (const flag of ['--profile', '--group', '--start-paused', '--ingest-files', '--auto-nudge', '--report-schema']) {
+    assert.match(result.stdout, new RegExp(flag), flag);
+  }
+  assert.match(result.stdout, /release <job-id>/);
+  assert.match(result.stdout, /stats \[--since/);
 });

@@ -21,7 +21,7 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 - Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. Outbound task packets are scanned for credential-shaped values and fail with `SECRET_IN_PROMPT`; `allowSensitive=true` explicitly overrides both checks and emits `security.warning`. It never removes scope control or the preserve-existing-changes rule. Project tooling may consume secrets internally, but workers must never echo or relocate their contents.
 
 - `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. Prefer it over prose-only fencing for every bounded write job.
-- Out-of-tree deliverables (a file outside the job cwd): Cursor workers cannot write outside the workspace. Stage a copy inside the repo (e.g. `.delegate-staging/<name>`), add that path to `allowedPaths`, and copy back after verifying the diff touched nothing else. An `ingestFiles` option is on the roadmap.
+- `ingestFiles` accepts up to 20 absolute regular files outside cwd, each smaller than 10 MB. The broker copies them into `.delegate-staging/<jobId>`, adds that directory when `allowedPaths` is set, and copies byte-changed staged content back only after `completed`; failures leave staging in place and reference it in the checkpoint. Sensitive names still require `allowSensitive=true`.
 - Cursor read-only modes block the shell entirely, including read-only git commands; a review task that needs `git log`/`git show` history should run on Codex (its read-only sandbox permits read-only shell) or accept the limitation.
 
 ## Writer Ownership
@@ -36,6 +36,8 @@ Give any start that may be retried a stable `idempotencyKey`. Lookup and job cre
 
 An opt-in `retryPolicy` may set `maxAttempts` from 1–5 and choose `transport` and/or `rate-limit`. Retries reuse the same job and provider session when one exists, are journaled as `job.retry`, and never apply to scope, quota, model, budget, user-input, or other task-level outcomes. The default is one attempt.
 
+Tag independent fan-out jobs with one `groupId`; `delegate_list` can filter or summarize the group. The ordinary same-cwd writer guard still applies to grouped write jobs, so use read-only fan-out or actual worktree isolation.
+
 Every writer must:
 
 - Preserve user changes and unrelated dirty files.
@@ -49,6 +51,8 @@ Every writer must:
 Store the Codex `threadId` or Cursor chat ID with the task. Resume only for the same objective. A follow-up should include new information, a correction, or a verification request rather than repeating the original prompt. Codex threads that engaged the multi-agent review flow (typically write-mode jobs whose approvals escalated) may refuse direct resume with `RESUME_UNSUPPORTED`; recover by starting a fresh job whose task packet folds in the prior findings.
 
 Managed control commands use optimistic concurrency. Read the current job revision immediately before steering or cancelling and send it as `expectedRevision`. A `REVISION_CONFLICT` includes `currentRevision`, so one retry with that value is enough when your command is still appropriate; never overwrite another controller's newer decision. Reuse the same `correctionId` when retrying the same request.
+
+`startPaused=true` opens the provider thread/session and sets phase `paused` before any prompt. Release it with `delegate_release` (or `delegate-jobs release`) at the current revision; cancellation works while paused, `waitForSession` returns as soon as the paused session exists, and `timeoutSeconds` continues counting during the pause.
 
 A steer that reduces the remaining work can finish the job before any follow-up command arrives. Do not design a steer-then-cancel sequence around a shrinking task; cancel first if termination is the goal.
 
@@ -65,9 +69,13 @@ Codex interruption waits up to `DELEGATE_DRAIN_GRACE_MS` (default 3000, maximum 
 
 `maxOutputTokens` is an optional per-job cap on provider-reported output tokens. Crossing it uses the normal provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`; partial events, diff, and continuation remain inspectable. Resumes accept a new cap and otherwise inherit the parent cap.
 
+`DELEGATE_MAX_CHANGED_FILES` defaults to 200. Codex live `fileChange` paths crossing it interrupt and fail with non-retryable `LARGE_WRITE` plus a checkpoint. Cursor exposes only completion inventory, so its record is flagged `largeWrite: true` and evented `large.write` post-hoc; that asymmetry cannot prevent Cursor's writes.
+
 Write modes may set `verify: { command, timeoutSeconds }` (default 600 seconds). The worker runs `/bin/sh -c` in the real job cwd only after provider success, outside the provider sandbox, and records command, exit code, duration, and a redacted output tail. A nonzero verdict does not rewrite the provider outcome: status remains `completed`, while `delegate-jobs wait` exits 6.
 
 Adapters assert their CLI versions before opening a provider session. `DELEGATE_MIN_CODEX_VERSION` and `DELEGATE_MIN_CURSOR_VERSION` override the validated built-in floors (`0.144.0` and `2026.7.0` respectively); a lower observed version fails with non-retryable `PROVIDER_TOO_OLD` and reports both versions.
+
+Profiles live under `${DELEGATE_PROFILES_DIR:-~/.delegate/profiles}/<name>.md`; simple frontmatter supplies mode/model/effort/allowedPaths defaults and explicit start options win. The body must contain `{{objective}}`. Packet lint warns when Objective, Allowed scope, Acceptance criteria, or Return is missing. The bundled `independent-review` profile is used only when no local override exists. Optional `reportSchema` instructs a final fenced JSON block; the last parseable object becomes `result.structured`, `objectiveMet` is surfaced, and missing output sets `structuredMissing` without changing terminal status.
 
 ## Failure And Quota Recovery
 

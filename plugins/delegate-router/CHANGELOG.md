@@ -2,6 +2,18 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.17.0 — 2026-07-13
+
+- `delegate-jobs stats [--since]` aggregates the terminal audit log by provider/model/mode; deterministic routes gain advisory historical output-token bands when matching samples exist.
+- Named packet profiles merge local or bundled skeletons with explicit-option precedence and packet-section lint warnings; `independent-review` ships as the fallback example.
+- Fan-out `groupId` tagging, filtered lists, and terminal group summaries compose with the existing per-cwd writer guard.
+- `startPaused` establishes a Codex thread or Cursor ACP session before the first prompt; `delegate_release` / `delegate-jobs release` advances it, while cancellation and the original timeout remain active during the pause.
+- `ingestFiles` privately stages up to 20 declared out-of-tree files, copies changed content back only on completion, and leaves failed staging referenced by the checkpoint.
+- Read-mode `autoNudge` performs at most one same-session inline-findings correction and preserves `result.firstAttemptText`.
+- `delegate-health --deep` spends real allowance on one bounded managed read probe per enabled provider and records `lastVerified` in state.
+- `DELEGATE_MAX_CHANGED_FILES` (default 200) interrupts Codex live with non-retryable `LARGE_WRITE`; Cursor records the same threshold post-hoc as `largeWrite` plus `large.write`.
+- Optional `reportSchema` adds a best-effort fenced-JSON contract, parses the last block into `result.structured`, surfaces `objectiveMet`, and flags `structuredMissing` without failing the job.
+
 ## 0.16.0 — 2026-07-13
 
 - Opt-in `retryPolicy` for transport and provider rate-limit/server failures, with bounded backoff, same-record continuation, `job.retry` events, and retry counts.
