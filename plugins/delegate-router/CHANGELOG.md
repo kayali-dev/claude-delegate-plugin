@@ -25,7 +25,7 @@ Field-report remediation (three independent coordinator evaluations).
 - **`delegate-health`** prints the active version, a surface-pinning note, and explains Cursor's permanently-manual usage.
 - This CHANGELOG.
 
-Planned (recorded asks, not yet shipped): `startPaused`, broker-run post-completion verification gate (`verifyCommand`), out-of-tree file hand-off (`ingestFiles`), `delegate_start_batch` fan-out, automatic narration-turn nudge.
+Planned work now lives in [ROADMAP.md](../delegate-router/ROADMAP.md) (three prioritized waves consolidated from five field reports).
 
 ## 0.13.x — 2026-07-13
 
