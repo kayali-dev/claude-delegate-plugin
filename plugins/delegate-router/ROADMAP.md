@@ -44,6 +44,18 @@ Consolidated from five coordinator field reports (2026-07-13) plus the CHANGELOG
 21. **Large-write circuit breaker** (M, honest limits). Codex streams `fileChange` items live: crossing `DELEGATE_MAX_CHANGED_FILES` (default 200) triggers pause-and-surface (cancel + checkpoint). Cursor reports files only at completion, so there it is a post-hoc `largeWrite: true` flag + refusal to auto-accept — documented asymmetry.
 22. **Structured result contract** (M). Optional `reportSchema` on start: the packet instructs the worker to end with a fenced JSON block; the broker parses it into `result.structured` (with `objectiveMet: true/false/partial` as a required key), flags `structuredMissing` when absent. Best-effort by design — workers are untrusted; the mechanical fields (changedFiles, verification) remain the ground truth.
 
+## Wave 4 — v0.18.0 "coordinator dogfood" (friction observed while delegating Waves 1-3 through the plugin itself)
+
+Waves 1-3 were implemented by delegated Codex Sol@xhigh jobs supervised through this plugin (3 implement jobs + 1 review-fix resume, 4 releases, 2 defects caught by coordinator review, 0 escaped). Every item below is a compensation the coordinator performed by hand during that run.
+
+23. **First-output wait** (S). `waitForSession` returns at session establishment, but "has it actually started producing?" still needed a sleep-then-inspect. Generalize to `waitFor: 'session' | 'turn' | 'first-output'` on start (bounded like waitForSession), keyed off existing phase transitions and first delta event.
+24. **Result windowing** (S). Long `resultText` had to be sliced with ad-hoc python three times. `delegate-jobs result <id> [--find <text>] [--offset N] [--max-chars N]` and matching windowing on the MCP read path — same pattern as `delegate_diff`.
+25. **Review-round helper** (M). Each fix round meant hand-assembling a packet of defects + diff context. `delegate-jobs review-round <id> --prompt-file <findings>` (and MCP equivalent): wraps `delegate_resume` and auto-prepends the job's diffStat, changedFiles, and scope so the worker re-anchors without the coordinator pasting context.
+26. **`start --dry-run` packet preview** (S). `delegate-cursor` has `--dry-run`; `delegate-jobs start` does not. Print the fully-merged packet (profile + scope fence + preamble + ingest note) and resolved options without launching — the natural companion to packet lint.
+27. **Ingest copy-back divergence guard** (S). `completeIngestedFiles` copies staged content back over the source even if the user edited the source mid-job. Record the source hash at ingest; on divergence write `<source>.delegate-new` beside it and report, instead of clobbering.
+28. **Cancel honored during retry backoff** (S). A cancel landing in the backoff window between retry attempts is only honored after the next provider spawn. Check pending cancel commands before relaunching.
+29. **Stats backfill** (S). `audit.jsonl` only starts at v0.15.0; terminal job records still in retention are invisible to `stats`. `delegate-jobs audit backfill` appends synthetic audit lines for terminal jobs missing from the log (idempotent by jobId).
+
 ## Declined / deferred, with reasons
 
 - **Native harness notification from the broker** — a detached worker cannot re-invoke the Claude Code harness; that is what background tasks/Monitor are for. `finishedPath` + Monitor stays the canonical long-wait; a bounded `delegate_wait` MCP tool would cap at ~30s long-poll like `delegate_events` and add little.
