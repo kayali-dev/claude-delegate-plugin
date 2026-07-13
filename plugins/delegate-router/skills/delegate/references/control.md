@@ -20,6 +20,10 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 - Consult, plan, and review modes are read-only.
 - Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. `allowSensitive=true` relaxes only that rule; the base security packet (scope control, preserve existing changes) is always sent. The base rule explicitly permits running project tooling that consumes secrets internally (builds, tests, dev servers reading `.env`) while forbidding the worker from echoing or relocating their contents — so build-class steps that read environment files work sandboxed, and a worker's claim of a "sanitized workspace" build is a deviation worth flagging.
 
+- `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. Prefer it over prose-only fencing for every bounded write job.
+- Out-of-tree deliverables (a file outside the job cwd): Cursor workers cannot write outside the workspace. Stage a copy inside the repo (e.g. `.delegate-staging/<name>`), add that path to `allowedPaths`, and copy back after verifying the diff touched nothing else. An `ingestFiles` option is on the roadmap.
+- Cursor read-only modes block the shell entirely, including read-only git commands; a review task that needs `git log`/`git show` history should run on Codex (its read-only sandbox permits read-only shell) or accept the limitation.
+
 ## Writer Ownership
 
 Allow only one writer for a path set. A read-only reviewer may inspect a stable diff, but do not ask it to review files while another agent is actively changing them. The coordinator owns final integration.

@@ -383,6 +383,18 @@ export function inspectJob(id) {
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
+function rootJobIdOf(job) {
+  let current = job;
+  const seen = new Set([job.id]);
+  while (current.parentJobId && !seen.has(current.parentJobId)) {
+    seen.add(current.parentJobId);
+    const parent = loadJob(current.parentJobId);
+    if (!parent) break;
+    current = parent;
+  }
+  return current.id === job.id ? undefined : current.id;
+}
+
 export function listManagedJobs(options = {}) {
   const limit = Math.min(Math.max(Number(options.limit || 20), 1), 100);
   const statuses = options.status?.length ? new Set([].concat(options.status)) : null;
@@ -406,6 +418,9 @@ export function listManagedJobs(options = {}) {
       transport: job.transport || null,
       managed: job.managedBy === 'delegate-control',
       reviewFlowEngaged: job.reviewFlowEngaged === true ? true : undefined,
+      scopeViolations: job.scopeViolations?.length ? job.scopeViolations.length : undefined,
+      session: job.providerSessionId || job.session || null,
+      rootJobId: rootJobIdOf(job),
       parentJobId: job.parentJobId || null,
       providerSessionId: job.providerSessionId || job.session || null,
       createdAt: job.createdAt || null,
@@ -465,16 +480,40 @@ export function jobDiff(id) {
 }
 
 export function jobFiles(id) {
+  // Providers report the same file inconsistently (ACP tool locations are
+  // absolute, the git inventory is repo-relative); normalize to repo-relative
+  // and dedupe so one file is one entry.
+  let cwd = null;
+  try { cwd = loadJob(id)?.cwd || null; } catch {}
+  const resolvedCwd = cwd ? path.resolve(cwd) : null;
+  const normalize = (file) => {
+    if (resolvedCwd && path.isAbsolute(file)) {
+      const relative = path.relative(resolvedCwd, file);
+      if (relative && !relative.startsWith('..')) return relative;
+    }
+    return file;
+  };
   const files = new Map();
   for (const event of readRawEvents(id)) {
     if (event.type !== 'file.changed') continue;
     const changes = event.data?.changes || [event.data];
     for (const change of changes) {
       const file = change.path || change.file || change.filePath;
-      if (file) files.set(file, { path: file, ...change, lastSeq: event.seq });
+      if (!file) continue;
+      const normalized = normalize(file);
+      files.set(normalized, { ...files.get(normalized), ...change, path: normalized, lastSeq: event.seq });
     }
   }
   return [...files.values()];
+}
+
+export function filterDiffPaths(diff, entries) {
+  if (!entries?.length) return String(diff || '');
+  const blocks = String(diff || '').split(/^(?=diff --git )/m);
+  return blocks.filter((block) => {
+    const header = block.match(/^diff --git a\/(.+) b\/(.+)$/m);
+    return header ? pathMatchesScope(header[2], entries) : false;
+  }).join('');
 }
 
 export function diffStat(diff) {
@@ -557,7 +596,11 @@ function providerCapabilities(provider, transport) {
     correction: codex ? 'same-turn' : transport === 'acp' ? 'cancel-resume' : 'cancel-resume',
     cancel: true,
     resume: true,
-    usage: true
+    usage: true,
+    // Codex app-server loads trusted-project docs/hooks (CLAUDE.md fallback)
+    // into the worker itself; Cursor workers do not, so orchestrators must
+    // post-review or pre-authorize instead of relying on in-worker gates.
+    selfEnforcesProjectHooks: codex
   };
 }
 
@@ -608,6 +651,34 @@ function gitBaseline(cwd) {
 const TIMEOUT_MIN_SECONDS = 60;
 const TIMEOUT_MAX_SECONDS = 86400;
 const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Scope entries are repo-relative path prefixes; '*' is a wildcard matching
+// any characters (including '/'). A file matches an entry when it equals it,
+// lives under it as a directory prefix, or matches its wildcard expansion.
+export function pathMatchesScope(file, entries) {
+  return (entries || []).some((entry) => {
+    if (entry.includes('*')) {
+      return new RegExp(`^${entry.split('*').map(escapeRegExp).join('.*')}(?:/|$)`).test(file);
+    }
+    return file === entry || file.startsWith(`${entry}/`);
+  });
+}
+
+export function validatedAllowedPaths(value) {
+  if (value == null) return null;
+  if (!Array.isArray(value) || !value.length || !value.every((item) => typeof item === 'string' && item.trim())) {
+    throw new Error('allowedPaths must be a non-empty array of path strings');
+  }
+  const entries = value.map((item) => item.trim().replace(/^\.\//, '').replace(/\/+$/, ''));
+  if (entries.some((item) => !item || item.startsWith('/') || item.split('/').includes('..'))) {
+    throw new Error('allowedPaths entries must be repo-relative and must not contain ..');
+  }
+  return entries;
+}
 
 // 'off' disables provider sandboxing for the job (Codex danger-full-access,
 // Cursor --sandbox disabled) so the worker can use git, host CLIs, and live
@@ -660,6 +731,7 @@ export function createManagedJob(options) {
     timeoutSeconds,
     network: options.network === true,
     sandbox: validatedSandbox(options.sandbox),
+    allowedPaths: validatedAllowedPaths(options.allowedPaths),
     allowSensitive: options.allowSensitive === true,
     status: 'queued',
     phase: 'queued',
@@ -903,9 +975,23 @@ export function resumeManagedJob(id, options) {
     timeoutSeconds: options.timeoutSeconds ?? parent.timeoutSeconds ?? null,
     network: options.network ?? parent.network ?? false,
     sandbox: options.sandbox ?? parent.sandbox ?? null,
+    allowedPaths: options.allowedPaths ?? parent.allowedPaths ?? null,
     overrideLimit: options.overrideLimit,
     overrideWriter: options.overrideWriter
   });
+}
+
+// Bounded synchronous-ish wait for the provider session id so gated
+// orchestration (filing a plan under the delegate's session id) has no race
+// between start and the worker's first write.
+export async function waitForSessionId(id, timeoutMs = 30000) {
+  const deadline = Date.now() + Math.min(Math.max(Number(timeoutMs) || 30000, 1000), 120000);
+  for (;;) {
+    const job = inspectJob(id);
+    if (job.providerSessionId || ['completed', 'failed', 'cancelled'].includes(job.status)) return job;
+    if (Date.now() > deadline) return job;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 }
 
 export function pruneJobs(options = {}) {

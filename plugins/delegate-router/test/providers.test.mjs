@@ -164,6 +164,44 @@ test('review-flow threads are flagged and refuse resume fast; terminal jobs writ
   assert.throws(() => resumeManagedJob(job.id, { prompt: 'continue' }), /RESUME_UNSUPPORTED/);
 }));
 
+test('out-of-scope writes are recorded as scopeViolations with a scope.violation event', () => isolated(async (directory) => {
+  fs.chmodSync(fakeCursor, 0o755);
+  spawnSync('git', ['init', '-q'], { cwd: directory });
+  process.env.DELEGATE_CURSOR_BIN = fakeCursor;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  process.env.FAKE_CURSOR_WRITE = '1';
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'implement', cwd: directory, prompt: 'write files', allowedPaths: ['new-file.txt'] });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  const violationPaths = completed.scopeViolations.map((item) => item.path);
+  assert.ok(violationPaths.includes('staged-file.txt'));
+  assert.ok(!violationPaths.includes('new-file.txt'));
+  const events = readJobEvents(job.id, { limit: 1000 });
+  const violation = events.find((event) => event.type === 'scope.violation');
+  assert.ok(violation);
+  assert.ok(violation.data.files.some((item) => item.path === 'staged-file.txt'));
+}));
+
+test('a session advertising only fast variants falls back to headless non-fast (live-catalog shape)', () => isolated(async (directory) => {
+  const fakeCursorTier = path.join(testDir, 'fake-cursor-tier.mjs');
+  fs.chmodSync(fakeCursorTier, 0o755);
+  process.env.DELEGATE_CURSOR_BIN = fakeCursorTier;
+  process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
+  // Tier fake ACP catalog: grok ONLY as [effort=high,fast=true] — the shape
+  // observed on the live account 2026-07-13. Plain grok must not silently run
+  // fast: the CLI catalog has a non-fast id, so the job switches to headless.
+  const job = createManagedJob({ provider: 'cursor', model: 'grok', mode: 'review', cwd: directory, prompt: 'review' });
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.transport, 'headless');
+  assert.equal(completed.resolvedModel, 'grok-4.5-high');
+  const events = readJobEvents(job.id, { limit: 1000 });
+  const fallback = events.find((event) => event.data.providerEvent === 'cursor:acp-tier-fallback');
+  assert.ok(fallback);
+  assert.match(fallback.data.error, /only as a fast variant/);
+}));
+
 test('Codex provider exit fails immediately instead of waiting for the turn timeout', () => isolated(async (directory) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   process.env.FAKE_CODEX_CRASH = '1';
@@ -202,9 +240,33 @@ test('cursor model resolution matches attribute-serialized catalogs (REG-1)', as
   assert.equal(cursorModel(acp, 'composer-2.5-fast'), 'composer-2.5[fast=true]');
   assert.equal(cursorModel(acp, 'grok-4.5-fast-high'), 'grok-4.5[effort=high,fast=true]');
   assert.equal(cursorModel(acp, 'grok-fast'), 'grok-4.5[effort=high,fast=true]');
+});
+
+test('fast-only live catalogs are flagged as a compromise, cursor- prefixed ids resolve', async () => {
+  const { cursorModel, cursorModelDetailed } = await import('../bin/lib/providers.mjs');
+  const { resolveCursorModel } = await import('../bin/lib/cursor.mjs');
+  // Exact ACP catalog shape observed live on 2026-07-13: grok and composer
+  // advertised ONLY as fast variants. Plain requests resolve but must carry
+  // fastCompromise so the adapter can escape to headless or warn loudly.
+  const live = [
+    { value: 'default[]' },
+    { value: 'grok-4.5[effort=high,fast=true]' },
+    { value: 'composer-2.5[fast=true]' },
+    { value: 'gpt-5.6-sol[context=272k,reasoning=medium,fast=false]' }
+  ];
+  assert.deepEqual(cursorModelDetailed(live, 'composer'), { value: 'composer-2.5[fast=true]', fastCompromise: true });
+  assert.deepEqual(cursorModelDetailed(live, 'grok'), { value: 'grok-4.5[effort=high,fast=true]', fastCompromise: true });
+  assert.deepEqual(cursorModelDetailed(live, 'auto'), { value: 'default[]', fastCompromise: false });
+  assert.deepEqual(cursorModelDetailed(live, 'grok-fast'), { value: 'grok-4.5[effort=high,fast=true]', fastCompromise: false });
+  // CLI catalogs now prefix first-party Grok ids with "cursor-".
+  const cli = [{ value: 'cursor-grok-4.5-high' }, { value: 'cursor-grok-4.5-high-fast' }, { value: 'cursor-grok-4.5-medium' }, { value: 'composer-2.5' }, { value: 'composer-2.5-fast' }];
+  assert.equal(cursorModel(cli, 'grok'), 'cursor-grok-4.5-high');
+  assert.equal(cursorModel(cli, 'grok-4.5-high'), 'cursor-grok-4.5-high');
+  assert.equal(cursorModel(cli, 'composer'), 'composer-2.5');
+  assert.equal(resolveCursorModel('grok', ['cursor-grok-4.5-high', 'cursor-grok-4.5-high-fast', 'composer-2.5']), 'cursor-grok-4.5-high');
   for (const bogus of ['grok-9point9-fake', 'grok-4.5-turbo', 'claude-fable-5']) {
     try {
-      cursorModel(acp, bogus);
+      cursorModel(live, bogus);
       assert.fail(`expected INVALID_MODEL for ${bogus}`);
     } catch (error) {
       assert.equal(error.code, 'INVALID_MODEL', bogus);

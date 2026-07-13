@@ -64,12 +64,12 @@ export function resolveCursorModel(requested, ids = []) {
   }
   if (requested === 'grok' || requested === 'grok-high') {
     return process.env.DELEGATE_CURSOR_GROK_MODEL
-      || newestModel(ids, /^grok-(\d+(?:\.\d+)*)-high$/, '4.5')
+      || newestModel(ids, /^(?:cursor-)?grok-(\d+(?:\.\d+)*)-high$/, '4.5')
       || 'grok-4.5-high';
   }
   if (requested === 'grok-xhigh') {
     return process.env.DELEGATE_CURSOR_GROK_XHIGH_MODEL
-      || newestModel(ids, /^grok-(\d+(?:\.\d+)*)-xhigh$/, '4.5')
+      || newestModel(ids, /^(?:cursor-)?grok-(\d+(?:\.\d+)*)-xhigh$/, '4.5')
       || 'grok-4.5-xhigh';
   }
   if (requested === 'auto') return 'auto';

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -30,7 +30,10 @@ ${sensitiveRule}
 }
 
 function promptFor(job) {
-  return `${securityPreamble(job.allowSensitive)}${fs.readFileSync(job.promptPath, 'utf8')}`;
+  const scope = job.allowedPaths?.length
+    ? `Allowed write scope (hard fence): create or modify files only under: ${job.allowedPaths.join(', ')}. If required work falls outside this set, stop and report instead of editing.\n\n`
+    : '';
+  return `${securityPreamble(job.allowSensitive)}${scope}${fs.readFileSync(job.promptPath, 'utf8')}`;
 }
 
 function codexModel(model) {
@@ -64,10 +67,23 @@ function terminal(job, status, phase, extra = {}) {
   // actually did; record the plugin's own observation of changed files so the
   // coordinator's first read of the job record is grounded.
   let changedFiles = null;
+  let scopeViolations = null;
   if (['implement', 'verify'].includes(job.mode)) {
     try {
-      const files = jobFiles(job.id).map((file) => file.path);
-      changedFiles = { count: files.length, files: files.slice(0, 50) };
+      const files = jobFiles(job.id);
+      const names = files.map((file) => file.path);
+      changedFiles = { count: names.length, files: names.slice(0, 50) };
+      if (job.allowedPaths?.length) {
+        const violations = files.filter((file) => !pathMatchesScope(file.path, job.allowedPaths));
+        if (violations.length) {
+          scopeViolations = violations.slice(0, 50).map((file) => ({
+            path: file.path,
+            ...(file.preexisting ? { preexisting: true } : {}),
+            ...(file.overlapsPreexisting ? { overlapsPreexisting: true } : {})
+          }));
+          appendJobEvent(job.id, 'scope.violation', { count: violations.length, files: scopeViolations });
+        }
+      }
     } catch {}
   }
   updateManagedJob(job.id, (current) => {
@@ -75,7 +91,24 @@ function terminal(job, status, phase, extra = {}) {
     current.phase = phase;
     current.completedAt = Math.floor(Date.now() / 1000);
     if (changedFiles) current.changedFiles = changedFiles;
+    if (scopeViolations) current.scopeViolations = scopeViolations;
     Object.assign(current, redact(extra));
+    // Providers return three different result shapes (Codex plain string,
+    // Cursor ACP {text, plan, stopReason}, Cursor headless CLI envelope);
+    // resultText is the one field consumers can always read.
+    const text = current.result == null ? null
+      : typeof current.result === 'string' ? current.result
+      : typeof current.result.text === 'string' && current.result.text ? current.result.text
+      : typeof current.result.result === 'string' ? current.result.result
+      : null;
+    if (text != null) current.resultText = text;
+    // A read-mode turn that ends with a sentence of narration instead of the
+    // findings is a recurring provider pattern; flag it so the coordinator
+    // resumes with "paste the full findings now" instead of trusting it.
+    if (status === 'completed' && ['consult', 'plan', 'review'].includes(job.mode)
+      && !current.result?.plan && (!text || text.trim().length < 200)) {
+      current.resultSuspect = 'short-final-message';
+    }
   });
   appendJobEvent(job.id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', extra);
 }
@@ -202,7 +235,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.13.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.14.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -379,11 +412,12 @@ function parseCursorModelId(value) {
   return { value: String(value), base, effort, fast };
 }
 
-export function cursorModel(options, requested) {
+export function cursorModelDetailed(options, requested) {
   const values = options.map((item) => item.value);
-  if (!values.length) return resolveCursorModel(requested, []);
-  if (values.includes(requested)) return requested;
+  if (!values.length) return { value: resolveCursorModel(requested, []), fastCompromise: false };
+  if (values.includes(requested)) return { value: requested, fastCompromise: false };
   const parsed = values.map(parseCursorModelId);
+  const isGrokBase = (base) => /^(?:cursor-)?grok-/.test(base);
   // Fast variants are opt-in: the default pool is non-fast, and a fast
   // variant is selected only when the request itself says fast. When the
   // preferred pool is empty the other variant still resolves — fast/non-fast
@@ -398,32 +432,45 @@ export function cursorModel(options, requested) {
     pool = [...pool].sort((a, b) =>
       ((EFFORT_RANK[b.effort] || 0) - (EFFORT_RANK[a.effort] || 0))
       || b.base.localeCompare(a.base, undefined, { numeric: true }));
-    return pool[0]?.value || null;
+    return pool[0] || null;
   };
   if (!requested || requested === 'auto') {
-    return values.find((value) => value === 'default[]')
+    const value = values.find((item) => item === 'default[]')
       || parsed.find((item) => item.base === 'auto' || item.base === 'default')?.value
       || null;
+    return { value, fastCompromise: false };
   }
   let resolved = null;
+  let wantFast = false;
   if (requested === 'composer') {
     resolved = pick(parsed.filter((item) => item.base.startsWith('composer-')), null);
   } else if (requested === 'grok' || requested === 'grok-high') {
-    resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'high');
+    resolved = pick(parsed.filter((item) => isGrokBase(item.base)), 'high');
   } else if (requested === 'grok-xhigh') {
-    resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'xhigh');
+    resolved = pick(parsed.filter((item) => isGrokBase(item.base)), 'xhigh');
   } else if (requested === 'grok-fast') {
-    resolved = pick(parsed.filter((item) => item.base.startsWith('grok-')), 'high', true);
+    wantFast = true;
+    resolved = pick(parsed.filter((item) => isGrokBase(item.base)), 'high', true);
   } else {
     const want = parseCursorModelId(requested);
+    wantFast = want.fast;
     let family = parsed.filter((item) => item.base === want.base);
     if (!family.length) family = parsed.filter((item) => item.base.startsWith(`${want.base}-`));
+    // CLI catalogs prefix first-party Grok ids with "cursor-"; tolerate the
+    // documented unprefixed form against a prefixed catalog.
+    if (!family.length) family = parsed.filter((item) => item.base === `cursor-${want.base}` || item.base.startsWith(`cursor-${want.base}-`));
     if (family.length) resolved = pick(family, want.effort, want.fast);
   }
-  if (resolved) return resolved;
+  if (resolved) {
+    return { value: resolved.value, fastCompromise: resolved.fast === true && wantFast !== true };
+  }
   const error = new Error(`INVALID_MODEL: '${requested}' is not in this account's model list; run agent models or cursor-agent models. Available: ${values.slice(0, 25).join(', ')}`);
   error.code = 'INVALID_MODEL';
   throw error;
+}
+
+export function cursorModel(options, requested) {
+  return cursorModelDetailed(options, requested).value;
 }
 
 // Codex threads that engaged the auto-review sub-agent (write-mode approval
@@ -472,6 +519,13 @@ function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas, planHolder
   } else if (kind === 'session_info_update') {
     appendJobEvent(jobId, 'provider.event', { providerEvent: 'session/update:session_info_update' }, options);
     if (update.model) {
+      // The session's own report is the ground truth for resolvedModel, but a
+      // silent overwrite hid fast-variant swaps from coordinators; disagreement
+      // with the negotiated value must be loud.
+      const current = loadJob(jobId);
+      if (current?.resolvedModel && current.resolvedModel !== update.model) {
+        appendJobEvent(jobId, 'provider.event', { providerEvent: 'cursor:model-mismatch', negotiated: current.resolvedModel, reported: update.model }, options);
+      }
       updateManagedJob(jobId, (job) => { job.resolvedModel = update.model; }, { incrementRevision: false });
     }
   } else if (kind !== 'agent_thought_chunk' && kind !== 'user_message_chunk') {
@@ -599,7 +653,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.13.1' }
+      clientInfo: { name: 'delegate-router', version: '0.14.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -612,8 +666,28 @@ async function runCursorAcp(job) {
     if (modelOption) {
       let resolvedModel;
       try {
-        resolvedModel = cursorModel(modelOption.options || [], job.model);
+        const detailed = cursorModelDetailed(modelOption.options || [], job.model);
+        resolvedModel = detailed.value;
+        if (detailed.fastCompromise) {
+          // The session advertises this model only as a fast variant. The
+          // non-fast contract wins: if the CLI catalog has a non-fast id,
+          // fall back to headless with it; otherwise proceed fast, loudly.
+          let cliModel = null;
+          try {
+            const ids = availableModelIds(binary);
+            const candidate = resolveCursorModel(job.model, ids);
+            if (ids.includes(candidate) && !/-fast(?:-|$)/.test(candidate)) cliModel = candidate;
+          } catch {}
+          if (cliModel) {
+            const fastError = new Error(`ACP_TIER_UNAVAILABLE: this ACP session advertises '${job.model}' only as a fast variant ('${detailed.value}'); the CLI catalog has non-fast '${cliModel}'`);
+            fastError.code = 'ACP_TIER_UNAVAILABLE';
+            fastError.cliModel = cliModel;
+            throw fastError;
+          }
+          appendJobEvent(job.id, 'provider.event', { providerEvent: 'cursor:fast-fallback', requested: job.model, resolved: detailed.value }, { sessionId });
+        }
       } catch (error) {
+        if (error.code === 'ACP_TIER_UNAVAILABLE') throw error;
         if (error.code !== 'INVALID_MODEL') throw error;
         // ACP sessions can advertise fewer tiers than the CLI catalog (for
         // example Grok capped at effort=high while the CLI lists -xhigh).

@@ -22,6 +22,7 @@ import {
   submitControl,
   updateManagedJob
 } from '../bin/lib/control.mjs';
+import { filterDiffPaths, pathMatchesScope, validatedAllowedPaths } from '../bin/lib/control.mjs';
 import { loadState, saveState, setWindow } from '../bin/lib/state.mjs';
 
 function isolated(fn) {
@@ -306,6 +307,43 @@ test('GPT models are refused on cursor while codex is enabled and under its avoi
   } finally {
     delete process.env.DELEGATE_CURSOR_BIN;
   }
+}));
+
+test('scope matching, allowedPaths validation, and diff path filtering', () => {
+  assert.equal(pathMatchesScope('src/app/page.tsx', ['src/app']), true);
+  assert.equal(pathMatchesScope('src/app.ts', ['src/app']), false);
+  assert.equal(pathMatchesScope('docs/notes.md', ['docs/notes.md']), true);
+  assert.equal(pathMatchesScope('packages/ai/test/x.test.mjs', ['packages/*/test']), true);
+  assert.equal(pathMatchesScope('anything/else.js', ['src']), false);
+  assert.deepEqual(validatedAllowedPaths(['./src/', 'docs']), ['src', 'docs']);
+  assert.throws(() => validatedAllowedPaths(['../escape']), /repo-relative/);
+  assert.throws(() => validatedAllowedPaths([]), /non-empty/);
+  const diff = 'diff --git a/src/a.js b/src/a.js\n+one\ndiff --git a/docs/b.md b/docs/b.md\n+two\n';
+  assert.match(filterDiffPaths(diff, ['src']), /src\/a\.js/);
+  assert.doesNotMatch(filterDiffPaths(diff, ['src']), /docs\/b\.md/);
+  assert.equal(filterDiffPaths(diff, null), diff);
+});
+
+test('jobFiles dedupes absolute and relative reports of the same file', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'implement', cwd: directory, prompt: 'implement' });
+  appendJobEvent(job.id, 'file.changed', { path: path.join(directory, 'src/demo.html') });
+  appendJobEvent(job.id, 'file.changed', { path: 'src/demo.html', status: 'M ' });
+  const files = jobFiles(job.id);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].path, 'src/demo.html');
+  assert.equal(files[0].status, 'M ');
+}));
+
+test('list rows carry session and rootJobId for resume chains', () => isolated((directory) => {
+  const root = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'root' });
+  updateManagedJob(root.id, (current) => { current.providerSessionId = 'thread-chain'; });
+  const child = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'child', parentJobId: root.id, providerSessionId: 'thread-chain' });
+  const grandchild = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'grandchild', parentJobId: child.id, providerSessionId: 'thread-chain' });
+  const rows = listManagedJobs({ limit: 10 }).jobs;
+  const row = rows.find((item) => item.id === grandchild.id);
+  assert.equal(row.rootJobId, root.id);
+  assert.equal(row.session, 'thread-chain');
+  assert.equal(rows.find((item) => item.id === root.id).rootJobId, undefined);
 }));
 
 test('sandbox off is validated, stored, and maps to full access across providers', async () => isolated(async (directory) => {

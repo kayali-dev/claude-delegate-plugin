@@ -36,6 +36,8 @@ Stop and report when:
 Return: outcome, changed files, verification, risks, blockers, continuation id.
 ```
 
+Pass `allowedPaths` on `delegate_start` for every write-mode job with a known file scope: the broker injects the fence into the worker prompt and records any out-of-scope changed file as `scopeViolations` on the job (plus a `scope.violation` event) — check it before accepting the result. Use `waitForSession=true` when you must file anything keyed to the delegate's session id before its first write.
+
 Reference repository paths instead of pasting large files. Include only conversation context the worker cannot discover. Tell every writer to preserve existing changes and never revert unrelated work.
 
 ## Delegate To Codex
@@ -80,7 +82,7 @@ For long work inside Claude Code, run the foreground `delegate-cursor` command w
 
 ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|restart` cancels the current prompt, waits for it to settle, and sends the correction to the same session. It reports `appliedAs=restart`; never describe this as same-turn steering. `strategy=same-turn` must be rejected for Cursor. Continue completed work with `delegate_resume`, which loads the same Cursor session. Use sensitive paths only when explicitly authorized.
 
-Known Grok-via-Cursor pattern (observed repeatedly on review work): the first turn can end with narration about filing or preparing the report without pasting the findings themselves. Mitigate in the task packet — "End your final message with the complete findings inline; a description of the report is not the report" — and when it still happens, treat the turn as incomplete and `delegate_resume` with "paste the full findings now".
+Known Grok-via-Cursor pattern (observed repeatedly on review work, both transports): the first turn can end with narration about filing or preparing the report without pasting the findings themselves — the broker flags this as `resultSuspect` on the record. Mitigate in the task packet — "End your final message with the complete findings inline; a description of the report is not the report" — and when it still happens, treat the turn as incomplete and `delegate_resume` with "paste the full findings now".
 
 ## Choose The External Model And Effort
 
@@ -122,7 +124,7 @@ An unsandboxed worker has your user's host privileges: state `sandbox=off` in th
 After `delegate_start`, retain the job ID and revision. Use:
 
 - `delegate_list` to rediscover jobs when an ID is no longer in context (after compaction or in a new session). It reconciles orphans and returns compact summaries, newest first.
-- `delegate_inspect` for lifecycle, capabilities, continuation IDs, the final `result`, and current revision. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. A running job whose worker process died is reconciled to `failed` with an `ORPHANED` error event.
+- `delegate_inspect` for lifecycle, capabilities, continuation IDs, the final `result`, and current revision. `resultText` is the provider-independent text of the final message; a read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. A running job whose worker process died is reconciled to `failed` with an `ORPHANED` error event.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
 - `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { terminatePid } from './lib/process.mjs';
 import {
   diffStat,
+  filterDiffPaths,
   inspectJob,
   jobDiff,
   jobFiles,
@@ -20,17 +21,17 @@ import { listJobs, saveJob } from './lib/state.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane]
+  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
   delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
   delegate-jobs wait <job-id> [--timeout-seconds N]   # blocks until terminal; exit 0 completed, 3 failed, 4 cancelled, 5 completed-but-no-changes (write modes), 75 timeout
-  delegate-jobs diff <job-id> [--stat] [--offset N] [--max-chars N]
+  delegate-jobs diff <job-id> [--stat] [--offset N] [--max-chars N] [--paths a,b]
   delegate-jobs files <job-id> [--json]
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
   delegate-jobs cancel <job-id> [--expected-revision N]
-  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs usage <job-id> [--json]
   delegate-jobs result <job-id>
   delegate-jobs logs <job-id> [--stderr]
@@ -62,14 +63,28 @@ const command = rawCommand === 'list' ? 'status' : rawCommand;
 try {
   if (command === 'start') {
     const rawTimeout = value(args, '--timeout-seconds');
-    json(launchManagedJob({
+    const started = launchManagedJob({
       provider: value(args, '--provider'), model: value(args, '--model', 'auto'), mode: value(args, '--mode', 'consult'),
       cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
       network: args.includes('--network'), sandbox: value(args, '--sandbox'),
+      allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
       overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane')
-    }));
+    });
+    if (args.includes('--wait-for-session')) {
+      const { waitForSessionId } = await import('./lib/control.mjs');
+      json(await waitForSessionId(started.id));
+    } else json(started);
+    if (args.includes('--wait')) {
+      let job = requireJob(started.id);
+      while (!terminal(job.status)) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        job = requireJob(started.id);
+      }
+      if (job.status !== 'completed') process.exit(job.status === 'failed' ? 3 : 4);
+      if (['implement', 'verify'].includes(job.mode) && !(job.changedFiles?.count > 0)) process.exit(5);
+    }
   } else if (command === 'status') {
     // A bare positional is a job id — but flag values (--limit 3) must not be
     // mistaken for one.
@@ -147,7 +162,7 @@ try {
     const rawDays = value(args, '--max-age-days');
     json(pruneJobs(rawDays == null ? {} : { maxAgeDays: Number(rawDays) }));
   } else if (command === 'diff') {
-    const full = jobDiff(args[0]);
+    const full = filterDiffPaths(jobDiff(args[0]), value(args, '--paths')?.split(',').map((item) => item.trim()).filter(Boolean));
     if (args.includes('--stat')) json(diffStat(full));
     else if (value(args, '--offset') != null || value(args, '--max-chars') != null) {
       json(sliceDiff(full, { offset: Number(value(args, '--offset', 0)), maxChars: Number(value(args, '--max-chars', 100000)) }));
@@ -181,6 +196,7 @@ try {
       prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? undefined : Number(rawTimeout),
       network: args.includes('--network') ? true : undefined, sandbox: value(args, '--sandbox'),
+      allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive') ? true : undefined,
       overrideLimit: args.includes('--override-limit'), overrideWriter: args.includes('--override-writer')
     }));

@@ -41,3 +41,5 @@ The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex w
 Per-job observed tokens or context usage are evidence about that execution, not a subscription allowance percentage. `delegate_usage` reports those values separately. Routing continues to use the provider windows in `usage.json`.
 
 Sources: https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md, https://code.claude.com/docs/en/statusline, and https://docs.cursor.com/account/pricing
+
+Cursor exposes no allowance API: `usage: unknown` for Cursor in `delegate-health` is the expected steady state, not an error. The only reliable source is the dashboard percentage, recorded manually with `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>` (stale entries expire per `DELEGATE_MANUAL_USAGE_TTL_DAYS`).

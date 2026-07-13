@@ -39,7 +39,7 @@ lines.on('line', (line) => {
       sessionId: 'cursor-session',
       configOptions: [
         { id: 'mode', currentValue: 'agent', options: [{ value: 'agent' }, { value: 'plan' }, { value: 'ask' }] },
-        { id: 'model', currentValue: 'composer-2.5[fast=true]', options: [{ value: 'composer-2.5[fast=true]' }, { value: 'grok-4.5[effort=high,fast=false]' }] }
+        { id: 'model', currentValue: 'composer-2.5[fast=true]', options: [{ value: 'composer-2.5[fast=true]' }, { value: 'composer-2.5[fast=false]' }, { value: 'grok-4.5[effort=high,fast=false]' }] }
       ]
     } });
   } else if (request.method === 'session/set_config_option') send({ jsonrpc: '2.0', id: request.id, result: {} });

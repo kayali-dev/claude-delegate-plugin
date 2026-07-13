@@ -23,8 +23,11 @@ const codexBinary = executableOnPath('codex');
 const claudeBinary = executableOnPath('claude');
 const controlServer = path.join(path.dirname(fileURLToPath(import.meta.url)), 'delegate-control-mcp');
 const configuredProviders = enabledProviders();
+const packageInfo = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'));
 const report = {
   ok: true,
+  version: packageInfo.version,
+  versionNote: 'CLI resolves to the installed plugin on every run; the skill and MCP servers pin at session start - reload plugins after upgrades to align all surfaces',
   stateFile: statePath(),
   providerConfigFile: providerConfigPath(),
   enabledProviders: configuredProviders,
@@ -35,6 +38,9 @@ const report = {
   control: { installed: fs.existsSync(controlServer), path: controlServer, protocol: 'MCP stdio' },
   usage: Object.fromEntries(providerNames().map((name) => [name, effectiveUsage(state, name)]))
 };
+if (report.usage.cursor && !report.usage.cursor.known) {
+  report.usage.cursor.note = 'expected: Cursor exposes no allowance API; record the dashboard percentage manually with delegate-usage set cursor <percent> --window first-party';
+}
 
 if (report.codex.enabled && codexBinary) report.codex.version = run(codexBinary, ['--version'], 5000);
 if (report.cursor.enabled && cursorBinary) {
