@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { brokerError, normalizeBrokerError } from '../bin/lib/errors.mjs';
 import {
   appendJobEvent,
   createManagedJob,
@@ -23,13 +24,13 @@ import {
   updateManagedJob
 } from '../bin/lib/control.mjs';
 import { filterDiffPaths, pathMatchesScope, validatedAllowedPaths } from '../bin/lib/control.mjs';
-import { loadState, saveState, setWindow } from '../bin/lib/state.mjs';
+import { auditLogPath, loadState, saveState, setWindow } from '../bin/lib/state.mjs';
 
-function isolated(fn) {
+async function isolated(fn) {
   const previous = process.env.DELEGATE_STATE_FILE;
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
-  try { return fn(directory); }
+  try { return await fn(directory); }
   finally {
     if (previous == null) delete process.env.DELEGATE_STATE_FILE;
     else process.env.DELEGATE_STATE_FILE = previous;
@@ -37,7 +38,7 @@ function isolated(fn) {
 }
 
 test('managed jobs persist ordered redacted events and derived views', () => isolated((directory) => {
-  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review token sk-12345678901234567890' });
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review public code' });
   appendJobEvent(job.id, 'file.changed', { changes: [{ path: 'src/a.js', token: 'secret-value' }] });
   appendJobEvent(job.id, 'diff.updated', { diff: 'diff --git a/src/a.js b/src/a.js' });
   const events = readJobEvents(job.id);
@@ -49,6 +50,48 @@ test('managed jobs persist ordered redacted events and derived views', () => iso
   assert.equal(jobTranscript(job.id)[0].type, 'message.user');
   const eventFile = path.join(directory, 'jobs', `${job.id}.events.jsonl`);
   assert.equal(fs.statSync(eventFile).mode & 0o777, 0o600);
+}));
+
+test('outbound prompt scan blocks credentials unless allowSensitive explicitly overrides', () => isolated((directory) => {
+  try {
+    createManagedJob({ provider: 'codex', cwd: directory, prompt: 'use token sk-12345678901234567890' });
+    assert.fail('expected SECRET_IN_PROMPT');
+  } catch (error) {
+    assert.equal(error.code, 'SECRET_IN_PROMPT');
+    assert.equal(error.retryable, false);
+    assert.equal(error.provider, 'codex');
+  }
+  const allowed = createManagedJob({
+    provider: 'codex',
+    cwd: directory,
+    prompt: 'use token sk-12345678901234567890',
+    allowSensitive: true
+  });
+  const events = readJobEvents(allowed.id);
+  assert.ok(events.some((event) => event.type === 'security.warning' && event.data.code === 'SECRET_IN_PROMPT'));
+  assert.doesNotMatch(JSON.stringify(events), /sk-12345678901234567890/);
+}));
+
+test('idempotency replays return the same job id without launching another record', () => isolated((directory) => {
+  const previous = process.env.DELEGATE_CODEX_BIN;
+  process.env.DELEGATE_CODEX_BIN = '/usr/bin/false';
+  try {
+    const options = {
+      provider: 'codex',
+      mode: 'implement',
+      cwd: directory,
+      prompt: 'implement once',
+      idempotencyKey: 'coordinator-wave-1'
+    };
+    const first = launchManagedJob(options);
+    const replay = launchManagedJob(options);
+    assert.equal(replay.id, first.id);
+    assert.equal(replay.idempotencyKey, options.idempotencyKey);
+    assert.equal(listManagedJobs().jobs.filter((job) => job.cwd === directory).length, 1);
+  } finally {
+    if (previous == null) delete process.env.DELEGATE_CODEX_BIN;
+    else process.env.DELEGATE_CODEX_BIN = previous;
+  }
 }));
 
 test('control commands use revisions and stable ids for exactly-once acceptance', () => isolated((directory) => {
@@ -76,6 +119,18 @@ test('event pagination resumes without duplicates and ignores a truncated tail',
   assert.equal(readJobEvents(job.id).length, 4);
   appendJobEvent(job.id, 'plan.updated', { plan: ['recovered'] });
   assert.deepEqual(readJobEvents(job.id).map((event) => event.seq), [1, 2, 3, 4, 5]);
+}));
+
+test('inspect leaves a partial journal tail byte-for-byte unchanged', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+  const file = path.join(directory, 'jobs', `${job.id}.events.jsonl`);
+  const expectedAt = readJobEvents(job.id).at(-1).at;
+  fs.appendFileSync(file, '{"truncated":');
+  const before = fs.readFileSync(file);
+  const beforeSize = fs.statSync(file).size;
+  assert.equal(inspectJob(job.id).lastActivityAt, expectedAt);
+  assert.equal(fs.statSync(file).size, beforeSize);
+  assert.deepEqual(fs.readFileSync(file), before);
 }));
 
 test('large diffs spill to private artifacts and remain fully inspectable', () => isolated((directory) => {
@@ -106,6 +161,20 @@ test('redaction preserves numeric usage while hiding numeric and boolean secrets
   assert.doesNotMatch(text, /hunter2|abcdef|value123|user:pass/);
 });
 
+test('broker error taxonomy carries closed codes, retryability, and provider attribution', () => {
+  const invalid = brokerError('INVALID_MODEL', 'missing model', { provider: 'cursor' });
+  assert.deepEqual({ code: invalid.code, retryable: invalid.retryable, provider: invalid.provider }, {
+    code: 'INVALID_MODEL', retryable: false, provider: 'cursor'
+  });
+  const transport = normalizeBrokerError(Object.assign(new Error('socket reset'), { code: 'ECONNRESET' }), { provider: 'codex' });
+  assert.deepEqual({ code: transport.code, retryable: transport.retryable, provider: transport.provider }, {
+    code: 'TRANSPORT_ERROR', retryable: true, provider: 'codex'
+  });
+  for (const code of ['USER_INPUT_REQUIRED', 'BUDGET_EXCEEDED', 'QUOTA_GUARD', 'ACP_TIER_UNAVAILABLE']) {
+    assert.equal(brokerError(code, 'same request cannot succeed').retryable, false, code);
+  }
+});
+
 test('filtered event pages advance across nonmatches without skipping later matches', () => isolated((directory) => {
   const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
   appendJobEvent(job.id, 'plan.updated', { plan: [] });
@@ -133,6 +202,30 @@ test('inspect reconciles orphaned running jobs to failed with an audit event', (
   assert.equal(inspectJob(job.id).status, 'failed');
 }));
 
+test('inspect and list expose journal-tail activity and flag stalled running jobs', () => isolated((directory) => {
+  const previous = process.env.DELEGATE_STALL_SECONDS;
+  process.env.DELEGATE_STALL_SECONDS = '1';
+  try {
+    const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+    updateManagedJob(job.id, (current) => { current.status = 'running'; current.workerPid = process.pid; });
+    const file = path.join(directory, 'jobs', `${job.id}.events.jsonl`);
+    const oldAt = Date.now() - 5000;
+    const oldEvents = fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => ({ ...JSON.parse(line), at: oldAt }));
+    fs.writeFileSync(file, `${oldEvents.map((event) => JSON.stringify(event)).join('\n')}\n`);
+    const stalled = inspectJob(job.id);
+    assert.equal(stalled.lastActivityAt, oldAt);
+    assert.equal(stalled.stalled, true);
+    assert.equal(listManagedJobs().jobs.find((row) => row.id === job.id).stalled, true);
+    const fresh = appendJobEvent(job.id, 'plan.updated', { plan: ['continue'] });
+    const active = inspectJob(job.id);
+    assert.equal(active.lastActivityAt, fresh.at);
+    assert.equal(active.stalled, false);
+  } finally {
+    if (previous == null) delete process.env.DELEGATE_STALL_SECONDS;
+    else process.env.DELEGATE_STALL_SECONDS = previous;
+  }
+}));
+
 test('write-mode launches are blocked while another writer is active in the same cwd', () => isolated((directory) => {
   const writer = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'first writer' });
   updateManagedJob(writer.id, (current) => { current.status = 'running'; current.workerPid = process.pid; });
@@ -141,6 +234,8 @@ test('write-mode launches are blocked while another writer is active in the same
     assert.fail('expected WRITER_ACTIVE');
   } catch (error) {
     assert.equal(error.code, 'WRITER_ACTIVE');
+    assert.equal(error.retryable, true);
+    assert.equal(error.provider, 'codex');
     assert.equal(error.activeJobId, writer.id);
   }
   assert.throws(() => launchManagedJob({ provider: 'codex', mode: 'verify', cwd: directory, prompt: 'verifier' }), /WRITER_ACTIVE/);
@@ -184,6 +279,8 @@ test('revision conflicts carry the current revision for one-step retry', () => i
     assert.fail('expected REVISION_CONFLICT');
   } catch (error) {
     assert.equal(error.code, 'REVISION_CONFLICT');
+    assert.equal(error.retryable, true);
+    assert.equal(error.provider, 'codex');
     assert.equal(error.currentRevision, revision + 1);
   }
 }));
@@ -217,11 +314,42 @@ test('prune removes aged terminal jobs and preserves active ones', () => isolate
   assert.ok(!fs.existsSync(path.join(directory, 'jobs', `${done.id}.prompt`)));
 }));
 
+test('terminal audit log is one-line-per-transition, redacted, private, and never pruned', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task' });
+  updateManagedJob(job.id, (current) => {
+    current.status = 'failed';
+    current.phase = 'failed';
+    current.completedAt = Math.floor(Date.now() / 1000) - 30 * 86400;
+    current.error = 'PASSWORD=synthetic-audit-secret';
+    current.errorCode = 'PROVIDER_ERROR';
+    current.changedFiles = { count: 2, files: ['a.js', 'b.js'] };
+    current.scopeViolations = [{ path: 'b.js' }];
+    current.usage = { inputTokens: 5, outputTokens: 3 };
+  });
+  updateManagedJob(job.id, (current) => { current.phase = 'failed'; });
+  const file = auditLogPath();
+  const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+  assert.equal(lines.length, 1);
+  const record = JSON.parse(lines[0]);
+  assert.equal(record.jobId, job.id);
+  assert.equal(record.provider, 'codex');
+  assert.equal(record.changedFilesCount, 2);
+  assert.equal(record.scopeViolationsCount, 1);
+  assert.equal(record.outcome.status, 'failed');
+  assert.doesNotMatch(lines[0], /synthetic-audit-secret/);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  pruneJobs({ maxAgeDays: 14 });
+  assert.equal(fs.existsSync(file), true);
+  assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 1);
+}));
+
 test('timeoutSeconds is validated, stored, and inherited by resume', () => isolated((directory) => {
-  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', timeoutSeconds: 7200 });
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', timeoutSeconds: 7200, maxOutputTokens: 5000 });
   assert.equal(inspectJob(job.id).timeoutSeconds, 7200);
+  assert.equal(inspectJob(job.id).maxOutputTokens, 5000);
   assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', timeoutSeconds: 5 }), /timeoutSeconds/);
   assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', timeoutSeconds: 1.5 }), /timeoutSeconds/);
+  assert.throws(() => createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task', maxOutputTokens: 0 }), /maxOutputTokens/);
   assert.equal(inspectJob(job.id).timeoutSeconds, 7200);
 }));
 
@@ -486,4 +614,17 @@ test('usage reports distinguish missing provider data from zero', () => isolated
   const usage = jobUsage(job.id);
   assert.equal(usage.observedAvailable, false);
   assert.match(usage.note, /did not emit usage/);
+}));
+
+test('usage reports chain-cumulative totals through the current continuation', () => isolated((directory) => {
+  const root = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'root' });
+  appendJobEvent(root.id, 'usage.updated', { total: { inputTokens: 10, outputTokens: 4 } });
+  const child = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'child', parentJobId: root.id });
+  appendJobEvent(child.id, 'usage.updated', { inputTokens: 6, outputTokens: 3 });
+  const usage = jobUsage(child.id);
+  assert.deepEqual(usage.chainCumulative.jobIds, [root.id, child.id]);
+  assert.equal(usage.chainCumulative.rootJobId, root.id);
+  assert.equal(usage.chainCumulative.inputTokens, 16);
+  assert.equal(usage.chainCumulative.outputTokens, 7);
+  assert.equal(usage.chainCumulative.totalTokens, 23);
 }));

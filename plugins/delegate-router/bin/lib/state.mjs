@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { brokerError, normalizeBrokerError } from './errors.mjs';
 import { withFileLock } from './lock.mjs';
 
 const PROVIDERS = ['claude', 'codex', 'cursor'];
@@ -19,6 +20,10 @@ export function jobsDir() {
   return path.join(dataDir(), 'jobs');
 }
 
+export function auditLogPath() {
+  return path.join(dataDir(), 'audit.jsonl');
+}
+
 export function providerConfigPath() {
   return process.env.DELEGATE_PROVIDER_CONFIG || path.join(dataDir(), 'providers.json');
 }
@@ -31,7 +36,7 @@ export function enabledProviders() {
     return normalizeEnabledProviders(config.enabled || []);
   } catch (error) {
     if (error.code === 'ENOENT') return ['codex', 'cursor'];
-    throw new Error(`Cannot read ${providerConfigPath()}: ${error.message}`);
+    throw brokerError('STATE_ERROR', `Cannot read ${providerConfigPath()}: ${error.message}`);
   }
 }
 
@@ -54,9 +59,9 @@ export function saveEnabledProviders(providers) {
 function normalizeEnabledProviders(providers) {
   const values = [...new Set(providers.map((value) => String(value).trim()).filter(Boolean))];
   for (const provider of values) {
-    if (!['codex', 'cursor'].includes(provider)) throw new Error(`Invalid enabled provider: ${provider}`);
+    if (!['codex', 'cursor'].includes(provider)) throw brokerError('INVALID_REQUEST', `Invalid enabled provider: ${provider}`);
   }
-  if (!values.length) throw new Error('At least one external provider must be enabled');
+  if (!values.length) throw brokerError('INVALID_REQUEST', 'At least one external provider must be enabled');
   return ['codex', 'cursor'].filter((provider) => values.includes(provider));
 }
 
@@ -70,7 +75,7 @@ function emptyState() {
 
 export function validateProvider(provider) {
   if (!PROVIDERS.includes(provider)) {
-    throw new Error(`Unknown provider: ${provider}. Expected ${PROVIDERS.join(', ')}.`);
+    throw brokerError('INVALID_REQUEST', `Unknown provider: ${provider}. Expected ${PROVIDERS.join(', ')}.`);
   }
   return provider;
 }
@@ -85,7 +90,7 @@ export function loadState() {
     return state;
   } catch (error) {
     if (error.code === 'ENOENT') return emptyState();
-    throw new Error(`Cannot read ${file}: ${error.message}`);
+    throw brokerError('STATE_ERROR', `Cannot read ${file}: ${error.message}`);
   }
 }
 
@@ -112,7 +117,7 @@ export function mutateState(mutator) {
 export function setWindow(state, provider, windowName, usedPercent, options = {}) {
   validateProvider(provider);
   if (!Number.isFinite(usedPercent) || usedPercent < 0 || usedPercent > 100) {
-    throw new Error('used percent must be between 0 and 100');
+    throw brokerError('INVALID_REQUEST', 'used percent must be between 0 and 100');
   }
   const now = Math.floor(Date.now() / 1000);
   state.providers[provider].windows[windowName] = {
@@ -177,12 +182,12 @@ export function warningPercentFor(provider) {
 }
 
 function jobPath(id) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid job id: ${id}`);
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw brokerError('INVALID_REQUEST', `Invalid job id: ${id}`);
   return path.join(jobsDir(), `${id}.json`);
 }
 
 export function saveJob(job) {
-  if (!job?.id) throw new Error('Job id is required');
+  if (!job?.id) throw brokerError('INVALID_REQUEST', 'Job id is required');
   fs.mkdirSync(jobsDir(), { recursive: true });
   const file = jobPath(job.id);
   const temporary = `${file}.${process.pid}.tmp`;
@@ -195,7 +200,7 @@ export function loadJob(id) {
     return JSON.parse(fs.readFileSync(jobPath(id), 'utf8'));
   } catch (error) {
     if (error.code === 'ENOENT') return null;
-    throw error;
+    throw normalizeBrokerError(error, { defaultCode: 'STATE_ERROR' });
   }
 }
 
@@ -208,6 +213,6 @@ export function listJobs() {
       .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   } catch (error) {
     if (error.code === 'ENOENT') return [];
-    throw error;
+    throw normalizeBrokerError(error, { defaultCode: 'STATE_ERROR' });
   }
 }

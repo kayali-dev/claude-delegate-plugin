@@ -17,11 +17,11 @@ import {
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const hook = path.join(root, 'bin', 'delegate-quota-hook');
 
-function withStateFile(fn) {
+async function withStateFile(fn) {
   const previous = process.env.DELEGATE_STATE_FILE;
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-router-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
-  try { return fn(process.env.DELEGATE_STATE_FILE); }
+  try { return await fn(process.env.DELEGATE_STATE_FILE); }
   finally {
     if (previous == null) delete process.env.DELEGATE_STATE_FILE;
     else process.env.DELEGATE_STATE_FILE = previous;

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { normalizeBrokerError } from './lib/errors.mjs';
 import { terminatePid } from './lib/process.mjs';
 import {
   diffStat,
@@ -21,7 +22,7 @@ import { listJobs, saveJob } from './lib/state.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--wait] [--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
@@ -31,7 +32,7 @@ function usage() {
   delegate-jobs files <job-id> [--json]
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
   delegate-jobs cancel <job-id> [--expected-revision N]
-  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs usage <job-id> [--json]
   delegate-jobs result <job-id>
   delegate-jobs logs <job-id> [--stderr]
@@ -63,10 +64,13 @@ const command = rawCommand === 'list' ? 'status' : rawCommand;
 try {
   if (command === 'start') {
     const rawTimeout = value(args, '--timeout-seconds');
+    const rawMaxOutputTokens = value(args, '--max-output-tokens');
     const started = launchManagedJob({
       provider: value(args, '--provider'), model: value(args, '--model', 'auto'), mode: value(args, '--mode', 'consult'),
       cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
+      maxOutputTokens: rawMaxOutputTokens == null ? null : Number(rawMaxOutputTokens),
+      idempotencyKey: value(args, '--idempotency-key'),
       network: args.includes('--network'), sandbox: value(args, '--sandbox'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
@@ -192,9 +196,11 @@ try {
     }
   } else if (command === 'resume') {
     const rawTimeout = value(args, '--timeout-seconds');
+    const rawMaxOutputTokens = value(args, '--max-output-tokens');
     json(resumeManagedJob(args[0], {
       prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? undefined : Number(rawTimeout),
+      maxOutputTokens: rawMaxOutputTokens == null ? undefined : Number(rawMaxOutputTokens),
       network: args.includes('--network') ? true : undefined, sandbox: value(args, '--sandbox'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive') ? true : undefined,
@@ -216,6 +222,7 @@ try {
     process.exit(command === 'help' ? 0 : 2);
   }
 } catch (error) {
-  console.error(`delegate-jobs: ${error.message}`);
+  const typed = normalizeBrokerError(error, { defaultCode: 'INTERNAL' });
+  console.error(`delegate-jobs: ${typed.message} (retryable=${typed.retryable}${typed.provider ? `, provider=${typed.provider}` : ''})`);
   process.exit(1);
 }

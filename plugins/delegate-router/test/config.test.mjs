@@ -27,6 +27,15 @@ test('provider configuration persists codex-only, cursor-only, and both modes', 
   assert.deepEqual(saveEnabledProviders(['cursor', 'codex']), ['codex', 'cursor']);
 }));
 
+test('delegate-health surfaces the never-pruned audit log path', () => isolated((directory) => {
+  const result = spawnSync(process.execPath, [path.join(plugin, 'bin', 'delegate-health'), '--quick', '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE, DELEGATE_ENABLED_PROVIDERS: 'codex' }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).auditLogFile, path.join(directory, 'audit.jsonl'));
+}));
+
 test('Cursor-only control MCP advertises only Cursor and Codex MCP exposes no tools', async () => {
   const env = { ...process.env, DELEGATE_ENABLED_PROVIDERS: 'cursor' };
   const child = spawn(process.execPath, [path.join(plugin, 'bin', 'delegate-control-mcp')], { stdio: ['pipe', 'pipe', 'pipe'], env });

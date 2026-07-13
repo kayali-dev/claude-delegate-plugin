@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { availableModelIds, executableOnPath, resolveCursorBinary } from './lib/cursor.mjs';
-import { effectiveUsage, enabledProviders, loadState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
+import { auditLogPath, effectiveUsage, enabledProviders, loadState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout, windowsHide: true });
@@ -29,6 +29,7 @@ const report = {
   version: packageInfo.version,
   versionNote: 'CLI resolves to the installed plugin on every run; the skill and MCP servers pin at session start - reload plugins after upgrades to align all surfaces',
   stateFile: statePath(),
+  auditLogFile: auditLogPath(),
   providerConfigFile: providerConfigPath(),
   enabledProviders: configuredProviders,
   node: { ok: Number(process.versions.node.split('.')[0]) >= 18, version: process.versions.node },
@@ -85,6 +86,7 @@ else {
   console.log(`Codex: ${report.codex.enabled ? report.codex.installed ? 'installed' : 'missing' : 'disabled'}`);
   console.log(`Cursor: ${report.cursor.enabled ? report.cursor.installed ? 'installed' : 'missing' : 'disabled'}${report.cursor.enabled && cursorBinary ? ` (${path.basename(cursorBinary)})` : ''}`);
   console.log(`Control MCP: ${report.control.installed ? 'installed' : 'missing'}`);
+  console.log(`Audit log: ${report.auditLogFile}`);
   if (report.cursor.acp) console.log(`Cursor ACP: ${report.cursor.acp.ok ? 'available' : 'unavailable (headless fallback)'}`);
   if (report.cursor.models) console.log(`Cursor models: ${report.cursor.models.count}`);
   for (const name of providerNames()) {

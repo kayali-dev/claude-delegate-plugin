@@ -15,12 +15,12 @@ const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
 const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
 
 async function isolated(fn) {
-  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, collab: process.env.FAKE_CODEX_COLLAB };
+  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, collab: process.env.FAKE_CODEX_COLLAB, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE };
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-provider-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
   try { await fn(directory); }
   finally {
-    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_COLLAB: old.collab })) {
+    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_COLLAB: old.collab, FAKE_CODEX_GROWING_USAGE: old.growingUsage })) {
       if (value == null) delete process.env[key]; else process.env[key] = value;
     }
   }
@@ -212,6 +212,35 @@ test('Codex provider exit fails immediately instead of waiting for the turn time
   assert.equal(inspectJob(job.id).status, 'failed');
 }));
 
+test('Codex output budget interrupts the turn and preserves partial state and continuation', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_GROWING_USAGE = '1';
+  const job = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'implement within budget',
+    maxOutputTokens: 4
+  });
+  await assert.rejects(
+    () => runManagedProvider(job),
+    (error) => error.code === 'BUDGET_EXCEEDED' && error.retryable === false && error.provider === 'codex'
+  );
+  const failed = inspectJob(job.id);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.stoppedReason, 'budget');
+  assert.equal(failed.errorCode, 'BUDGET_EXCEEDED');
+  assert.match(failed.error, /BUDGET_EXCEEDED/);
+  assert.equal(failed.providerSessionId, 'thread-fake');
+  assert.equal(failed.usage.total.outputTokens, 6);
+  const events = readJobEvents(job.id, { limit: 1000 });
+  assert.ok(events.some((event) => event.type === 'budget.exceeded' && event.data.observedOutputTokens === 6));
+  assert.ok(events.some((event) => event.type === 'diff.updated' && /partial\.js/.test(event.data.diff)));
+  assert.ok(events.some((event) => event.type === 'message.delta' && /partial work/.test(event.data.delta)));
+  assert.ok(events.some((event) => event.type === 'turn.completed' && event.data.turn.status === 'interrupted'));
+}));
+
 test('cursor model resolution matches attribute-serialized catalogs (REG-1)', async () => {
   const { cursorModel } = await import('../bin/lib/providers.mjs');
   // Realistic ACP catalog: attribute-serialized values, as advertised by the
@@ -270,6 +299,8 @@ test('fast-only live catalogs are flagged as a compromise, cursor- prefixed ids 
       assert.fail(`expected INVALID_MODEL for ${bogus}`);
     } catch (error) {
       assert.equal(error.code, 'INVALID_MODEL', bogus);
+      assert.equal(error.retryable, false, bogus);
+      assert.equal(error.provider, 'cursor', bogus);
     }
   }
 });

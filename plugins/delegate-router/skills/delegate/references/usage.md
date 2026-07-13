@@ -38,7 +38,7 @@ The default avoid threshold is 90% for Claude and Codex and 80% for Cursor (stri
 
 The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex work at that threshold. Set `DELEGATE_ALLOW_OVER_LIMIT=codex` only for a deliberate user override. Cursor enforces the threshold inside its adapter and accepts `--override-limit` for the same explicit case.
 
-Per-job observed tokens or context usage are evidence about that execution, not a subscription allowance percentage. `delegate_usage` reports those values separately. Routing continues to use the provider windows in `usage.json`.
+Per-job observed tokens or context usage are evidence about that execution, not a subscription allowance percentage. `delegate_usage` reports those values separately and includes `chainCumulative` input/output/total tokens from the root job through the inspected continuation. Routing continues to use the provider windows in `usage.json`.
 
 Sources: https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md, https://code.claude.com/docs/en/statusline, and https://docs.cursor.com/account/pricing
 

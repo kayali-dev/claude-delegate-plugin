@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { avoidPercentFor, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerEnabled, saveJob, validateProvider } from './state.mjs';
+import { brokerError, normalizeBrokerError } from './errors.mjs';
+import { auditLogPath, avoidPercentFor, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerEnabled, saveJob, validateProvider } from './state.mjs';
 import { isProcessAlive } from './process.mjs';
 import { withFileLock } from './lock.mjs';
 
@@ -14,15 +15,16 @@ const LOCK_WAIT_MS = 10;
 const LOCK_TIMEOUT_MS = 5000;
 const SENSITIVE_KEY = /(?:authorization|cookie|credential|password|private.?key|secret|token)/i;
 const SENSITIVE_VALUE = /(?:sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+\/-]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|CREDENTIAL|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH_?TOKEN|REFRESH_?TOKEN)[A-Z0-9_]*)["']?\s*[:=]\s*["']?[^"'\s,;]+|:\/\/[^/\s:@]+:[^@\s/]+@)/gi;
-const USAGE_TOKEN_KEY = /^(?:(?:input|output|total|cached|reasoning|prompt|completion|billable|context)tokens?(?:count|usage)?|tokens?(?:count|usage))$/i;
+const USAGE_TOKEN_KEY = /^(?:(?:max|observed)?(?:input|output|total|cached|reasoning|prompt|completion|billable|context)tokens?(?:count|usage)?|tokens?(?:count|usage))$/i;
 const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function assertJobId(id) {
-  if (!SAFE_JOB_ID.test(id || '')) throw new Error(`Invalid job id: ${id}`);
+  if (!SAFE_JOB_ID.test(id || '')) throw brokerError('INVALID_REQUEST', `Invalid job id: ${id}`);
   return id;
 }
 
@@ -57,7 +59,7 @@ function acquireLock(id) {
         const age = Date.now() - fs.statSync(lock).mtimeMs;
         if (age > 30000) { fs.unlinkSync(lock); continue; }
       } catch {}
-      if (Date.now() - started > LOCK_TIMEOUT_MS) throw new Error(`Timed out locking job ${id}`);
+      if (Date.now() - started > LOCK_TIMEOUT_MS) throw brokerError('LOCK_TIMEOUT', `Timed out locking job ${id}`);
       sleepSync(LOCK_WAIT_MS);
     }
   }
@@ -90,6 +92,50 @@ export function redact(value, key = '', maxLength = MAX_STRING) {
     return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redact(item, name, maxLength)]));
   }
   return value;
+}
+
+function containsSensitiveValue(value) {
+  const text = String(value || '');
+  return redact(text, '', Number.POSITIVE_INFINITY) !== text;
+}
+
+function appendTerminalAudit(job) {
+  const file = auditLogPath();
+  const completedAt = job.completedAt || Math.floor(Date.now() / 1000);
+  const record = redact({
+    at: Date.now(),
+    jobId: job.id,
+    who: job.managedBy || 'legacy',
+    provider: job.provider || null,
+    model: job.resolvedModel || job.model || job.requestedModel || null,
+    mode: job.mode || null,
+    sandbox: job.sandbox || 'auto',
+    network: job.network === true,
+    approval: job.approval || 'auto',
+    cwd: job.cwd || null,
+    changedFilesCount: job.changedFiles?.count || 0,
+    scopeViolationsCount: job.scopeViolations?.length || 0,
+    outcome: {
+      status: job.status,
+      stoppedReason: job.stoppedReason || null,
+      errorCode: job.errorCode || null,
+      error: job.error || null
+    },
+    usage: job.usage || null,
+    durationMs: job.durationMs ?? Math.max(0, (completedAt - (job.createdAt || completedAt)) * 1000)
+  });
+  withFileLock(`${file}.lock`, () => {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    try { fs.chmodSync(file, 0o600); } catch {}
+  });
+}
+
+function writeTerminalArtifacts(job, wasTerminal) {
+  if (wasTerminal || !TERMINAL_STATUSES.has(job.status)) return;
+  const sentinel = paths(job.id).finished;
+  if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
+  appendTerminalAudit(job);
 }
 
 export function eventPath(id) { return paths(id).events; }
@@ -171,6 +217,36 @@ function repairAndReadLastEvent(file) {
   } finally { fs.closeSync(fd); }
 }
 
+function previousNewlineOffset(fd, before) {
+  let position = before;
+  while (position > 0) {
+    const length = Math.min(8192, position);
+    const chunk = Buffer.allocUnsafe(length);
+    position -= length;
+    const bytesRead = fs.readSync(fd, chunk, 0, length, position);
+    const index = chunk.subarray(0, bytesRead).lastIndexOf(0x0a);
+    if (index >= 0) return position + index;
+  }
+  return -1;
+}
+
+function readLastCompleteEvent(file) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (!size) return null;
+    const end = previousNewlineOffset(fd, size);
+    if (end <= 0) return null;
+    const start = previousNewlineOffset(fd, end) + 1;
+    const line = Buffer.alloc(end - start);
+    const bytesRead = fs.readSync(fd, line, 0, line.length, start);
+    if (bytesRead !== line.length) return null;
+    try { return JSON.parse(line.toString('utf8')); } catch { return null; }
+  } finally { fs.closeSync(fd); }
+}
+
 function appendUnlocked(job, type, data = {}, options = {}) {
   const journal = eventPath(job.id);
   const latest = repairAndReadLastEvent(journal)?.seq || 0;
@@ -213,7 +289,7 @@ function appendUnlocked(job, type, data = {}, options = {}) {
 export function appendJobEvent(id, type, data = {}, options = {}) {
   return withLock(id, () => {
     const job = loadJob(id);
-    if (!job) throw new Error(`job not found: ${id}`);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
     const event = appendUnlocked(job, type, data, options);
     if (options.lifecycle) job.revision = (job.revision || 0) + 1;
     saveJob(job);
@@ -224,27 +300,19 @@ export function appendJobEvent(id, type, data = {}, options = {}) {
 export function updateManagedJob(id, mutate, options = {}) {
   return withLock(id, () => {
     const job = loadJob(id);
-    if (!job) throw new Error(`job not found: ${id}`);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
     if (options.expectedRevision != null && job.revision !== options.expectedRevision) {
-      const error = new Error(`REVISION_CONFLICT: expected ${options.expectedRevision}, current ${job.revision}`);
-      error.code = 'REVISION_CONFLICT';
-      error.currentRevision = job.revision;
-      throw error;
+      throw brokerError('REVISION_CONFLICT', `expected ${options.expectedRevision}, current ${job.revision}`, {
+        provider: job.provider,
+        currentRevision: job.revision
+      });
     }
+    const wasTerminal = TERMINAL_STATUSES.has(job.status);
     mutate(job);
     if (options.incrementRevision !== false) job.revision = (job.revision || 0) + 1;
     job.updatedAt = Math.floor(Date.now() / 1000);
     saveJob(job);
-    // Terminal sentinel: a plain file whose existence means "this job is
-    // done", so callers can wait with a file watcher instead of a polling
-    // process. Background `delegate-jobs wait` processes can be reaped by
-    // the host harness; watching finishedPath is the durable alternative.
-    if (TERMINAL_STATUSES.has(job.status)) {
-      const sentinel = paths(id).finished;
-      if (!fs.existsSync(sentinel)) {
-        try { writePrivate(sentinel, `${job.status}\n`); } catch {}
-      }
-    }
+    writeTerminalArtifacts(job, wasTerminal);
     return job;
   });
 }
@@ -293,7 +361,7 @@ export function readJobEventPage(id, options = {}) {
   const limit = Math.min(Math.max(Number(options.limit || 200), 1), 1000);
   const types = options.types ? new Set(options.types) : null;
   return withLock(id, () => {
-    if (!loadJob(id)) throw new Error(`job not found: ${id}`);
+    if (!loadJob(id)) throw brokerError('NOT_FOUND', `job not found: ${id}`);
     const file = eventPath(id);
     let size = 0;
     try {
@@ -355,7 +423,7 @@ function isOrphaned(job) {
 
 export function reconcileJob(id) {
   const job = loadJob(assertJobId(id));
-  if (!job) throw new Error(`job not found: ${id}`);
+  if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
   if (!isOrphaned(job)) return job;
   return withLock(id, () => {
     const current = loadJob(id);
@@ -363,25 +431,39 @@ export function reconcileJob(id) {
     current.status = 'failed';
     current.phase = 'failed';
     current.error ||= 'ORPHANED: worker exited without recording a terminal result';
+    current.errorCode = 'ORPHANED';
+    current.errorRetryable = true;
+    if (current.provider) current.errorProvider = current.provider;
     current.completedAt = Math.floor(Date.now() / 1000);
     current.revision = (current.revision || 0) + 1;
     appendUnlocked(current, 'error', { code: 'ORPHANED', message: current.error, stage: 'reconcile' });
     saveJob(current);
+    writeTerminalArtifacts(current, false);
     return current;
   });
+}
+
+function activityFields(job) {
+  const event = readLastCompleteEvent(eventPath(job.id));
+  const lastActivityAt = event?.at || (job.createdAt ? job.createdAt * 1000 : null);
+  const configured = Number(process.env.DELEGATE_STALL_SECONDS ?? 300);
+  const stallSeconds = Number.isFinite(configured) && configured >= 0 ? configured : 300;
+  return {
+    lastActivityAt,
+    stalled: job.status === 'running' && lastActivityAt != null && Date.now() - lastActivityAt > stallSeconds * 1000
+  };
 }
 
 export function inspectJob(id) {
   const job = reconcileJob(id);
   return {
     ...job,
+    ...activityFields(job),
     promptPath: undefined,
     managed: job.managedBy === 'delegate-control',
     legacy: job.managedBy !== 'delegate-control'
   };
 }
-
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 function rootJobIdOf(job) {
   let current = job;
@@ -426,6 +508,7 @@ export function listManagedJobs(options = {}) {
       createdAt: job.createdAt || null,
       updatedAt: job.updatedAt || null,
       completedAt: job.completedAt || null,
+      ...activityFields(job),
       resultPreview: typeof job.result === 'string'
         ? job.result.slice(0, 200)
         : typeof job.result?.text === 'string' && job.result.text.trim()
@@ -569,15 +652,70 @@ export function capEventsBySize(page, budget = 60000) {
   return { events: kept, nextSeq, latestSeq: page.latestSeq, hasMore: true, truncated: 'response-size' };
 }
 
+function finiteValue(object, names) {
+  for (const name of names) {
+    const value = Number(object?.[name]);
+    if (Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+export function usageTotals(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const source = usage.total && typeof usage.total === 'object' ? usage.total : usage;
+  const inputTokens = finiteValue(source, ['inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens']);
+  const outputTokens = finiteValue(source, ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens']);
+  let totalTokens = finiteValue(source, ['totalTokens', 'total_tokens', 'tokenCount', 'token_count']);
+  if (totalTokens == null && (inputTokens != null || outputTokens != null)) totalTokens = (inputTokens || 0) + (outputTokens || 0);
+  if (inputTokens == null && outputTokens == null && totalTokens == null) return null;
+  return { inputTokens: inputTokens || 0, outputTokens: outputTokens || 0, totalTokens: totalTokens || 0 };
+}
+
+function observedUsage(job) {
+  const events = readRawEvents(job.id).filter((event) => event.type === 'usage.updated');
+  return events.at(-1)?.data || job.usage || null;
+}
+
+function jobChain(job) {
+  const chain = [job];
+  const seen = new Set([job.id]);
+  let current = job;
+  while (current.parentJobId && !seen.has(current.parentJobId)) {
+    seen.add(current.parentJobId);
+    const parent = loadJob(current.parentJobId);
+    if (!parent) break;
+    chain.unshift(parent);
+    current = parent;
+  }
+  return chain;
+}
+
 export function jobUsage(id) {
   const job = inspectJob(id);
-  const events = readRawEvents(id).filter((event) => event.type === 'usage.updated');
   const quota = effectiveUsage(loadState(), job.provider);
-  const observed = events.at(-1)?.data || job.usage || null;
+  const observed = observedUsage(job);
+  const chain = jobChain(job);
+  const cumulative = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  let observedJobs = 0;
+  for (const member of chain) {
+    const totals = usageTotals(observedUsage(member));
+    if (!totals) continue;
+    observedJobs += 1;
+    cumulative.inputTokens += totals.inputTokens;
+    cumulative.outputTokens += totals.outputTokens;
+    cumulative.totalTokens += totals.totalTokens;
+  }
   return {
     observed,
     observedAvailable: Boolean(observed),
     ...(observed ? {} : { note: 'the provider did not emit usage data for this job; Cursor ACP does not always report it' }),
+    chainCumulative: {
+      rootJobId: chain[0].id,
+      throughJobId: job.id,
+      jobIds: chain.map((member) => member.id),
+      observedJobs,
+      ...cumulative
+    },
     providerAllowance: quota
   };
 }
@@ -671,11 +809,11 @@ export function pathMatchesScope(file, entries) {
 export function validatedAllowedPaths(value) {
   if (value == null) return null;
   if (!Array.isArray(value) || !value.length || !value.every((item) => typeof item === 'string' && item.trim())) {
-    throw new Error('allowedPaths must be a non-empty array of path strings');
+    throw brokerError('INVALID_REQUEST', 'allowedPaths must be a non-empty array of path strings');
   }
   const entries = value.map((item) => item.trim().replace(/^\.\//, '').replace(/\/+$/, ''));
   if (entries.some((item) => !item || item.startsWith('/') || item.split('/').includes('..'))) {
-    throw new Error('allowedPaths entries must be repo-relative and must not contain ..');
+    throw brokerError('INVALID_REQUEST', 'allowedPaths entries must be repo-relative and must not contain ..');
   }
   return entries;
 }
@@ -686,12 +824,12 @@ export function validatedAllowedPaths(value) {
 export function validatedSandbox(value) {
   if (value == null || value === 'auto') return null;
   if (value === 'off') return 'off';
-  throw new Error("sandbox must be 'auto' or 'off'");
+  throw brokerError('INVALID_REQUEST', "sandbox must be 'auto' or 'off'");
 }
 
 function validatedEffort(value) {
   if (value == null) return null;
-  if (!EFFORT_LEVELS.has(value)) throw new Error(`effort must be one of ${[...EFFORT_LEVELS].join(', ')}`);
+  if (!EFFORT_LEVELS.has(value)) throw brokerError('INVALID_REQUEST', `effort must be one of ${[...EFFORT_LEVELS].join(', ')}`);
   return value;
 }
 
@@ -699,23 +837,46 @@ function validatedTimeoutSeconds(value) {
   if (value == null) return null;
   const seconds = Number(value);
   if (!Number.isInteger(seconds) || seconds < TIMEOUT_MIN_SECONDS || seconds > TIMEOUT_MAX_SECONDS) {
-    throw new Error(`timeoutSeconds must be an integer between ${TIMEOUT_MIN_SECONDS} and ${TIMEOUT_MAX_SECONDS}`);
+    throw brokerError('INVALID_REQUEST', `timeoutSeconds must be an integer between ${TIMEOUT_MIN_SECONDS} and ${TIMEOUT_MAX_SECONDS}`);
   }
   return seconds;
 }
 
+function validatedMaxOutputTokens(value) {
+  if (value == null) return null;
+  const tokens = Number(value);
+  if (!Number.isSafeInteger(tokens) || tokens <= 0) {
+    throw brokerError('INVALID_REQUEST', 'maxOutputTokens must be a positive integer');
+  }
+  return tokens;
+}
+
+function validatedIdempotencyKey(value) {
+  if (value == null) return null;
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(value)) {
+    throw brokerError('INVALID_REQUEST', 'idempotencyKey must be 1-128 characters using letters, numbers, _, ., :, or -');
+  }
+  return value;
+}
+
 export function createManagedJob(options) {
   const provider = validateProvider(options.provider);
-  if (provider === 'claude') throw new Error('Claude stays in the current session; managed jobs support codex and cursor');
-  if (!options.prompt?.trim()) throw new Error('prompt is required');
+  if (provider === 'claude') throw brokerError('INVALID_REQUEST', 'Claude stays in the current session; managed jobs support codex and cursor');
+  if (!options.prompt?.trim()) throw brokerError('INVALID_REQUEST', 'prompt is required', { provider });
+  const sensitivePromptDetected = containsSensitiveValue(options.prompt);
+  if (sensitivePromptDetected && options.allowSensitive !== true) {
+    throw brokerError('SECRET_IN_PROMPT', 'the task packet contains a value that looks like a credential; remove it or explicitly set allowSensitive=true', { provider });
+  }
   const timeoutSeconds = validatedTimeoutSeconds(options.timeoutSeconds);
+  const maxOutputTokens = validatedMaxOutputTokens(options.maxOutputTokens);
+  const idempotencyKey = validatedIdempotencyKey(options.idempotencyKey);
   const cwd = path.resolve(options.cwd || process.cwd());
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`cwd does not exist or is not a directory: ${cwd}`);
+  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw brokerError('INVALID_REQUEST', `cwd does not exist or is not a directory: ${cwd}`, { provider });
   const id = jobId(provider);
   const now = Math.floor(Date.now() / 1000);
   const transport = provider === 'cursor' ? (options.transport || 'acp') : 'app-server';
-  if (provider === 'cursor' && !['acp', 'headless'].includes(transport)) throw new Error(`Invalid Cursor transport: ${transport}`);
-  if (provider === 'codex' && options.transport && options.transport !== 'app-server') throw new Error(`Invalid Codex transport: ${options.transport}`);
+  if (provider === 'cursor' && !['acp', 'headless'].includes(transport)) throw brokerError('INVALID_REQUEST', `Invalid Cursor transport: ${transport}`, { provider });
+  if (provider === 'codex' && options.transport && options.transport !== 'app-server') throw brokerError('INVALID_REQUEST', `Invalid Codex transport: ${options.transport}`, { provider });
   const p = paths(id);
   writePrivate(p.prompt, options.prompt);
   const baseline = gitBaseline(cwd);
@@ -729,6 +890,8 @@ export function createManagedJob(options) {
     approval: options.approval || 'auto',
     effort: validatedEffort(options.effort || null),
     timeoutSeconds,
+    maxOutputTokens,
+    idempotencyKey,
     network: options.network === true,
     sandbox: validatedSandbox(options.sandbox),
     allowedPaths: validatedAllowedPaths(options.allowedPaths),
@@ -756,6 +919,12 @@ export function createManagedJob(options) {
   };
   saveJob(job);
   appendJobEvent(id, 'job.created', { provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, ...(job.sandbox === 'off' ? { sandbox: 'off' } : {}) });
+  if (sensitivePromptDetected) {
+    appendJobEvent(id, 'security.warning', {
+      code: 'SECRET_IN_PROMPT',
+      message: 'Sensitive-value pattern detected in the task packet; allowSensitive=true authorized dispatch'
+    });
+  }
   appendJobEvent(id, 'message.user', { text: options.prompt });
   return inspectJob(id);
 }
@@ -770,10 +939,10 @@ function assertNoActiveWriter(options) {
     if (path.resolve(other.cwd || '') !== cwd) continue;
     const current = ['running', 'queued'].includes(other.status) ? reconcileJob(other.id) : other;
     if (TERMINAL_STATUSES.has(current.status)) continue;
-    const error = new Error(`WRITER_ACTIVE: job ${current.id} (${current.mode}) is already ${current.status} in ${cwd}; wait for it, cancel it, or pass overrideWriter=true`);
-    error.code = 'WRITER_ACTIVE';
-    error.activeJobId = current.id;
-    throw error;
+    throw brokerError('WRITER_ACTIVE', `job ${current.id} (${current.mode}) is already ${current.status} in ${cwd}; wait for it, cancel it, or pass overrideWriter=true`, {
+      provider: options.provider,
+      activeJobId: current.id
+    });
   }
 }
 
@@ -785,34 +954,42 @@ function writerLockPath(options) {
 
 export function launchManagedJob(options) {
   const provider = validateProvider(options.provider);
-  if (!providerEnabled(provider)) throw new Error(`PROVIDER_DISABLED: ${provider} is disabled for this installation`);
-  const overrides = String(process.env.DELEGATE_ALLOW_OVER_LIMIT || '')
-    .split(',').map((value) => value.trim()).filter(Boolean);
-  const usage = effectiveUsage(loadState(), provider);
-  const threshold = options.providerSessionId ? 98 : avoidPercentFor(provider);
-  if (!options.overrideLimit && !overrides.includes(provider) && !overrides.includes('all') && usage.known && usage.usedPercent >= threshold) {
-    throw new Error(`QUOTA_GUARD: ${provider} is at ${usage.usedPercent}% (threshold ${threshold}%); route to a fallback or explicitly override`);
-  }
+  const launchOptions = { ...options, provider, idempotencyKey: validatedIdempotencyKey(options.idempotencyKey) };
   try { maybePruneJobs(); } catch {}
-  // GPT models have a native lane (Codex app-server); running them through
-  // Cursor burns the Cursor API pool and loses the Codex harness. Allowed only
-  // when the user explicitly asked (overrideLane), Codex is disabled, or Codex
-  // is at/above its avoid band. Resumes skip the check — their lane is set.
-  if (provider === 'cursor' && /^gpt-/i.test(options.model || '') && options.overrideLane !== true && !options.providerSessionId && providerEnabled('codex')) {
-    const codexUsage = effectiveUsage(loadState(), 'codex');
-    if (!(codexUsage.known && codexUsage.usedPercent >= avoidPercentFor('codex'))) {
-      throw new Error(`WRONG_LANE: '${options.model}' routes natively through Codex (provider=codex); use Cursor for GPT models only when the user explicitly asks for that (set overrideLane=true) or Codex is disabled or at its avoid threshold`);
+
+  const create = () => {
+    if (launchOptions.idempotencyKey) {
+      const cwd = path.resolve(launchOptions.cwd || process.cwd());
+      const existing = listJobs().find((job) => job.idempotencyKey === launchOptions.idempotencyKey && path.resolve(job.cwd || '') === cwd);
+      if (existing) return { job: inspectJob(existing.id), replayed: true };
     }
-  }
-  // The guard check and the job-record creation must be atomic per cwd, or two
-  // concurrent write-mode launches can both pass the check before either
-  // persists its record.
-  const job = WRITE_MODES.has(options.mode) && options.isolation !== 'worktree'
-    ? withFileLock(writerLockPath(options), () => {
-        assertNoActiveWriter(options);
-        return createManagedJob(options);
-      })
-    : createManagedJob(options);
+    if (!providerEnabled(provider)) throw brokerError('PROVIDER_DISABLED', `${provider} is disabled for this installation`, { provider });
+    const overrides = String(process.env.DELEGATE_ALLOW_OVER_LIMIT || '')
+      .split(',').map((value) => value.trim()).filter(Boolean);
+    const usage = effectiveUsage(loadState(), provider);
+    const threshold = launchOptions.providerSessionId ? 98 : avoidPercentFor(provider);
+    if (!launchOptions.overrideLimit && !overrides.includes(provider) && !overrides.includes('all') && usage.known && usage.usedPercent >= threshold) {
+      throw brokerError('QUOTA_GUARD', `${provider} is at ${usage.usedPercent}% (threshold ${threshold}%); route to a fallback or explicitly override`, { provider });
+    }
+    // GPT models have a native lane (Codex app-server); running them through
+    // Cursor burns the Cursor API pool and loses the Codex harness. Allowed
+    // only when explicitly requested or the native lane is unavailable.
+    if (provider === 'cursor' && /^gpt-/i.test(launchOptions.model || '') && launchOptions.overrideLane !== true && !launchOptions.providerSessionId && providerEnabled('codex')) {
+      const codexUsage = effectiveUsage(loadState(), 'codex');
+      if (!(codexUsage.known && codexUsage.usedPercent >= avoidPercentFor('codex'))) {
+        throw brokerError('WRONG_LANE', `'${launchOptions.model}' routes natively through Codex (provider=codex); use Cursor for GPT models only when the user explicitly asks for that (set overrideLane=true) or Codex is disabled or at its avoid threshold`, { provider });
+      }
+    }
+    assertNoActiveWriter(launchOptions);
+    return { job: createManagedJob(launchOptions), replayed: false };
+  };
+  // Idempotency lookup and writer admission share one per-cwd launch lock, so
+  // concurrent retries cannot create or launch a second record.
+  const needsLock = Boolean(launchOptions.idempotencyKey)
+    || (WRITE_MODES.has(launchOptions.mode) && launchOptions.isolation !== 'worktree');
+  const launched = needsLock ? withFileLock(writerLockPath(launchOptions), create) : create();
+  if (launched.replayed) return launched.job;
+  const job = launched.job;
   const p = paths(job.id);
   const stdout = fs.openSync(p.stdout, 'a', 0o600);
   const stderr = fs.openSync(p.stderr, 'a', 0o600);
@@ -826,13 +1003,17 @@ export function launchManagedJob(options) {
   });
   child.once('error', (error) => {
     try {
+      const typed = normalizeBrokerError(error, { provider, defaultCode: 'TRANSPORT_ERROR' });
       updateManagedJob(job.id, (current) => {
         current.status = 'failed';
         current.phase = 'failed';
-        current.error = redact(error.message);
+        current.error = redact(typed.message);
+        current.errorCode = typed.code;
+        current.errorRetryable = typed.retryable;
+        current.errorProvider = typed.provider;
         current.completedAt = Math.floor(Date.now() / 1000);
       });
-      appendJobEvent(job.id, 'error', { error: error.message, stage: 'worker-spawn' });
+      appendJobEvent(job.id, 'error', { code: typed.code, retryable: typed.retryable, provider: typed.provider, error: typed.message, stage: 'worker-spawn' });
     } catch {}
   });
   fs.closeSync(stdout);
@@ -848,12 +1029,12 @@ export function launchManagedJob(options) {
 
 export function submitControl(id, command, expectedRevision) {
   assertJobId(id);
-  if (!command?.type) throw new Error('control command type is required');
+  if (!command?.type) throw brokerError('INVALID_REQUEST', 'control command type is required');
   return withLock(id, () => {
     const job = loadJob(id);
-    if (!job) throw new Error(`job not found: ${id}`);
-    if (job.managedBy !== 'delegate-control') throw new Error('UNMANAGED_JOB: live control is unavailable for this legacy job');
-    if (['completed', 'failed', 'cancelled'].includes(job.status)) throw new Error(`JOB_TERMINAL: job is already ${job.status}`);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'live control is unavailable for this legacy job', { provider: job.provider });
+    if (TERMINAL_STATUSES.has(job.status)) throw brokerError('JOB_TERMINAL', `job is already ${job.status}`, { provider: job.provider });
     const requestedId = command.commandId || command.correctionId || crypto.randomUUID();
     const commandId = /^[a-zA-Z0-9_-]{1,128}$/.test(requestedId)
       ? requestedId
@@ -861,19 +1042,20 @@ export function submitControl(id, command, expectedRevision) {
     job.controls ||= {};
     if (job.controls[commandId]) return { duplicate: true, commandId, job };
     if (!Number.isInteger(expectedRevision)) {
-      const error = new Error(`expectedRevision is required; current revision is ${job.revision}`);
-      error.currentRevision = job.revision;
-      throw error;
+      throw brokerError('INVALID_REQUEST', `expectedRevision is required; current revision is ${job.revision}`, {
+        provider: job.provider,
+        currentRevision: job.revision
+      });
     }
     if (job.revision !== expectedRevision) {
-      const error = new Error(`REVISION_CONFLICT: expected ${expectedRevision}, current ${job.revision}`);
-      error.code = 'REVISION_CONFLICT';
-      error.currentRevision = job.revision;
-      throw error;
+      throw brokerError('REVISION_CONFLICT', `expected ${expectedRevision}, current ${job.revision}`, {
+        provider: job.provider,
+        currentRevision: job.revision
+      });
     }
-    if (command.type === 'steer' && !command.text?.trim()) throw new Error('steering text is required');
+    if (command.type === 'steer' && !command.text?.trim()) throw brokerError('INVALID_REQUEST', 'steering text is required', { provider: job.provider });
     if (command.type === 'steer' && command.strategy === 'same-turn' && job.provider === 'cursor') {
-      throw new Error('UNSUPPORTED_STRATEGY: Cursor ACP has no same-turn steering; use strategy=auto or restart (applied as a cancel-and-resume restart)');
+      throw brokerError('UNSUPPORTED_STRATEGY', 'Cursor ACP has no same-turn steering; use strategy=auto or restart (applied as a cancel-and-resume restart)', { provider: job.provider });
     }
     const record = { ...command, commandId, expectedRevision, requestedAt: Date.now() };
     fs.mkdirSync(paths(id).commands, { recursive: true, mode: 0o700 });
@@ -949,15 +1131,15 @@ export function settleQueuedControl(id, commandId, outcome) {
 
 export function resumeManagedJob(id, options) {
   const parent = inspectJob(id);
-  if (!['completed', 'failed', 'cancelled'].includes(parent.status)) {
-    throw new Error(`PARENT_ACTIVE: cannot resume while ${parent.id} is ${parent.status}`);
+  if (!TERMINAL_STATUSES.has(parent.status)) {
+    throw brokerError('PARENT_ACTIVE', `cannot resume while ${parent.id} is ${parent.status}`, { provider: parent.provider });
   }
-  if (!parent.providerSessionId) throw new Error('SESSION_UNAVAILABLE: the original job has no continuation id');
+  if (!parent.providerSessionId) throw brokerError('SESSION_UNAVAILABLE', 'the original job has no continuation id', { provider: parent.provider });
   // Detected during the original run (collab-agent items): resuming such a
   // thread fails provider-side, so fail fast with the recovery instead of
   // burning a provider round-trip.
   if (parent.provider === 'codex' && parent.reviewFlowEngaged === true) {
-    throw new Error('RESUME_UNSUPPORTED: this Codex thread engaged the multi-agent review flow and cannot be resumed directly; start a fresh job whose task packet folds in the prior findings');
+    throw brokerError('RESUME_UNSUPPORTED', 'this Codex thread engaged the multi-agent review flow and cannot be resumed directly; start a fresh job whose task packet folds in the prior findings', { provider: parent.provider });
   }
   return launchManagedJob({
     provider: parent.provider,
@@ -973,6 +1155,7 @@ export function resumeManagedJob(id, options) {
     transport: parent.transport,
     isolation: parent.isolation,
     timeoutSeconds: options.timeoutSeconds ?? parent.timeoutSeconds ?? null,
+    maxOutputTokens: options.maxOutputTokens ?? parent.maxOutputTokens ?? null,
     network: options.network ?? parent.network ?? false,
     sandbox: options.sandbox ?? parent.sandbox ?? null,
     allowedPaths: options.allowedPaths ?? parent.allowedPaths ?? null,

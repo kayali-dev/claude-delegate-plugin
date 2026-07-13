@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -11,6 +11,7 @@ import {
   runCursor
 } from './cursor.mjs';
 import { delay, JsonRpcProcess } from './jsonrpc.mjs';
+import { brokerError, normalizeBrokerError } from './errors.mjs';
 import { terminateProcessTree } from './process.mjs';
 import { loadJob, mutateState, setWindow } from './state.mjs';
 
@@ -60,6 +61,27 @@ function jobTimeoutMs(job, name, fallbackSeconds, maximumSeconds = 86400) {
 function acpGraceMs() {
   const value = Number(process.env.DELEGATE_ACP_GRACE_MS || 250);
   return Number.isFinite(value) ? Math.min(Math.max(value, 0), 2000) : 250;
+}
+
+function recordUsage(job, usage, options = {}) {
+  appendJobEvent(job.id, 'usage.updated', usage, options);
+  updateManagedJob(job.id, (current) => { current.usage = usage; }, { incrementRevision: false });
+  const totals = usageTotals(usage);
+  if (!job.maxOutputTokens || !totals || totals.outputTokens <= job.maxOutputTokens) return null;
+  return brokerError('BUDGET_EXCEEDED', `output token usage ${totals.outputTokens} exceeded maxOutputTokens ${job.maxOutputTokens}`, {
+    provider: job.provider,
+    maxOutputTokens: job.maxOutputTokens,
+    observedOutputTokens: totals.outputTokens
+  });
+}
+
+function recordBudgetExceeded(job, error, options = {}) {
+  appendJobEvent(job.id, 'budget.exceeded', {
+    code: error.code,
+    retryable: error.retryable,
+    maxOutputTokens: error.maxOutputTokens,
+    observedOutputTokens: error.observedOutputTokens
+  }, options);
 }
 
 function terminal(job, status, phase, extra = {}) {
@@ -176,6 +198,7 @@ async function runCodex(job) {
   let interruptRequested = false;
   const messages = new Map();
   const deltas = new DeltaRedactor();
+  let budgetError = null;
   const rpc = new JsonRpcProcess(process.env.DELEGATE_CODEX_BIN || 'codex', codexSpawnArgs(job), {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
@@ -187,9 +210,9 @@ async function runCodex(job) {
       else if (method === 'item/fileChange/requestApproval' || method === 'applyPatchApproval') result = { decision: forced ? 'accept' : 'decline' };
       else if (method === 'item/tool/requestUserInput') {
         appendJobEvent(job.id, 'error', { code: 'USER_INPUT_REQUIRED', message: 'Codex requested interactive input; managed v1 does not fabricate an answer', request: params });
-        throw new Error('USER_INPUT_REQUIRED: inspect the request and resume the job with an explicit answer');
+        throw brokerError('USER_INPUT_REQUIRED', 'inspect the request and resume the job with an explicit answer', { provider: job.provider });
       }
-      else throw new Error(`Unsupported app-server request: ${method}`);
+      else throw brokerError('INVALID_REQUEST', `Unsupported app-server request: ${method}`, { provider: job.provider });
       appendJobEvent(job.id, 'approval.resolved', { method, decision: result.decision || 'empty' });
       return result;
     },
@@ -209,8 +232,18 @@ async function runCodex(job) {
       else if (method === 'turn/plan/updated') appendJobEvent(job.id, 'plan.updated', { explanation: params.explanation, plan: params.plan }, options);
       else if (method === 'turn/diff/updated') appendJobEvent(job.id, 'diff.updated', { diff: params.diff }, options);
       else if (method === 'thread/tokenUsage/updated') {
-        appendJobEvent(job.id, 'usage.updated', params.tokenUsage, options);
-        updateManagedJob(job.id, (current) => { current.usage = params.tokenUsage; }, { incrementRevision: false });
+        const exceeded = recordUsage(job, params.tokenUsage, options);
+        if (exceeded && !budgetError) {
+          budgetError = exceeded;
+          recordBudgetExceeded(job, exceeded, options);
+          const turnId = params.turnId || inspectJob(job.id).providerTurnId;
+          if (turnId) {
+            try { await rpc.request('turn/interrupt', { threadId: params.threadId || job.providerSessionId, turnId }); }
+            catch (error) {
+              appendJobEvent(job.id, 'provider.event', { providerEvent: 'budget-interrupt-error', error: error.message }, options);
+            }
+          }
+        }
       } else if (method === 'turn/completed') {
         appendJobEvent(job.id, 'turn.completed', { turn: params.turn }, options);
         updateManagedJob(job.id, (current) => { current.providerTurnId = null; }, { incrementRevision: false });
@@ -235,7 +268,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.14.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.15.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -289,7 +322,7 @@ async function runCodex(job) {
       if (Date.now() >= deadline) {
         const active = inspectJob(job.id).providerTurnId;
         if (active) await rpc.request('turn/interrupt', { threadId, turnId: active });
-        throw new Error(`TIMEOUT: Codex managed job exceeded ${Math.round(timeoutMs / 1000)}s and was interrupted; raise timeoutSeconds for longer work`);
+        throw brokerError('TIMEOUT', `Codex managed job exceeded ${Math.round(timeoutMs / 1000)}s and was interrupted; raise timeoutSeconds for longer work`, { provider: job.provider });
       }
       const completed = await Promise.race([
         turnDone.then((turn) => ({ turn })),
@@ -298,7 +331,7 @@ async function runCodex(job) {
       ]);
       if (completed?.providerExit) {
         const outcome = completed.providerExit;
-        throw outcome.error || new Error(`Codex app-server exited before turn completion (code ${outcome.code}, signal ${outcome.signal || 'none'})`);
+        throw outcome.error || brokerError('TRANSPORT_ERROR', `Codex app-server exited before turn completion (code ${outcome.code}, signal ${outcome.signal || 'none'})`, { provider: job.provider });
       }
       for (const claimed of claimCommands(job.id)) {
         const command = claimed.command;
@@ -350,6 +383,7 @@ async function runCodex(job) {
       }
       if (completed) {
         interruptRequested = false;
+        if (budgetError) throw budgetError;
         if (cancelled) { terminal(job, 'cancelled', 'cancelled'); break; }
         if (queuedPrompts.length) {
           const next = queuedPrompts.shift();
@@ -464,9 +498,7 @@ export function cursorModelDetailed(options, requested) {
   if (resolved) {
     return { value: resolved.value, fastCompromise: resolved.fast === true && wantFast !== true };
   }
-  const error = new Error(`INVALID_MODEL: '${requested}' is not in this account's model list; run agent models or cursor-agent models. Available: ${values.slice(0, 25).join(', ')}`);
-  error.code = 'INVALID_MODEL';
-  throw error;
+  throw brokerError('INVALID_MODEL', `'${requested}' is not in this account's model list; run agent models or cursor-agent models. Available: ${values.slice(0, 25).join(', ')}`, { provider: 'cursor' });
 }
 
 export function cursorModel(options, requested) {
@@ -478,11 +510,9 @@ export function cursorModel(options, requested) {
 // an actionable code instead of a cryptic provider message.
 function mapCodexResumeError(error, isResume) {
   if (isResume && /multi-agent v2|not allowed for .*sub-agents/i.test(error?.message || '')) {
-    const mapped = new Error('RESUME_UNSUPPORTED: this Codex thread cannot be resumed directly (it engaged the multi-agent review flow); start a fresh job with a full task packet that folds in prior findings');
-    mapped.code = 'RESUME_UNSUPPORTED';
-    return mapped;
+    return brokerError('RESUME_UNSUPPORTED', 'this Codex thread cannot be resumed directly (it engaged the multi-agent review flow); start a fresh job with a full task packet that folds in prior findings', { provider: 'codex' });
   }
-  return error;
+  return normalizeBrokerError(error, { provider: 'codex', defaultCode: 'TRANSPORT_ERROR' });
 }
 
 function planEntriesText(entries) {
@@ -492,7 +522,8 @@ function planEntriesText(entries) {
     .join('\n');
 }
 
-function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas, planHolder) {
+function mapAcpUpdate(job, update, sessionId, messageParts, deltas, planHolder) {
+  const jobId = job.id;
   const kind = update.sessionUpdate;
   const options = { sessionId };
   if (kind === 'agent_message_chunk') {
@@ -514,8 +545,7 @@ function mapAcpUpdate(jobId, update, sessionId, messageParts, deltas, planHolder
     appendJobEvent(jobId, type, update, options);
     for (const location of update.locations || []) if (location.path) appendJobEvent(jobId, 'file.changed', { path: location.path }, options);
   } else if (kind === 'usage_update') {
-    appendJobEvent(jobId, 'usage.updated', update, options);
-    updateManagedJob(jobId, (job) => { job.usage = update; }, { incrementRevision: false });
+    return recordUsage(job, update, options);
   } else if (kind === 'session_info_update') {
     appendJobEvent(jobId, 'provider.event', { providerEvent: 'session/update:session_info_update' }, options);
     if (update.model) {
@@ -619,7 +649,7 @@ function recordGitState(job, sessionId) {
 
 async function runCursorAcp(job) {
   const binary = resolveCursorBinary();
-  if (!binary) throw new Error('neither agent nor cursor-agent is executable');
+  if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   const sandboxValue = job.sandbox === 'off' ? 'disabled' : 'enabled';
   const rootArgs = readOnly(job) ? ['--sandbox', sandboxValue, 'acp'] : ['--auto-review', '--sandbox', sandboxValue, 'acp'];
   const launch = cursorCommand(binary, rootArgs);
@@ -631,14 +661,25 @@ async function runCursorAcp(job) {
   const messageParts = [];
   const planHolder = { entries: null };
   const deltas = new DeltaRedactor();
+  let budgetError = null;
   const rpc = new JsonRpcProcess(launch.command, launch.args, {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
     onNotification: async (method, params) => {
-      if (method === 'session/update') mapAcpUpdate(job.id, params.update || {}, params.sessionId, messageParts, deltas, planHolder);
+      if (method === 'session/update') {
+        const exceeded = mapAcpUpdate(job, params.update || {}, params.sessionId, messageParts, deltas, planHolder);
+        if (exceeded && !budgetError) {
+          budgetError = exceeded;
+          recordBudgetExceeded(job, exceeded, { sessionId: params.sessionId });
+          if (!cancelSignalSent && (params.sessionId || sessionId)) {
+            rpc.notify('session/cancel', { sessionId: params.sessionId || sessionId });
+            cancelSignalSent = true;
+          }
+        }
+      }
     },
     onRequest: async (method, params) => {
-      if (method !== 'session/request_permission') throw new Error(`Unsupported ACP request: ${method}`);
+      if (method !== 'session/request_permission') throw brokerError('INVALID_REQUEST', `Unsupported ACP request: ${method}`, { provider: job.provider });
       appendJobEvent(job.id, 'approval.requested', { method, toolCall: params.toolCall, options: params.options }, { sessionId });
       const allow = job.approval === 'force' ? params.options?.find((option) => /allow/i.test(option.kind)) : null;
       const reject = params.options?.find((option) => /reject|deny/i.test(option.kind));
@@ -653,7 +694,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.14.1' }
+      clientInfo: { name: 'delegate-router', version: '0.15.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -679,10 +720,10 @@ async function runCursorAcp(job) {
             if (ids.includes(candidate) && !/-fast(?:-|$)/.test(candidate)) cliModel = candidate;
           } catch {}
           if (cliModel) {
-            const fastError = new Error(`ACP_TIER_UNAVAILABLE: this ACP session advertises '${job.model}' only as a fast variant ('${detailed.value}'); the CLI catalog has non-fast '${cliModel}'`);
-            fastError.code = 'ACP_TIER_UNAVAILABLE';
-            fastError.cliModel = cliModel;
-            throw fastError;
+            throw brokerError('ACP_TIER_UNAVAILABLE', `this ACP session advertises '${job.model}' only as a fast variant ('${detailed.value}'); the CLI catalog has non-fast '${cliModel}'`, {
+              provider: job.provider,
+              cliModel
+            });
           }
           appendJobEvent(job.id, 'provider.event', { providerEvent: 'cursor:fast-fallback', requested: job.model, resolved: detailed.value }, { sessionId });
         }
@@ -700,10 +741,10 @@ async function runCursorAcp(job) {
           if (ids.includes(candidate)) cliModel = candidate;
         } catch {}
         if (!cliModel) throw error;
-        const tierError = new Error(`ACP_TIER_UNAVAILABLE: '${job.model}' resolves to '${cliModel}' in the CLI catalog, but this ACP session does not advertise that tier`);
-        tierError.code = 'ACP_TIER_UNAVAILABLE';
-        tierError.cliModel = cliModel;
-        throw tierError;
+        throw brokerError('ACP_TIER_UNAVAILABLE', `'${job.model}' resolves to '${cliModel}' in the CLI catalog, but this ACP session does not advertise that tier`, {
+          provider: job.provider,
+          cliModel
+        });
       }
       await rpc.request('session/set_config_option', { sessionId, configId: 'model', value: resolvedModel });
       updateManagedJob(job.id, (current) => {
@@ -757,7 +798,17 @@ async function runCursorAcp(job) {
       if (acpGraceMs()) await delay(acpGraceMs());
       appendJobEvent(job.id, 'turn.completed', completed.response, { sessionId });
       if (messageParts.length) appendJobEvent(job.id, 'message.completed', { text: messageParts.join('') }, { sessionId });
-      if (completed.response.usage) appendJobEvent(job.id, 'usage.updated', completed.response.usage, { sessionId });
+      if (completed.response.usage) {
+        const exceeded = recordUsage(job, completed.response.usage, { sessionId });
+        if (exceeded && !budgetError) {
+          budgetError = exceeded;
+          recordBudgetExceeded(job, exceeded, { sessionId });
+        }
+      }
+      if (budgetError) {
+        recordGitState(job, sessionId);
+        throw budgetError;
+      }
       if (cancelRequested) { terminal(job, 'cancelled', 'cancelled'); break; }
       if (pendingCorrections.length) {
         const next = pendingCorrections.shift();
@@ -783,12 +834,15 @@ async function runCursorAcp(job) {
   }
 }
 
-function mapHeadlessEvent(jobId, event, deltas) {
+function mapHeadlessEvent(job, event, deltas) {
+  const jobId = job.id;
   const sessionId = findValue(event, ['session_id', 'sessionId', 'chat_id', 'chatId']);
   if (sessionId) {
     updateManagedJob(jobId, (job) => { job.providerSessionId = sessionId; job.session = sessionId; }, { incrementRevision: false });
   }
   const options = { sessionId };
+  const usage = event.usage || (event.type === 'usage_update' || event.subtype === 'usage_update' ? event : null);
+  const exceeded = usage ? recordUsage(job, usage, options) : null;
   if (event.type === 'assistant') {
     const text = findValue(event, ['text', 'content', 'message']) || '';
     appendJobEvent(jobId, 'message.delta', { delta: deltas.redactDelta('message:headless', typeof text === 'string' ? text : JSON.stringify(text)) }, options);
@@ -796,14 +850,14 @@ function mapHeadlessEvent(jobId, event, deltas) {
     const type = event.subtype === 'started' ? 'tool.started' : event.subtype === 'completed' ? 'tool.completed' : 'tool.output';
     appendJobEvent(jobId, type, { toolCall: event.tool_call, subtype: event.subtype }, options);
   } else if (event.type === 'result') {
-    if (event.usage) appendJobEvent(jobId, 'usage.updated', event.usage, options);
     if (event.result) appendJobEvent(jobId, 'message.completed', { text: event.result }, options);
   } else appendJobEvent(jobId, 'provider.event', { providerEvent: `cursor:${event.type || 'unknown'}`, subtype: event.subtype }, options);
+  return exceeded;
 }
 
 async function runCursorHeadless(job) {
   const binary = resolveCursorBinary();
-  if (!binary) throw new Error('neither agent nor cursor-agent is executable');
+  if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   const ids = process.platform === 'darwin' && process.env.DELEGATE_CURSOR_LOGIN_SHELL !== '0'
     ? []
     : availableModelIds(binary);
@@ -813,6 +867,8 @@ async function runCursorHeadless(job) {
   let cancelRequested = false;
   const pendingCorrections = [];
   const deltas = new DeltaRedactor();
+  let budgetError = null;
+  let budgetTermination = null;
 
   while (true) {
     let activeChild = null;
@@ -825,7 +881,14 @@ async function runCursorHeadless(job) {
       prompt: text,
       timeoutMs: jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600),
       onChild: (child) => { activeChild = child; },
-      onEvent: (event) => mapHeadlessEvent(job.id, event, deltas)
+      onEvent: (event) => {
+        const exceeded = mapHeadlessEvent(job, event, deltas);
+        if (exceeded && !budgetError) {
+          budgetError = exceeded;
+          recordBudgetExceeded(job, exceeded, { sessionId: resume });
+          if (activeChild) budgetTermination = terminateProcessTree(activeChild);
+        }
+      }
     });
     let outcome;
     while (!outcome) {
@@ -862,7 +925,12 @@ async function runCursorHeadless(job) {
         } else completeCommand(job.id, claimed, { ok: false, error: `unsupported command: ${command.type}` });
       }
     }
+    if (budgetTermination) await budgetTermination;
     appendJobEvent(job.id, 'turn.completed', { status: outcome.status, error: outcome.error }, { sessionId: resume });
+    if (budgetError) {
+      recordGitState(job, resume);
+      throw budgetError;
+    }
     if (cancelRequested) { terminal(job, 'cancelled', 'cancelled'); return; }
     if (pendingCorrections.length) {
       const next = pendingCorrections.shift();
@@ -871,7 +939,7 @@ async function runCursorHeadless(job) {
       text = next.text;
       continue;
     }
-    if (outcome.status !== 0) throw new Error(outcome.error || 'Cursor headless execution failed');
+    if (outcome.status !== 0) throw brokerError('PROVIDER_ERROR', outcome.error || 'Cursor headless execution failed', { provider: job.provider });
     const sessionId = findValue(outcome.payload, ['session_id', 'sessionId', 'chat_id', 'chatId']);
     if (sessionId) recordSession(job.id, sessionId, null);
     recordGitState(job, sessionId);
@@ -913,13 +981,22 @@ export async function runManagedProvider(job) {
         await runCursorHeadless(loadJob(job.id));
       }
     }
-    else throw new Error(`Unsupported managed provider: ${job.provider}`);
+    else throw brokerError('INVALID_REQUEST', `Unsupported managed provider: ${job.provider}`, { provider: job.provider });
   } catch (error) {
-    if (/(?:quota|usage limit|rate limit|allowance)/i.test(error.message || '')) {
+    const typed = normalizeBrokerError(error, { provider: job.provider, defaultCode: 'TRANSPORT_ERROR' });
+    if (/(?:quota|usage limit|rate limit|allowance)/i.test(typed.message || '')) {
       mutateState((state) => setWindow(state, job.provider, 'quota-error', 100, { source: 'quota-error' }));
     }
     const current = inspectJob(job.id);
-    if (!['completed', 'cancelled', 'failed'].includes(current.status)) terminal(job, 'failed', 'failed', { error: error.message });
-    throw error;
+    if (!['completed', 'cancelled', 'failed'].includes(current.status)) {
+      terminal(job, 'failed', 'failed', {
+        error: typed.message,
+        errorCode: typed.code,
+        errorRetryable: typed.retryable,
+        ...(typed.provider ? { errorProvider: typed.provider } : {}),
+        ...(typed.code === 'BUDGET_EXCEEDED' ? { stoppedReason: 'budget' } : {})
+      });
+    }
+    throw typed;
   }
 }

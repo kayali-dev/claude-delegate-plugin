@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
+import { brokerError } from './errors.mjs';
 import { terminateProcessTree } from './process.mjs';
 
 export function executableOnPath(name, searchPath = process.env.PATH || '') {
@@ -74,7 +75,7 @@ export function resolveCursorModel(requested, ids = []) {
   }
   if (requested === 'auto') return 'auto';
   if (ids.length && !ids.includes(requested)) {
-    throw new Error(`Cursor model '${requested}' is unavailable. Run agent models or cursor-agent models.`);
+    throw brokerError('INVALID_MODEL', `Cursor model '${requested}' is unavailable. Run agent models or cursor-agent models.`, { provider: 'cursor' });
   }
   return requested;
 }

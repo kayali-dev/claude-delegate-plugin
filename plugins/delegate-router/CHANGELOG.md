@@ -2,6 +2,15 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.15.0 — 2026-07-13
+
+- Atomic, per-cwd `idempotencyKey` replay for `delegate_start`, with matching `--idempotency-key` CLI support.
+- Per-job `maxOutputTokens` on start/resume; budget stops use provider-aware cancellation and preserve partial state/continuations under `BUDGET_EXCEEDED`. `delegate_usage` now includes chain-cumulative totals.
+- Closed broker error taxonomy with `code`, `retryable`, and provider attribution.
+- Journal-tail `lastActivityAt` plus non-destructive `stalled` detection (`DELEGATE_STALL_SECONDS`, default 300).
+- Outbound credential-pattern scan with `SECRET_IN_PROMPT`; explicit `allowSensitive` overrides emit `security.warning`.
+- Never-pruned, redacted terminal audit JSONL; `delegate-health` reports its path.
+
 ## 0.14.1 — 2026-07-13
 
 - `delegate-health` human output leads with the active version and the surface-pinning rule.

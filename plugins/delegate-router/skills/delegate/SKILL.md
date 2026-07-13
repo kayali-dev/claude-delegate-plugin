@@ -11,7 +11,7 @@ Keep Claude as coordinator, integrator, and final reviewer. Delegate only a boun
 
 ## Route
 
-1. Parse explicit provider, model, mode, scope, effort, approval, network, background, timeout, and budget controls. Explicit user choices win unless unavailable or unsafe.
+1. Parse explicit provider, model, mode, scope, effort, approval, network, background, timeout, idempotency, and output-token budget controls. Explicit user choices win unless unavailable or unsafe.
 2. Run `delegate-health --quick` once per session. Its `enabledProviders` is authoritative: never invoke or recommend a disabled provider, including optional external plugins. Run `delegate-usage refresh codex` only when Codex is enabled and a candidate. Treat missing usage as unknown, not zero. If Claude usage is unknown, suggest `delegate-config statusline enable` once (official status-line capture); never query Claude usage any other way — Anthropic prohibits third-party OAuth-token use.
 3. Call `delegate-route --json --mode <mode> --provider <provider-or-auto> --model <model-or-auto> --task '<bounded summary>'`. Use its eligible primary and fallbacks unless the user explicitly overrides.
 4. Read [routing.md](references/routing.md) when the route is surprising or model fit is ambiguous. Read [models.md](references/models.md) for detailed model strengths.
@@ -36,7 +36,9 @@ Stop and report when:
 Return: outcome, changed files, verification, risks, blockers, continuation id.
 ```
 
-Pass `allowedPaths` on `delegate_start` for every write-mode job with a known file scope: the broker injects the fence into the worker prompt and records any out-of-scope changed file as `scopeViolations` on the job (plus a `scope.violation` event) — check it before accepting the result. Use `waitForSession=true` when you must file anything keyed to the delegate's session id before its first write.
+Pass `allowedPaths` on `delegate_start` for every write-mode job with a known file scope: the broker injects the fence into the worker prompt and records any out-of-scope changed file as `scopeViolations` on the job (plus a `scope.violation` event) — check it before accepting the result. Give retryable starts a caller-stable `idempotencyKey`; a replay in the same cwd returns the original job. Set `maxOutputTokens` when a run needs a hard observed-output ceiling. Use `waitForSession=true` when you must file anything keyed to the delegate's session id before its first write.
+
+The broker scans outbound task packets for credential-shaped values. It fails with `SECRET_IN_PROMPT` unless `allowSensitive=true`; an override is recorded as `security.warning` and does not relax scope or preservation rules.
 
 Reference repository paths instead of pasting large files. Include only conversation context the worker cannot discover. Tell every writer to preserve existing changes and never revert unrelated work.
 
@@ -129,14 +131,15 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
 - `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.
 - `completed` means the turn ended, not that the objective was met: check `changedFiles` on the record (mechanical, from broker observation) against the worker's claims, and treat a write-mode job with zero changed files as a failed objective (`delegate-jobs wait` exits 5 for this).
-- `delegate_usage` for observed job usage and provider allowance as separate values.
+- `lastActivityAt` comes from the journal tail. `stalled=true` means a running job has been quiet longer than `DELEGATE_STALL_SECONDS` (default 300); it is a diagnostic flag, never an automatic kill.
+- `delegate_usage` for observed job usage, chain-cumulative token totals, and provider allowance as separate values.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
 - For long waits inside Claude Code, do not rely on a background `delegate-jobs wait` process — the harness can reap it (field-verified across a full multi-cluster run). Watch the job's `finishedPath` instead (on the job record from `delegate_inspect`/`delegate_list`): the broker writes that sentinel file on every terminal transition, so a Monitor until-loop on its existence is the durable wake signal; then read the outcome with `delegate_inspect`. `delegate-jobs wait` remains fine from a real terminal.
 - A Codex job whose transcript shows collab-agent activity has engaged the multi-agent review flow: the record carries `reviewFlowEngaged: true`, and `delegate_resume` will refuse it immediately with `RESUME_UNSUPPORTED` — plan the follow-up as a fresh job whose packet folds in the prior findings instead of attempting resume.
 
 `REVISION_CONFLICT` errors carry `currentRevision`; retry once with that value when your command is still appropriate for the newer state, instead of a full re-inspect round-trip.
 
-For long jobs, do not chain polling turns: run `delegate-jobs wait <job-id>` with the Bash tool's `run_in_background: true` and continue other work — the harness notifies on exit (0 completed, 3 failed, 4 cancelled, 75 wait-timeout). Bound the whole job with `timeoutSeconds` on `delegate_start` (60–86400; default 3600, deliberately long because LLM jobs legitimately run long).
+For long jobs, do not chain polling turns: run `delegate-jobs wait <job-id>` with the Bash tool's `run_in_background: true` and continue other work — the harness notifies on exit (0 completed, 3 failed, 4 cancelled, 75 wait-timeout). Bound the whole job with `timeoutSeconds` on `delegate_start` (60–86400; default 3600, deliberately long because LLM jobs legitimately run long). `maxOutputTokens` stops through the provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and the continuation ID.
 
 Write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another write-mode job is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent writers. Worktree-isolated jobs are exempt. Terminal job records are pruned automatically after `DELEGATE_JOB_RETENTION_DAYS` (default 14).
 

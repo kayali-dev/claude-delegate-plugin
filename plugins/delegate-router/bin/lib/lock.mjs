@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { brokerError } from './errors.mjs';
 
 const LOCK_WAIT_MS = 10;
 const LOCK_TIMEOUT_MS = 5000;
@@ -27,7 +28,7 @@ export function withFileLock(lockPath, fn) {
           continue;
         }
       } catch {}
-      if (Date.now() - started > LOCK_TIMEOUT_MS) throw new Error(`Timed out acquiring lock ${lockPath}`);
+      if (Date.now() - started > LOCK_TIMEOUT_MS) throw brokerError('LOCK_TIMEOUT', `Timed out acquiring lock ${lockPath}`);
       sleepSync(LOCK_WAIT_MS);
     }
   }

@@ -18,7 +18,7 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 - Network remains off unless the task needs current external information and the user permits it; the explicit control is `network=true` on `delegate_start` (Codex workspace-write sandbox only).
 - `sandbox=off` disables provider sandboxing entirely (Codex `danger-full-access`, Cursor `--sandbox disabled`) for jobs that require host tools: git push, gh/PR flows, package installs, authenticated CLIs, live web. It is a per-job caller judgment — decide from the task packet, surface to the user when unsure, record the choice in the pre-delegation update, and never pair it with `approval=force` without explicit user acceptance. Codex web search turns on automatically when `network=true` or `sandbox=off`.
 - Consult, plan, and review modes are read-only.
-- Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. `allowSensitive=true` relaxes only that rule; the base security packet (scope control, preserve existing changes) is always sent. The base rule explicitly permits running project tooling that consumes secrets internally (builds, tests, dev servers reading `.env`) while forbidding the worker from echoing or relocating their contents — so build-class steps that read environment files work sandboxed, and a worker's claim of a "sanitized workspace" build is a deviation worth flagging.
+- Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. Outbound task packets are scanned for credential-shaped values and fail with `SECRET_IN_PROMPT`; `allowSensitive=true` explicitly overrides both checks and emits `security.warning`. It never removes scope control or the preserve-existing-changes rule. Project tooling may consume secrets internally, but workers must never echo or relocate their contents.
 
 - `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. Prefer it over prose-only fencing for every bounded write job.
 - Out-of-tree deliverables (a file outside the job cwd): Cursor workers cannot write outside the workspace. Stage a copy inside the repo (e.g. `.delegate-staging/<name>`), add that path to `allowedPaths`, and copy back after verifying the diff touched nothing else. An `ingestFiles` option is on the roadmap.
@@ -29,6 +29,8 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 Allow only one writer for a path set. A read-only reviewer may inspect a stable diff, but do not ask it to review files while another agent is actively changing them. The coordinator owns final integration.
 
 The broker enforces this for managed jobs: a write-mode start (`implement` or `verify`) in a cwd that already has an active write-mode job fails with `WRITER_ACTIVE` and the blocking job's ID. Orphaned writers (dead worker process) are reconciled to `failed` automatically and stop blocking. Worktree-isolated jobs are exempt. `overrideWriter=true` bypasses the guard; use it only with explicit user acceptance of concurrent writers.
+
+Give any start that may be retried a stable `idempotencyKey`. Lookup and job creation are atomic under the per-cwd launch lock, so a replay returns the existing job instead of launching a second worker.
 
 Every writer must:
 
@@ -55,9 +57,11 @@ For managed runs, store the job ID and use the `delegate_control` inspection and
 
 Managed jobs are bounded by `timeoutSeconds` (60–86400) or, when unset, `DELEGATE_CODEX_TIMEOUT_SECONDS` / `DELEGATE_CURSOR_TIMEOUT_SECONDS` (default 3600). Defaults are deliberately long — LLM agent jobs legitimately run long — so set an explicit value only when the task warrants a tighter or looser bound. A timeout interrupts the active turn and fails the job with a `TIMEOUT:` error; the thread remains resumable.
 
+`maxOutputTokens` is an optional per-job cap on provider-reported output tokens. Crossing it uses the normal provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`; partial events, diff, and continuation remain inspectable. Resumes accept a new cap and otherwise inherit the parent cap.
+
 ## Failure And Quota Recovery
 
-On timeout, quota exhaustion, or agent failure:
+On timeout, output-budget exhaustion, quota exhaustion, or agent failure:
 
 1. Stop the failed process; do not start a competing writer while it may still run.
 2. Inspect the actual diff and process state.

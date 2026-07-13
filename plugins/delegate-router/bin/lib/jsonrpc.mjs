@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
+import { brokerError, normalizeBrokerError } from './errors.mjs';
 import { terminateProcessTree } from './process.mjs';
 
 export class JsonRpcProcess {
@@ -8,7 +9,7 @@ export class JsonRpcProcess {
     this.pending = new Map();
     this.closed = false;
     this.onNotification = options.onNotification || (() => {});
-    this.onRequest = options.onRequest || (async () => { throw new Error('Unsupported server request'); });
+    this.onRequest = options.onRequest || (async () => { throw brokerError('INVALID_REQUEST', 'Unsupported server request'); });
     this.onStderr = options.onStderr || (() => {});
     this.requestTimeoutMs = Number(options.requestTimeoutMs || process.env.DELEGATE_RPC_TIMEOUT_MS || 30000);
     this.child = spawn(command, args, {
@@ -29,7 +30,7 @@ export class JsonRpcProcess {
   }
 
   #send(message) {
-    if (this.closed) throw new Error('JSON-RPC process is closed');
+    if (this.closed) throw brokerError('TRANSPORT_ERROR', 'JSON-RPC process is closed');
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
@@ -42,9 +43,10 @@ export class JsonRpcProcess {
       this.pending.delete(String(message.id));
       if (pending.timer) clearTimeout(pending.timer);
       if (message.error) {
-        const error = new Error(message.error.message || JSON.stringify(message.error));
-        error.code = message.error.code;
-        error.data = message.error.data;
+        const error = brokerError('PROVIDER_ERROR', message.error.message || JSON.stringify(message.error), {
+          rpcCode: message.error.code,
+          data: message.error.data
+        });
         pending.reject(error);
       } else pending.resolve(message.result);
       return;
@@ -65,7 +67,9 @@ export class JsonRpcProcess {
     if (this.closed) return;
     this.closed = true;
     this.lines.close();
-    const error = outcome.error || new Error(`JSON-RPC process exited with code ${outcome.code}${outcome.signal ? ` (${outcome.signal})` : ''}`);
+    const error = outcome.error
+      ? normalizeBrokerError(outcome.error, { defaultCode: 'TRANSPORT_ERROR' })
+      : brokerError('TRANSPORT_ERROR', `JSON-RPC process exited with code ${outcome.code}${outcome.signal ? ` (${outcome.signal})` : ''}`);
     for (const pending of this.pending.values()) {
       if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
@@ -81,8 +85,7 @@ export class JsonRpcProcess {
       if (timeoutMs > 0) {
         pending.timer = setTimeout(() => {
           if (!this.pending.delete(String(id))) return;
-          const error = new Error(`JSON-RPC request timed out after ${timeoutMs}ms: ${method}`);
-          error.code = 'RPC_TIMEOUT';
+          const error = brokerError('RPC_TIMEOUT', `JSON-RPC request timed out after ${timeoutMs}ms: ${method}`);
           reject(error);
         }, timeoutMs);
         pending.timer.unref?.();

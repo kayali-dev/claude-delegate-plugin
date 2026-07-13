@@ -13,7 +13,11 @@ Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.eve
 
 Terminal jobs older than `DELEGATE_JOB_RETENTION_DAYS` (default 14) are pruned opportunistically at broker start and job launch, at most once per six hours; `delegate-jobs prune` runs it on demand. Active jobs are never pruned.
 
+Every first transition into a terminal status appends one redacted, private JSON line to the separate `audit.jsonl` beside the state file. It records actor, provider/model/mode, access policy, cwd, observed change/violation counts, outcome, usage, and duration. Job pruning never removes this log; `delegate-health` reports its path.
+
 Inspection reconciles liveness: a job recorded as `running` whose worker process no longer exists is transitioned to `failed` with an `ORPHANED` error event before the snapshot is returned. `delegate_list` rediscovers jobs by recency when an ID is no longer in context.
+
+Inspect and list rows expose `lastActivityAt` from the last complete journal line without scanning the journal. `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
 
 Every terminal transition also writes the job's `finishedPath` sentinel file (content: the terminal status). Its existence is the durable "job is done" signal for file watchers, which survive host harnesses that reap background waiter processes. Codex jobs that engaged the multi-agent review flow are marked `reviewFlowEngaged: true` (detected from collab-agent items), and `delegate_resume` refuses them fast with `RESUME_UNSUPPORTED`.
 
@@ -37,10 +41,22 @@ approval.requested, approval.resolved
 correction.requested, correction.applied, correction.queued, correction.restarted
 command.applied, command.rejected
 scope.violation
+security.warning, budget.exceeded
 error, provider.event
 ```
 
 `provider.event` contains only a redacted event name and safe metadata. Raw provider payload persistence and hidden reasoning are intentionally excluded.
+
+## Error Taxonomy
+
+Every broker error has `{ code, retryable, provider }`; `provider` is null/omitted only when no provider is known. Controllers branch on this closed code set, never on message text.
+
+| Retryable | Codes |
+| --- | --- |
+| `true` | `LOCK_TIMEOUT`, `WRITER_ACTIVE`, `REVISION_CONFLICT`, `ORPHANED`, `PARENT_ACTIVE`, `TIMEOUT`, `RPC_TIMEOUT`, `TRANSPORT_ERROR`, `PROVIDER_ERROR`, `STATE_ERROR` |
+| `false` | `INVALID_REQUEST`, `NOT_FOUND`, `QUOTA_GUARD`, `INVALID_MODEL`, `WRONG_LANE`, `RESUME_UNSUPPORTED`, `ACP_TIER_UNAVAILABLE`, `USER_INPUT_REQUIRED`, `SECRET_IN_PROMPT`, `BUDGET_EXCEEDED`, `PROVIDER_DISABLED`, `SESSION_UNAVAILABLE`, `UNMANAGED_JOB`, `JOB_TERMINAL`, `UNSUPPORTED_STRATEGY`, `INTERNAL` |
+
+`retryable: true` means retrying the same request, possibly after backoff, can succeed. `QUOTA_GUARD` needs a window reset or different provider; `ACP_TIER_UNAVAILABLE` needs a catalog or transport change; `USER_INPUT_REQUIRED` needs new information in a resume; and `BUDGET_EXCEEDED` needs a higher cap. `REVISION_CONFLICT` includes `currentRevision`; budget and timeout failures retain partial state for an explicit resume.
 
 ## Correction Semantics
 

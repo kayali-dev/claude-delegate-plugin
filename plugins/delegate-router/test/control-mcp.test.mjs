@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -23,4 +23,18 @@ test('control MCP initializes and exposes the complete supervision surface', asy
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_resume', 'delegate_usage'
   ]);
+  const start = responses[1].result.tools.find((tool) => tool.name === 'delegate_start');
+  const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
+  assert.ok(start.inputSchema.properties.idempotencyKey);
+  assert.ok(start.inputSchema.properties.maxOutputTokens);
+  assert.ok(resume.inputSchema.properties.maxOutputTokens);
+});
+
+test('delegate-jobs help has CLI parity for Wave 1 caller options', () => {
+  const cli = path.join(root, 'bin', 'delegate-jobs');
+  const result = spawnSync(process.execPath, [cli, 'help'], { encoding: 'utf8' });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /--idempotency-key/);
+  assert.match(result.stdout, /--max-output-tokens/);
+  assert.match(result.stdout, /resume[^\n]+--max-output-tokens/);
 });
