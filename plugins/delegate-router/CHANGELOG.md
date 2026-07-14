@@ -2,6 +2,13 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.22.0 — 2026-07-14
+
+- Added a loopback-only, bearer-authenticated `delegate-tui --serve [--port N]` read export over dependency-free HTTP/SSE, with private first-use token generation, constant-time authentication, bounded event/diff responses, connection caps, slow-client deadlines, access logging, and graceful shutdown.
+- Added a fetch-backed `RemoteDatasource` and `delegate-tui --connect URL` client with five-second fleet polling, selected-job SSE follow, bounded retry backoff, a remote host column/header marker, and connection-loss state that never terminates the dashboard.
+- Remote mode disables all broker mutations and launcher controls; cross-machine access is documented exclusively through an SSH loopback tunnel. Multi-host aggregation remains future work.
+- Runtime/plugin versions intentionally remain unchanged until owner interactive validation and release.
+
 ## 0.21.0 — 2026-07-14
 
 - Added a read-only, best-effort Claude coordinator Sessions screen with bounded transcript-tail parsing, redacted last-activity labels, active/idle classification, exact-cwd managed-job counts, and existing writer-lock attribution.

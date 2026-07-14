@@ -126,9 +126,10 @@ function badges(job) {
   return values.join(',') || '—';
 }
 
-function fleetColumns(width) {
+function fleetColumns(width, remote = null) {
   const columns = width >= 90 ? [
     { key: 'id', title: 'Job', width: 10, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
+    ...(remote?.enabled ? [{ key: 'host', title: 'Host', width: 16 }] : []),
     { key: 'model', title: 'Model', width: 10, flexible: true }, { key: 'mode', title: 'Mode', width: 8 },
     { key: 'state', title: 'Status/phase', width: 14 }, { key: 'heartbeat', title: 'Beat', width: 7, align: 'right' },
     { key: 'elapsed', title: 'Elapsed', width: 8, align: 'right' }, { key: 'tokens', title: 'Out/budget', width: 14, align: 'right' },
@@ -154,6 +155,19 @@ function providerBand(provider) {
 }
 
 function commonOverlay(frame, ui) {
+  const remote = ui.remote;
+  if (remote?.enabled) {
+    const connection = remote.connection || { status: 'connecting', attempt: 0 };
+    frame.title.text = `[remote] ${frame.title.text}`;
+    frame.title.right = `${remote.host || 'unknown host'}${frame.title.right ? ` · ${frame.title.right}` : ''}`;
+    const retry = connection.status === 'connected' ? '' : connection.attempt ? `#${connection.attempt}` : '';
+    const connectionText = `remote:${connection.status}${retry}`;
+    if (frame.status?.segments) {
+      frame.status.segments.unshift({ text: `${connectionText} `, style: connection.status === 'connected' ? palette.positive : palette.failed });
+    } else if (frame.status) {
+      frame.status.text = `${connectionText} · ${frame.status.text || ''}`;
+    }
+  }
   const notify = ui.notifyEnabled === false ? 'notify:off' : 'notify:on';
   if (frame.status) frame.status.right = `${notify}${frame.status.right ? ` · ${frame.status.right}` : ''}`;
   if (ui.help) frame.overlay = { kind: 'help', title: 'delegate-tui keys', items: HELP_ITEMS };
@@ -182,7 +196,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
       || Number(right.job.lastActivityAt || right.job.updatedAt * 1000 || 0) - Number(left.job.lastActivityAt || left.job.updatedAt * 1000 || 0));
   const selected = Math.max(0, Math.min(entries.length - 1, Number(ui.selectedIndex || 0)));
   const innerWidth = Math.max(1, width - 2);
-  const columns = fleetColumns(innerWidth);
+  const columns = fleetColumns(innerWidth, ui.remote);
   const rows = entries.map(({ job }) => {
     const usage = jobUsage(job, store.eventsByJob?.[job.id]);
     const max = Number(job.maxOutputTokens);
@@ -190,6 +204,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     const values = {
       id: shortId(job),
       provider: job.provider || '—',
+      host: ui.remote?.host || '—',
       model: job.resolvedModel || job.model || job.requestedModel || 'auto',
       mode: job.mode || '—',
       state: jobState(job),
@@ -207,7 +222,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     Math.max(requestedScroll, selected >= requestedScroll + visibleRows ? selected - visibleRows + 1 : requestedScroll),
     Math.max(0, entries.length - visibleRows)
   ));
-  const reconcileJobIds = rows.slice(scroll, scroll + visibleRows).filter((row) => row.reconciliationPending).map((row) => row.id);
+  const reconcileJobIds = ui.remote?.enabled ? [] : rows.slice(scroll, scroll + visibleRows).filter((row) => row.reconciliationPending).map((row) => row.id);
   const allowance = (store.providers || []).filter((provider) => provider.name !== 'claude' || provider.allowance?.known).map((provider) => {
     const band = providerBand(provider);
     return { text: `${provider.name.slice(0, 2)}:${band.label} `, style: band.style };
@@ -225,7 +240,9 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     status: statusOverride || {
       style: palette.bar,
       segments: [...allowance, { text: ` ${locks} `, style: store.writerLocks?.length ? palette.badgeWarn : palette.dim }],
-      right: ui.groupId ? 'Enter detail  Esc groups  / filter' : 'Enter detail  G groups  S sessions  a active  / filter  p providers  t stats  N new'
+      right: ui.groupId ? 'Enter detail  Esc groups  / filter' : ui.remote?.enabled
+        ? 'Enter detail  G groups  S sessions  a active  / filter  p providers  t stats  read-only remote'
+        : 'Enter detail  G groups  S sessions  a active  / filter  p providers  t stats  N new'
     },
     meta: {
       visibleJobIds: entries.map(({ job }) => job.id),
@@ -559,7 +576,9 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
     title: { text: `${job.id} · ${job.provider} · ${job.resolvedModel || job.model || 'auto'}`, right: jobState(job).text },
     tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: tabs, active: tab },
     panes: [{ rect: { x: 0, y: 2, width, height: Math.max(3, height - 3) }, title: body.title, content: body.content }],
-    status: errorStatus(ui) || { text: 'Esc fleet  [/] tabs  / search  f follow  s steer  r resume  R release  n nudge  w review  c cancel  v revert' },
+    status: errorStatus(ui) || { text: ui.remote?.enabled
+      ? 'Esc fleet  [/] tabs  / search  f follow  read-only remote'
+      : 'Esc fleet  [/] tabs  / search  f follow  s steer  r resume  R release  n nudge  w review  c cancel  v revert' },
     meta: {
       jobId: job.id,
       tab,
@@ -814,14 +833,15 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
 }
 
 export function createViewModel(store, ui = {}, viewport = {}) {
-  if (ui.screen === 'detail') return detailViewModel(store, ui, viewport);
-  if (ui.screen === 'groups') return groupsViewModel(store, ui, viewport);
-  if (ui.screen === 'group-members') return groupMembersViewModel(store, ui, viewport);
-  if (ui.screen === 'providers') return providersViewModel(store, ui, viewport);
-  if (ui.screen === 'sessions') return sessionsViewModel(store, ui, viewport);
-  if (ui.screen === 'stats') return statsViewModel(store, ui, viewport);
-  if (ui.screen === 'launcher') return launcherViewModel(store, ui, viewport);
-  return fleetViewModel(store, ui, viewport);
+  const effectiveUi = ui.remote || !store.remote ? ui : { ...ui, remote: store.remote };
+  if (effectiveUi.screen === 'detail') return detailViewModel(store, effectiveUi, viewport);
+  if (effectiveUi.screen === 'groups') return groupsViewModel(store, effectiveUi, viewport);
+  if (effectiveUi.screen === 'group-members') return groupMembersViewModel(store, effectiveUi, viewport);
+  if (effectiveUi.screen === 'providers') return providersViewModel(store, effectiveUi, viewport);
+  if (effectiveUi.screen === 'sessions') return sessionsViewModel(store, effectiveUi, viewport);
+  if (effectiveUi.screen === 'stats') return statsViewModel(store, effectiveUi, viewport);
+  if (effectiveUi.screen === 'launcher') return launcherViewModel(store, effectiveUi, viewport);
+  return fleetViewModel(store, effectiveUi, viewport);
 }
 
 export function selectedFleetJobId(store, ui = {}, viewport = {}) {

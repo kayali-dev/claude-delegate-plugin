@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import {
   filterDiffPaths,
   inspectJob,
@@ -23,6 +24,8 @@ import {
   virtualLogBottomPosition
 } from './lib/tui/components.mjs';
 import { tailAllJobs } from './lib/tui/datasource.mjs';
+import { remoteActionMessage } from './lib/tui/action-policy.mjs';
+import { connectRemoteDatasource } from './lib/tui/remote-datasource.mjs';
 import { editTextInEditor } from './lib/tui/editor.mjs';
 import { BufferedInput } from './lib/tui/input.mjs';
 import { NotificationDispatcher } from './lib/tui/notifications.mjs';
@@ -34,28 +37,102 @@ import { routeTask } from './lib/router.mjs';
 import { auditUsageBands } from './lib/stats.mjs';
 
 const USAGE = `Usage: delegate-tui [--job <id>]
+       delegate-tui --serve [--port <number>]
+       delegate-tui --connect <url> [--token-file <path>] [--job <id>]
 
-Live ANSI dashboard for Delegate Router's local managed-job store.
+Live ANSI dashboard for Delegate Router's local or read-only remote managed-job store.
 
 Options:
-  -h, --help   Show this help without entering the alternate screen
-  --job <id>   Open directly in that managed job's detail
+  -h, --help          Show this help without entering the alternate screen
+  --job <id>          Open directly in that managed job's detail
+  --serve             Export the local store read-only on 127.0.0.1
+  --port <number>     Serve port (default 4263)
+  --connect <url>     Connect to one read-only Delegate Router host
+  --token-file <path> Read the remote bearer token from this file
 
 The TUI requires an interactive macOS or Linux terminal. It honors
-DELEGATE_STATE_FILE and the ordinary delegate-router provider configuration.`;
+DELEGATE_STATE_FILE and the ordinary delegate-router provider configuration.
+DELEGATE_CONNECT_TOKEN supplies the client token when --token-file is omitted.`;
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
   console.log(USAGE);
   process.exit(0);
 }
-let initialJobId = null;
-if (args[0] === '--job' && args.length === 2) initialJobId = args[1];
-else if (args.length) {
-  console.error(`delegate-tui: ${args[0] === '--job' ? '--job requires exactly one job id' : `unknown option: ${args[0]}`}\n${USAGE}`);
+
+function argumentError(message) {
+  console.error(`delegate-tui: ${message}\n${USAGE}`);
   process.exit(2);
 }
-if (initialJobId) {
+
+const cli = { initialJobId: null, serve: false, port: 4263, connect: null, tokenFile: null };
+for (let index = 0; index < args.length; index += 1) {
+  const arg = args[index];
+  if (arg === '--serve') cli.serve = true;
+  else if (arg === '--job') {
+    const value = args[++index];
+    if (!value) argumentError('--job requires exactly one job id');
+    cli.initialJobId = value;
+  } else if (arg === '--port') {
+    const value = args[++index];
+    if (!value || !/^\d+$/.test(value)) argumentError('--port requires an integer');
+    cli.port = Number(value);
+    if (!Number.isInteger(cli.port) || cli.port < 0 || cli.port > 65535) argumentError('--port must be between 0 and 65535');
+  } else if (arg === '--connect') {
+    const value = args[++index];
+    if (!value) argumentError('--connect requires a URL');
+    cli.connect = value;
+  } else if (arg === '--token-file') {
+    const value = args[++index];
+    if (!value) argumentError('--token-file requires a path');
+    cli.tokenFile = value;
+  } else argumentError(`unknown option: ${arg}`);
+}
+if (cli.serve && cli.connect) argumentError('--serve and --connect are mutually exclusive');
+if (cli.serve && cli.initialJobId) argumentError('--job cannot be combined with --serve');
+if (!cli.serve && args.includes('--port')) argumentError('--port requires --serve');
+if (!cli.connect && cli.tokenFile) argumentError('--token-file requires --connect');
+
+if (cli.serve) {
+  try {
+    const { startDelegateServe } = await import('./lib/serve.mjs');
+    const running = await startDelegateServe({ port: cli.port });
+    const url = `http://${running.host}:${running.port}`;
+    if (running.created) {
+      console.error(`delegate-tui: remote bearer token (shown once): ${running.token}`);
+      console.error(`delegate-tui: connect with: delegate-tui --connect ${url} --token-file ${running.tokenFile}`);
+      console.error(`delegate-tui: SSH tunnel: ssh -L ${running.port}:127.0.0.1:${running.port} host`);
+    } else if (running.source === 'file') {
+      console.error(`delegate-tui: bearer token file: ${running.tokenFile}`);
+    } else {
+      console.error('delegate-tui: bearer token supplied by DELEGATE_SERVE_TOKEN');
+    }
+    console.error(`delegate-tui: read-only server listening on ${url}`);
+    let stopping = false;
+    await new Promise((resolve) => {
+      const stop = async (signal) => {
+        if (stopping) return;
+        stopping = true;
+        console.error(`delegate-tui: ${signal}; shutting down`);
+        await running.close();
+        resolve();
+      };
+      process.once('SIGINT', () => void stop('SIGINT'));
+      process.once('SIGTERM', () => void stop('SIGTERM'));
+    });
+    process.exit(0);
+  } catch (error) {
+    console.error(`delegate-tui: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+const initialJobId = cli.initialJobId;
+if (initialJobId && !/^[a-zA-Z0-9_-]+$/.test(initialJobId)) {
+  console.error(`delegate-tui: invalid job id: ${initialJobId}`);
+  process.exit(1);
+}
+if (initialJobId && !cli.connect) {
   try {
     if (!loadJob(initialJobId)) {
       console.error(`delegate-tui: job not found: ${initialJobId}`);
@@ -79,13 +156,28 @@ if (process.platform === 'win32') {
   process.exit(2);
 }
 
+let connectToken = null;
+if (cli.connect) {
+  try {
+    connectToken = cli.tokenFile ? fs.readFileSync(cli.tokenFile, 'utf8').trim() : String(process.env.DELEGATE_CONNECT_TOKEN || '').trim();
+    if (!connectToken || /\s/.test(connectToken)) throw new Error(cli.tokenFile
+      ? 'token file must contain one non-empty token without whitespace'
+      : 'DELEGATE_CONNECT_TOKEN is required when --token-file is omitted');
+  } catch (error) {
+    console.error(`delegate-tui: cannot load remote token: ${error.message}`);
+    process.exit(1);
+  }
+}
+
 const NUDGE_PROMPT = 'Your final message described the deliverable instead of containing it. Paste the complete findings inline now.';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DIFF_WINDOW = 12000;
 const CHOICE_FIELDS = new Set(['profile', 'provider', 'mode', 'effort']);
 
 const screen = new Screen();
-const source = tailAllJobs();
+const source = cli.connect
+  ? connectRemoteDatasource({ baseUrl: cli.connect, token: connectToken })
+  : tailAllJobs();
 let store = source.getState();
 const notifier = new NotificationDispatcher();
 notifier.observe(store);
@@ -101,6 +193,7 @@ const ui = {
   groupSelection: 0, groupScroll: 0, groupId: null, groupMemberSelection: 0, groupMemberScroll: 0,
   sessionSelection: 0, sessionScroll: 0,
   providerScroll: 0, statsSelection: 0, statsScroll: 0, statsFilter: '', notifyEnabled: notifier.enabled,
+  remote: store.remote || null,
   launcher: {
     fieldIndex: 0, profile: '<none>', provider: 'codex', model: 'auto',
     mode: 'consult', effort: '<default>', prompt: '', allowedPaths: '',
@@ -126,7 +219,7 @@ function draw() {
   }
   const frame = viewModel();
   screen.render(paintFrame(frame));
-  if (frame.meta?.reconcileJobIds?.length) void source.reconcileVisibleJobs(frame.meta.reconcileJobIds, { limit: 5 });
+  if (!source.readOnly && frame.meta?.reconcileJobIds?.length) void source.reconcileVisibleJobs(frame.meta.reconcileJobIds, { limit: 5 });
 }
 
 function setStatus(message, kind = 'info') {
@@ -835,6 +928,12 @@ function handleKey(key) {
   if (key && typeof key === 'object' && key.type === 'click') return handleClick(key);
   if (key === '?') { ui.help = true; draw(); return; }
   if (key === 'escape') return goBack();
+  const blocked = remoteActionMessage(ui, key);
+  if (blocked) {
+    setStatus(blocked, 'error');
+    draw();
+    return;
+  }
   if ((key === 'n' || key === 'N') && ui.search?.query) {
     if (jumpSearch(key === 'n' ? 1 : -1)) return;
   }
@@ -994,6 +1093,7 @@ const bufferedInput = new BufferedInput({
 
 source.on('change', (next) => {
   store = next;
+  ui.remote = next.remote || null;
   notifier.observe(next);
   rebuildPaneSearch();
   if (ui.screen === 'launcher') scheduleRouteAdvice();

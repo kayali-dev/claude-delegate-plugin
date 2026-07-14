@@ -1,6 +1,6 @@
 # Delegate TUI
 
-`delegate-tui` is a zero-dependency ANSI dashboard over Delegate Router's existing local job store. It does not start providers on launch and it does not write job or usage files directly. Its control actions call the same broker functions as `delegate-jobs`, including optimistic revisions, dry-run revert planning, provider-aware cancellation, and ordinary launch admission.
+`delegate-tui` is a zero-dependency ANSI dashboard over Delegate Router's existing local job store or one read-only remote export. It does not start providers on launch and it does not write job or usage files directly. In local mode, its control actions call the same broker functions as `delegate-jobs`, including optimistic revisions, dry-run revert planning, provider-aware cancellation, and ordinary launch admission. Remote mode disables every control and launcher action.
 
 ## Launch
 
@@ -14,9 +14,39 @@ Open a known job directly in detail view with `delegate-tui --job <id>`. An unkn
 
 From a source checkout, use `node bin/delegate-tui`. `DELEGATE_STATE_FILE`, `DELEGATE_ENABLED_PROVIDERS`, provider configuration, allowance guard bands, profile directories, and the ordinary state-directory defaults are honored. `node bin/delegate-tui --help` prints usage without switching terminal screens. If stdout is not a TTY, the command exits 2 without emitting terminal escapes.
 
+## Remote
+
+Export the job store on the machine that owns it:
+
+```bash
+delegate-tui --serve
+```
+
+The server is hard-bound to `127.0.0.1` on port 4263 by default; `--port N` changes only the port. It refuses non-loopback bind requests and intentionally sends no CORS headers. The first launch generates a 32-byte bearer token at `<state-dir>/serve-token` with mode `0600` and prints it once with connection instructions. Later launches reuse the private file without printing the token. `DELEGATE_SERVE_TOKEN` is an in-memory override intended for controlled automation and tests.
+
+For another machine, tunnel the loopback listener over SSH rather than exposing it on a network interface:
+
+```bash
+ssh -L 4263:127.0.0.1:4263 host
+```
+
+Then, in another terminal on the client machine, connect through the tunnel using either a private token file or the environment:
+
+```bash
+delegate-tui --connect http://127.0.0.1:4263 --token-file /private/path/to/serve-token
+# or
+DELEGATE_CONNECT_TOKEN='<printed token>' delegate-tui --connect http://127.0.0.1:4263
+```
+
+The header includes `[remote]` and the connected host, and Fleet adds a Host column when space permits. Fleet data polls every five seconds; the selected job follows its event journal over SSE. Connection loss remains in the status line and retries automatically with bounded backoff instead of terminating the dashboard.
+
+The export is read-only by construction: it exposes authenticated GET health, jobs, event pages/streams, transcript, bounded diff, job/provider usage, coordinator-session, and aggregate-stat reads only. It accepts job ids and bounded repository-relative diff selectors, never server filesystem paths. Steer, resume, release, nudge, review round, cancel, revert, and launcher keys report `read-only remote` and do nothing.
+
+Remote federation is one host at a time in this version. A combined fleet spanning several `--connect` targets is future work.
+
 ## Screens
 
-- **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider/model/mode, status and phase, heartbeat age, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, and current shared-worktree writer ownership.
+- **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider/model/mode, status and phase, heartbeat age, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, and current shared-worktree writer ownership. Remote mode also shows the connected host.
 - **Groups** aggregates jobs by `groupId`, with member/running/terminal/stalled counts, newest activity, and the all-terminal barrier state. Enter opens that group's members in the ordinary fleet row format.
 - **Sessions** is a read-only, best-effort overview of Claude Code coordinator sessions around the managed fleet. It reads only the newest 64 KiB of at most 200 recently modified `~/.claude/projects/<encoded-cwd>/*.jsonl` files, shows active/idle age, project cwd, approximate size, one redacted activity label, active managed-job count by exact cwd, and existing managed writer ownership. It never opens a transcript. Enter filters Fleet to the selected cwd; `Esc` clears the Fleet filter.
 - **Job detail** has Transcript, Diff, Record, Usage, and Events tabs. A sixth Chain tab appears for a root with children or a resumed child; it orders rounds and shows changed-file count, verification exit, objective/suspicion markers, and the first outcome line. Enter on a chain round jumps to that job. Transcript and Events can follow live journal tails. Diff starts with per-file stats; Enter opens one file's windowed hunks. Record intentionally limits itself to curated broker fields. Usage includes cached-input percentage, output budget, and continuation-chain totals.
@@ -72,5 +102,6 @@ While the TUI is running, terminal transitions, new stalls, recorded scope viola
 - Inline launcher and review input remains single-line; use `$VISUAL`/`$EDITOR` for multi-line text.
 - Common emoji, ZWJ sequences, flags, combining marks, and East Asian wide ranges are width-aware. Exotic grapheme clusters may occupy a different number of cells on a particular terminal.
 - The dashboard consumes already-redacted broker records, journals, audit rows, and diff artifacts. Coordinator ingestion extracts only bounded metadata and one shared-redactor-filtered tail label; it does not expose transcript viewing or ingest raw provider payloads.
+- Remote export is single-host and read-only. It is not a multi-tenant service and must remain behind the documented loopback listener and SSH tunnel.
 - Shared-worktree changed-file attribution remains best-effort, exactly as in the broker. Writer ownership shown by the TUI covers managed shared-worktree jobs, not unmanaged editors.
 - Dangerous launch overrides (`overrideWriter`, sandbox off, and forced approval) are intentionally absent. Use the explicit CLI/MCP paths with the required user authorization when those exceptional controls are necessary.
