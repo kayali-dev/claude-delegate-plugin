@@ -1,4 +1,4 @@
- delegate | fleet                         local | v0.22.0                   codex 42%   cursor off
+ delegate | fleet                            local | v?                     codex 42%   cursor off
 
 +- Managed jobs --------------------------------------------------------------------------- 1-2/2 -+
 | Job       Provi.. Model    Mode    Activity            Elapsed    Out/budget Chain    Badges     #

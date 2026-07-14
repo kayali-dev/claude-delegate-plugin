@@ -12,18 +12,48 @@ const COMMANDS = [
   'delegate-jobs', 'delegate-tui', 'delegate-usage', 'delegate-claude-usage'
 ];
 
+function installedShim() {
+  try {
+    const registryPath = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+    const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    const entries = registry.plugins?.['delegate-router@delegate-skill'] || [];
+    const entry = entries.find((item) => item.scope === 'user') || entries[0];
+    if (!entry?.installPath) return null;
+    const candidate = path.join(entry.installPath, 'bin', 'delegate-shim');
+    return fs.existsSync(candidate) ? path.resolve(candidate) : null;
+  } catch {
+    return null;
+  }
+}
+
+function cachedDelegateShim(link, target) {
+  if (!target) return false;
+  const resolved = path.resolve(path.dirname(link), target);
+  const parts = resolved.split(path.sep).filter(Boolean);
+  const cache = parts.findIndex((part, index) => part === '.claude' && parts[index + 1] === 'plugins' && parts[index + 2] === 'cache');
+  if (cache < 0 || parts.at(-2) !== 'bin' || parts.at(-1) !== 'delegate-shim') return false;
+  return parts.slice(cache + 3, -2).includes('delegate-router');
+}
+
 try {
   const binDir = path.dirname(fs.realpathSync(fileURLToPath(import.meta.url)));
-  const shim = path.join(binDir, 'delegate-shim');
+  const shim = installedShim() || path.join(binDir, 'delegate-shim');
   const userBin = process.env.DELEGATE_USER_BIN || path.join(os.homedir(), '.local', 'bin');
   fs.mkdirSync(userBin, { recursive: true });
   for (const name of COMMANDS) {
     const link = path.join(userBin, name);
+    let current = null;
     try {
-      if (fs.readlinkSync(link) === shim) continue;
-    } catch {}
+      const stat = fs.lstatSync(link);
+      if (!stat.isSymbolicLink()) continue;
+      current = fs.readlinkSync(link);
+      if (path.resolve(path.dirname(link), current) === path.resolve(shim)) continue;
+      if (!cachedDelegateShim(link, current)) continue;
+    } catch (error) {
+      if (error.code !== 'ENOENT') continue;
+    }
     try {
-      fs.rmSync(link, { force: true });
+      if (current != null) fs.unlinkSync(link);
       fs.symlinkSync(shim, link);
     } catch {}
   }

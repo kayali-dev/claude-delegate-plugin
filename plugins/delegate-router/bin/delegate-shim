@@ -16,22 +16,47 @@ if (name === 'delegate-shim') {
   process.exit(2);
 }
 
+function pluginVersion(directory, fallback = '?') {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
+    return typeof manifest.version === 'string' && manifest.version.trim() ? manifest.version.trim() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function installedTarget() {
   try {
     const registryPath = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
     const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
     const entries = registry.plugins?.['delegate-router@delegate-skill'] || [];
     const entry = entries.find((item) => item.scope === 'user') || entries[0];
-    if (!entry?.installPath) return null;
+    if (!entry?.installPath) return { target: null, reason: 'lookup' };
     const candidate = path.join(entry.installPath, 'bin', name);
-    return fs.existsSync(candidate) ? candidate : null;
+    if (fs.existsSync(candidate)) return { target: candidate, reason: null };
+    return {
+      target: null,
+      reason: 'missing-binary',
+      installedVersion: typeof entry.version === 'string' && entry.version.trim()
+        ? entry.version.trim() : pluginVersion(entry.installPath)
+    };
   } catch {
-    return null;
+    return { target: null, reason: 'lookup' };
   }
 }
 
 const fallback = path.join(path.dirname(self), name);
-const target = installedTarget() || (fs.existsSync(fallback) ? fallback : null);
+const installed = installedTarget();
+const fallbackExists = fs.existsSync(fallback);
+let target = installed.target;
+if (!target && fallbackExists) {
+  const siblingVersion = pluginVersion(path.dirname(path.dirname(fallback)));
+  const warning = installed.reason === 'missing-binary'
+    ? `delegate-shim: installed ${installed.installedVersion} lacks ${name}; falling back to sibling ${siblingVersion}`
+    : `delegate-shim: installed registry lookup failed; falling back to sibling ${siblingVersion}`;
+  console.error(warning);
+  target = fallback;
+}
 if (!target) {
   console.error(`delegate-shim: cannot resolve ${name}: plugin is not installed and no checkout sibling exists`);
   process.exit(127);

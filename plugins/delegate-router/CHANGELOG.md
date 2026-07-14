@@ -2,6 +2,12 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.23.2 — 2026-07-14
+
+- App-bar version now comes from package.json at startup (a hardcoded `v0.22.0` fallback in the view had been lying since the restyle, causing a cross-machine version-skew wild-goose chase); absent version renders `v?` so failure is visible.
+- delegate-shim warns on stderr before its sibling fallback (missing installed binary or failed registry lookup) — silent fallback masked broken installs.
+- delegate-bootstrap re-points stale delegate-* symlinks to the current version's shim each session and recreates dangling ones, so pruned old cache versions can no longer strand commands.
+
 ## 0.23.1 — 2026-07-14
 
 - Width-probe hardening for fast local terminals (bare Ghostty): strict in-order CPR parsing with resynchronization past malformed replies (previously a bad reply shifted width assignments across glyph families), explicit measured/parse/timeout outcomes in verbose mode, and `probeVersion` in the cache identity so stale verdicts invalidate on update — restores missing icons/glyphs on machines whose first probe ran under earlier builds.

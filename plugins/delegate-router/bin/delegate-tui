@@ -209,6 +209,14 @@ const NUDGE_PROMPT = 'Your final message described the deliverable instead of co
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DIFF_WINDOW = 12000;
 const CHOICE_FIELDS = new Set(['profile', 'provider', 'mode', 'effort']);
+const TUI_PACKAGE_VERSION = (() => {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    return typeof manifest.version === 'string' && manifest.version.trim() ? manifest.version.trim() : null;
+  } catch {
+    return null;
+  }
+})();
 
 const preferences = loadTuiPreferences();
 const widthIdentity = terminalWidthIdentity(process.env);
@@ -247,7 +255,7 @@ let quitting = false;
 let inputBatch = false;
 let inputDrawPending = false;
 const ui = {
-  screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, now: Date.now(), selectedIndex: 0, scroll: 0,
+  screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, version: TUI_PACKAGE_VERSION, now: Date.now(), selectedIndex: 0, scroll: 0,
   activeOnly: false, filter: '', help: false, input: null, confirm: null,
   status: '', statusKind: 'info', detailTab: 0, detailScroll: 0, transcriptSelection: null,
   diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', follow: true,

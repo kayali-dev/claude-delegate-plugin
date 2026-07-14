@@ -227,7 +227,9 @@ function commonOverlay(frame, ui, store = null) {
   const notify = ui.notifyEnabled === false ? 'notify:off' : 'notify:on';
   if (frame.status) frame.status.right = [remote?.enabled ? 'read-only remote' : '', notify, frame.status.right || '']
     .filter(Boolean).join(CHROME_SEPARATOR);
-  const hostCenter = `${ui.remote?.host || ui.hostLabel || 'local'}${CHROME_SEPARATOR}${ui.version || 'v0.22.0'}`;
+  const suppliedVersion = formatDisplayValue(ui.version).trim().replace(/^v/i, '');
+  const version = suppliedVersion ? `v${suppliedVersion}` : 'v?';
+  const hostCenter = `${ui.remote?.host || ui.hostLabel || 'local'}${CHROME_SEPARATOR}${version}`;
   frame.appBar = {
     product: 'delegate',
     breadcrumb: breadcrumbs(frame, ui),

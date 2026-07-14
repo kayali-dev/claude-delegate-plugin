@@ -1,4 +1,4 @@
- delegate | home                          local | v0.22.0                   codex 42%   cursor off
+ delegate | home                             local | v?                     codex 42%   cursor off
 
 +- Needs you ------------------------------------------------------------------------------ 1-2/2 -+
 |    Job         Attention                           Context                                   Age #

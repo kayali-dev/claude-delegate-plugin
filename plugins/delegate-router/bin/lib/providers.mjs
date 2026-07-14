@@ -569,7 +569,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.23.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.23.2' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1034,7 +1034,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.23.1' }
+      clientInfo: { name: 'delegate-router', version: '0.23.2' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })

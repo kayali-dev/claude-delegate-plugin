@@ -1,4 +1,4 @@
- delegate | sessions                      local | v0.22.0
+ delegate | sessions                         local | v?
 
 +- Metadata and redacted tail labels only | no transcript viewing ------------------------- 1-2/2 -+
 | Session   Project           State       Age  Jobs Writer     Last activity                       #

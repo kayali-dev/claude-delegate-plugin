@@ -25,6 +25,8 @@ import {
 } from '../bin/lib/tui/viewmodels.mjs';
 
 const NOW = 1_700_000_000_000;
+const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const packageVersion = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'package.json'), 'utf8')).version;
 
 function syntheticStore() {
   const active = {
@@ -69,6 +71,21 @@ function syntheticStore() {
     stats: { since: '7d', jobs: 2, groups: [{ provider: 'codex', model: 'sol', mode: 'implement', jobs: 2, successRate: 0.5, resumedJobs: 1, nudgeCount: 0, meanDurationMs: 1234, meanOutputTokens: 2000, budgetCount: 0, timeoutCount: 1, violationCount: 1 }] }
   };
 }
+
+test('app bar receives the package version from startup and never invents a release literal', () => {
+  const frame = dashboardViewModel(syntheticStore(), { now: NOW, version: packageVersion }, { width: 100, height: 30 });
+  const escapedVersion = packageVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  assert.match(frame.appBar.center, new RegExp(`v${escapedVersion}$`));
+
+  const absent = dashboardViewModel(syntheticStore(), { now: NOW }, { width: 100, height: 30 });
+  assert.match(absent.appBar.center, /v\?$/);
+
+  const viewSource = fs.readFileSync(path.join(pluginRoot, 'bin', 'lib', 'tui', 'viewmodels.mjs'), 'utf8');
+  assert.doesNotMatch(viewSource, /v\d+\.\d+\.\d+/, 'TUI view code contains no plausible hardcoded release');
+  const executable = fs.readFileSync(path.join(pluginRoot, 'bin', 'delegate-tui'), 'utf8');
+  assert.match(executable, /new URL\('\.\.\/package\.json', import\.meta\.url\)/);
+  assert.match(executable, /version: TUI_PACKAGE_VERSION/);
+});
 
 test('fleet rows sort active first, expose compact safety badges, and filter id/model/cwd', () => {
   const store = syntheticStore();
