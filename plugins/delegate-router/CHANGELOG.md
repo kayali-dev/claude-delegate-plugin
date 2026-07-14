@@ -2,6 +2,11 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.23.1 — 2026-07-14
+
+- Width-probe hardening for fast local terminals (bare Ghostty): strict in-order CPR parsing with resynchronization past malformed replies (previously a bad reply shifted width assignments across glyph families), explicit measured/parse/timeout outcomes in verbose mode, and `probeVersion` in the cache identity so stale verdicts invalidate on update — restores missing icons/glyphs on machines whose first probe ran under earlier builds.
+- Transcript plan checklists render via the tiered glyph system (✓ / spinner / ○ with fallbacks) instead of ASCII markers.
+
 ## 0.23.0 — 2026-07-14
 
 The TUI modernization release: fourteen owner-tested rounds on one Codex Sol thread.

@@ -771,8 +771,10 @@ function transcriptLineStyle(block, fragment) {
   if (kind === 'body' || kind === 'gap') return palette.body;
   if (kind === 'message-header') return block.role === 'user' ? palette.header : palette.accent;
   if (kind === 'tool-failed' || kind === 'notice-error' || kind === 'plan-failed') return palette.failed;
-  if (kind === 'tool-running' || kind === 'notice-warning' || kind === 'plan-entry') return palette.badgeWarn;
-  if (kind === 'plan-complete') return palette.positive;
+  if (kind === 'tool-running' || kind === 'notice-warning') return palette.badgeWarn;
+  if (kind === 'plan-complete') return palette.planCompleted;
+  if (kind === 'plan-active') return palette.planActive;
+  if (kind === 'plan-pending') return palette.planPending;
   if (kind === 'meta' || kind === 'notice') return palette.dim;
   return palette.accent;
 }

@@ -5,10 +5,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { detectColorMode, styleSequence } from '../bin/lib/tui/ansi.mjs';
 import {
+  accentFg,
   barBg,
   barFg,
   badgeWarn,
   createPalette,
+  dimFg,
   headerFg,
   selectionBg,
   setUiTheme,
@@ -30,6 +32,9 @@ test('dark-theme palette uses muted semantic 256-color tokens', () => {
   assert.deepEqual(palette.body, {});
   assert.deepEqual(palette.selection, { bg: selectionBg });
   assert.deepEqual(palette.selectedId, { bold: true });
+  assert.deepEqual(palette.planCompleted, { fg: statusRunning, dim: true });
+  assert.deepEqual(palette.planActive, { fg: accentFg });
+  assert.deepEqual(palette.planPending, { fg: dimFg, dim: true });
 });
 
 test('NO_COLOR removes palette colors but preserves structural bold and dim', () => {

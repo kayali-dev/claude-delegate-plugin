@@ -21,7 +21,7 @@ import {
   WrapCache
 } from '../bin/lib/tui/components.mjs';
 import { uiPalette } from '../bin/lib/tui/palette.mjs';
-import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
+import { CHROME_GLYPHS, configureGlyphs, GLYPH_TIERS, spinnerGlyph } from '../bin/lib/tui/glyphs.mjs';
 import { LogicalSearchIndex } from '../bin/lib/tui/search.mjs';
 import { CellGrid } from '../bin/lib/tui/screen.mjs';
 import {
@@ -30,6 +30,7 @@ import {
   transcriptToolPaths,
   wrapTranscriptBlock
 } from '../bin/lib/tui/transcript.mjs';
+import { WIDTH_PROBE_GRAPHEMES } from '../bin/lib/tui/width-probe.mjs';
 
 const AT = 1_700_000_000_000;
 
@@ -148,13 +149,54 @@ test('latest plan replaces earlier plans and provider noise never enters Transcr
     event(2, 'plan.updated', { plan: [{ step: 'old step', status: 'pending' }] }),
     event(3, 'plan.updated', { plan: [{ step: 'done step', status: 'completed' }, { step: 'next step', status: 'inProgress' }] }),
     event(4, 'scope.violation', { count: 2 })
-  ]);
+  ], { now: AT });
   assert.equal(blocks.filter((block) => block.kind === 'plan').length, 1);
   const rendered = blocks.map(formatTranscriptBlock).join('\n');
   assert.doesNotMatch(rendered, /old step|noise|provider\.event/);
-  assert.match(rendered, /\+ done step/);
-  assert.match(rendered, /~ next step/);
+  assert.match(rendered, new RegExp(`${CHROME_GLYPHS.planCompleted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} done step`));
+  assert.match(rendered, new RegExp(`${spinnerGlyph(AT).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} next step`));
   assert.match(rendered, /scope violation/);
+});
+
+test('plan checklist glyph tiers and spinner phase snapshot in Unicode and ASCII modes', (t) => {
+  t.after(() => configureGlyphs({ env: process.env, widths: {} }));
+  const snapshotDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), 'snapshots');
+  const cases = [
+    {
+      name: 'unicode',
+      env: { TERM: 'xterm-ghostty', LANG: 'en_US.UTF-8' },
+      widths: Object.fromEntries(WIDTH_PROBE_GRAPHEMES.map((glyph) => [glyph, 1])),
+      tier: GLYPH_TIERS.elegant
+    },
+    {
+      name: 'ascii',
+      env: { TERM: 'xterm-ghostty', LANG: 'en_US.UTF-8', DELEGATE_TUI_ASCII: '1' },
+      widths: {},
+      tier: GLYPH_TIERS.ascii
+    }
+  ];
+  for (const item of cases) {
+    configureGlyphs({ env: item.env, widths: item.widths });
+    const projector = new TranscriptProjector();
+    const [block] = projector.project([event(0, 'plan.updated', { plan: [
+      { step: 'completed item', status: 'completed' },
+      { step: 'active item', status: 'inProgress' },
+      { step: 'pending item', status: 'pending' },
+      { step: 'failed item', status: 'failed' }
+    ] }, AT)], { now: AT });
+    const wrapped = wrapTranscriptBlock(block, 52);
+    const rendered = wrapped.lines.join('\n');
+    const snapshot = fs.readFileSync(path.join(snapshotDirectory, `tui-transcript-plan-${item.name}.txt`), 'utf8').trimEnd();
+    assert.equal(rendered, snapshot);
+    assert.equal(CHROME_GLYPHS.planCompleted, item.tier.planCompleted);
+    assert.equal(CHROME_GLYPHS.planPending, item.tier.planPending);
+    assert.ok(wrapped.fragments.some((fragment) => fragment.spinnerChar === item.tier.spinnerFrames[0]), `${item.name} active entry is animated`);
+    const grid = new CellGrid(60, 10);
+    paintLogPane(grid, { x: 0, y: 0, width: 60, height: 10 }, {
+      virtual: true, entries: [block], formatEntry: formatTranscriptBlock, wrapEntry: wrapTranscriptBlock, follow: true
+    });
+    assert.ok(grid.spinnerCells.size > 0, `${item.name} plan spinner participates in the shared animation grid`);
+  }
 });
 
 test('search indexes coalesced blocks without wrapping history and maps one hit lazily', () => {

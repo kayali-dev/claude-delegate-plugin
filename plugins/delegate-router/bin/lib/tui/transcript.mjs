@@ -259,11 +259,19 @@ function planEntries(event) {
   return text ? text.split(/\r?\n/).filter(Boolean).map((entry) => ({ text: entry, status: 'pending' })) : [];
 }
 
-function planGlyph(status) {
-  if (SUCCESS.test(status)) return '+';
-  if (FAILURE.test(status)) return 'x';
-  if (/progress|running|active/i.test(status)) return '~';
-  return '-';
+function planStatusKind(status) {
+  if (SUCCESS.test(status)) return 'complete';
+  if (FAILURE.test(status)) return 'failed';
+  if (/progress|running|active/i.test(status)) return 'active';
+  return 'pending';
+}
+
+function planGlyph(status, activeGlyph) {
+  const kind = planStatusKind(status);
+  if (kind === 'complete') return CHROME_GLYPHS.planCompleted;
+  if (kind === 'failed') return CHROME_GLYPHS.failure;
+  if (kind === 'active') return activeGlyph || CHROME_GLYPHS.spinner;
+  return CHROME_GLYPHS.planPending;
 }
 
 function noticeText(event) {
@@ -428,10 +436,11 @@ export class TranscriptProjector {
       const tool = base.kind === 'tool' && base.tool.running
         ? { ...base.tool, glyph: spinnerGlyph(now), durationMs: Number.isFinite(now) && base.tool.startedAt && now >= base.tool.startedAt ? now - base.tool.startedAt : null }
         : base.tool;
+      const planActive = base.kind === 'plan' && base.entries?.some((entry) => planStatusKind(entry.status) === 'active');
       return {
         ...base,
         ...(tool ? { tool } : {}),
-        ...((base.streaming || tool?.running) ? { spinner: spinnerGlyph(now) } : {}),
+        ...((base.streaming || tool?.running || planActive) ? { spinner: spinnerGlyph(now) } : {}),
         timestamp: formatTimestamp(base.at, { mode: options.timestampMode, now }),
         expanded: base.kind === 'tool' && expanded.has(base.tool.key),
         gapAfter: index < this.base.length - 1
@@ -488,7 +497,16 @@ export function transcriptLogicalLines(block) {
   }
   if (block.kind === 'plan') {
     const lines = [{ text: '| plan', rightText: formatDisplayValue(block.timestamp), kind: 'plan-header', nowrap: true }];
-    for (const entry of block.entries || []) lines.push({ text: `${planGlyph(entry.status)} ${formatDisplayValue(entry.text)}`, kind: FAILURE.test(entry.status) ? 'plan-failed' : SUCCESS.test(entry.status) ? 'plan-complete' : 'plan-entry', indent: '  ' });
+    for (const entry of block.entries || []) {
+      const status = planStatusKind(entry.status);
+      const glyph = planGlyph(entry.status, block.spinner);
+      lines.push({
+        text: `${glyph} ${formatDisplayValue(entry.text)}`,
+        kind: `plan-${status}`,
+        indent: '  ',
+        ...(status === 'active' ? { spinner: glyph } : {})
+      });
+    }
     if (block.gapAfter) lines.push({ text: '', kind: 'gap' });
     return lines;
   }

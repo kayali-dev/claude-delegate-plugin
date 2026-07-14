@@ -22,7 +22,13 @@ import {
   splitGraphemes,
   setGraphemeWidthOverrides
 } from '../bin/lib/tui/width.mjs';
-import { probeTerminalWidths, terminalWidthIdentity, WIDTH_PROBE_GRAPHEMES } from '../bin/lib/tui/width-probe.mjs';
+import {
+  formatWidthProbeResult,
+  probeTerminalWidths,
+  terminalWidthIdentity,
+  WIDTH_PROBE_GRAPHEMES,
+  WIDTH_PROBE_VERSION
+} from '../bin/lib/tui/width-probe.mjs';
 
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-diag-'));
@@ -32,6 +38,28 @@ function temporaryDirectory(t) {
 
 function outputCapture(columns = 60, rows = 6) {
   return { text: '', columns, rows, isTTY: true, write(value) { this.text += String(value); return true; } };
+}
+
+async function deliverProbeChunks(chunks, options = {}) {
+  const input = new EventEmitter();
+  const writes = [];
+  const screen = {
+    rows: 20, input,
+    writeOutput(value, meta) {
+      writes.push({ value, meta });
+      if (meta.context !== 'probe' || !String(value).includes('\u001b[6n')) return;
+      queueMicrotask(async () => {
+        for (const chunk of chunks) {
+          input.emit('data', chunk);
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      });
+    }
+  };
+  const result = await probeTerminalWidths({
+    screen, input, env: {}, probes: options.probes || ['A', 'B', 'C'], timeoutMs: options.timeoutMs || 30
+  });
+  return { result, writes };
 }
 
 test('width classification is conservative and runtime probe overrides are exact', (t) => {
@@ -54,6 +82,7 @@ test('terminal identity distinguishes tmux from the same outer terminal', () => 
   assert.notEqual(terminalWidthIdentity(outer), terminalWidthIdentity({ ...outer, TMUX: '/tmp/tmux-1/default,1,0' }));
   assert.match(terminalWidthIdentity({ ...outer, TMUX: 'present' }), /mux=tmux/);
   assert.match(terminalWidthIdentity({ TERM: 'tmux-256color', TERM_PROGRAM: 'ghostty' }), /mux=tmux/);
+  assert.match(terminalWidthIdentity(outer), new RegExp(`probeVersion=${WIDTH_PROBE_VERSION}(?:\\||$)`));
 });
 
 test('width probe covers every elegant chrome family before it may be selected', () => {
@@ -147,6 +176,59 @@ test('runtime CPR probe measures the interposed terminal and cached/off modes do
   const off = await probeTerminalWidths({ screen, input, mode: 'off' });
   assert.equal(off.source, 'off');
   assert.equal(writes.length, 0);
+});
+
+test('runtime CPR probe parses coalesced, fragmented, and noisy delivery without losing replies', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const coalesced = await deliverProbeChunks(['\u001b[20;2R\u001b[20;3R\u001b[20;2R']);
+  assert.deepEqual(coalesced.result.widths, { A: 1, B: 2, C: 1 });
+  assert.deepEqual(coalesced.result.outcomes.map((entry) => entry.status), ['measured', 'measured', 'measured']);
+
+  const fragmented = await deliverProbeChunks(['\u001b[20;', '2R\u001b[20;3', 'R\u001b[20;2R']);
+  assert.deepEqual(fragmented.result.widths, { A: 1, B: 2, C: 1 });
+
+  const noisy = await deliverProbeChunks([
+    '\u001b[I\u001b[<64;20;4Mterminal chatter\u001b[20;2R',
+    '\u001b[O\u001b[20;3R\u001b[<65;20;4M\u001b[20;2R'
+  ]);
+  assert.deepEqual(noisy.result.widths, { A: 1, B: 2, C: 1 });
+  assert.deepEqual(noisy.result.outcomes.map((entry) => entry.status), ['measured', 'measured', 'measured']);
+});
+
+test('runtime CPR probe isolates malformed and missing replies by ordered outcome', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const malformed = await deliverProbeChunks(['\u001b[20;watR\u001b[20;3R\u001b[20;2R']);
+  assert.deepEqual(malformed.result.widths, { B: 2, C: 1 });
+  assert.deepEqual(malformed.result.outcomes.map((entry) => entry.status), ['parse', 'measured', 'measured']);
+
+  const missing = await deliverProbeChunks(['\u001b[20;2R\u001b[20;3R'], { probes: ['A', 'B', 'C', 'D'], timeoutMs: 10 });
+  assert.deepEqual(missing.result.widths, { A: 1, B: 2 });
+  assert.deepEqual(missing.result.outcomes.map((entry) => entry.status), ['measured', 'measured', 'timeout', 'timeout']);
+});
+
+test('verbose width-probe result reports measured, parse, and timeout family outcomes', () => {
+  const message = formatWidthProbeResult({
+    source: 'probe', elapsedMs: 12.5,
+    outcomes: [
+      { grapheme: '─', status: 'measured', width: 1 },
+      { grapheme: '┃', status: 'parse' },
+      { grapheme: '▁', status: 'timeout' }
+    ]
+  });
+  assert.match(message, /borders=measured-width\(1\)/);
+  assert.match(message, /scrollbar=unproven\(parse\)/);
+  assert.match(message, /sparkline=unproven\(timeout\)/);
+});
+
+test('the full elegant glyph set proves under one coalesced CPR delivery', async (t) => {
+  t.after(() => configureGlyphs({ env: process.env, widths: {} }));
+  t.after(clearGraphemeWidthOverrides);
+  const replies = WIDTH_PROBE_GRAPHEMES.map(() => '\u001b[20;2R').join('');
+  const { result } = await deliverProbeChunks([replies], { probes: WIDTH_PROBE_GRAPHEMES });
+  assert.equal(Object.keys(result.widths).length, WIDTH_PROBE_GRAPHEMES.length);
+  configureGlyphs({ env: { TERM: 'xterm-ghostty', LANG: 'en_US.UTF-8' }, widths: result.widths });
+  assert.equal(glyphConfiguration().mode, 'probed-elegant');
+  for (const [key, value] of Object.entries(GLYPH_TIERS.elegant)) assert.deepEqual(CHROME_GLYPHS[key], value, key);
 });
 
 test('suspect graphemes are isolated by CUP so adversarial width disagreement cannot move neighboring ASCII', () => {
