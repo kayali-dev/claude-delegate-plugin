@@ -168,7 +168,8 @@ test('read-only endpoints match existing store readers and reject unsafe job ids
 
   const healthResponse = await authorized(`${running.baseUrl}/v1/health`);
   const health = await healthResponse.json();
-  assert.equal(health.version, '0.21.0');
+  const manifestVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+  assert.equal(health.version, manifestVersion);
   assert.ok(health.uptime >= 0);
   assert.equal(healthResponse.headers.get('cache-control'), 'no-store');
   assert.equal(healthResponse.headers.get('access-control-allow-origin'), null);
