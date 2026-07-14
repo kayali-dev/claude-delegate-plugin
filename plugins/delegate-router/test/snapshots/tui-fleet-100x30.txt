@@ -27,4 +27,4 @@
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- co:42% cu:off  writers:1                        notify:on · Enter detail  G groups  a active  / fi
+ co:42% cu:off  writers:1                        notify:on · Enter detail  G groups  S sessions  a

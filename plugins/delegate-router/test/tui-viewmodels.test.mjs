@@ -151,7 +151,7 @@ test('stats and launcher frames use seven days and show the exact dry-run packet
 
 test('help lists mouse, viewport, and edge navigation alongside every action group', () => {
   const keys = HELP_ITEMS.map((item) => item.key).join(' ');
-  for (const key of ['wheel', 'PgUp', 'PgDn', 'Home', 'End', 'G / p', 'j/k', '1…6', 's / r / R', 'c / v / w', 'q']) {
+  for (const key of ['wheel', 'PgUp', 'PgDn', 'Home', 'End', 'G / S / p', 'j/k', '1…6', 's / r / R', 'c / v / w', 'q']) {
     assert.match(keys, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   const frame = fleetViewModel(syntheticStore(), { now: NOW, help: true }, { width: 80, height: 24 });

@@ -18,6 +18,7 @@ From a source checkout, use `node bin/delegate-tui`. `DELEGATE_STATE_FILE`, `DEL
 
 - **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider/model/mode, status and phase, heartbeat age, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, and current shared-worktree writer ownership.
 - **Groups** aggregates jobs by `groupId`, with member/running/terminal/stalled counts, newest activity, and the all-terminal barrier state. Enter opens that group's members in the ordinary fleet row format.
+- **Sessions** is a read-only, best-effort overview of Claude Code coordinator sessions around the managed fleet. It reads only the newest 64 KiB of at most 200 recently modified `~/.claude/projects/<encoded-cwd>/*.jsonl` files, shows active/idle age, project cwd, approximate size, one redacted activity label, active managed-job count by exact cwd, and existing managed writer ownership. It never opens a transcript. Enter filters Fleet to the selected cwd; `Esc` clears the Fleet filter.
 - **Job detail** has Transcript, Diff, Record, Usage, and Events tabs. A sixth Chain tab appears for a root with children or a resumed child; it orders rounds and shows changed-file count, verification exit, objective/suspicion markers, and the first outcome line. Enter on a chain round jumps to that job. Transcript and Events can follow live journal tails. Diff starts with per-file stats; Enter opens one file's windowed hunks. Record intentionally limits itself to curated broker fields. Usage includes cached-input percentage, output budget, and continuation-chain totals.
 - **Providers** shows enabled state, allowance windows, colored warning/avoid bands, deep-health `lastVerified` data when available, and active writer jobs grouped by cwd.
 - **Stats** renders the never-pruned audit-log aggregation for the last seven days. `/` incrementally filters the already-loaded audit rows without touching the store.
@@ -35,7 +36,7 @@ Transcript, Events, and an opened Diff file support case-insensitive `/` search 
 | `Enter` | Open a job/diff file or edit a launcher field |
 | `Esc` | Back or close the current overlay/file view |
 | `a` | Fleet active-only toggle |
-| `G` | Open/close Groups |
+| `G`, `S` | Open/close Groups or coordinator Sessions |
 | `/` | Fleet filter; detail-pane search; Stats loaded-row filter |
 | `n`, `N` | Next/previous active search match; `n` otherwise keeps its narration-nudge behavior |
 | `p`, `t`, `N` | Providers, stats, launcher (`N` opens Launcher when no search is active) |
@@ -67,8 +68,9 @@ While the TUI is running, terminal transitions, new stalls, recorded scope viola
 ## Limitations
 
 - The TUI supports macOS and Linux terminals, not Windows. SGR button press and wheel input are supported; drag/motion gestures are not.
+- Claude coordinator-session discovery is best-effort because the Claude Code JSONL format and encoded project-directory convention are not stable interfaces. Missing, unreadable, truncated, malformed, or oversized transcript content is skipped; a missing/unreadable projects directory produces one explanatory line and does not affect managed-job views. `DELEGATE_CLAUDE_PROJECTS_DIR` overrides the projects root and `DELEGATE_SESSION_ACTIVE_SECONDS` overrides the default 300-second active window. Files are rescanned every ten seconds and on project-directory watch events when available.
 - Inline launcher and review input remains single-line; use `$VISUAL`/`$EDITOR` for multi-line text.
 - Common emoji, ZWJ sequences, flags, combining marks, and East Asian wide ranges are width-aware. Exotic grapheme clusters may occupy a different number of cells on a particular terminal.
-- The dashboard consumes already-redacted broker records, journals, audit rows, and diff artifacts. It does not ingest coordinator-session messages or raw provider payloads.
+- The dashboard consumes already-redacted broker records, journals, audit rows, and diff artifacts. Coordinator ingestion extracts only bounded metadata and one shared-redactor-filtered tail label; it does not expose transcript viewing or ingest raw provider payloads.
 - Shared-worktree changed-file attribution remains best-effort, exactly as in the broker. Writer ownership shown by the TUI covers managed shared-worktree jobs, not unmanaged editors.
 - Dangerous launch overrides (`overrideWriter`, sandbox off, and forced approval) are intentionally absent. Use the explicit CLI/MCP paths with the required user authorization when those exceptional controls are necessary.

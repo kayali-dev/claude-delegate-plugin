@@ -2,6 +2,12 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.21.0 — 2026-07-14
+
+- Added a read-only, best-effort Claude coordinator Sessions screen with bounded transcript-tail parsing, redacted last-activity labels, active/idle classification, exact-cwd managed-job counts, and existing writer-lock attribution.
+- Added ten-second and filesystem-watch refreshes, a 200-session newest-first scan cap, missing-directory degradation, and Enter-to-Fleet cwd filtering without transcript viewing.
+- Runtime/plugin versions intentionally remain unchanged until owner interactive validation and release.
+
 ## 0.20.0 — 2026-07-13
 
 - Added group barrier/member screens and a conditional sixth Chain detail tab with round outcomes, changed-file counts, verification exits, result markers, and direct round jumps.

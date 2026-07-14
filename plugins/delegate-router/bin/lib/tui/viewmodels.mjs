@@ -1,5 +1,7 @@
+import path from 'node:path';
 import { jobNeedsReconciliation } from '../control.mjs';
 import { uiPalette as palette } from './palette.mjs';
+import { classifySession, correlateSessions } from './sessions.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
@@ -12,7 +14,7 @@ export const HELP_ITEMS = Object.freeze([
   { key: 'Home/End, g', description: 'Jump to the start or end of the focused pane' },
   { key: 'Enter / Esc', description: 'Open or edit / go back or close an overlay' },
   { key: 'a / /', description: 'Toggle active jobs / filter or search the focused pane' },
-  { key: 'G / p / t / N', description: 'Groups / providers / seven-day stats / launcher' },
+  { key: 'G / S / p / t / N', description: 'Groups / coordinator sessions / providers / seven-day stats / launcher' },
   { key: '[/], 1…6', description: 'Cycle detail tabs / open a specific tab' },
   { key: 'f', description: 'Toggle follow mode in Transcript or Events' },
   { key: 's / r / R', description: 'Steer / resume / release a paused start' },
@@ -223,7 +225,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     status: statusOverride || {
       style: palette.bar,
       segments: [...allowance, { text: ` ${locks} `, style: store.writerLocks?.length ? palette.badgeWarn : palette.dim }],
-      right: ui.groupId ? 'Enter detail  Esc groups  / filter' : 'Enter detail  G groups  a active  / filter  p providers  t stats  N new'
+      right: ui.groupId ? 'Enter detail  Esc groups  / filter' : 'Enter detail  G groups  S sessions  a active  / filter  p providers  t stats  N new'
     },
     meta: {
       visibleJobIds: entries.map(({ job }) => job.id),
@@ -624,6 +626,109 @@ export function providersViewModel(store, ui = {}, viewport = {}) {
   return commonOverlay(frame, ui);
 }
 
+function sessionColumns(width) {
+  const columns = width >= 90 ? [
+    { key: 'id', title: 'Session', width: 10, selectedStyle: palette.selectedId },
+    { key: 'project', title: 'Project', width: 18 },
+    { key: 'state', title: 'State', width: 8 },
+    { key: 'age', title: 'Age', width: 8, align: 'right' },
+    { key: 'jobs', title: 'Jobs', width: 6, align: 'right' },
+    { key: 'writer', title: 'Writer', width: 11 },
+    { key: 'activity', title: 'Last activity', width: Math.max(14, width - 61) }
+  ] : [
+    { key: 'id', title: 'Session', width: 10, selectedStyle: palette.selectedId },
+    { key: 'project', title: 'Project', width: Math.max(9, width - 43) },
+    { key: 'state', title: 'State', width: 8 },
+    { key: 'jobs', title: 'Jobs', width: 6, align: 'right' },
+    { key: 'writer', title: 'Writer', width: 10 }
+  ];
+  return columns;
+}
+
+export function sessionsViewModel(store, ui = {}, viewport = {}) {
+  const { width, height } = viewportOf(viewport);
+  const scan = store.sessionScan || { status: 'loading', available: null, scanned: 0, totalFiles: 0, capped: false };
+  const now = nowOf(ui);
+  const correlated = correlateSessions(store.sessions || [], store.jobs || [], store.writerLocks || [])
+    .map((session) => ({ ...session, ...classifySession(session.mtimeMs, { now, activeSeconds: session.activeSeconds }) }))
+    .sort((left, right) => Number(right.active) - Number(left.active)
+      || Number(right.mtimeMs || 0) - Number(left.mtimeMs || 0) || String(left.id).localeCompare(String(right.id)));
+  const selected = Math.max(0, Math.min(correlated.length - 1, Number(ui.sessionSelection || 0)));
+  const status = errorStatus(ui) || { text: 'Enter filter Fleet to cwd  Esc fleet/clear filter  S close  ↑/↓ select  ? help  q quit' };
+  if (scan.status === 'loading') {
+    return commonOverlay({
+      width, height, screen: 'sessions',
+      title: { text: 'Claude coordinator sessions · best-effort overview', right: 'scanning' },
+      panes: [{ rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) }, title: 'Sessions', content: { kind: 'log', lines: ['Scanning the Claude Code projects directory…'], follow: false, scroll: 0 } }],
+      status,
+      meta: { sessionIds: [], selectedSessionCwd: null, selected: 0 }
+    }, ui);
+  }
+  if (!scan.available) {
+    return commonOverlay({
+      width, height, screen: 'sessions',
+      title: { text: 'Claude coordinator sessions · best-effort overview', right: 'unavailable' },
+      panes: [{ rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) }, title: 'Sessions unavailable; managed-job views remain fully available', content: { kind: 'log', lines: [scan.error || 'Claude projects directory is missing or unreadable.'], follow: false, scroll: 0 } }],
+      status,
+      meta: { sessionIds: [], selectedSessionCwd: null, selected: 0 }
+    }, ui);
+  }
+  if (!correlated.length) {
+    return commonOverlay({
+      width, height, screen: 'sessions',
+      title: { text: 'Claude coordinator sessions · best-effort overview', right: '0 sessions' },
+      panes: [{ rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) }, title: 'Sessions', content: { kind: 'log', lines: ['No Claude Code session files were found.'], follow: false, scroll: 0 } }],
+      status,
+      meta: { sessionIds: [], selectedSessionCwd: null, selected: 0 }
+    }, ui);
+  }
+  const innerWidth = Math.max(1, width - 2);
+  const columns = sessionColumns(innerWidth);
+  const rowAt = (index) => {
+    const session = correlated[index];
+    if (!session) return null;
+    const writer = session.writerJobId ? `W:${String(session.writerJobId).slice(-6)}` : '—';
+    const values = {
+      id: String(session.id || '').slice(0, 8),
+      project: path.basename(session.cwd || '') || session.cwd || '—',
+      state: { text: session.active ? 'active' : 'idle', style: session.active ? palette.running : palette.dim },
+      age: duration(session.ageMs),
+      jobs: { text: String(session.activeDelegateJobs || 0), style: session.activeDelegateJobs ? palette.accent : palette.dim },
+      writer: { text: writer, style: session.writerJobId ? palette.badgeWarn : palette.dim },
+      activity: session.lastActivity || '(unreadable)'
+    };
+    return { id: session.id, cells: columns.map((column) => values[column.key]) };
+  };
+  const selectedSession = correlated[selected];
+  const tableHeight = Math.max(3, height - 5);
+  const detailHeight = Math.max(3, height - tableHeight - 2);
+  const cap = scan.capped ? ` · newest ${scan.scanned}/${scan.totalFiles}` : '';
+  const frame = {
+    width, height, screen: 'sessions',
+    title: { text: 'Claude coordinator sessions · best-effort overview', right: `${correlated.length} sessions${cap}` },
+    panes: [
+      {
+        rect: { x: 0, y: 1, width, height: tableHeight },
+        title: 'Metadata and redacted tail labels only · no transcript viewing',
+        content: { kind: 'table', columns, rows: [], rowCount: correlated.length, rowAt, selected, scroll: ui.sessionScroll || 0 }
+      },
+      {
+        rect: { x: 0, y: 1 + tableHeight, width, height: detailHeight },
+        title: 'Selected project path',
+        content: { kind: 'log', lines: [`${selectedSession.cwd} · approx ${number(selectedSession.size)} bytes`], follow: false, scroll: 0 }
+      }
+    ],
+    status,
+    meta: {
+      sessionIds: correlated.map((session) => session.id),
+      sessionCwds: correlated.map((session) => session.cwd),
+      selectedSessionCwd: selectedSession.cwd,
+      selected
+    }
+  };
+  return commonOverlay(frame, ui);
+}
+
 export function statsViewModel(store, ui = {}, viewport = {}) {
   const { width, height } = viewportOf(viewport);
   const stats = store.stats || { since: '7d', jobs: 0, groups: [] };
@@ -713,6 +818,7 @@ export function createViewModel(store, ui = {}, viewport = {}) {
   if (ui.screen === 'groups') return groupsViewModel(store, ui, viewport);
   if (ui.screen === 'group-members') return groupMembersViewModel(store, ui, viewport);
   if (ui.screen === 'providers') return providersViewModel(store, ui, viewport);
+  if (ui.screen === 'sessions') return sessionsViewModel(store, ui, viewport);
   if (ui.screen === 'stats') return statsViewModel(store, ui, viewport);
   if (ui.screen === 'launcher') return launcherViewModel(store, ui, viewport);
   return fleetViewModel(store, ui, viewport);

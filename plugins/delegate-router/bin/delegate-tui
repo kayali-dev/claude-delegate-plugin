@@ -99,6 +99,7 @@ const ui = {
   diffSelection: 0, diffFile: null, diffWindow: null, eventFilter: '', follow: true,
   chainSelection: 0, search: null, detailReturn: 'fleet',
   groupSelection: 0, groupScroll: 0, groupId: null, groupMemberSelection: 0, groupMemberScroll: 0,
+  sessionSelection: 0, sessionScroll: 0,
   providerScroll: 0, statsSelection: 0, statsScroll: 0, statsFilter: '', notifyEnabled: notifier.enabled,
   launcher: {
     fieldIndex: 0, profile: '<none>', provider: 'codex', model: 'auto',
@@ -709,6 +710,9 @@ function move(direction) {
   } else if (ui.screen === 'group-members') {
     const count = viewModel().meta.visibleJobIds.length;
     ui.groupMemberSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.groupMemberSelection + direction));
+  } else if (ui.screen === 'sessions') {
+    const count = viewModel().meta.sessionIds.length;
+    ui.sessionSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.sessionSelection + direction));
   } else if (ui.screen === 'providers') ui.providerScroll = Math.max(0, Math.min(providerScrollMax(), ui.providerScroll + direction));
   else if (ui.screen === 'stats') {
     const count = viewModel().meta.visibleStatsCount || 0;
@@ -747,6 +751,8 @@ function moveEdge(end) {
     ui.groupSelection = end ? Math.max(0, (store.groups?.length || 0) - 1) : 0;
   } else if (ui.screen === 'group-members') {
     ui.groupMemberSelection = end ? Math.max(0, model.meta.visibleJobIds.length - 1) : 0;
+  } else if (ui.screen === 'sessions') {
+    ui.sessionSelection = end ? Math.max(0, model.meta.sessionIds.length - 1) : 0;
   } else if (ui.screen === 'providers') {
     ui.providerScroll = end ? providerScrollMax() : 0;
   } else if (ui.screen === 'stats') {
@@ -760,7 +766,11 @@ function moveEdge(end) {
 function goBack() {
   if (ui.help) ui.help = false;
   else if (ui.search) clearSearch();
-  else if (ui.screen === 'detail' && ui.diffFile) {
+  else if (ui.screen === 'fleet' && ui.filter) {
+    ui.filter = '';
+    ui.selectedIndex = 0;
+    ui.scroll = 0;
+  } else if (ui.screen === 'detail' && ui.diffFile) {
     ui.diffFile = null;
     ui.diffWindow = null;
     ui.detailScroll = 0;
@@ -804,6 +814,7 @@ function handleClick(event) {
   if (ui.screen === 'fleet') ui.selectedIndex = row;
   else if (ui.screen === 'groups') ui.groupSelection = row;
   else if (ui.screen === 'group-members') ui.groupMemberSelection = row;
+  else if (ui.screen === 'sessions') ui.sessionSelection = row;
   else if (ui.screen === 'stats') ui.statsSelection = row;
   else if (ui.screen === 'launcher') ui.launcher.fieldIndex = row;
   else if (ui.screen === 'detail' && ui.detailTab === 1 && !ui.diffFile) ui.diffSelection = row;
@@ -850,6 +861,15 @@ function handleKey(key) {
     draw();
     return;
   }
+  if (key === 'S') {
+    if (ui.screen === 'detail') void source.selectJob(null);
+    ui.screen = ui.screen === 'sessions' ? 'fleet' : 'sessions';
+    ui.sessionSelection = 0;
+    ui.sessionScroll = 0;
+    clearStatus();
+    draw();
+    return;
+  }
   if (key === 'p') {
     if (ui.screen === 'detail') void source.selectJob(null);
     ui.screen = ui.screen === 'providers' ? 'fleet' : 'providers'; clearStatus(); draw(); return;
@@ -885,6 +905,20 @@ function handleKey(key) {
   }
   if (ui.screen === 'stats') {
     if (key === '/') { beginInput('stats-filter', 'Filter loaded audit rows', ui.statsFilter); return; }
+    return;
+  }
+  if (ui.screen === 'sessions') {
+    if (key === 'enter') {
+      const cwd = viewModel().meta.selectedSessionCwd;
+      if (cwd) {
+        ui.filter = cwd;
+        ui.selectedIndex = 0;
+        ui.scroll = 0;
+        ui.screen = 'fleet';
+        setStatus(`Fleet filtered to coordinator cwd: ${cwd}`);
+        draw();
+      }
+    }
     return;
   }
   if (ui.screen === 'fleet') {

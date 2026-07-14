@@ -10,11 +10,12 @@ import { fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
 import { loadJob, saveJob } from '../bin/lib/state.mjs';
 
 async function isolated(fn) {
-  const names = ['DELEGATE_STATE_FILE', 'DELEGATE_ENABLED_PROVIDERS'];
+  const names = ['DELEGATE_STATE_FILE', 'DELEGATE_ENABLED_PROVIDERS', 'DELEGATE_CLAUDE_PROJECTS_DIR'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-source-'));
   process.env.DELEGATE_STATE_FILE = path.join(root, 'state', 'usage.json');
   process.env.DELEGATE_ENABLED_PROVIDERS = 'codex,cursor';
+  process.env.DELEGATE_CLAUDE_PROJECTS_DIR = path.join(root, 'claude-projects');
   try { return await fn(root); }
   finally {
     for (const name of names) {
@@ -154,6 +155,7 @@ test('close tears down polls, debounce work, watchers, and deferred hydration im
   await hydration;
   const elapsed = performance.now() - started;
   assert.equal(source.pollTimer, null);
+  assert.equal(source.sessionPollTimer, null);
   assert.equal(source.debounceTimer, null);
   assert.deepEqual(source.watchers, []);
   assert.equal(source.immediates.size, 0);

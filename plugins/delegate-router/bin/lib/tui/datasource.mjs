@@ -28,6 +28,7 @@ import {
   warningPercentFor
 } from '../state.mjs';
 import { aggregateAuditStats, readAuditLog } from '../stats.mjs';
+import { claudeProjectsDirectory, scanClaudeSessions } from './sessions.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DEFAULT_MAX_EVENTS = 5000;
@@ -120,6 +121,8 @@ function cloneState(state) {
       allowance: { ...provider.allowance, windows: [...provider.allowance.windows] }
     })),
     writerLocks: state.writerLocks.map((lock) => ({ ...lock })),
+    sessions: state.sessions.map((session) => ({ ...session })),
+    sessionScan: { ...state.sessionScan },
     profiles: [...state.profiles],
     groups: state.groups.map((group) => ({ ...group, memberIds: [...group.memberIds] })),
     stats: { ...state.stats, groups: [...state.stats.groups] }
@@ -133,6 +136,16 @@ export class DelegateDataSource extends EventEmitter {
     this.debounceMs = Math.max(0, Number(options.debounceMs ?? 80));
     this.maxEvents = Math.max(100, Number(options.maxEvents || DEFAULT_MAX_EVENTS));
     this.watchEnabled = options.watch !== false;
+    this.sessionPollMs = Math.max(100, Number(options.sessionPollMs || 10000));
+    this.sessionProjectsDir = path.resolve(String(options.projectsDir || claudeProjectsDirectory(options.env || process.env)));
+    this.sessionScanOptions = {
+      env: options.env || process.env,
+      projectsDir: this.sessionProjectsDir,
+      ...(options.activeSeconds == null ? {} : { activeSeconds: options.activeSeconds }),
+      ...(options.maxSessions == null ? {} : { maxSessions: options.maxSessions }),
+      ...(options.sessionTailBytes == null ? {} : { tailBytes: options.sessionTailBytes }),
+      ...(options.sessionSnippetWidth == null ? {} : { snippetWidth: options.sessionSnippetWidth })
+    };
     this.journalCursors = new Map();
     this.hydratedJobs = new Set();
     this.hydrations = new Map();
@@ -141,6 +154,8 @@ export class DelegateDataSource extends EventEmitter {
     this.followJobId = null;
     this.watchers = [];
     this.pollTimer = null;
+    this.sessionPollTimer = null;
+    this.sessionWatcherInstalled = false;
     this.debounceTimer = null;
     this.pendingKinds = new Set();
     this.immediates = new Map();
@@ -150,10 +165,11 @@ export class DelegateDataSource extends EventEmitter {
     this.closed = false;
     this.recordsDigest = null;
     this.metadataStamp = null;
-    this.metrics = { refreshes: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
+    this.metrics = { refreshes: 0, sessionScans: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
     this.state = {
       jobs: [], eventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
       usage: null, providers: [], writerLocks: [], profiles: [], groups: [], audit: [], metadataReady: false,
+      sessions: [], sessionScan: { status: 'loading', available: null, projectsDir: this.sessionProjectsDir, scanned: 0, totalFiles: 0, capped: false, error: null },
       stats: { since: '7d', jobs: 0, groups: [] }, updatedAt: null, error: null
     };
   }
@@ -181,14 +197,20 @@ export class DelegateDataSource extends EventEmitter {
     if (this.watchEnabled) this.installWatchers();
     this.pollTimer = setInterval(() => this.scheduleRefresh('all'), this.pollMs);
     this.pollTimer.unref?.();
-    void this.yieldTurn().then(() => { if (!this.closed) this.hydrateMetadata({ force: true }); });
+    this.sessionPollTimer = setInterval(() => this.scheduleRefresh('sessions'), this.sessionPollMs);
+    this.sessionPollTimer.unref?.();
+    void this.yieldTurn().then(() => {
+      if (this.closed) return;
+      this.hydrateMetadata({ force: true });
+      this.refreshSessions({ force: true });
+    });
     return this;
   }
 
   installWatchers() {
-    const add = (target, kind, accept = null) => {
+    const add = (target, kind, accept = null, watchOptions = {}) => {
       try {
-        const watcher = fs.watch(target, { persistent: false }, (_event, filename) => {
+        const watcher = fs.watch(target, { persistent: false, ...watchOptions }, (_event, filename) => {
           if (accept && !accept(String(filename || ''))) return;
           this.scheduleRefresh(kind);
         });
@@ -201,6 +223,25 @@ export class DelegateDataSource extends EventEmitter {
     if (!add(jobsDir(), 'jobs', jobChange)) add(dataDir(), 'jobs', (name) => !name || name === 'jobs');
     add(statePath(), 'metadata');
     add(auditLogPath(), 'metadata');
+    this.installSessionWatcher(add);
+  }
+
+  installSessionWatcher(addWatcher = null) {
+    if (!this.watchEnabled || this.sessionWatcherInstalled || this.closed) return false;
+    const add = addWatcher || ((target, kind, accept = null, watchOptions = {}) => {
+      try {
+        const watcher = fs.watch(target, { persistent: false, ...watchOptions }, (_event, filename) => {
+          if (accept && !accept(String(filename || ''))) return;
+          this.scheduleRefresh(kind);
+        });
+        watcher.on('error', () => this.scheduleRefresh(kind));
+        this.watchers.push(watcher);
+        return true;
+      } catch { return false; }
+    });
+    this.sessionWatcherInstalled = add(this.sessionProjectsDir, 'sessions', null, { recursive: true })
+      || add(this.sessionProjectsDir, 'sessions');
+    return this.sessionWatcherInstalled;
   }
 
   scheduleRefresh(kind = 'all') {
@@ -213,6 +254,7 @@ export class DelegateDataSource extends EventEmitter {
       this.pendingKinds.clear();
       if (kinds.has('all') || kinds.has('jobs')) this.refreshRecords();
       if (kinds.has('all') || kinds.has('metadata')) this.hydrateMetadata();
+      if (kinds.has('sessions')) this.refreshSessions();
     }, this.debounceMs);
     this.debounceTimer.unref?.();
   }
@@ -307,6 +349,26 @@ export class DelegateDataSource extends EventEmitter {
       this.state = { ...this.state, error: error.message, updatedAt: Date.now() };
       this.emit('warning', error);
     }
+    return this.getState();
+  }
+
+  refreshSessions(options = {}) {
+    if (this.closed) return this.getState();
+    this.metrics.sessionScans += 1;
+    const scan = scanClaudeSessions(this.sessionScanOptions);
+    const { sessions, ...summary } = scan;
+    const sessionScan = { status: scan.available ? 'ready' : 'unavailable', ...summary };
+    const previous = this.state.sessionScan;
+    const changed = options.force || JSON.stringify([
+      sessionScan.status, sessionScan.available, sessionScan.scanned, sessionScan.totalFiles, sessionScan.capped, sessionScan.error,
+      ...sessions.map((session) => [session.id, session.cwd, session.mtimeMs, session.size, session.lastActivity, session.active])
+    ]) !== JSON.stringify([
+      previous.status, previous.available, previous.scanned, previous.totalFiles, previous.capped, previous.error,
+      ...this.state.sessions.map((session) => [session.id, session.cwd, session.mtimeMs, session.size, session.lastActivity, session.active])
+    ]);
+    this.state = { ...this.state, sessions, sessionScan, updatedAt: Date.now() };
+    if (scan.available) this.installSessionWatcher();
+    if (changed) this.emit('change', this.getState());
     return this.getState();
   }
 
@@ -437,8 +499,11 @@ export class DelegateDataSource extends EventEmitter {
     }
     this.watchers = [];
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.sessionPollTimer) clearInterval(this.sessionPollTimer);
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.pollTimer = null;
+    this.sessionPollTimer = null;
+    this.sessionWatcherInstalled = false;
     this.debounceTimer = null;
     this.pendingKinds.clear();
     this.reconcileAttempts.clear();
