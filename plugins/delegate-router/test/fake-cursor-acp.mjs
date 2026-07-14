@@ -54,6 +54,7 @@ lines.on('line', (line) => {
       { content: 'Search repo for the old name', priority: 'medium', status: 'pending' },
       { content: 'Rename and update call sites', priority: 'high', status: 'pending' }
     ] } } });
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'agent_thought_chunk' } } });
     count += 1;
     if (count === 1 && process.env.FAKE_CURSOR_WRITE === '1') {
       fs.writeFileSync('new-file.txt', 'new file\n');

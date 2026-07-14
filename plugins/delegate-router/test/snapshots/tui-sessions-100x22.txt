@@ -1,22 +1,22 @@
- Claude coordinator sessions · best-effort overview                                      2 sessions
-┌─ Metadata and redacted tail labels only · no transcript viewing ─────────────────────────────────┐
-│Session   Project           State       Age  Jobs Writer     Last activity                        │
-│11111111  alpha             active      20s     1 W:123456   assistant: implementation complete   │
-│22222222  beta              idle     10m00s     0 —          user: review the result              │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌─ Selected project path ──────────────────────────────────────────────────────────────────────────┐
-│/work/alpha · approx 13k bytes                                                                    │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
- Enter filter Fleet to cwd  Esc fleet/clear filter  S close  ↑/↓ select  ? help  q quit   notify:on
+ delegate | sessions                      local | v0.22.0
+
++- Metadata and redacted tail labels only | no transcript viewing ------------------------- 1-2/2 -+
+| Session   Project           State       Age  Jobs Writer     Last activity                       #
+|>11111111  alpha             active      20s     1 W:123456   assistant: implementation complete  #
+| 22222222  beta              idle     10m00s     0 -          user: review the result             #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
++--------------------------------------------------------------------------------------------------+
+
++- Selected project path ------------------------------------------------------------------ 1-1/1 -+
+| /work/alpha | approx 13k bytes                                                                   #
++--------------------------------------------------------------------------------------------------+
+ Up/Dn select Enter fleet by cwd  | Esc back ? help q quit                                notify:on

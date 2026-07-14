@@ -1,30 +1,30 @@
- Delegate fleet                                                                              2 jobs
-┌─ Managed jobs ───────────────────────────────────────────────────────────────────────────────────┐
-│Job       Provide Model        Mode    Status/phase    Beat Elapsed    Out/budget Chain    Badges │
-│C:1234567 codex   gpt-5.4-sol  impleme running/worki     5s   2m05s 2.0k/8.0k 25% ↳654321  S1,L,RF│
-│C:abcdef0 cursor  composer-2.5 review  completed      1m00s   7m20s           120 —        ?      │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
- co:42% cu:off  writers:1                        notify:on · Enter detail  G groups  S sessions  a
+ delegate | fleet                         local | v0.22.0                   codex 42%   cursor off
+
++- Managed jobs --------------------------------------------------------------------------- 1-2/2 -+
+| Job       Provi.. Model    Mode    Activity            Elapsed    Out/budget Chain    Badges     #
+|>C:1234567 codex   gpt-5... imple.. | working | 4s        2m05s 2.0k/8.0k 25% >654321   S1 L RF   #
+| C:abcdef0 cursor  compos.. review  + completed           7m20s           120 -         ?         #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
++--------------------------------------------------------------------------------------------------+
+ Up/Dn select Enter detail / filter  | a active o sort z density  | N new G . notify:on | writers:1

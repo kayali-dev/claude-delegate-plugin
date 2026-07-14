@@ -17,7 +17,10 @@ const LOCK_WAIT_MS = 10;
 const LOCK_TIMEOUT_MS = 5000;
 const SENSITIVE_KEY = /(?:authorization|cookie|credential|password|private.?key|secret|token)/i;
 const SENSITIVE_VALUE = /(?:sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+\/-]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|CREDENTIAL|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH_?TOKEN|REFRESH_?TOKEN)[A-Z0-9_]*)["']?\s*[:=]\s*["']?[^"'\s,;]+|:\/\/[^/\s:@]+:[^@\s/]+@)/gi;
-const USAGE_TOKEN_KEY = /^(?:(?:max|observed)?(?:input|output|total|cached|reasoning|prompt|completion|billable|context)tokens?(?:count|usage)?|tokens?(?:count|usage))$/i;
+// Usage counters often compose several semantic atoms (for example
+// cachedInputTokens or reasoningOutputTokens). Keep those numeric counters
+// inspectable without weakening the blanket treatment of auth/access tokens.
+const USAGE_TOKEN_KEY = /^(?:(?:(?:max|observed|cached|reasoning|billable|prompt|completion|input|output|total|context)+tokens?(?:count|usage)?)|tokens?(?:count|usage))$/i;
 const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WRITE_MODES = new Set(['implement', 'verify']);
@@ -90,7 +93,11 @@ function writePrivate(file, value) {
 
 export function redact(value, key = '', maxLength = MAX_STRING) {
   const normalizedKey = key.replace(/[_\-\s]/g, '');
-  if (SENSITIVE_KEY.test(key) && !(typeof value === 'number' && USAGE_TOKEN_KEY.test(normalizedKey))) return '[REDACTED]';
+  if (SENSITIVE_KEY.test(key)) {
+    const usageKey = USAGE_TOKEN_KEY.test(normalizedKey);
+    const usageObject = usageKey && value && typeof value === 'object' && !Array.isArray(value);
+    if (!(usageKey && typeof value === 'number') && !usageObject) return '[REDACTED]';
+  }
   if (typeof value === 'string') {
     const replaced = value.replace(SENSITIVE_VALUE, '[REDACTED]');
     return replaced.length > maxLength ? `${replaced.slice(0, maxLength)}\n[TRUNCATED ${replaced.length - maxLength} chars]` : replaced;
@@ -1392,7 +1399,7 @@ function writerLockPath(options) {
 
 export function launchManagedJob(options) {
   if (options.dryRun === true) return previewManagedJob(options);
-  const prepared = prepareManagedOptions(options);
+  const prepared = prepareManagedOptions(options, { reportLint: options.reportLint });
   const provider = validateProvider(prepared.provider);
   const launchOptions = {
     ...prepared,
@@ -1616,7 +1623,8 @@ export function resumeManagedJob(id, options) {
     autoNudge: options.autoNudge ?? parent.autoNudge ?? false,
     reportSchema: options.reportSchema ?? parent.reportSchema ?? null,
     overrideLimit: options.overrideLimit,
-    overrideWriter: options.overrideWriter
+    overrideWriter: options.overrideWriter,
+    reportLint: options.reportLint
   });
 }
 

@@ -1,0 +1,10 @@
+| user                                      22:13:21
+  Please keep the words intact.
+
+| assistant | | streaming                   22:13:22
+  Now loading the remaining files.
+
+$ node --test test/unit.test.mjs | +              2s
+
+| plan                                      22:13:26
+  + Verify the focused behavior

@@ -16,10 +16,15 @@ import { loadJob } from './lib/state.mjs';
 import {
   compareVirtualPositions,
   invalidateWrapCache,
+  paneContentRect,
   paintFrame,
   scrollVirtualLog,
+  settleVirtualFollow,
+  stepVirtualLogSelection,
   tableRowIndexAt,
   tabIndexAtColumn,
+  virtualLogEntryIndexAt,
+  virtualLogScrollToEntry,
   virtualSearchPosition,
   virtualLogBottomPosition
 } from './lib/tui/components.mjs';
@@ -29,9 +34,20 @@ import { connectRemoteDatasource } from './lib/tui/remote-datasource.mjs';
 import { editTextInEditor } from './lib/tui/editor.mjs';
 import { BufferedInput } from './lib/tui/input.mjs';
 import { NotificationDispatcher } from './lib/tui/notifications.mjs';
+import { copyToClipboard } from './lib/tui/clipboard.mjs';
+import { formatDisplayValue } from './lib/tui/display.mjs';
+import { CHROME_SEPARATOR, configureGlyphs } from './lib/tui/glyphs.mjs';
+import { analyzeTuiDiagnostics, TuiFlightRecorder } from './lib/tui/diagnostics.mjs';
+import { setUiTheme } from './lib/tui/palette.mjs';
+import { loadTuiPreferences, saveTuiPreferences } from './lib/tui/preferences.mjs';
 import { LogicalSearchIndex, nextSearchMatch } from './lib/tui/search.mjs';
 import { Screen } from './lib/tui/screen.mjs';
+import { advanceSpinnerGrid, SpinnerAnimator } from './lib/tui/spinner.mjs';
+import { formatTranscriptBlock, normalizeJobPaths, transcriptToolPaths } from './lib/tui/transcript.mjs';
+import { TerminalOutputCapture } from './lib/tui/terminal-output.mjs';
 import { splitGraphemes } from './lib/tui/width.mjs';
+import { setGraphemeWidthOverrides } from './lib/tui/width.mjs';
+import { formatWidthProbeResult, probeTerminalWidths, terminalWidthIdentity, widthProbeMode, WIDTH_PROBE_GRAPHEMES } from './lib/tui/width-probe.mjs';
 import { createViewModel, nudgeEligible } from './lib/tui/viewmodels.mjs';
 import { routeTask } from './lib/router.mjs';
 import { auditUsageBands } from './lib/stats.mjs';
@@ -39,6 +55,7 @@ import { auditUsageBands } from './lib/stats.mjs';
 const USAGE = `Usage: delegate-tui [--job <id>]
        delegate-tui --serve [--port <number>]
        delegate-tui --connect <url> [--token-file <path>] [--job <id>]
+       delegate-tui --analyze <diagnostic-directory>
 
 Live ANSI dashboard for Delegate Router's local or read-only remote managed-job store.
 
@@ -49,10 +66,14 @@ Options:
   --port <number>     Serve port (default 4263)
   --connect <url>     Connect to one read-only Delegate Router host
   --token-file <path> Read the remote bearer token from this file
+  --analyze <path>    Replay DELEGATE_TUI_DIAG logs without requiring a TTY
 
 The TUI requires an interactive macOS or Linux terminal. It honors
 DELEGATE_STATE_FILE and the ordinary delegate-router provider configuration.
-DELEGATE_CONNECT_TOKEN supplies the client token when --token-file is omitted.`;
+DELEGATE_CONNECT_TOKEN supplies the client token when --token-file is omitted.
+DELEGATE_TUI_WIDTH_PROBE=off|verbose controls terminal width probing.
+DELEGATE_TUI_ASCII=1 forces the conservative ASCII glyph tier.
+DELEGATE_TUI_DIAG=<path> records replayable terminal bytes and intended frames.`;
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
@@ -65,7 +86,7 @@ function argumentError(message) {
   process.exit(2);
 }
 
-const cli = { initialJobId: null, serve: false, port: 4263, connect: null, tokenFile: null };
+const cli = { initialJobId: null, serve: false, port: 4263, connect: null, tokenFile: null, analyze: null };
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index];
   if (arg === '--serve') cli.serve = true;
@@ -86,12 +107,27 @@ for (let index = 0; index < args.length; index += 1) {
     const value = args[++index];
     if (!value) argumentError('--token-file requires a path');
     cli.tokenFile = value;
+  } else if (arg === '--analyze') {
+    const value = args[++index];
+    if (!value) argumentError('--analyze requires a diagnostic directory');
+    cli.analyze = value;
   } else argumentError(`unknown option: ${arg}`);
 }
 if (cli.serve && cli.connect) argumentError('--serve and --connect are mutually exclusive');
 if (cli.serve && cli.initialJobId) argumentError('--job cannot be combined with --serve');
 if (!cli.serve && args.includes('--port')) argumentError('--port requires --serve');
 if (!cli.connect && cli.tokenFile) argumentError('--token-file requires --connect');
+if (cli.analyze && (cli.serve || cli.connect || cli.initialJobId || args.includes('--port') || cli.tokenFile)) argumentError('--analyze cannot be combined with interactive or server options');
+
+if (cli.analyze) {
+  try {
+    console.log(analyzeTuiDiagnostics(cli.analyze));
+    process.exit(0);
+  } catch (error) {
+    console.error(`delegate-tui: diagnostic analysis failed: ${error.message}`);
+    process.exit(1);
+  }
+}
 
 if (cli.serve) {
   try {
@@ -174,25 +210,55 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DIFF_WINDOW = 12000;
 const CHOICE_FIELDS = new Set(['profile', 'provider', 'mode', 'effort']);
 
-const screen = new Screen();
+const preferences = loadTuiPreferences();
+const widthIdentity = terminalWidthIdentity(process.env);
+const widthProbeCache = { ...(preferences.widthProbeCache || {}) };
+const cachedCandidate = widthProbeCache[widthIdentity] || null;
+// Probe families grow as chrome evolves. An older partial cache must not
+// silently gate newly added elegant glyphs forever; refresh it once instead.
+const cachedWidths = cachedCandidate?.widths && WIDTH_PROBE_GRAPHEMES.every((glyph) => Object.hasOwn(cachedCandidate.widths, glyph))
+  ? cachedCandidate : null;
+if (cachedWidths?.widths) setGraphemeWidthOverrides(cachedWidths.widths);
+configureGlyphs({ env: process.env, widths: cachedWidths?.widths || {} });
+setUiTheme(preferences.theme);
+let diagnosticRecorder = null;
+if (process.env.DELEGATE_TUI_DIAG) {
+  try { diagnosticRecorder = new TuiFlightRecorder(process.env.DELEGATE_TUI_DIAG); }
+  catch (error) {
+    console.error(`delegate-tui: cannot start diagnostic recorder: ${error.message}`);
+    process.exit(1);
+  }
+}
+const outputCapture = new TerminalOutputCapture({
+  limit: 100,
+  onEntry(entry) {
+    addStatusHistory(entry.text, entry.stream === 'stderr' ? 'error' : 'info', entry.stream);
+  }
+});
+const screen = new Screen({ outputCapture, diagnostics: diagnosticRecorder });
 const source = cli.connect
   ? connectRemoteDatasource({ baseUrl: cli.connect, token: connectToken })
   : tailAllJobs();
 let store = source.getState();
 const notifier = new NotificationDispatcher();
+notifier.enabled = preferences.notifications;
 notifier.observe(store);
 let quitting = false;
 let inputBatch = false;
 let inputDrawPending = false;
 const ui = {
-  screen: initialJobId ? 'detail' : 'fleet', jobId: initialJobId, now: Date.now(), selectedIndex: 0, scroll: 0,
+  screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, now: Date.now(), selectedIndex: 0, scroll: 0,
   activeOnly: false, filter: '', help: false, input: null, confirm: null,
-  status: '', statusKind: 'info', detailTab: 0, detailScroll: 0,
-  diffSelection: 0, diffFile: null, diffWindow: null, eventFilter: '', follow: true,
-  chainSelection: 0, search: null, detailReturn: 'fleet',
+  status: '', statusKind: 'info', detailTab: 0, detailScroll: 0, transcriptSelection: null,
+  diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', follow: true,
+  expandedTools: new Set(), expandedEvents: new Set(), eventSelection: null,
+  chainSelection: 0, search: null, detailReturn: initialJobId ? 'dashboard' : 'fleet',
+  dashboardFocus: 0, dashboardAttentionSelection: 0, dashboardFeedSelection: 0, focusedPane: 0,
   groupSelection: 0, groupScroll: 0, groupId: null, groupMemberSelection: 0, groupMemberScroll: 0,
   sessionSelection: 0, sessionScroll: 0,
   providerScroll: 0, statsSelection: 0, statsScroll: 0, statsFilter: '', notifyEnabled: notifier.enabled,
+  timestampMode: preferences.timestampMode, fleetDensity: preferences.fleetDensity, fleetSort: 'recency', theme: preferences.theme,
+  statusHistory: [], statusHistoryOpen: false,
   remote: store.remote || null,
   launcher: {
     fieldIndex: 0, profile: '<none>', provider: 'codex', model: 'auto',
@@ -202,6 +268,19 @@ const ui = {
   }
 };
 let routeAdviceTimer = null;
+let renderedGrid = null;
+const spinnerAnimator = new SpinnerAnimator({
+  onTick(now) {
+    if (quitting || !renderedGrid) return;
+    const next = advanceSpinnerGrid(renderedGrid, now);
+    if (!next) {
+      spinnerAnimator.setActive(false);
+      return;
+    }
+    renderedGrid = next;
+    screen.render(next);
+  }
+});
 
 function viewport() {
   return { width: screen.columns, height: screen.rows };
@@ -218,18 +297,44 @@ function draw() {
     return;
   }
   const frame = viewModel();
-  screen.render(paintFrame(frame));
+  renderedGrid = paintFrame(frame);
+  screen.render(renderedGrid);
+  spinnerAnimator.setActive(renderedGrid.spinnerCells.size > 0);
   if (!source.readOnly && frame.meta?.reconcileJobIds?.length) void source.reconcileVisibleJobs(frame.meta.reconcileJobIds, { limit: 5 });
 }
 
+function addStatusHistory(message, kind = 'info', stream = null) {
+  const rendered = formatDisplayValue(message);
+  if (!rendered) return;
+  ui.statusHistory.push({ at: Date.now(), message: rendered, kind, stream });
+  if (ui.statusHistory.length > 20) ui.statusHistory.splice(0, ui.statusHistory.length - 20);
+}
+
 function setStatus(message, kind = 'info') {
-  ui.status = String(message || '');
+  ui.status = formatDisplayValue(message);
   ui.statusKind = kind;
+  addStatusHistory(ui.status, kind);
 }
 
 function clearStatus() {
   ui.status = '';
   ui.statusKind = 'info';
+}
+
+function persistPreferences() {
+  try {
+    saveTuiPreferences({
+      theme: ui.theme,
+      notifications: ui.notifyEnabled,
+      timestampMode: ui.timestampMode,
+      fleetDensity: ui.fleetDensity,
+      widthProbeCache
+    });
+    return true;
+  } catch (error) {
+    setStatus(`Could not save TUI preferences: ${formatDisplayValue(error?.message)}`, 'error');
+    return false;
+  }
 }
 
 function refresh() {
@@ -241,6 +346,7 @@ function quit(code = 0) {
   if (quitting) return;
   quitting = true;
   clearInterval(clock);
+  spinnerAnimator.stop();
   if (routeAdviceTimer) clearTimeout(routeAdviceTimer);
   source.close();
   bufferedInput.close();
@@ -297,7 +403,8 @@ function setSearchQuery(value, options = {}) {
   if (ui.search.matches.length) {
     const pane = searchablePane();
     if (pane) {
-      ui.detailScroll = virtualSearchPosition(pane.content, ui.search.matches[ui.search.current], Math.max(1, screen.columns - 2));
+      ui.detailScroll = virtualSearchPosition(pane.content, ui.search.matches[ui.search.current], detailViewport().width);
+      if (pane.pane === 'transcript') ui.transcriptSelection = ui.search.matches[ui.search.current].entry;
       ui.follow = false;
     }
   }
@@ -344,7 +451,8 @@ function jumpSearch(direction) {
   ui.search.current = nextSearchMatch(ui.search.current, ui.search.matches.length, direction);
   const pane = searchablePane();
   if (pane) {
-    ui.detailScroll = virtualSearchPosition(pane.content, ui.search.matches[ui.search.current], Math.max(1, screen.columns - 2));
+    ui.detailScroll = virtualSearchPosition(pane.content, ui.search.matches[ui.search.current], detailViewport().width);
+    if (pane.pane === 'transcript') ui.transcriptSelection = ui.search.matches[ui.search.current].entry;
     ui.follow = false;
   }
   draw();
@@ -390,7 +498,7 @@ function submitReviewRound(jobId, findings) {
     draw();
     return;
   }
-  runMutation(() => reviewRoundManagedJob(jobId, { prompt: String(findings).trim() }), (child) => `Review round resumed as ${child.id}`);
+  runMutation(() => reviewRoundManagedJob(jobId, { prompt: String(findings).trim(), reportLint: false }), (child) => `Review round resumed as ${child.id}`);
 }
 
 function beginReviewRound(job) {
@@ -437,6 +545,7 @@ function launchOptions() {
     ...(launcher.profile && launcher.profile !== '<none>' ? { profile: launcher.profile } : {}),
     ...(launcher.effort && launcher.effort !== '<default>' ? { effort: launcher.effort } : {}),
     prompt: launcher.prompt,
+    reportLint: false,
     cwd: process.cwd(),
     ...(allowedPaths.length ? { allowedPaths } : {}),
     ...(verifyCommand ? { verify: { command: verifyCommand } } : {}),
@@ -536,7 +645,7 @@ function commitInput() {
     }, (result) => `Steer queued at revision ${result.revision}`);
   } else if (input.action === 'resume') {
     if (!value.trim()) setStatus('Resume text is required', 'error');
-    else runMutation(() => resumeManagedJob(input.jobId, { prompt: value.trim() }), (job) => `Resumed as ${job.id}`);
+    else runMutation(() => resumeManagedJob(input.jobId, { prompt: value.trim(), reportLint: false }), (job) => `Resumed as ${job.id}`);
   } else if (input.action === 'review-round') {
     submitReviewRound(input.jobId, value);
   }
@@ -643,13 +752,18 @@ function openJobDetail(job, returnScreen = ui.screen) {
   if (!job) return;
   ui.screen = 'detail';
   ui.jobId = job.id;
-  ui.detailReturn = returnScreen === 'group-members' ? 'group-members' : 'fleet';
+  ui.detailReturn = ['dashboard', 'group-members', 'fleet'].includes(returnScreen) ? returnScreen : 'fleet';
   ui.detailTab = 0;
   ui.detailScroll = 0;
+  ui.transcriptSelection = null;
   ui.chainSelection = 0;
   ui.diffSelection = 0;
   ui.diffFile = null;
+  ui.diffPaths = [];
   ui.diffWindow = null;
+  ui.expandedTools = new Set();
+  ui.expandedEvents = new Set();
+  ui.eventSelection = null;
   ui.follow = true;
   clearSearch();
   clearStatus();
@@ -665,17 +779,30 @@ function openDiffFile() {
     draw();
     return;
   }
+  openDiffPaths([path], path);
+}
+
+function openDiffPaths(paths, label = null) {
+  const selected = [...new Set(normalizeJobPaths(paths, selectedJob()?.cwd).filter(Boolean))];
+  if (!selected.length) {
+    setStatus('The focused tool has no journaled file paths', 'error');
+    draw();
+    return;
+  }
   const diff = store.diffsByJob?.[ui.jobId] || '';
-  const filtered = filterDiffPaths(diff, [path]);
-  ui.diffFile = path;
+  const filtered = filterDiffPaths(diff, selected);
+  ui.detailTab = 1;
+  ui.diffPaths = selected;
+  ui.diffFile = label || (selected.length === 1 ? selected[0] : `${selected.length} tool paths`);
   ui.diffWindow = sliceDiff(filtered, { offset: 0, maxChars: DIFF_WINDOW });
   ui.detailScroll = 0;
+  clearSearch();
   draw();
 }
 
 function pageDiff(direction) {
   if (!ui.diffFile) return;
-  const diff = filterDiffPaths(store.diffsByJob?.[ui.jobId] || '', [ui.diffFile]);
+  const diff = filterDiffPaths(store.diffsByJob?.[ui.jobId] || '', ui.diffPaths?.length ? ui.diffPaths : [ui.diffFile]);
   const offset = direction > 0
     ? ui.diffWindow?.nextOffset
     : Math.max(0, Number(ui.diffWindow?.offset || 0) - DIFF_WINDOW);
@@ -708,10 +835,10 @@ function beginRevert(job) {
       ...plan.skipped.map((entry) => `SKIP ${entry.path}: ${entry.reason}`),
       ...plan.conflicts.map((entry) => `CONFLICT ${entry.path || '<inventory>'}: ${entry.reason}`)
     ];
-    if (lines.length > 18) lines.splice(17, lines.length - 17, `… ${lines.length - 17} more plan rows; inspect with delegate-jobs revert --dry-run for the full list`);
+    if (lines.length > 18) lines.splice(17, lines.length - 17, `... ${lines.length - 17} more plan rows; inspect with delegate-jobs revert --dry-run for the full list`);
     const expected = job.id.slice(-4);
     lines.push(`Type the last 4 job-id characters to apply this safe subset: ${expected}`);
-    ui.confirm = { action: 'revert', jobId: job.id, expected, value: '', danger: true, title: `Revert plan · ${job.id}`, lines, label: 'Suffix' };
+    ui.confirm = { action: 'revert', jobId: job.id, expected, value: '', danger: true, title: `Revert plan${CHROME_SEPARATOR}${job.id}`, lines, label: 'Suffix' };
     draw();
   } catch (error) {
     const typed = normalizeBrokerError(error, { defaultCode: 'INTERNAL' });
@@ -737,7 +864,7 @@ function detailAction(key) {
     }, (result) => `Release queued at revision ${result.revision}`);
   } else if (key === 'n') {
     if (!nudgeEligible(job)) setStatus('Nudge requires a terminal read-mode job flagged resultSuspect', 'error');
-    else runMutation(() => resumeManagedJob(job.id, { prompt: NUDGE_PROMPT }), (child) => `Nudge resumed as ${child.id}`);
+    else runMutation(() => resumeManagedJob(job.id, { prompt: NUDGE_PROMPT, reportLint: false }), (child) => `Nudge resumed as ${child.id}`);
   } else if (key === 'c') beginCancel(job);
   else if (key === 'v') beginRevert(job);
   else if (key === 'w') beginReviewRound(job);
@@ -745,12 +872,128 @@ function detailAction(key) {
 }
 
 function detailViewport(model = viewModel()) {
-  const content = model.panes?.[0]?.content;
+  const pane = model.panes?.[0];
+  const rect = pane ? paneContentRect(pane, { scrollbar: ['table', 'log', 'text'].includes(pane.content?.kind) }) : null;
   return {
-    content,
-    height: Math.max(1, screen.rows - 5),
-    width: Math.max(1, screen.columns - 2)
+    content: pane?.content,
+    height: Math.max(1, rect?.height || 1),
+    width: Math.max(1, rect?.width || 1)
   };
+}
+
+function focusedTranscriptBlock() {
+  if (ui.screen !== 'detail' || ui.detailTab !== 0) return null;
+  const entries = viewModel().panes?.[0]?.content?.entries || [];
+  if (!entries.length) return null;
+  const index = ui.follow
+    ? entries.length - 1
+    : Math.max(0, Math.min(entries.length - 1, Number(ui.transcriptSelection ?? ui.detailScroll?.entry ?? ui.detailScroll ?? 0)));
+  return entries[index] || null;
+}
+
+function focusedClipboardValue() {
+  const model = viewModel();
+  if (ui.screen === 'fleet' || ui.screen === 'group-members') {
+    const id = model.meta?.selectedJobId;
+    return id ? { value: formatDisplayValue(id), label: 'job id' } : null;
+  }
+  if (ui.screen !== 'detail') return null;
+  if (ui.detailTab === 0) {
+    const block = focusedTranscriptBlock();
+    if (!block) return null;
+    if (block.kind === 'tool' && block.tool.command) return { value: formatDisplayValue(block.tool.command), label: 'command' };
+    if (block.kind === 'tool' && block.tool.paths?.length) {
+      const paths = normalizeJobPaths(block.tool.paths, selectedJob()?.cwd);
+      if (paths[0]) return { value: paths[0], label: 'file path' };
+    }
+    return { value: formatDisplayValue(block.text) || formatTranscriptBlock(block), label: 'transcript block' };
+  }
+  if (ui.detailTab === 1) {
+    if (ui.diffFile) return { value: formatDisplayValue(ui.diffPaths?.[0] || ui.diffFile), label: 'file path' };
+    const file = model.meta?.diffFiles?.[ui.diffSelection];
+    return file ? { value: formatDisplayValue(file), label: 'file path' } : null;
+  }
+  return null;
+}
+
+function copyFocused() {
+  const focused = focusedClipboardValue();
+  if (!focused?.value || !copyToClipboard(focused.value)) return false;
+  setStatus(`Copied ${focused.label} to clipboard`);
+  draw();
+  return true;
+}
+
+function toggleToolBlock(block) {
+  if (block?.kind !== 'tool') return false;
+  const expanded = new Set(ui.expandedTools);
+  if (expanded.has(block.tool.key)) expanded.delete(block.tool.key);
+  else expanded.add(block.tool.key);
+  ui.expandedTools = expanded;
+  rebuildPaneSearch();
+  const { content, width, height } = detailViewport();
+  if (content?.virtual && ui.transcriptSelection != null) {
+    ui.detailScroll = virtualLogScrollToEntry(content, ui.transcriptSelection, width, height);
+  }
+  draw();
+  return true;
+}
+
+function toggleFocusedTool() {
+  return toggleToolBlock(focusedTranscriptBlock());
+}
+
+function focusedEventBlock() {
+  if (ui.screen !== 'detail' || ui.detailTab !== 4) return null;
+  const entries = viewModel().panes?.[0]?.content?.entries || [];
+  if (!entries.length) return null;
+  const index = ui.follow ? entries.length - 1
+    : Math.max(0, Math.min(entries.length - 1, Number(ui.eventSelection ?? ui.detailScroll?.entry ?? 0)));
+  return entries[index] || null;
+}
+
+function toggleFocusedEvent() {
+  const block = focusedEventBlock();
+  if (!block) return false;
+  const expanded = new Set(ui.expandedEvents);
+  if (expanded.has(block.key)) expanded.delete(block.key);
+  else expanded.add(block.key);
+  ui.expandedEvents = expanded;
+  rebuildPaneSearch();
+  const { content, width, height } = detailViewport();
+  if (content?.virtual && ui.eventSelection != null) {
+    const target = virtualLogScrollToEntry(content, ui.eventSelection, width, height);
+    const settled = settleVirtualFollow(content, target, width, height, { selectedEntry: ui.eventSelection });
+    ui.detailScroll = settled.scroll;
+    ui.follow = settled.follow;
+  }
+  draw();
+  return true;
+}
+
+function openFocusedToolDiff() {
+  const block = focusedTranscriptBlock();
+  const job = selectedJob();
+  if (block?.kind !== 'tool' || !job) return false;
+  const paths = transcriptToolPaths(block, job.cwd);
+  if (!paths.length) return false;
+  openDiffPaths(paths, paths.length === 1 ? paths[0] : `${paths.length} tool paths`);
+  return true;
+}
+
+function jumpTranscriptToEvents() {
+  const block = focusedTranscriptBlock();
+  if (!block) return false;
+  const targetSeq = Number(block.seqStart || block.seqEnd || 0);
+  ui.detailTab = 4;
+  ui.detailScroll = 0;
+  ui.follow = false;
+  clearSearch();
+  const events = store.eventsByJob?.[ui.jobId] || [];
+  const index = events.findIndex((event) => Number(event.seq || 0) >= targetSeq);
+  ui.detailScroll = { entry: index < 0 ? Math.max(0, events.length - 1) : index, line: 0 };
+  draw();
+  return true;
 }
 
 function moveVirtualDetail(content, direction, width, height) {
@@ -761,12 +1004,9 @@ function moveVirtualDetail(content, direction, width, height) {
     ui.follow = false;
   }
   const next = scrollVirtualLog(content, ui.detailScroll, direction, width);
-  if (direction > 0 && compareVirtualPositions(next, bottom) >= 0) {
-    ui.detailScroll = bottom;
-    ui.follow = true;
-  } else {
-    ui.detailScroll = next;
-  }
+  const settled = settleVirtualFollow(content, next, width, height);
+  ui.detailScroll = settled.scroll;
+  ui.follow = settled.follow;
 }
 
 function providerScrollMax() {
@@ -775,8 +1015,17 @@ function providerScrollMax() {
   return Math.max(0, (store.writerLocks?.length || 0) - visible);
 }
 
-function move(direction) {
-  if (ui.screen === 'fleet') {
+function move(direction, options = {}) {
+  if (ui.screen === 'dashboard') {
+    const model = viewModel();
+    if (ui.dashboardFocus === 1) {
+      const count = model.meta.feedJobIds.length;
+      ui.dashboardFeedSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.dashboardFeedSelection + direction));
+    } else {
+      const count = model.meta.attentionJobIds.length;
+      ui.dashboardAttentionSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.dashboardAttentionSelection + direction));
+    }
+  } else if (ui.screen === 'fleet') {
     const count = viewModel().meta.visibleJobIds.length;
     ui.selectedIndex = Math.max(0, Math.min(Math.max(0, count - 1), ui.selectedIndex + direction));
   } else if (ui.screen === 'detail') {
@@ -790,7 +1039,20 @@ function move(direction) {
       const model = viewModel();
       const { content, height, width } = detailViewport(model);
       if (content?.virtual) {
-        moveVirtualDetail(content, direction, width, height);
+        if ([0, 4].includes(ui.detailTab) && options.select) {
+          const count = content.entries?.length || 0;
+          const fallback = ui.follow ? count - 1 : Number(ui.detailScroll?.entry ?? ui.detailScroll ?? 0);
+          const field = ui.detailTab === 0 ? 'transcriptSelection' : 'eventSelection';
+          const stepped = stepVirtualLogSelection({ ...content, follow: false, scroll: ui.detailScroll }, Number(ui[field] ?? fallback), direction, width, height);
+          ui[field] = stepped.selectedEntry;
+          const settled = settleVirtualFollow(content, stepped.scroll, width, height, { selectedEntry: stepped.selectedEntry });
+          ui.detailScroll = settled.scroll;
+          ui.follow = settled.follow;
+        } else {
+          moveVirtualDetail(content, direction, width, height);
+          if (ui.detailTab === 0) ui.transcriptSelection = ui.follow ? Math.max(0, (content.entries?.length || 1) - 1) : Number(ui.detailScroll?.entry ?? 0);
+          if (ui.detailTab === 4) ui.eventSelection = ui.follow ? Math.max(0, (content.entries?.length || 1) - 1) : Number(ui.detailScroll?.entry ?? 0);
+        }
       } else {
         const count = model.meta.scrollItemCount || 0;
         const maxScroll = Math.max(0, count - height);
@@ -823,7 +1085,10 @@ function page(direction) {
 
 function moveEdge(end) {
   const model = viewModel();
-  if (ui.screen === 'fleet') {
+  if (ui.screen === 'dashboard') {
+    if (ui.dashboardFocus === 1) ui.dashboardFeedSelection = end ? Math.max(0, model.meta.feedJobIds.length - 1) : 0;
+    else ui.dashboardAttentionSelection = end ? Math.max(0, model.meta.attentionJobIds.length - 1) : 0;
+  } else if (ui.screen === 'fleet') {
     ui.selectedIndex = end ? Math.max(0, model.meta.visibleJobIds.length - 1) : 0;
   } else if (ui.screen === 'detail') {
     if (ui.detailTab === 1 && !ui.diffFile) {
@@ -833,8 +1098,13 @@ function moveEdge(end) {
     } else {
       const { content, height, width } = detailViewport(model);
       if (content?.virtual) {
-        ui.detailScroll = end ? virtualLogBottomPosition(content, width, height) : { entry: 0, line: 0 };
-        ui.follow = end;
+        const selection = end ? Math.max(0, (content.entries?.length || 1) - 1) : 0;
+        const target = end ? virtualLogBottomPosition(content, width, height) : { entry: 0, line: 0 };
+        const settled = end ? settleVirtualFollow(content, target, width, height, { selectedEntry: selection }) : { scroll: target, follow: false };
+        ui.detailScroll = settled.scroll;
+        ui.follow = settled.follow;
+        if (ui.detailTab === 0) ui.transcriptSelection = end ? Math.max(0, (content.entries?.length || 1) - 1) : 0;
+        if (ui.detailTab === 4) ui.eventSelection = selection;
       } else {
         const maxScroll = Math.max(0, (model.meta.scrollItemCount || 0) - height);
         ui.detailScroll = end ? maxScroll : 0;
@@ -858,6 +1128,7 @@ function moveEdge(end) {
 
 function goBack() {
   if (ui.help) ui.help = false;
+  else if (ui.statusHistoryOpen) ui.statusHistoryOpen = false;
   else if (ui.search) clearSearch();
   else if (ui.screen === 'fleet' && ui.filter) {
     ui.filter = '';
@@ -865,14 +1136,17 @@ function goBack() {
     ui.scroll = 0;
   } else if (ui.screen === 'detail' && ui.diffFile) {
     ui.diffFile = null;
+    ui.diffPaths = [];
     ui.diffWindow = null;
     ui.detailScroll = 0;
-  } else if (ui.screen !== 'fleet') {
+  } else if (ui.screen === 'fleet') {
+    ui.screen = 'dashboard';
+  } else if (ui.screen !== 'dashboard') {
     if (ui.screen === 'detail') {
       void source.selectJob(null);
-      ui.screen = ui.detailReturn || 'fleet';
+      ui.screen = ui.detailReturn || 'dashboard';
     } else if (ui.screen === 'group-members') ui.screen = 'groups';
-    else ui.screen = 'fleet';
+    else ui.screen = 'dashboard';
   }
   clearStatus();
   draw();
@@ -885,7 +1159,10 @@ function switchDetailTab(tab) {
   if (next === ui.detailTab) return;
   ui.detailTab = next;
   ui.detailScroll = 0;
+  if (next === 0) ui.transcriptSelection = null;
+  if (next === 4) ui.eventSelection = null;
   ui.diffFile = null;
+  ui.diffPaths = [];
   ui.diffWindow = null;
   ui.chainSelection = 0;
   clearSearch();
@@ -902,9 +1179,35 @@ function handleClick(event) {
   }
   const pane = model.panes?.find((entry) => event.x >= entry.rect.x && event.x < entry.rect.x + entry.rect.width
     && event.y >= entry.rect.y && event.y < entry.rect.y + entry.rect.height);
+  if (ui.screen === 'detail' && [0, 4].includes(ui.detailTab) && pane?.content?.virtual) {
+    const contentRect = paneContentRect(pane, { scrollbar: true });
+    const contentY = contentRect.y;
+    const contentX = contentRect.x;
+    const height = Math.max(1, contentRect.height);
+    const width = Math.max(1, contentRect.width);
+    if (event.x >= contentX && event.x < contentX + width && event.y >= contentY && event.y < contentY + height) {
+      const index = virtualLogEntryIndexAt(pane.content, event.y - contentY, width, height);
+      if (index != null) {
+        const field = ui.detailTab === 0 ? 'transcriptSelection' : 'eventSelection';
+        ui[field] = index;
+        const target = virtualLogScrollToEntry(pane.content, index, width, height);
+        const settled = settleVirtualFollow(pane.content, target, width, height, { selectedEntry: index });
+        ui.detailScroll = settled.scroll;
+        ui.follow = settled.follow;
+        if (ui.detailTab === 0) {
+          const block = pane.content.entries[index];
+          if (!toggleToolBlock(block)) draw();
+        } else draw();
+      }
+    }
+    return;
+  }
   const row = tableRowIndexAt(pane, event.x, event.y);
   if (row == null) return;
-  if (ui.screen === 'fleet') ui.selectedIndex = row;
+  if (ui.screen === 'dashboard') {
+    if (pane?.title === 'Needs you') { ui.dashboardFocus = 0; ui.dashboardAttentionSelection = row; }
+    else if (pane?.title === 'Recent notable activity') { ui.dashboardFocus = 1; ui.dashboardFeedSelection = row; }
+  } else if (ui.screen === 'fleet') ui.selectedIndex = row;
   else if (ui.screen === 'groups') ui.groupSelection = row;
   else if (ui.screen === 'group-members') ui.groupMemberSelection = row;
   else if (ui.screen === 'sessions') ui.sessionSelection = row;
@@ -917,6 +1220,12 @@ function handleClick(event) {
 
 function handleKey(key) {
   if (key === 'ctrl-c') return quit(0);
+  if (key === 'ctrl-g') {
+    const marker = screen.markDiagnostic();
+    setStatus(marker ? `Diagnostic marker saved at frame ${marker.frame}` : 'Diagnostic recorder is not enabled', marker ? 'info' : 'error');
+    draw();
+    return;
+  }
   if (ui.input || ui.confirm) return editValue(key);
   if (key === 'q') return quit(0);
   if (ui.help) {
@@ -924,9 +1233,15 @@ function handleKey(key) {
     draw();
     return;
   }
+  if (ui.statusHistoryOpen) {
+    if (key === 'M' || key === 'escape') ui.statusHistoryOpen = false;
+    draw();
+    return;
+  }
   if (key && typeof key === 'object' && key.type === 'scroll') return move(key.delta);
   if (key && typeof key === 'object' && key.type === 'click') return handleClick(key);
   if (key === '?') { ui.help = true; draw(); return; }
+  if (key === 'M') { ui.statusHistoryOpen = true; draw(); return; }
   if (key === 'escape') return goBack();
   const blocked = remoteActionMessage(ui, key);
   if (blocked) {
@@ -940,21 +1255,50 @@ function handleKey(key) {
   if (key === 'b') {
     const enabled = notifier.toggle();
     ui.notifyEnabled = notifier.enabled;
+    persistPreferences();
     setStatus(String(process.env.DELEGATE_TUI_NOTIFY ?? '1') === '0'
       ? 'Notifications are disabled by DELEGATE_TUI_NOTIFY=0'
       : `Notifications ${enabled ? 'enabled' : 'disabled'} for this session`);
     draw();
     return;
   }
-  if (key === 'up' || key === 'k') return move(-1);
-  if (key === 'down' || key === 'j') return move(1);
+  if (key === 'T') {
+    ui.timestampMode = ui.timestampMode === 'relative' ? 'absolute' : 'relative';
+    invalidateWrapCache();
+    persistPreferences();
+    setStatus(`Timestamps: ${ui.timestampMode}`);
+    draw();
+    return;
+  }
+  if (key === 'y' && ui.screen !== 'launcher') {
+    copyFocused();
+    return;
+  }
+  if (key === 'up' || key === 'k') return move(-1, { select: true });
+  if (key === 'down' || key === 'j') return move(1, { select: true });
   if (key === 'page-up') return page(-1);
   if (key === 'page-down') return page(1);
   if (key === 'home' || key === 'g') return moveEdge(false);
   if (key === 'end') return moveEdge(true);
+  if (key === 'tab' || key === 'shift-tab') {
+    if (ui.screen === 'dashboard') ui.dashboardFocus = ui.dashboardFocus === 0 ? 1 : 0;
+    else {
+      const count = Math.max(1, viewModel().panes?.filter((pane) => pane.focusable !== false).length || 1);
+      ui.focusedPane = (ui.focusedPane + (key === 'tab' ? 1 : -1) + count) % count;
+    }
+    draw();
+    return;
+  }
+  if (key === 'F') {
+    if (ui.screen === 'detail') void source.selectJob(null);
+    ui.screen = 'fleet';
+    clearStatus();
+    draw();
+    return;
+  }
   if (key === 'G') {
     if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'groups' || ui.screen === 'group-members' ? 'fleet' : 'groups';
+    ui.screen = ui.screen === 'groups' || ui.screen === 'group-members' ? 'dashboard' : 'groups';
     ui.groupSelection = 0;
     clearStatus();
     draw();
@@ -962,7 +1306,7 @@ function handleKey(key) {
   }
   if (key === 'S') {
     if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'sessions' ? 'fleet' : 'sessions';
+    ui.screen = ui.screen === 'sessions' ? 'dashboard' : 'sessions';
     ui.sessionSelection = 0;
     ui.sessionScroll = 0;
     clearStatus();
@@ -971,17 +1315,24 @@ function handleKey(key) {
   }
   if (key === 'p') {
     if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'providers' ? 'fleet' : 'providers'; clearStatus(); draw(); return;
+    ui.screen = ui.screen === 'providers' ? 'dashboard' : 'providers'; clearStatus(); draw(); return;
   }
   if (key === 't') {
     if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'stats' ? 'fleet' : 'stats'; clearStatus(); draw(); return;
+    ui.screen = ui.screen === 'stats' ? 'dashboard' : 'stats'; clearStatus(); draw(); return;
   }
   if (key === 'N') {
     if (ui.screen === 'detail') void source.selectJob(null);
     const enabled = choiceValues('provider');
     if (!enabled.includes(ui.launcher.provider)) ui.launcher.provider = enabled[0];
     ui.screen = 'launcher'; clearStatus(); updateRouteAdvice(); draw(); return;
+  }
+  if (ui.screen === 'dashboard') {
+    if (key === 'enter') {
+      const job = selectedJob();
+      if (job) openJobDetail(job, 'dashboard');
+    }
+    return;
   }
   if (ui.screen === 'groups') {
     if (key === 'enter') {
@@ -1022,6 +1373,19 @@ function handleKey(key) {
   }
   if (ui.screen === 'fleet') {
     if (key === 'a') { ui.activeOnly = !ui.activeOnly; ui.selectedIndex = 0; draw(); return; }
+    if (key === 'o') {
+      const sorts = ['activity', 'recency', 'provider', 'tokens'];
+      ui.fleetSort = sorts[(sorts.indexOf(ui.fleetSort) + 1) % sorts.length];
+      ui.selectedIndex = 0;
+      draw();
+      return;
+    }
+    if (key === 'z') {
+      ui.fleetDensity = ui.fleetDensity === 'compact' ? 'wide' : 'compact';
+      persistPreferences();
+      draw();
+      return;
+    }
     if (key === '/') { beginInput('fleet-filter', 'Filter id/model/cwd', ui.filter); return; }
     if (key === 'enter') {
       const job = selectedJob();
@@ -1062,6 +1426,10 @@ function handleKey(key) {
     return;
   }
   if (key === '/' && [0, 1, 4].includes(ui.detailTab)) { beginPaneSearch(); return; }
+  if (key === 'E' && ui.detailTab === 0) { jumpTranscriptToEvents(); return; }
+  if (key === 'enter' && ui.detailTab === 0 && toggleFocusedTool()) return;
+  if (key === 'enter' && ui.detailTab === 4 && toggleFocusedEvent()) return;
+  if (key === 'd' && ui.detailTab === 0 && openFocusedToolDiff()) return;
   if (key === 'enter' && ui.detailTab === 1 && !ui.diffFile) { openDiffFile(); return; }
   if (key === 'enter' && ui.detailTab === 5) {
     const id = viewModel().meta.chainJobIds?.[ui.chainSelection];
@@ -1101,10 +1469,20 @@ source.on('change', (next) => {
 });
 source.on('warning', (error) => { setStatus(`Store warning: ${error.message}`, 'error'); draw(); });
 screen.on('resize', () => { invalidateWrapCache(); draw(); });
-process.stdin.on('data', onData);
 const clock = setInterval(() => { ui.now = Date.now(); draw(); }, 1000);
 clock.unref?.();
 
 screen.start();
+const probeResult = await probeTerminalWidths({
+  screen, input: process.stdin, env: process.env, mode: widthProbeMode(process.env), cached: cachedWidths
+});
+configureGlyphs({ env: process.env, widths: probeResult.widths });
+if (probeResult.source === 'probe' && Object.keys(probeResult.widths).length) {
+  widthProbeCache[widthIdentity] = { widths: probeResult.widths, measuredAt: Date.now() };
+  persistPreferences();
+}
+if (probeResult.mode === 'verbose') addStatusHistory(formatWidthProbeResult(probeResult), 'info');
+process.stdin.on('data', onData);
+if (probeResult.remainder) bufferedInput.push(probeResult.remainder);
 draw();
 if (initialJobId) void source.selectJob(initialJobId);

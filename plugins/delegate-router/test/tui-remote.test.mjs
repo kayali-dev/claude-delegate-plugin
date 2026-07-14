@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';

@@ -5,6 +5,8 @@ export const sequences = Object.freeze({
   alternateScreenOff: `${ESC}[?1049l`,
   cursorHide: `${ESC}[?25l`,
   cursorShow: `${ESC}[?25h`,
+  autowrapOff: `${ESC}[?7l`,
+  autowrapOn: `${ESC}[?7h`,
   mouseSgrOn: `${ESC}[?1006h`,
   mouseSgrOff: `${ESC}[?1006l`,
   mouseButtonOn: `${ESC}[?1000h`,
@@ -79,7 +81,10 @@ export function styleSequence(style = null, mode = detectColorMode()) {
   if (style.inverse) codes.push('7');
   if (mode !== 'none' && Object.hasOwn(style, 'fg')) codes.push(colorCode('fg', style.fg, mode));
   if (mode !== 'none' && Object.hasOwn(style, 'bg')) codes.push(colorCode('bg', style.bg, mode));
-  return `${ESC}[${codes.length ? codes.join(';') : '0'}m`;
+  // Cell styles are absolute descriptions, while SGR parameters are normally
+  // cumulative. Reset first so bold/dim/color from an earlier run cannot leak
+  // into a later run whose style simply omits that attribute.
+  return `${ESC}[0${codes.length ? `;${codes.join(';')}` : ''}m`;
 }
 
 export function alternateScreen(enabled) {

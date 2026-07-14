@@ -1,0 +1,30 @@
+ delegate | home                          local | v0.22.0                   codex 42%   cursor off
+
++- Needs you ------------------------------------------------------------------------------ 1-2/2 -+
+|    Job         Attention                           Context                                   Age #
+|>!  C:1234567   1 scope violation                   gpt-5.4-sol                                4s #
+| !  C:abcdef0   result needs review                 composer-2.5                               0s #
+|                                                                                                  #
+|                                                                                                  #
++--------------------------------------------------------------------------------------------------+
+
++----------------------+ +----------------------+ +----------------------+ +-----------------------+
+| | 1 / 0              | | 1  100%              | | 920                  | | 0%                    |
+| running / paused     | | jobs today / success | | tokens today         | | mean cache hit        |
+|                      | | collecting data (1d) | | in 800 | out 120     | | collecting data (1d)  |
++----------------------+ +----------------------+ +----------------------+ +-----------------------+
+
++- Provider allowance --------------------------------------------------------------------- 1-2/2 -+
+| Provider    Allowance                 Used     Verified                                          #
+| codex       ###########-------------  42%      10s ago                                           #
+| cursor      ###################-----  off      not verified                                      #
++--------------------------------------------------------------------------------------------------+
+
++- Recent notable activity ---------------------------------------------------------------- 1-1/1 -+
+| When       Job         Event                                                           Provider  #
+| 1m ago     ne-abcdef0  completed                                                       cursor    #
+|                                                                                                  #
+|                                                                                                  #
+|                                                                                                  #
++--------------------------------------------------------------------------------------------------+
+ F fleet N new job  | Up/Dn select Tab focus Enter open  | Esc back ? help q quit         notify:on

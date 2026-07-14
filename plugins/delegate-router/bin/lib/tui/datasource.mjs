@@ -32,6 +32,38 @@ import { claudeProjectsDirectory, scanClaudeSessions } from './sessions.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DEFAULT_MAX_EVENTS = 5000;
+// Activity hydration is deferred until after first paint. A moderately deep
+// tail retains the start of long-running tool calls without ever scanning a
+// full, output-heavy journal on the fleet path.
+const ACTIVITY_TAIL_BYTES = 512 * 1024;
+const ACTIVITY_TAIL_EVENTS = 5000;
+
+export function readRecentJobEvents(id, options = {}) {
+  const file = eventPath(id);
+  const maxBytes = Math.max(1024, Number(options.maxBytes || ACTIVITY_TAIL_BYTES));
+  const limit = Math.max(1, Number(options.limit || ACTIVITY_TAIL_EVENTS));
+  let size;
+  try { size = fs.statSync(file).size; }
+  catch { return []; }
+  if (!size) return [];
+  const offset = Math.max(0, size - maxBytes);
+  const fd = fs.openSync(file, 'r');
+  let text;
+  try {
+    const buffer = Buffer.alloc(size - offset);
+    fs.readSync(fd, buffer, 0, buffer.length, offset);
+    text = buffer.toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (offset) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
+  const events = [];
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try { events.push(JSON.parse(line)); } catch {}
+  }
+  return events.slice(-limit);
+}
 
 export function aggregateJobGroups(jobs = []) {
   const groups = new Map();
@@ -113,6 +145,7 @@ function cloneState(state) {
     ...state,
     jobs: state.jobs.map((job) => ({ ...job })),
     eventsByJob: Object.fromEntries(Object.entries(state.eventsByJob).map(([id, events]) => [id, [...events]])),
+    activityEventsByJob: Object.fromEntries(Object.entries(state.activityEventsByJob).map(([id, events]) => [id, [...events]])),
     diffsByJob: { ...state.diffsByJob },
     diffStatsByJob: Object.fromEntries(Object.entries(state.diffStatsByJob).map(([id, stat]) => [id, { ...stat, files: [...stat.files] }])),
     hydrationByJob: Object.fromEntries(Object.entries(state.hydrationByJob).map(([id, hydration]) => [id, { ...hydration }])),
@@ -149,7 +182,10 @@ export class DelegateDataSource extends EventEmitter {
     this.journalCursors = new Map();
     this.hydratedJobs = new Set();
     this.hydrations = new Map();
+    this.journalStamps = new Map();
     this.events = new Map();
+    this.activityEvents = new Map();
+    this.activityTailStamps = new Map();
     this.diffs = new Map();
     this.followJobId = null;
     this.watchers = [];
@@ -165,9 +201,9 @@ export class DelegateDataSource extends EventEmitter {
     this.closed = false;
     this.recordsDigest = null;
     this.metadataStamp = null;
-    this.metrics = { refreshes: 0, sessionScans: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
+    this.metrics = { refreshes: 0, sessionScans: 0, activityTailReads: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
     this.state = {
-      jobs: [], eventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
+      jobs: [], eventsByJob: {}, activityEventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
       usage: null, providers: [], writerLocks: [], profiles: [], groups: [], audit: [], metadataReady: false,
       sessions: [], sessionScan: { status: 'loading', available: null, projectsDir: this.sessionProjectsDir, scanned: 0, totalFiles: 0, capped: false, error: null },
       stats: { since: '7d', jobs: 0, groups: [] }, updatedAt: null, error: null
@@ -203,6 +239,7 @@ export class DelegateDataSource extends EventEmitter {
       if (this.closed) return;
       this.hydrateMetadata({ force: true });
       this.refreshSessions({ force: true });
+      this.refreshActivityTails({ force: true });
     });
     return this;
   }
@@ -252,7 +289,10 @@ export class DelegateDataSource extends EventEmitter {
       this.debounceTimer = null;
       const kinds = new Set(this.pendingKinds);
       this.pendingKinds.clear();
-      if (kinds.has('all') || kinds.has('jobs')) this.refreshRecords();
+      if (kinds.has('all') || kinds.has('jobs')) {
+        this.refreshRecords();
+        this.refreshActivityTails();
+      }
       if (kinds.has('all') || kinds.has('metadata')) this.hydrateMetadata();
       if (kinds.has('sessions')) this.refreshSessions();
     }, this.debounceMs);
@@ -291,7 +331,10 @@ export class DelegateDataSource extends EventEmitter {
         if (ids.has(id)) continue;
         this.journalCursors.delete(id);
         this.hydratedJobs.delete(id);
+        this.journalStamps.delete(id);
         this.events.delete(id);
+        this.activityEvents.delete(id);
+        this.activityTailStamps.delete(id);
         this.diffs.delete(id);
         this.reconcileAttempts.delete(id);
         this.reconciledByTui.delete(id);
@@ -312,7 +355,10 @@ export class DelegateDataSource extends EventEmitter {
         error: null
       };
       if (changed) this.emit('change', this.getState());
-      if (this.followJobId && ids.has(this.followJobId)) void this.hydrateJob(this.followJobId);
+      if (this.followJobId && ids.has(this.followJobId)
+        && this.journalStamps.get(this.followJobId) !== fileStamp(eventPath(this.followJobId))) {
+        void this.hydrateJob(this.followJobId);
+      }
     } catch (error) {
       this.state = { ...this.state, error: error.message, updatedAt: Date.now() };
       this.emit('warning', error);
@@ -348,6 +394,33 @@ export class DelegateDataSource extends EventEmitter {
     } catch (error) {
       this.state = { ...this.state, error: error.message, updatedAt: Date.now() };
       this.emit('warning', error);
+    }
+    return this.getState();
+  }
+
+  refreshActivityTails(options = {}) {
+    if (this.closed) return this.getState();
+    let changed = false;
+    const active = new Set();
+    for (const job of this.state.jobs) {
+      if (TERMINAL.has(job.status)) continue;
+      active.add(job.id);
+      const stamp = fileStamp(eventPath(job.id));
+      if (!options.force && this.activityTailStamps.get(job.id) === stamp) continue;
+      this.activityTailStamps.set(job.id, stamp);
+      this.activityEvents.set(job.id, readRecentJobEvents(job.id));
+      this.metrics.activityTailReads += 1;
+      changed = true;
+    }
+    for (const id of [...this.activityEvents.keys()]) {
+      if (active.has(id)) continue;
+      this.activityEvents.delete(id);
+      this.activityTailStamps.delete(id);
+      changed = true;
+    }
+    if (changed) {
+      this.state = { ...this.state, activityEventsByJob: Object.fromEntries(this.activityEvents), updatedAt: Date.now() };
+      this.emit('change', this.getState());
     }
     return this.getState();
   }
@@ -390,6 +463,8 @@ export class DelegateDataSource extends EventEmitter {
   selectJob(id) {
     this.followJobId = id || null;
     if (!id) return Promise.resolve(this.getState());
+    const loaded = this.state.hydrationByJob[id]?.loaded === true;
+    if (loaded && this.journalStamps.get(id) === fileStamp(eventPath(id))) return Promise.resolve(this.getState());
     return this.hydrateJob(id);
   }
 
@@ -445,7 +520,8 @@ export class DelegateDataSource extends EventEmitter {
       this.diffs.delete(id);
     }
     const wasLoaded = this.state.hydrationByJob[id]?.loaded === true;
-    this.publishJournal(id, { loading: true, loaded: wasLoaded, error: null });
+    const initialHistoryLoad = !wasLoaded;
+    if (initialHistoryLoad) this.publishJournal(id, { loading: true, loaded: false, error: null });
     const task = (async () => {
       await this.yieldTurn();
       let cursor = this.journalCursors.get(id) || 0;
@@ -465,12 +541,15 @@ export class DelegateDataSource extends EventEmitter {
           const next = Math.max(cursor, page.nextSeq);
           this.journalCursors.set(id, next);
           complete = !page.hasMore || next <= cursor;
-          this.publishJournal(id, { loading: !complete, loaded: complete || wasLoaded, error: null });
+          this.publishJournal(id, { loading: initialHistoryLoad && !complete, loaded: complete || wasLoaded, error: null });
           if (complete) break;
           cursor = next;
           await this.yieldTurn();
         }
-        if (!this.closed) this.publishJournal(id, { loading: false, loaded: complete || wasLoaded, error: null });
+        if (!this.closed) {
+          this.journalStamps.set(id, fileStamp(eventPath(id)));
+          this.publishJournal(id, { loading: false, loaded: complete || wasLoaded, error: null });
+        }
       } catch (error) {
         if (!this.closed) {
           this.publishJournal(id, { loading: false, loaded: wasLoaded, error: error.message });
@@ -486,9 +565,10 @@ export class DelegateDataSource extends EventEmitter {
   }
 
   refresh(options = {}) {
-    const state = this.refreshRecords(options);
+    this.refreshRecords(options);
+    this.refreshActivityTails(options);
     if (options.metadata === true) this.hydrateMetadata({ force: options.force });
-    return state;
+    return this.getState();
   }
 
   close() {
@@ -515,6 +595,7 @@ export class DelegateDataSource extends EventEmitter {
     this.immediates.clear();
     this.reconcileTask = null;
     this.hydrations.clear();
+    this.journalStamps.clear();
   }
 }
 

@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { displayWidth, padToWidth, stripAnsi, truncateToWidth } from '../bin/lib/tui/width.mjs';
@@ -31,4 +34,3 @@ test('padToWidth aligns ANSI and double-width content by display columns', () =>
   assert.equal(padToWidth('x', 4, 'center'), ' x  ');
   assert.equal(displayWidth(padToWidth('\u001b[32mgo\u001b[0m', 5)), 5);
 });
-

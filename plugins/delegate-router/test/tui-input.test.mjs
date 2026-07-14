@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BufferedInput, coalesceInputEvents, decodeInput } from '../bin/lib/tui/input.mjs';
@@ -10,7 +13,7 @@ test('SGR mouse wheel sequences decode to three-line scroll deltas', () => {
   assert.deepEqual(decodeInput('\u001b[5~\u001b[6~\u001b[H\u001b[F', { final: true }).events, ['page-up', 'page-down', 'home', 'end']);
 });
 
-test('buffered input coalesces twenty scroll keys into one state update and render', () => {
+test('buffered arrows preserve every selection step while rendering once per tick', () => {
   let scheduled = null;
   let state = 0;
   let renders = 0;
@@ -18,8 +21,8 @@ test('buffered input coalesces twenty scroll keys into one state update and rend
     schedule(callback) { scheduled = callback; return 1; },
     cancel() {},
     onFlush(events) {
-      assert.deepEqual(events, [{ type: 'scroll', delta: 20 }]);
-      state += events[0].delta;
+      assert.deepEqual(events, Array(20).fill('down'));
+      for (const event of events) state += event === 'down' ? 1 : -1;
       renders += 1;
     }
   });
@@ -29,6 +32,13 @@ test('buffered input coalesces twenty scroll keys into one state update and rend
   assert.equal(state, 20);
   assert.equal(renders, 1);
   input.close();
+});
+
+test('only wheel motion coalesces into viewport scroll while arrows stay logical', () => {
+  assert.deepEqual(
+    coalesceInputEvents(['down', 'down', 'wheel-down', 'wheel-down', 'up', 'wheel-up']),
+    ['down', 'down', { type: 'scroll', delta: 6 }, 'up', { type: 'scroll', delta: -3 }]
+  );
 });
 
 test('input decoder retains split escape sequences until the next chunk', () => {

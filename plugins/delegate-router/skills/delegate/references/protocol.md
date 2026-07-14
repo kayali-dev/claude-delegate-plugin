@@ -33,6 +33,7 @@ Stable types include:
 job.created, job.state, job.completed, job.cancelled
 session.updated, turn.started, turn.completed
 message.user, message.delta, message.completed
+activity
 plan.updated
 tool.started, tool.output, tool.completed
 file.changed, diff.updated
@@ -46,7 +47,7 @@ job.retry, verification.finished
 error, provider.event
 ```
 
-`provider.event` contains only a redacted event name and safe metadata. Raw provider payload persistence and hidden reasoning are intentionally excluded.
+`activity` contains only `{ kind: 'thinking' | 'output', at }`. Codex reasoning items and Cursor ACP thought chunks produce transition markers at most once per two seconds; the event never contains thought/reasoning text. `provider.event` contains only a redacted event name and safe metadata. Raw provider payload persistence and hidden reasoning are intentionally excluded.
 
 ## Error Taxonomy
 

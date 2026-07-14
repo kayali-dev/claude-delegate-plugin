@@ -28,8 +28,8 @@ function truncateLabel(value, width) {
   const text = safeText(value);
   const columns = Math.max(1, Math.floor(finiteNonNegative(width, DEFAULT_SNIPPET_WIDTH)));
   if (displayWidth(text) <= columns) return text;
-  if (columns === 1) return '…';
-  return `${truncateToWidth(text, columns - 1)}…`;
+  if (columns === 1) return '.';
+  return `${truncateToWidth(text, columns - 1)}.`;
 }
 
 function messageMarker(record) {

@@ -1,11 +1,18 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
-import { uiPalette } from '../bin/lib/tui/palette.mjs';
+import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
+import { createPalette, uiPalette } from '../bin/lib/tui/palette.mjs';
+import { clearGraphemeWidthOverrides, setGraphemeWidthOverrides } from '../bin/lib/tui/width.mjs';
+import { WIDTH_PROBE_GRAPHEMES } from '../bin/lib/tui/width-probe.mjs';
 import {
+  dashboardViewModel,
   DETAIL_TABS,
   HELP_ITEMS,
   detailViewModel,
@@ -58,6 +65,7 @@ function syntheticStore() {
     writerLocks: [{ cwd: '/work/alpha', jobId: active.id, provider: 'codex', mode: 'implement', status: 'running', phase: 'working' }],
     profiles: ['independent-review'],
     groups: [{ groupId: 'wave-a', total: 1, running: 1, terminal: 0, stalled: 0, allTerminal: false, newestActivityAt: NOW - 5000, memberIds: [active.id] }],
+    audit: [{ at: NOW - 60_000, jobId: done.id, provider: 'cursor', model: 'composer', mode: 'review', durationMs: 440_000, outcome: { status: 'completed' }, usage: done.usage, scopeViolationsCount: 0 }],
     stats: { since: '7d', jobs: 2, groups: [{ provider: 'codex', model: 'sol', mode: 'implement', jobs: 2, successRate: 0.5, resumedJobs: 1, nudgeCount: 0, meanDurationMs: 1234, meanOutputTokens: 2000, budgetCount: 0, timeoutCount: 1, violationCount: 1 }] }
   };
 }
@@ -85,8 +93,8 @@ test('fleet and Record derive failed state for stale queued records before durab
   store.jobs.push(stale);
   const frame = fleetViewModel(store, { now: NOW }, { width: 100, height: 30 });
   const rowIndex = frame.meta.visibleJobIds.indexOf(stale.id);
-  const stateIndex = frame.panes[0].content.columns.findIndex((column) => column.key === 'state');
-  assert.match(frame.panes[0].content.rows[rowIndex].cells[stateIndex].text, /^failed/);
+  const activityIndex = frame.panes[0].content.columns.findIndex((column) => column.key === 'activity');
+  assert.match(frame.panes[0].content.rows[rowIndex].cells[activityIndex].text, /failed/);
   assert.ok(frame.meta.reconcileJobIds.includes(stale.id));
 
   const activeOnly = fleetViewModel(store, { now: NOW, activeOnly: true }, { width: 100, height: 30 });
@@ -115,18 +123,79 @@ test('detail transcript exposes history hydration progress instead of a blank pa
   delete store.eventsByJob['codex-active-1234567'];
   store.hydrationByJob['codex-active-1234567'] = { loaded: false, loading: true, error: null };
   const frame = detailViewModel(store, { jobId: 'codex-active-1234567', detailTab: 0, follow: true }, { width: 100, height: 30 });
-  assert.match(frame.panes[0].title, /loading history/);
-  assert.match(frame.panes[0].content.lines[0].text, /Loading journal history/);
+  assert.equal(frame.panes[0].loading, true);
+  assert.equal(frame.panes[0].content.kind, 'log');
+  assert.deepEqual(frame.panes[0].content.lines, []);
+  assert.doesNotMatch(frame.panes[0].title, /loading history/);
 });
 
-test('providers render warning and avoid zones as styled bar segments', () => {
+test('fleet and detail snapshots expose live activity, transient thinking, and honest headless visibility', (t) => {
+  t.after(() => configureGlyphs({ env: process.env, widths: {} }));
+  configureGlyphs({ env: { TERM: 'xterm', LANG: 'C', DELEGATE_TUI_ASCII: '1' }, widths: {} });
+  const store = syntheticStore();
+  const id = 'codex-active-1234567';
+  store.eventsByJob[id] = [...store.eventsByJob[id], { v: 1, seq: 4, at: NOW - 12_000, jobId: id, type: 'activity', redacted: true, data: { kind: 'thinking', at: NOW - 12_000 } }];
+  const fleet = fleetViewModel(store, { now: NOW }, { width: 100, height: 30 });
+  const activityIndex = fleet.panes[0].content.columns.findIndex((column) => column.key === 'activity');
+  assert.match(fleet.panes[0].content.rows[0].cells[activityIndex].text, /thinking \| 12s$/);
+
+  const detail = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW, follow: true }, { width: 100, height: 30 });
+  assert.match(detail.title.right, /thinking \| 12s/);
+  assert.equal(detail.meta.activity.kind, 'thinking');
+  assert.equal(detail.panes[0].content.entries.at(-1).kind, 'thinking');
+  const rendered = renderFrameToString(detail, { trimEnd: true }).split('\n').map((line) => line.trimEnd()).join('\n');
+  const snapshot = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'snapshots', 'tui-detail-activity-100x30.txt'), 'utf8').trimEnd();
+  assert.equal(rendered, snapshot);
+
+  store.eventsByJob[id] = [...store.eventsByJob[id], { v: 1, seq: 5, at: NOW - 1000, jobId: id, type: 'message.delta', redacted: true, data: { id: 'next', delta: 'Visible output' } }];
+  const output = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW, follow: true }, { width: 100, height: 30 });
+  assert.equal(output.meta.activity.kind, 'streaming');
+  assert.ok(!output.panes[0].content.entries.some((entry) => entry.kind === 'thinking'));
+
+  store.jobs = store.jobs.map((job) => job.id === id ? { ...job, provider: 'cursor', transport: 'headless' } : job);
+  store.eventsByJob[id] = [{ v: 1, seq: 1, at: NOW - 1000, jobId: id, type: 'activity', redacted: true, data: { kind: 'thinking', at: NOW - 1000 } }];
+  const headless = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW }, { width: 100, height: 30 });
+  assert.equal(headless.meta.activity.kind, 'working');
+  assert.match(headless.title.right, /headless transport: reduced visibility/);
+});
+
+test('remote clock offset keeps activity windows aligned to the newest server timeline', () => {
+  const store = syntheticStore();
+  const id = 'codex-active-1234567';
+  store.remote = { enabled: true, host: 'remote.test', clockOffsetMs: -60_000 };
+  store.eventsByJob[id] = [{ v: 1, seq: 1, at: NOW - 1000, jobId: id, type: 'message.delta', redacted: true, data: { id: 'live', delta: 'output' } }];
+  const frame = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW + 60_000, remote: store.remote }, { width: 100, height: 30 });
+  assert.equal(frame.meta.activity.kind, 'streaming');
+});
+
+test('timestamp mode, fleet density, and provider/token sort are reflected in pure frames', () => {
+  const store = syntheticStore();
+  const first = 'codex-active-1234567';
+  store.eventsByJob[first] = [{ v: 1, seq: 1, at: NOW - 180_000, jobId: first, type: 'message.completed', redacted: true, data: { id: 'stamp', text: 'timestamped' } }];
+  const absolute = detailViewModel(store, { jobId: first, detailTab: 0, now: NOW, timestampMode: 'absolute' }, { width: 100, height: 30 });
+  const relative = detailViewModel(store, { jobId: first, detailTab: 0, now: NOW, timestampMode: 'relative' }, { width: 100, height: 30 });
+  assert.match(absolute.panes[0].content.entries[0].timestamp, /^\d\d:\d\d:\d\d$/);
+  assert.equal(relative.panes[0].content.entries[0].timestamp, '3m ago');
+
+  const second = { ...store.jobs.find((job) => job.id === first), id: 'cursor-active-high-tokens', provider: 'cursor', updatedAt: NOW / 1000 - 1, lastActivityAt: NOW - 1000, usage: { total: { outputTokens: 7000 } } };
+  store.jobs.push(second);
+  store.eventsByJob[second.id] = [];
+  const tokens = fleetViewModel(store, { now: NOW, fleetSort: 'tokens', fleetDensity: 'compact' }, { width: 100, height: 30 });
+  assert.equal(tokens.meta.visibleJobIds[0], second.id);
+  assert.equal(tokens.meta.fleetDensity, 'compact');
+  assert.match(tokens.title.text, /sort:tokens \| compact/);
+  const provider = fleetViewModel(store, { now: NOW, fleetSort: 'provider' }, { width: 100, height: 30 });
+  assert.equal(provider.meta.visibleJobIds[0], first);
+});
+
+test('providers render a smooth band-colored fill over a dim track', () => {
   const frame = providersViewModel(syntheticStore(), {}, { width: 100, height: 30 });
   const columns = frame.panes[0].content.columns;
   const barIndex = columns.findIndex((column) => column.key === 'bar');
   const cursorBar = frame.panes[0].content.rows.find((row) => row.provider === 'cursor').bar;
-  assert.ok(cursorBar.segments.some((segment) => segment.style === uiPalette.badgeWarn));
-  assert.ok(cursorBar.segments.some((segment) => segment.style === uiPalette.failed));
-  assert.equal(columns[barIndex].title, 'Allowance · warning · avoid');
+  assert.ok(cursorBar.segments.some((segment) => segment.style === uiPalette.dim));
+  assert.ok(cursorBar.segments.some((segment) => segment.style === uiPalette.meterTrack));
+  assert.equal(columns[barIndex].title, 'Allowance | warning | avoid');
 });
 
 test('stats and launcher frames use seven days and show the exact dry-run packet', () => {
@@ -149,42 +218,125 @@ test('stats and launcher frames use seven days and show the exact dry-run packet
   assert.match(launcher.panes[1].content.lines.join('\n'), /WARNING: missing section: Return/);
 });
 
+test('dashboard is attention-first and derives today tiles, providers, feed, and trends without scanning', () => {
+  const expectedPalette = createPalette(process.env);
+  const store = syntheticStore();
+  store.audit[0].usage = { total: { inputTokens: 800, cachedInputTokens: 200, outputTokens: 120 } };
+  const frame = dashboardViewModel(store, { now: NOW, timestampMode: 'relative', dashboardFocus: 0 }, { width: 100, height: 30 });
+  assert.equal(frame.screen, 'dashboard');
+  assert.equal(frame.panes[0].title, 'Needs you');
+  assert.deepEqual(frame.meta.attentionJobIds, ['codex-active-1234567', 'cursor-done-abcdef0']);
+  assert.deepEqual(frame.meta.feedJobIds, ['cursor-done-abcdef0']);
+  assert.equal(frame.meta.selectedJobId, 'codex-active-1234567');
+  assert.equal(frame.meta.trends.jobs.length, 14);
+  assert.ok(frame.panes.some((pane) => pane.title === 'Provider allowance'));
+  assert.ok(frame.panes.some((pane) => pane.title === 'Recent notable activity'));
+  assert.equal(frame.panes.find((pane) => pane.content?.label === 'mean cache hit').content.value, '25%');
+  const grid = paintFrame(frame);
+  const focused = frame.panes.find((pane) => pane.focused);
+  assert.ok(focused);
+  assert.deepEqual(uiPalette.focusBorder, expectedPalette.focusBorder, 'renderer and expectation share the isolated palette');
+  assert.deepEqual(grid.get(focused.rect.x, focused.rect.y).style, expectedPalette.focusBorder);
+  assert.equal(grid.get(0, 1).char, ' ', 'row one remains the app-bar-owned spacer');
+  assert.deepEqual(grid.get(0, 1).style, expectedPalette.body);
+});
+
+test('dashboard frame snapshots are deterministic in ASCII and probe-proven Unicode modes', (t) => {
+  t.after(() => { clearGraphemeWidthOverrides(); configureGlyphs({ env: process.env, widths: {} }); });
+  const store = syntheticStore();
+  const frame = () => dashboardViewModel(store, { now: NOW, timestampMode: 'relative', dashboardFocus: 0 }, { width: 100, height: 30 });
+  configureGlyphs({ env: { TERM: 'xterm', LANG: 'C', DELEGATE_TUI_ASCII: '1' }, widths: {} });
+  clearGraphemeWidthOverrides();
+  const ascii = renderFrameToString(frame(), { trimEnd: true });
+  const directory = path.join(path.dirname(fileURLToPath(import.meta.url)), 'snapshots');
+  assert.equal(ascii, fs.readFileSync(path.join(directory, 'tui-dashboard-100x30-ascii.txt'), 'utf8').trimEnd());
+
+  const widths = Object.fromEntries(WIDTH_PROBE_GRAPHEMES.map((glyph) => [glyph, 1]));
+  setGraphemeWidthOverrides(widths);
+  configureGlyphs({ env: { TERM: 'tmux-256color', LANG: 'en_US.UTF-8' }, widths });
+  const unicode = renderFrameToString(frame(), { trimEnd: true });
+  assert.equal(unicode, fs.readFileSync(path.join(directory, 'tui-dashboard-100x30-unicode.txt'), 'utf8').trimEnd());
+  assert.match(unicode, /╭─ Needs you/);
+  assert.match(ascii, /\+- Needs you/);
+});
+
+test('dashboard trend frames snapshot sparse, single-day, flat, and normal histories exactly', (t) => {
+  t.after(() => { clearGraphemeWidthOverrides(); configureGlyphs({ env: process.env, widths: {} }); });
+  const widths = Object.fromEntries(WIDTH_PROBE_GRAPHEMES.map((glyph) => [glyph, 1]));
+  setGraphemeWidthOverrides(widths);
+  configureGlyphs({ env: { TERM: 'tmux-256color', LANG: 'en_US.UTF-8' }, widths });
+  const dayStart = new Date(NOW); dayStart.setHours(0, 0, 0, 0);
+  const auditFor = (counts, durations) => counts.flatMap((count, day) => Array.from({ length: count }, (_, index) => ({
+    at: dayStart.getTime() - (13 - day) * 86_400_000 + 1000 + index,
+    jobId: `trend-${day}-${index}`,
+    provider: 'cursor', model: 'composer', mode: 'review', durationMs: durations[day],
+    outcome: { status: 'completed' },
+    usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 25 }, output_tokens: 20 }
+  })));
+  const cases = [
+    ['sparse-two-days', Array(12).fill(0).concat([1, 1]), Array(12).fill(0).concat([1000, 2000])],
+    ['single-day', Array(13).fill(0).concat([1]), Array(13).fill(0).concat([1000])],
+    ['zero-variance', Array(14).fill(1), Array(14).fill(5000)],
+    ['normal', [1, 2, 1, 3, 2, 4, 2, 1, 3, 4, 2, 5, 3, 6], [1000, 2000, 1500, 3000, 2500, 5000, 2200, 1800, 4000, 3500, 2800, 6000, 4500, 7000]]
+  ];
+  const snapshot = cases.map(([name, counts, durations]) => {
+    const state = syntheticStore();
+    state.audit = auditFor(counts, durations);
+    const frame = dashboardViewModel(state, { now: NOW, timestampMode: 'relative', dashboardFocus: 0 }, { width: 100, height: 30 });
+    const rendered = renderFrameToString(frame).split('\n');
+    const tiles = frame.panes.filter((pane) => pane.content?.kind === 'tile');
+    const top = Math.min(...tiles.map((pane) => pane.rect.y));
+    const bottom = Math.max(...tiles.map((pane) => pane.rect.y + pane.rect.height - 1));
+    return `## ${name}\n${rendered.slice(top, bottom + 1).join('\n')}`;
+  }).join('\n\n');
+  const expected = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'snapshots', 'tui-dashboard-trends.txt'), 'utf8').trimEnd();
+  assert.equal(snapshot, expected);
+  assert.match(snapshot, /collecting data \(2d\)/);
+  assert.match(snapshot, /collecting data \(1d\)/);
+  assert.match(snapshot, /jobs\/14d ▁+/);
+  assert.match(snapshot, /jobs\/14d .*max 6/);
+});
+
 test('help lists mouse, viewport, and edge navigation alongside every action group', () => {
   const keys = HELP_ITEMS.map((item) => item.key).join(' ');
-  for (const key of ['wheel', 'PgUp', 'PgDn', 'Home', 'End', 'G / S / p', 'j/k', '1…6', 's / r / R', 'c / v / w', 'q']) {
+  for (const key of ['wheel', 'PgUp', 'PgDn', 'Home', 'End', 'G / S / p', 'j/k', '1-6', 's / r / R', 'c / v / w', 'q']) {
     assert.match(keys, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   const frame = fleetViewModel(syntheticStore(), { now: NOW, help: true }, { width: 80, height: 24 });
   assert.equal(frame.overlay.items.length, HELP_ITEMS.length);
 });
 
-test('fixed 100x30 fleet headless frame is deterministic', () => {
+test('fixed 100x30 fleet headless frame is deterministic', (t) => {
+  t.after(() => configureGlyphs({ env: process.env, widths: {} }));
+  configureGlyphs({ env: { TERM: 'xterm', LANG: 'C', DELEGATE_TUI_ASCII: '1' }, widths: {} });
   const frame = fleetViewModel(syntheticStore(), { now: NOW }, { width: 100, height: 30 });
   const rendered = renderFrameToString(frame, { trimEnd: true });
   const snapshot = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'snapshots', 'tui-fleet-100x30.txt'), 'utf8').trimEnd();
   assert.equal(rendered, snapshot);
   assert.equal(rendered.split('\n').length, 30);
-  assert.match(rendered, /^ Delegate fleet/m);
-  assert.match(rendered, /S1,L,RF/);
+  assert.match(rendered, /^ delegate \| fleet/m);
+  assert.match(rendered, /S1 L RF/);
   assert.match(rendered, /Enter detail/);
 
   const grid = paintFrame(frame);
   assert.deepEqual(grid.get(0, 29).style, uiPalette.bar);
-  assert.deepEqual(grid.get(1, 2).style, uiPalette.header);
-  assert.deepEqual(grid.get(2, 4).style, {});
+  assert.deepEqual(grid.get(2, 3).style, uiPalette.header);
+  assert.deepEqual(grid.get(1, 4).style, uiPalette.selectionBar);
+  assert.deepEqual(grid.get(4, 4).style, { ...uiPalette.selectedId, ...uiPalette.selection });
   assert.deepEqual(
-    Object.fromEntries(Object.entries(grid.get(1, 3).style).filter(([key]) => key !== 'bold')),
+    Object.fromEntries(Object.entries(grid.get(3, 4).style).filter(([key]) => key !== 'bold')),
     uiPalette.selection
   );
-  assert.equal(grid.get(1, 3).style.bold, true);
-  assert.equal(Object.hasOwn(grid.get(1, 3).style, 'fg'), false);
-  assert.deepEqual(grid.get(23, 3).style, uiPalette.selection);
-  assert.equal(grid.get(23, 3).style.bold, undefined);
+  assert.equal(grid.get(3, 4).style.bold, true);
+  assert.equal(Object.hasOwn(grid.get(3, 4).style, 'fg'), false);
+  assert.deepEqual(grid.get(24, 4).style, uiPalette.selection);
+  assert.equal(grid.get(24, 4).style.bold, undefined);
 });
 
 test('every screen paints at realistic resize breakpoints with filters, follow, launcher, and help state', () => {
   const store = syntheticStore();
   const screens = [
+    (viewport) => dashboardViewModel(store, { now: NOW, dashboardFocus: 0 }, viewport),
     (viewport) => fleetViewModel(store, { now: NOW, filter: 'work', activeOnly: false, selectedIndex: 1 }, viewport),
     ...(DETAIL_TABS.map((_name, detailTab) => (viewport) => detailViewModel(store, {
       jobId: 'codex-active-1234567', detailTab, now: NOW, follow: detailTab % 2 === 0,

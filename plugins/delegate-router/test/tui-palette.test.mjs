@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { detectColorMode, styleSequence } from '../bin/lib/tui/ansi.mjs';
@@ -8,8 +11,10 @@ import {
   createPalette,
   headerFg,
   selectionBg,
+  setUiTheme,
   statusFailed,
-  statusRunning
+  statusRunning,
+  uiPalette
 } from '../bin/lib/tui/palette.mjs';
 
 test('dark-theme palette uses muted semantic 256-color tokens', () => {
@@ -39,8 +44,24 @@ test('NO_COLOR removes palette colors but preserves structural bold and dim', ()
   assert.equal(palette.bar.dim, true);
   assert.equal(palette.header.dim, true);
   assert.equal(palette.dim.dim, true);
+  assert.equal(palette.selection.underline, true);
   assert.equal(detectColorMode({ NO_COLOR: '', TERM: 'xterm-direct' }), 'none');
   const sequence = styleSequence({ fg: statusFailed, bold: true }, 'none');
-  assert.match(sequence, /\[1m$/);
+  assert.match(sequence, /\[0;1m$/);
   assert.doesNotMatch(sequence, /(?:38|48);/);
+  assert.match(styleSequence({ dim: true }, 'none'), /\[0;2m$/, 'each nonempty style resets omitted attributes first');
+});
+
+test('theme selection keeps captured palette references live and the track shares pane border chrome', (t) => {
+  t.after(() => setUiTheme('dark', process.env));
+  setUiTheme('dark', {});
+  const captured = uiPalette;
+  const darkBorder = captured.border;
+  assert.equal(captured.scrollTrack, captured.border, 'ordinary scrollbar track is the pane border style');
+
+  setUiTheme('light', {});
+  assert.equal(captured, uiPalette, 'theme selection preserves the exported palette identity');
+  assert.equal(captured.theme, 'light', 'a pre-selection capture resolves the new backing palette');
+  assert.notEqual(captured.border, darkBorder);
+  assert.equal(captured.scrollTrack, captured.border, 'the border/track identity survives theme selection');
 });

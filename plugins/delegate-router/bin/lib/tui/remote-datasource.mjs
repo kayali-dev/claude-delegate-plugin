@@ -102,6 +102,7 @@ export class RemoteDatasource extends EventEmitter {
     this.streamRetryTimer = null;
     this.streamController = null;
     this.requests = new Set();
+    this.clockOffsetMs = 0;
     this.state = emptyState(this.host);
   }
 
@@ -125,6 +126,8 @@ export class RemoteDatasource extends EventEmitter {
         signal: controller.signal
       });
       if (!response.ok) throw Object.assign(new Error(`remote request failed with HTTP ${response.status}`), { status: response.status });
+      const serverDate = Date.parse(response.headers?.get?.('date') || '');
+      if (Number.isFinite(serverDate)) this.clockOffsetMs = serverDate - Date.now();
       if (options.response) return response;
       return await response.json();
     } finally {
@@ -152,6 +155,7 @@ export class RemoteDatasource extends EventEmitter {
       ...this.state,
       remote: {
         ...this.state.remote,
+        clockOffsetMs: this.clockOffsetMs,
         connection: {
           status: connected ? 'connected' : this.started ? 'retrying' : 'connecting',
           attempt,

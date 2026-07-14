@@ -45,6 +45,9 @@ test('Codex app-server maps events and applies true same-turn steering', () => i
   assert.equal(inspectJob(job.id).status, 'completed');
   const types = readJobEvents(job.id, { limit: 1000 }).map((event) => event.type);
   for (const type of ['turn.started', 'plan.updated', 'file.changed', 'message.delta', 'message.completed', 'diff.updated', 'usage.updated', 'correction.applied', 'job.completed']) assert.ok(types.includes(type), type);
+  const activity = readJobEvents(job.id, { limit: 1000 }).find((event) => event.type === 'activity');
+  assert.equal(activity?.data.kind, 'thinking');
+  assert.deepEqual(Object.keys(activity?.data || {}).sort(), ['at', 'kind']);
   const codexUsage = effectiveUsage(loadState(), 'codex');
   assert.equal(codexUsage.usedPercent, 41);
   assert.deepEqual(codexUsage.windows.map((window) => window.name).sort(), ['primary', 'secondary']);
@@ -74,6 +77,9 @@ test('Cursor ACP maps structured updates and reports correction as restart', () 
   assert.equal(completed.controls['cursor-correction'].state, 'applied');
   assert.equal(completed.controls['cursor-correction-2'].state, 'applied');
   const events = readJobEvents(job.id, { limit: 1000 });
+  const activity = events.find((event) => event.type === 'activity');
+  assert.equal(activity?.data.kind, 'thinking');
+  assert.deepEqual(Object.keys(activity?.data || {}).sort(), ['at', 'kind']);
   assert.ok(events.some((event) => event.type === 'correction.restarted' && event.data.appliedAs === 'restart'));
   assert.ok(events.some((event) => event.type === 'tool.started'));
   assert.ok(events.some((event) => event.type === 'correction.queued'));

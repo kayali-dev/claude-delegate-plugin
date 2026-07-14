@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { brokerError, normalizeBrokerError } from '../bin/lib/errors.mjs';
+import { eventBlocks, wrapEventBlock } from '../bin/lib/tui/events.mjs';
 import {
   appendJobEvent,
   createManagedJob,
@@ -163,6 +164,81 @@ test('redaction preserves numeric usage while hiding numeric and boolean secrets
   });
   const text = redact({ text: 'password=hunter2 AWS_SECRET_ACCESS_KEY=abcdef "apiKey":"value123" postgres://user:pass@db.local/app' }).text;
   assert.doesNotMatch(text, /hunter2|abcdef|value123|user:pass/);
+});
+
+test('compound provider usage counters survive journaling and Events rendering while credential tokens stay redacted', () => isolated((directory) => {
+  const codexUsage = {
+    total: {
+      inputTokens: 120,
+      cachedInputTokens: 80,
+      reasoningOutputTokens: 14,
+      outputTokens: 30,
+      totalTokens: 150
+    },
+    last: {
+      inputTokens: 20,
+      cachedInputTokensCount: 10,
+      reasoningOutputTokens: 4,
+      outputTokens: 6
+    },
+    maxOutputTokens: 500
+  };
+  const cursorUsage = {
+    sessionUpdate: 'usage_update',
+    used: 12,
+    size: 1000,
+    tokenUsage: { inputTokens: 5, outputTokens: 2 }
+  };
+  const secrets = {
+    authToken: 'auth-secret',
+    refreshToken: 'refresh-secret',
+    apiToken: 'api-secret',
+    accessToken: 'access-secret',
+    idToken: 'id-secret'
+  };
+
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'inspect usage' });
+  appendJobEvent(job.id, 'usage.updated', { ...codexUsage, ...secrets });
+  appendJobEvent(job.id, 'usage.updated', cursorUsage);
+  const usageEvents = readJobEvents(job.id).filter((event) => event.type === 'usage.updated');
+
+  assert.deepEqual(usageEvents[0].data.total, codexUsage.total);
+  assert.deepEqual(usageEvents[0].data.last, codexUsage.last);
+  assert.equal(usageEvents[0].data.maxOutputTokens, 500);
+  for (const key of Object.keys(secrets)) assert.equal(usageEvents[0].data[key], '[REDACTED]', key);
+  assert.deepEqual(usageEvents[1].data, cursorUsage);
+
+  const blocks = eventBlocks(usageEvents);
+  const rendered = blocks.map((block) => wrapEventBlock(block, 120, '', {
+    now: usageEvents.at(-1).at,
+    timestampMode: 'relative',
+    expandedEvents: new Set([block.key])
+  }).lines.join('\n')).join('\n');
+  assert.match(rendered, /cachedInputTokens/);
+  assert.match(rendered, /reasoningOutputTokens/);
+  assert.match(rendered, /tokenUsage/);
+  assert.match(rendered, /usage_update/);
+  assert.doesNotMatch(rendered, /auth-secret|refresh-secret|api-secret|access-secret|id-secret/);
+}));
+
+test('usage-shaped token objects recurse but non-usage token keys never receive the exemption', () => {
+  assert.deepEqual(redact({
+    tokenUsage: {
+      cachedInputTokens: 9,
+      reasoningOutputTokens: 3,
+      authToken: 'nested-auth-secret'
+    }
+  }), {
+    tokenUsage: {
+      cachedInputTokens: 9,
+      reasoningOutputTokens: 3,
+      authToken: '[REDACTED]'
+    }
+  });
+  for (const key of ['authToken', 'refreshToken', 'apiToken', 'accessToken', 'idToken']) {
+    assert.equal(redact({ [key]: 12345 })[key], '[REDACTED]', key);
+    assert.equal(redact({ [key]: { inputTokens: 12 } })[key], '[REDACTED]', `${key} object`);
+  }
 });
 
 test('broker error taxonomy carries closed codes, retryability, and provider attribution', () => {

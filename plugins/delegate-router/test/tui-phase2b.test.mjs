@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -62,7 +65,7 @@ test('tail parsing skips garbage, truncated starts, huge lines, and empty files 
   const huge = path.join(root, 'huge-line.jsonl');
   fs.writeFileSync(huge, `${JSON.stringify({ type: 'user', message: { content: 'safe previous line' } })}\n${JSON.stringify({ type: 'assistant', message: { content: 'z'.repeat(40 * 1024) } })}\n`);
   const hugeResult = parseSessionTail(huge);
-  assert.match(hugeResult.lastActivity, /^assistant: z+…$/);
+  assert.match(hugeResult.lastActivity, /^assistant: z+\.$/);
   assert.ok(hugeResult.lastActivity.length <= 120);
 
   const empty = path.join(root, 'empty.jsonl');
@@ -120,7 +123,8 @@ test('missing projects directory degrades to an explanatory absent panel', (t) =
   assert.match(scan.error, /missing or unreadable/);
   const frame = sessionsViewModel({ jobs: [], writerLocks: [], sessions: [], sessionScan: { status: 'unavailable', ...scan } }, {}, { width: 80, height: 20 });
   assert.equal(frame.screen, 'sessions');
-  assert.match(frame.panes[0].content.lines[0], /missing or unreadable/);
+  assert.equal(frame.panes[0].content.kind, 'empty');
+  assert.match(frame.panes[0].content.action, /missing or unreadable/);
   assert.equal(paintFrame(frame).rows, 20);
 });
 

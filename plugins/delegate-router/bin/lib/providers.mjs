@@ -19,6 +19,99 @@ import { loadJob, mutateState, setWindow } from './state.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
+export class ActivityTransitionEmitter {
+  constructor(jobId, options = {}) {
+    this.jobId = jobId;
+    this.now = options.now || (() => Date.now());
+    this.schedule = options.schedule || ((callback, delayMs) => setTimeout(callback, delayMs));
+    this.cancel = options.cancel || ((handle) => clearTimeout(handle));
+    this.minimumMs = Math.max(0, Number(options.minimumMs ?? 2000));
+    this.emit = options.emit || ((kind, at) => appendJobEvent(jobId, 'activity', { kind, at }));
+    this.current = 'output';
+    this.lastKind = null;
+    this.lastAt = Number.NEGATIVE_INFINITY;
+    this.pending = null;
+    this.timer = null;
+    this.closed = false;
+  }
+
+  emitMarker(kind, at) {
+    try { this.emit(kind, at); } catch { return false; }
+    this.lastKind = kind;
+    this.lastAt = at;
+    return true;
+  }
+
+  clearPending() {
+    if (this.timer != null) this.cancel(this.timer);
+    this.timer = null;
+    this.pending = null;
+  }
+
+  mark(kind, at = this.now()) {
+    if (this.closed || !['thinking', 'output'].includes(kind) || kind === this.current) return false;
+    this.current = kind;
+    const timestamp = Number(at ?? this.now());
+    if (kind === this.lastKind) {
+      this.clearPending();
+      return false;
+    }
+    if (timestamp - this.lastAt >= this.minimumMs) {
+      this.clearPending();
+      return this.emitMarker(kind, timestamp);
+    }
+    this.pending = { kind, at: timestamp };
+    if (this.timer == null) {
+      this.timer = this.schedule(() => {
+        this.timer = null;
+        this.flush();
+      }, Math.max(0, this.lastAt + this.minimumMs - timestamp));
+      this.timer?.unref?.();
+    }
+    return false;
+  }
+
+  flush(at = this.now()) {
+    if (this.closed || !this.pending) return false;
+    const pending = this.pending;
+    if (pending.kind !== this.current || pending.kind === this.lastKind) {
+      this.clearPending();
+      return false;
+    }
+    const timestamp = Number(at ?? this.now());
+    if (timestamp - this.lastAt < this.minimumMs) {
+      if (this.timer == null) {
+        this.timer = this.schedule(() => {
+          this.timer = null;
+          this.flush();
+        }, Math.max(0, this.lastAt + this.minimumMs - timestamp));
+        this.timer?.unref?.();
+      }
+      return false;
+    }
+    this.pending = null;
+    return this.emitMarker(pending.kind, pending.at);
+  }
+
+  close() {
+    this.closed = true;
+    this.clearPending();
+  }
+}
+
+export function codexActivitySignal(method = '', item = null) {
+  if (item?.type === 'reasoning' || String(method).includes('reasoning')) return 'thinking';
+  if (item || method) return 'output';
+  return null;
+}
+
+export function cursorAcpActivitySignal(update = {}) {
+  const kind = update.sessionUpdate;
+  if (kind === 'agent_thought_chunk') return 'thinking';
+  if (['agent_message_chunk', 'plan', 'plan_update', 'tool_call', 'tool_call_update'].includes(kind)) return 'output';
+  return null;
+}
+
 // Local floors are intentionally conservative and traceable to the CLIs on
 // the release workstation: codex-cli 0.144.1 and Cursor build
 // 2026.07.09-a3815c0. Operators can raise or lower either assertion without a
@@ -314,9 +407,11 @@ function recordSession(jobId, sessionId, turnId = undefined) {
   appendJobEvent(jobId, 'session.updated', { sessionId, turnId });
 }
 
-function mapCodexItem(jobId, phase, params) {
+function mapCodexItem(jobId, phase, params, activity = null) {
   const item = params.item || {};
   const options = { sessionId: params.threadId, turnId: params.turnId };
+  activity?.mark(codexActivitySignal('', item));
+  if (item.type === 'reasoning') return;
   if (item.type === 'agentMessage' && phase === 'completed') {
     appendJobEvent(jobId, 'message.completed', { id: item.id, text: item.text, phase: item.phase }, options);
     storeProviderResult(jobId, item.text);
@@ -366,6 +461,7 @@ async function runCodex(job) {
   let cancelDrainDeadline = null;
   const messages = new Map();
   const deltas = new DeltaRedactor();
+  const activity = new ActivityTransitionEmitter(job.id);
   let budgetError = null;
   let largeWriteError = null;
   const liveChangedPaths = new Set();
@@ -377,6 +473,7 @@ async function runCodex(job) {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
     onRequest: async (method, params) => {
+      activity.mark('output');
       appendJobEvent(job.id, 'approval.requested', { method, params });
       const forced = job.approval === 'force';
       let result;
@@ -393,16 +490,18 @@ async function runCodex(job) {
     onNotification: async (method, params) => {
       const options = { sessionId: params.threadId, turnId: params.turnId || params.turn?.id };
       if (method === 'turn/started') {
+        activity.mark('output');
         const turnId = params.turn?.id;
         recordSession(job.id, params.threadId, turnId);
         appendJobEvent(job.id, 'turn.started', { turn: params.turn }, options);
       } else if (method === 'item/agentMessage/delta') {
+        activity.mark('output');
         const text = `${messages.get(params.itemId) || ''}${params.delta || ''}`;
         messages.set(params.itemId, text);
         appendJobEvent(job.id, 'message.delta', { id: params.itemId, delta: deltas.redactDelta(`message:${params.itemId}`, params.delta) }, options);
       } else if (method === 'item/started' || method === 'item/completed') {
         const phase = method === 'item/started' ? 'started' : 'completed';
-        mapCodexItem(job.id, phase, params);
+        mapCodexItem(job.id, phase, params, activity);
         for (const file of codexChangedPaths(params.item)) liveChangedPaths.add(file);
         const limit = largeWriteLimit();
         if (liveChangedPaths.size > limit && !largeWriteError) {
@@ -420,8 +519,14 @@ async function runCodex(job) {
           }
         }
       }
-      else if (method === 'item/commandExecution/outputDelta') appendJobEvent(job.id, 'tool.output', { id: params.itemId, delta: deltas.redactDelta(`tool:${params.itemId}`, params.delta) }, options);
-      else if (method === 'turn/plan/updated') appendJobEvent(job.id, 'plan.updated', { explanation: params.explanation, plan: params.plan }, options);
+      else if (method === 'item/commandExecution/outputDelta') {
+        activity.mark('output');
+        appendJobEvent(job.id, 'tool.output', { id: params.itemId, delta: deltas.redactDelta(`tool:${params.itemId}`, params.delta) }, options);
+      }
+      else if (method === 'turn/plan/updated') {
+        activity.mark('output');
+        appendJobEvent(job.id, 'plan.updated', { explanation: params.explanation, plan: params.plan }, options);
+      }
       else if (method === 'turn/diff/updated') appendJobEvent(job.id, 'diff.updated', { diff: params.diff }, options);
       else if (method === 'thread/tokenUsage/updated') {
         const exceeded = recordUsage(job, params.tokenUsage, options);
@@ -453,14 +558,18 @@ async function runCodex(job) {
             }
           });
         } catch {}
-      } else if (method === 'error') appendJobEvent(job.id, 'error', params, options);
-      else if (!method.includes('reasoning')) appendJobEvent(job.id, 'provider.event', { providerEvent: method }, options);
+      } else if (method === 'error') {
+        activity.mark('output');
+        appendJobEvent(job.id, 'error', params, options);
+      }
+      else if (method.includes('reasoning')) activity.mark(codexActivitySignal(method));
+      else appendJobEvent(job.id, 'provider.event', { providerEvent: method }, options);
     }
   });
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.22.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.23.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -609,6 +718,7 @@ async function runCodex(job) {
       }
     }
   } finally {
+    activity.close();
     await rpc.stop();
   }
 }
@@ -733,10 +843,12 @@ function planEntriesText(entries) {
     .join('\n');
 }
 
-function mapAcpUpdate(job, update, sessionId, messageParts, deltas, planHolder) {
+function mapAcpUpdate(job, update, sessionId, messageParts, deltas, planHolder, activity = null) {
   const jobId = job.id;
   const kind = update.sessionUpdate;
   const options = { sessionId };
+  const signal = cursorAcpActivitySignal(update);
+  if (signal) activity?.mark(signal);
   if (kind === 'agent_message_chunk') {
     const text = update.content?.text || '';
     messageParts.push(text);
@@ -755,6 +867,8 @@ function mapAcpUpdate(job, update, sessionId, messageParts, deltas, planHolder) 
     const type = ['completed', 'failed'].includes(update.status) ? 'tool.completed' : 'tool.output';
     appendJobEvent(jobId, type, update, options);
     for (const location of update.locations || []) if (location.path) appendJobEvent(jobId, 'file.changed', { path: location.path }, options);
+  } else if (kind === 'agent_thought_chunk') {
+    return undefined;
   } else if (kind === 'usage_update') {
     return recordUsage(job, update, options);
   } else if (kind === 'session_info_update') {
@@ -883,6 +997,7 @@ async function runCursorAcp(job) {
   const messageParts = [];
   const planHolder = { entries: null };
   const deltas = new DeltaRedactor();
+  const activity = new ActivityTransitionEmitter(job.id);
   let budgetError = null;
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
   const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
@@ -891,7 +1006,7 @@ async function runCursorAcp(job) {
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
     onNotification: async (method, params) => {
       if (method === 'session/update') {
-        const exceeded = mapAcpUpdate(job, params.update || {}, params.sessionId, messageParts, deltas, planHolder);
+        const exceeded = mapAcpUpdate(job, params.update || {}, params.sessionId, messageParts, deltas, planHolder, activity);
         if (exceeded && !budgetError) {
           budgetError = exceeded;
           recordBudgetExceeded(job, exceeded, { sessionId: params.sessionId });
@@ -904,6 +1019,7 @@ async function runCursorAcp(job) {
     },
     onRequest: async (method, params) => {
       if (method !== 'session/request_permission') throw brokerError('INVALID_REQUEST', `Unsupported ACP request: ${method}`, { provider: job.provider });
+      activity.mark('output');
       appendJobEvent(job.id, 'approval.requested', { method, toolCall: params.toolCall, options: params.options }, { sessionId });
       const allow = job.approval === 'force' ? params.options?.find((option) => /allow/i.test(option.kind)) : null;
       const reject = params.options?.find((option) => /reject|deny/i.test(option.kind));
@@ -918,7 +1034,7 @@ async function runCursorAcp(job) {
     await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.22.0' }
+      clientInfo: { name: 'delegate-router', version: '0.23.0' }
     });
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
@@ -1065,6 +1181,7 @@ async function runCursorAcp(job) {
       break;
     }
   } finally {
+    activity.close();
     await rpc.stop();
   }
 }

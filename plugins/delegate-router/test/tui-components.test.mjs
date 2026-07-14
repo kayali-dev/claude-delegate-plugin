@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { paintLogPane, scrollVirtualLog, WrapCache } from '../bin/lib/tui/components.mjs';

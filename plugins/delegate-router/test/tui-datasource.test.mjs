@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,7 +9,7 @@ import test from 'node:test';
 import { activeWriterLocks, appendJobEvent, createManagedJob, updateManagedJob } from '../bin/lib/control.mjs';
 import { paintFrame } from '../bin/lib/tui/components.mjs';
 import { DelegateDataSource, tailAllJobs } from '../bin/lib/tui/datasource.mjs';
-import { fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
+import { dashboardViewModel, fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
 import { loadJob, saveJob } from '../bin/lib/state.mjs';
 
 async function isolated(fn) {
@@ -206,5 +209,79 @@ test('lazy visible-row reconciliation is deferred and capped at five jobs per ba
     await source.reconcileVisibleJobs(secondFrame.meta.reconcileJobIds, { limit: 5 });
     assert.equal(source.getState().jobs.filter((job) => job.status === 'failed').length, 8);
     assert.equal(source.metrics.reconciliations, 8);
+  } finally { source.close(); }
+}));
+
+test('completed history hydration stays settled across quiet refreshes and tails without loading churn', () => isolated(async (root) => {
+  const job = createManagedJob({ provider: 'codex', mode: 'review', cwd: root, prompt: completePacket('hydrate once') });
+  const source = new DelegateDataSource({ watch: false, pollMs: 100000 }).start();
+  try {
+    await source.selectJob(job.id);
+    const pages = source.metrics.journalPages;
+    const loading = [];
+    source.on('change', (state) => loading.push(state.hydrationByJob[job.id]?.loading));
+    source.refreshRecords();
+    source.refreshRecords();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(source.metrics.journalPages, pages, 'unchanged journal is not hydrated again');
+    assert.ok(!loading.includes(true), 'settled history never re-enters loading');
+
+    appendJobEvent(job.id, 'message.completed', { text: 'one new tail event' });
+    await source.selectJob(job.id);
+    assert.equal(source.metrics.journalPages, pages + 1);
+    assert.equal(source.getState().hydrationByJob[job.id].loading, false);
+    assert.ok(!loading.includes(true), 'incremental tail reads do not show initial-history loading');
+  } finally { source.close(); }
+}));
+
+test('fleet freshness follows unselected record, journal, and clock transitions within one refresh cycle', () => isolated(async (root) => {
+  const jobs = [];
+  for (let index = 0; index < 9; index += 1) {
+    const created = createManagedJob({ provider: 'codex', mode: 'review', cwd: root, prompt: completePacket(`fresh ${index}`) });
+    updateManagedJob(created.id, (record) => {
+      record.status = 'running';
+      record.phase = 'working';
+      record.workerPid = process.pid;
+    });
+    jobs.push(created.id);
+  }
+  const target = jobs[5];
+  const source = new DelegateDataSource({ watch: false, pollMs: 100000 }).start();
+  const activityText = (state, now = Date.now()) => {
+    const frame = fleetViewModel(state, { now, selectedIndex: 1, scroll: 3 }, { width: 100, height: 14 });
+    const activity = frame.panes[0].content.columns.findIndex((column) => column.key === 'activity');
+    return frame.panes[0].content.rows.find((row) => row.id === target)?.cells[activity]?.text || '';
+  };
+  try {
+    appendJobEvent(target, 'tool.started', { id: 'fresh-tool', item: { id: 'fresh-tool', type: 'commandExecution', command: ['node', '--test'], status: 'inProgress' } });
+    let state = source.refresh({ force: true });
+    assert.match(activityText(state), /tool:/, 'visible unselected row receives its journal tail');
+
+    // A different screen may be focused; the next source refresh still
+    // updates the shared store consumed by both Dashboard and Fleet.
+    dashboardViewModel(state, { now: Date.now() }, { width: 100, height: 30 });
+    appendJobEvent(target, 'tool.completed', { id: 'fresh-tool', item: { id: 'fresh-tool', type: 'commandExecution', command: ['node', '--test'], status: 'completed', exitCode: 0 } });
+    state = source.refresh({ force: true });
+    assert.doesNotMatch(activityText(state), /tool:/, 'tool completion replaces stale tool activity');
+
+    updateManagedJob(target, (record) => {
+      record.status = 'completed';
+      record.phase = 'completed';
+      record.completedAt = Math.floor(Date.now() / 1000);
+    });
+    state = source.refresh({ force: true });
+    assert.match(activityText(state), /completed/, 'modified job record is re-read rather than cached by id');
+
+    updateManagedJob(target, (record) => {
+      record.status = 'running';
+      record.phase = 'working';
+      record.completedAt = null;
+      record.workerPid = process.pid;
+    });
+    state = source.refresh({ force: true });
+    const future = Date.now() + 600_000;
+    assert.match(activityText(state, future), /stalled/, 'the one-second clock re-derives activity buckets');
+    const dashboard = dashboardViewModel(state, { now: future }, { width: 100, height: 30 });
+    assert.ok(dashboard.meta.attentionJobIds.includes(target), 'Dashboard and Fleet agree on the stalled transition');
   } finally { source.close(); }
 }));

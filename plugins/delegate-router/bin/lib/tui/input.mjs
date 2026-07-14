@@ -7,7 +7,7 @@ const FIXED_SEQUENCES = Object.freeze([
   [`${ESC}[F`, 'end'], [`${ESC}[4~`, 'end'], [`${ESC}OF`, 'end'],
   [`${ESC}[Z`, 'shift-tab'],
   ['\r', 'enter'], ['\n', 'enter'], ['\u007f', 'backspace'], ['\b', 'backspace'],
-  ['\u0003', 'ctrl-c'], ['\u0015', 'ctrl-u'], ['\t', 'tab']
+  ['\u0003', 'ctrl-c'], ['\u0007', 'ctrl-g'], ['\u0015', 'ctrl-u'], ['\t', 'tab']
 ].sort((left, right) => right[0].length - left[0].length));
 
 const ESCAPE_PREFIXES = FIXED_SEQUENCES.map(([sequence]) => sequence).filter((sequence) => sequence.startsWith(ESC));
@@ -66,9 +66,13 @@ export function coalesceInputEvents(events) {
     scrollDelta = 0;
   };
   for (const event of events || []) {
-    if (event === 'up') scrollDelta -= 1;
-    else if (event === 'down') scrollDelta += 1;
-    else if (event === 'wheel-up') scrollDelta -= 3;
+    // Arrow keys are logical selection steps. Do not collapse them into a
+    // viewport scroll: the controller must visit one block per keypress even
+    // when the viewport is already at its top or bottom limit. BufferedInput
+    // still dispatches the whole burst in one animation tick, so preserving
+    // the individual events does not add renders. Wheel input intentionally
+    // remains viewport-only and may be coalesced to its net line delta.
+    if (event === 'wheel-up') scrollDelta -= 3;
     else if (event === 'wheel-down') scrollDelta += 3;
     else {
       flushScroll();

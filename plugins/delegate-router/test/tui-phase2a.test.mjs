@@ -1,3 +1,6 @@
+import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
+await useTuiTestHarness(import.meta.url);
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -81,7 +84,7 @@ test('incremental logical search maps hits lazily through the wrap cache and nav
 
   const highlighted = new CellGrid(40, 2);
   paintLogPane(highlighted, { x: 0, y: 0, width: 40, height: 2 }, { ...log, entries: entries.slice(0, 1), scroll: position }, { wrapCache: new WrapCache() });
-  assert.ok(highlighted.cells.flat().some((cell) => cell.style.bold), 'visible matches receive the semantic search-match style');
+  assert.ok(highlighted.cells.flat().some((cell) => cell.style.bg || cell.style.underline), 'visible matches receive the semantic search-match style');
 });
 
 test('editor handoff restores terminal, runs a scripted editor, and fully re-enters the screen', (t) => {
@@ -122,8 +125,8 @@ test('route advisor formats primary, top fallback, scores, and observed usage ba
     primary: { provider: 'cursor', model: 'auto', score: 105, reason: 'best fit', usageBand: { p50OutputTokens: 1200, p90OutputTokens: 3400, samples: 8 } },
     fallbacks: [{ provider: 'codex', model: 'terra', score: 80 }]
   });
-  assert.match(lines[1], /Primary: cursor\/auto · score 105 · p50 1200 \/ p90 3400 out \(8\)/);
-  assert.match(lines[2], /Fallback: codex\/terra · score 80/);
+  assert.match(lines[1], /Primary: cursor\/auto \| score 105 \| p50 1200 \/ p90 3400 out \(8\)/);
+  assert.match(lines[2], /Fallback: codex\/terra \| score 80/);
 });
 
 test('notification dispatch is safe, debounced, and disabled by DELEGATE_TUI_NOTIFY=0', () => {
@@ -183,6 +186,6 @@ test('light theme changes semantic palette values without component-specific ove
   assert.equal(palette.theme, 'light');
   assert.deepEqual(palette.bar, { fg: lightBarFg, bg: lightBarBg });
   assert.deepEqual(palette.selection, { bg: lightSelectionBg });
-  assert.deepEqual(palette.searchMatch, { bg: lightSearchMatchBg, bold: true });
+  assert.deepEqual(palette.searchMatch, { bg: lightSearchMatchBg });
   assert.deepEqual(palette.body, {});
 });

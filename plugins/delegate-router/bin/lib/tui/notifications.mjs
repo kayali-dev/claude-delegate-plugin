@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { CHROME_SEPARATOR } from './glyphs.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
@@ -75,7 +76,7 @@ export class NotificationDispatcher {
     const now = this.now();
     if (this.lastSent.has(job.id) && now - this.lastSent.get(job.id) < 5000) return false;
     const safeField = state.provider;
-    const body = `${job.id} · ${state.status} · ${safeField} · ${kind}`;
+    const body = `${job.id}${CHROME_SEPARATOR}${state.status}${CHROME_SEPARATOR}${safeField}${CHROME_SEPARATOR}${kind}`;
     const args = this.platform === 'darwin'
       ? ['-e', `display notification ${appleString(body)} with title ${appleString('Delegate Router')}`]
       : ['Delegate Router', body];
