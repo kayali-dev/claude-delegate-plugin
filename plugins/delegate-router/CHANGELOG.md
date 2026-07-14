@@ -2,6 +2,10 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.23.3 — 2026-07-14
+
+- Width probe now completes on terminals that pace CPR replies per render frame (bare Ghostty): event-driven incremental reply parsing, budget scaled to the measured reply cadence (cap 500ms), raw-mode enforcement, exclusive stdin ownership during the probe, and distinct unproven(budget)/timeout/no-raw-mode verdicts. probeVersion=3 invalidates prior verdicts. Restores the elegant glyph set on directly-attached fast terminals.
+
 ## 0.23.2 — 2026-07-14
 
 - App-bar version now comes from package.json at startup (a hardcoded `v0.22.0` fallback in the view had been lying since the restyle, causing a cross-machine version-skew wild-goose chase); absent version renders `v?` so failure is visible.

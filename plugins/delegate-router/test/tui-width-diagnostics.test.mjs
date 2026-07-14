@@ -40,8 +40,44 @@ function outputCapture(columns = 60, rows = 6) {
   return { text: '', columns, rows, isTTY: true, write(value) { this.text += String(value); return true; } };
 }
 
+class ProbeInput extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.isTTY = options.isTTY ?? true;
+    this.isRaw = options.isRaw ?? false;
+    this.paused = true;
+    this.readable = [];
+    this.rawModeCalls = [];
+  }
+
+  setRawMode(value) {
+    this.rawModeCalls.push(Boolean(value));
+    this.isRaw = Boolean(value);
+    return this;
+  }
+
+  pause() {
+    this.paused = true;
+    return this;
+  }
+
+  resume() {
+    this.paused = false;
+    while (this.readable.length) this.emit('data', this.readable.shift());
+    return this;
+  }
+
+  read() {
+    return this.readable.shift() ?? null;
+  }
+
+  prebuffer(value) {
+    this.readable.push(Buffer.from(String(value), 'utf8'));
+  }
+}
+
 async function deliverProbeChunks(chunks, options = {}) {
-  const input = new EventEmitter();
+  const input = new ProbeInput();
   const writes = [];
   const screen = {
     rows: 20, input,
@@ -154,7 +190,7 @@ test('TUI-owned chrome gates every ambiguous literal behind the measured elegant
 
 test('runtime CPR probe measures the interposed terminal and cached/off modes do not write', async (t) => {
   t.after(clearGraphemeWidthOverrides);
-  const input = new EventEmitter();
+  const input = new ProbeInput();
   const writes = [];
   const screen = {
     rows: 20, input,
@@ -176,6 +212,53 @@ test('runtime CPR probe measures the interposed terminal and cached/off modes do
   const off = await probeTerminalWidths({ screen, input, mode: 'off' });
   assert.equal(off.source, 'off');
   assert.equal(writes.length, 0);
+});
+
+test('runtime CPR probe owns raw stdin before writes and handles every reply latency', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  for (const delivery of ['synchronous', 'prebuffered', 'delayed']) {
+    const input = new ProbeInput();
+    const decoderBytes = [];
+    const decoder = (chunk) => decoderBytes.push(String(chunk));
+    input.on('data', decoder);
+    const screen = {
+      rows: 20, input,
+      writeOutput(value, meta) {
+        if (meta.context !== 'probe' || !String(value).includes('\u001b[6n')) return;
+        assert.equal(input.isRaw, true, `${delivery}: raw mode precedes the first query`);
+        assert.equal(input.listeners('data').includes(decoder), false, `${delivery}: decoder is suspended during the probe`);
+        const reply = '\u001b[20;2R\u001b[20;3R';
+        if (delivery === 'synchronous') input.emit('data', reply);
+        else if (delivery === 'prebuffered') input.prebuffer(reply);
+        else setTimeout(() => input.emit('data', reply), 30);
+      }
+    };
+    const result = await probeTerminalWidths({ screen, input, env: {}, probes: ['A', 'B'], timeoutMs: 60 });
+    assert.deepEqual(result.widths, { A: 1, B: 2 }, delivery);
+    assert.deepEqual(result.outcomes.map((entry) => entry.status), ['measured', 'measured'], delivery);
+    assert.deepEqual(decoderBytes, [], `${delivery}: CPR bytes never enter the input decoder`);
+    assert.equal(input.listeners('data').includes(decoder), true, `${delivery}: decoder ownership is restored`);
+  }
+
+  const input = new ProbeInput();
+  const timeout = await probeTerminalWidths({
+    screen: { rows: 20, input, writeOutput() {} }, input, env: {}, probes: ['A'], timeoutMs: 10
+  });
+  assert.deepEqual(timeout.outcomes.map((entry) => entry.status), ['timeout']);
+});
+
+test('runtime CPR probe skips visibly when raw input cannot be established', async () => {
+  const input = new EventEmitter();
+  input.isTTY = true;
+  const writes = [];
+  const result = await probeTerminalWidths({
+    screen: { rows: 20, input, writeOutput(value) { writes.push(value); } },
+    input, env: {}, probes: ['─', '│']
+  });
+  assert.equal(result.source, 'fallback');
+  assert.deepEqual(result.outcomes.map((entry) => entry.status), ['no-raw-mode', 'no-raw-mode']);
+  assert.equal(writes.length, 0, 'canonical-mode terminals are never queried');
+  assert.match(formatWidthProbeResult(result), /unproven\(no-raw-mode\)/);
 });
 
 test('runtime CPR probe parses coalesced, fragmented, and noisy delivery without losing replies', async (t) => {
@@ -229,6 +312,64 @@ test('the full elegant glyph set proves under one coalesced CPR delivery', async
   configureGlyphs({ env: { TERM: 'xterm-ghostty', LANG: 'en_US.UTF-8' }, widths: result.widths });
   assert.equal(glyphConfiguration().mode, 'probed-elegant');
   for (const [key, value] of Object.entries(GLYPH_TIERS.elegant)) assert.deepEqual(CHROME_GLYPHS[key], value, key);
+});
+
+test('pipelined probe proves all 57 glyphs at local and ssh-like RTTs', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const replies = WIDTH_PROBE_GRAPHEMES.map(() => '\u001b[20;2R').join('');
+  for (const delayMs of [1, 20]) {
+    const input = new ProbeInput();
+    const screen = {
+      rows: 20, input,
+      writeOutput(value, meta) {
+        if (meta.context === 'probe' && String(value).includes('\u001b[6n')) setTimeout(() => input.emit('data', replies), delayMs);
+      }
+    };
+    const result = await probeTerminalWidths({ screen, input, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 40 });
+    assert.equal(Object.keys(result.widths).length, 57, `${delayMs}ms batch proves the complete set`);
+    assert.ok(result.elapsedMs < (delayMs === 1 ? 15 : 60), `${delayMs}ms RTT completed in ${result.elapsedMs.toFixed(1)}ms`);
+  }
+});
+
+test('probe budget scales with streamed reply cadence and distinguishes budget exhaustion', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const serialInput = new ProbeInput();
+  let serialTimer;
+  const serialScreen = {
+    rows: 20, input: serialInput,
+    writeOutput(value, meta) {
+      if (meta.context !== 'probe' || !String(value).includes('\u001b[6n')) return;
+      let delivered = 0;
+      serialTimer = setInterval(() => {
+        serialInput.emit('data', '\u001b[20;2R');
+        delivered += 1;
+        if (delivered === WIDTH_PROBE_GRAPHEMES.length) clearInterval(serialTimer);
+      }, 7);
+    }
+  };
+  t.after(() => clearInterval(serialTimer));
+  const serial = await probeTerminalWidths({
+    screen: serialScreen, input: serialInput, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 45, maxBudgetMs: 500
+  });
+  assert.equal(Object.keys(serial.widths).length, 57, 'a render-cycle-paced terminal completes after the old 45ms cutoff');
+  assert.ok(serial.elapsedMs > 45 && serial.elapsedMs < 500, `scaled batch completed in ${serial.elapsedMs.toFixed(1)}ms`);
+
+  const budgetInput = new ProbeInput();
+  let budgetTimer;
+  const budgetScreen = {
+    rows: 20, input: budgetInput,
+    writeOutput(value, meta) {
+      if (meta.context !== 'probe' || !String(value).includes('\u001b[6n')) return;
+      budgetTimer = setInterval(() => budgetInput.emit('data', '\u001b[20;2R'), 10);
+    }
+  };
+  t.after(() => clearInterval(budgetTimer));
+  const budget = await probeTerminalWidths({
+    screen: budgetScreen, input: budgetInput, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 20, maxBudgetMs: 70
+  });
+  clearInterval(budgetTimer);
+  assert.ok(budget.outcomes.some((entry) => entry.status === 'budget'));
+  assert.match(formatWidthProbeResult(budget), /unproven\(budget\)/);
 });
 
 test('suspect graphemes are isolated by CUP so adversarial width disagreement cannot move neighboring ASCII', () => {
