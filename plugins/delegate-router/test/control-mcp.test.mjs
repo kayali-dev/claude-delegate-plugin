@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
@@ -21,10 +23,11 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.equal(responses[0].result.serverInfo.name, 'delegate-control');
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_events', 'delegate_transcript', 'delegate_diff',
-    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_resume', 'delegate_review_round', 'delegate_usage'
+    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage'
   ]);
   const start = responses[1].result.tools.find((tool) => tool.name === 'delegate_start');
   const inspect = responses[1].result.tools.find((tool) => tool.name === 'delegate_inspect');
+  const respond = responses[1].result.tools.find((tool) => tool.name === 'delegate_respond');
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
@@ -33,15 +36,71 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   for (const option of ['profile', 'groupId', 'startPaused', 'ingestFiles', 'autoNudge', 'reportSchema']) {
     assert.ok(start.inputSchema.properties[option], option);
   }
+  for (const option of ['networkAllow', 'addDirs', 'approveMcps', 'cursorWorktree', 'cursorWorktreeBase']) {
+    assert.ok(start.inputSchema.properties[option], `delegate_start.${option}`);
+    assert.ok(resume.inputSchema.properties[option], `delegate_resume.${option}`);
+  }
   assert.deepEqual(start.inputSchema.properties.waitFor.enum, ['session', 'turn', 'first-output']);
   assert.ok(start.inputSchema.properties.waitForSession);
   assert.ok(start.inputSchema.properties.dryRun);
   assert.ok(inspect.inputSchema.properties.resultWindow);
   assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_release'));
+  assert.deepEqual(respond.inputSchema.required, ['jobId', 'expectedRevision']);
+  for (const option of ['requestId', 'answer', 'accept', 'response', 'commandId']) assert.ok(respond.inputSchema.properties[option], `delegate_respond.${option}`);
   assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_review_round'));
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
   assert.ok(resume.inputSchema.properties.retryPolicy);
   assert.ok(resume.inputSchema.properties.verify);
+});
+
+test('delegate_respond queues a revision-safe answer through the control inbox', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-mcp-respond-'));
+  const previousState = process.env.DELEGATE_STATE_FILE;
+  const previousProviders = process.env.DELEGATE_ENABLED_PROVIDERS;
+  process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
+  process.env.DELEGATE_ENABLED_PROVIDERS = 'cursor';
+  try {
+    const { createManagedJob, updateManagedJob } = await import('../bin/lib/control.mjs');
+    const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'consult', cwd: directory, prompt: 'answer without changing files' });
+    const requestId = 'cursor-question-1';
+    const waiting = updateManagedJob(job.id, (current) => {
+      current.status = 'running';
+      current.phase = 'user-input-required';
+      current.stopReason = 'USER_INPUT_REQUIRED';
+      current.pid = process.pid;
+      current.pendingInput = { requestId, method: 'cursor/ask_question', payload: { question: 'Which directory?' } };
+    });
+    const child = spawn(process.execPath, [server], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE, DELEGATE_ENABLED_PROVIDERS: 'cursor' }
+    });
+    const lines = readline.createInterface({ input: child.stdout });
+    const responses = [];
+    lines.on('line', (line) => responses.push(JSON.parse(line)));
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'delegate_respond', arguments: {
+      jobId: job.id,
+      expectedRevision: waiting.revision,
+      requestId,
+      answer: 'src',
+      commandId: 'mcp-response-1'
+    } } })}\n`);
+    for (let i = 0; i < 100 && responses.length < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    child.stdin.end();
+    await new Promise((resolve) => child.once('exit', resolve));
+    const result = JSON.parse(responses[0].result.content[0].text);
+    assert.deepEqual(result, {
+      accepted: true,
+      commandId: 'mcp-response-1',
+      revision: waiting.revision + 1,
+      phase: 'responding'
+    });
+  } finally {
+    if (previousState == null) delete process.env.DELEGATE_STATE_FILE;
+    else process.env.DELEGATE_STATE_FILE = previousState;
+    if (previousProviders == null) delete process.env.DELEGATE_ENABLED_PROVIDERS;
+    else process.env.DELEGATE_ENABLED_PROVIDERS = previousProviders;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('delegate-jobs help has CLI parity for caller options', () => {

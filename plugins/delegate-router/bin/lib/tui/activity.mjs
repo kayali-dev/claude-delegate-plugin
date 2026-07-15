@@ -1,5 +1,6 @@
-import { deriveToolDescriptor, toolActivityLabel, toolEventKey } from './transcript.mjs';
+import { deriveToolDescriptor, normalizeCompactionEvents, toolActivityLabel, toolEventKey } from './transcript.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR } from './glyphs.mjs';
+import { formatDisplayValue } from './display.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const PHASES = new Set(['verifying', 'retrying', 'paused', 'starting']);
@@ -7,7 +8,7 @@ const PHASES = new Set(['verifying', 'retrying', 'paused', 'starting']);
 export const ACTIVITY_CAPABILITIES = Object.freeze({
   'codex:app-server': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: true, needsInput: true, visibility: 'full' }),
   'cursor:acp': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: true, needsInput: true, visibility: 'near-full' }),
-  'cursor:headless': Object.freeze({ thinking: false, streaming: true, tools: false, approvals: false, needsInput: false, visibility: 'minimal' })
+  'cursor:headless': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: false, needsInput: false, visibility: 'near-full' })
 });
 
 export function activityTransportKey(job = {}) {
@@ -38,18 +39,23 @@ function result(kind, label, glyph, since, now, tone, extra = {}) {
 const signalCache = new WeakMap();
 
 function activitySignals(events) {
+  events = normalizeCompactionEvents(events);
   if (signalCache.has(events)) return signalCache.get(events);
   const open = new Map();
+  const openCompactions = new Map();
   let approval = null;
   let needsInput = null;
   let delta = null;
   let signal = null;
   for (const event of events) {
+    if (event.replay === true) continue;
     if (event.type === 'turn.started') needsInput = null;
     if (event.type === 'approval.requested') approval = event;
     else if (event.type === 'approval.resolved') approval = null;
     if (event.type === 'error' && (event.data?.code === 'USER_INPUT_REQUIRED'
       || /USER_INPUT_REQUIRED/.test(String(event.data?.error || event.data?.message || '')))) needsInput = event;
+    if (event.type === 'input.requested') needsInput = event;
+    else if (event.type === 'input.resolved') needsInput = null;
     if (event.type === 'tool.started') {
       const key = toolEventKey(event) || `seq-${event.seq || 0}`;
       open.set(key, event);
@@ -63,15 +69,24 @@ function activitySignals(events) {
       if (event.data.phase === 'started' || event.data.status === 'inProgress' || event.data.status === 'in_progress') open.set(key, event);
       else open.delete(key);
     }
+    if (event.type === 'compaction.started') {
+      openCompactions.set(formatDisplayValue(event.data?.itemId) || `seq-${event.seq || 0}`, event);
+    } else if (event.type === 'compaction.completed') {
+      const itemId = formatDisplayValue(event.data?.itemId);
+      if (itemId) openCompactions.delete(itemId);
+      else openCompactions.delete([...openCompactions.keys()].at(-1));
+    }
     if (event.type === 'message.delta') delta = event;
     if (event.type === 'activity' || event.type === 'message.delta' || event.type === 'message.completed'
       || event.type === 'tool.started' || event.type === 'tool.output' || event.type === 'tool.completed'
       || event.type === 'file.changed' || event.type === 'plan.updated' || event.type === 'approval.requested' || event.type === 'approval.resolved'
-      || event.type === 'error') signal = event;
+      || event.type === 'input.requested' || event.type === 'input.resolved'
+      || event.type === 'compaction.started' || event.type === 'compaction.completed' || event.type === 'error') signal = event;
   }
   const value = {
     approval, needsInput, delta, signal, lastEvent: events.at(-1) || null,
-    openTool: [...open.entries()].sort((left, right) => eventAt(right[1]) - eventAt(left[1]))[0] || null
+    openTool: [...open.entries()].sort((left, right) => eventAt(right[1]) - eventAt(left[1]))[0] || null,
+    openCompaction: [...openCompactions.values()].sort((left, right) => eventAt(right) - eventAt(left))[0] || null
   };
   signalCache.set(events, value);
   return value;
@@ -83,8 +98,7 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   const capabilities = ACTIVITY_CAPABILITIES[key];
   const signals = activitySignals(events);
   const lastEvent = signals.lastEvent;
-  const visibleLastEvent = key === 'cursor:headless' ? signals.delta : lastEvent;
-  const lastAt = eventAt(visibleLastEvent) || Number(job.lastActivityAt || job.updatedAt * 1000 || job.createdAt * 1000 || now);
+  const lastAt = eventAt(lastEvent) || Number(job.lastActivityAt || job.updatedAt * 1000 || job.createdAt * 1000 || now);
   if (TERMINAL.has(job.status)) {
     const glyph = job.status === 'completed' ? CHROME_GLYPHS.success : job.status === 'failed' ? CHROME_GLYPHS.failure : '-';
     const tone = job.status === 'failed' ? 'failed' : job.status === 'cancelled' ? 'dim' : 'body';
@@ -99,6 +113,13 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   if (capabilities.needsInput) {
     const input = signals.needsInput;
     if (input) return result('needs-input', 'needs input', '?', eventAt(input), now, 'warning', { capabilities, transportKey: key, sourceSeq: input.seq });
+  }
+
+  if (key === 'codex:app-server' && signals.openCompaction) {
+    const compaction = signals.openCompaction;
+    return result('compacting', 'compacting', CHROME_GLYPHS.spinner, eventAt(compaction), now, 'accent', {
+      capabilities, transportKey: key, sourceSeq: compaction.seq
+    });
   }
 
   if (capabilities.tools) {
@@ -127,7 +148,7 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   }
 
   const phase = String(job.phase || '').toLowerCase();
-  if (key !== 'cursor:headless' && PHASES.has(phase)) {
+  if (PHASES.has(phase)) {
     const glyph = phase === 'paused' ? '||' : phase === 'starting' ? '>' : phase === 'retrying' ? '~' : '+';
     return result(phase, phase, glyph, Number(job.updatedAt || 0) * 1000 || lastAt, now, phase === 'paused' ? 'paused' : 'accent', { capabilities, transportKey: key });
   }
@@ -138,9 +159,5 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   if (job.stalled || idleMs > stallMs) return result('stalled', 'stalled', '!', lastAt, now, 'failed', { capabilities, transportKey: key, idleMs });
   if (idleMs > Number(options.quietMs ?? 30_000)) return result('quiet', 'quiet', '.', lastAt, now, 'dim', { capabilities, transportKey: key, idleMs });
 
-  const label = key === 'cursor:headless' ? 'working' : 'working';
-  return result('working', label, '>', lastAt, now, 'body', {
-    capabilities, transportKey: key, idleMs,
-    visibilityNote: key === 'cursor:headless' ? 'headless transport: reduced visibility' : null
-  });
+  return result('working', 'working', '>', lastAt, now, 'body', { capabilities, transportKey: key, idleMs, visibilityNote: null });
 }

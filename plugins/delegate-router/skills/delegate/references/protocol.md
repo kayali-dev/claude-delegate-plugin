@@ -17,7 +17,7 @@ Every first transition into a terminal status appends one redacted, private JSON
 
 Inspection reconciles liveness: a job recorded as `running` whose worker process no longer exists is transitioned to `failed` with an `ORPHANED` error event before the snapshot is returned. `delegate_list` rediscovers jobs by recency when an ID is no longer in context.
 
-Inspect and list rows expose `lastActivityAt` from the last complete journal line without scanning the journal. `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
+Inspect and list rows expose `lastActivityAt` from the last complete non-replay journal line (the ordinary fast path reads only the tail; a replay tail falls back to the newest live event). `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
 
 Every terminal transition also writes the job's `finishedPath` sentinel file (content: the terminal status). Its existence is the durable "job is done" signal for file watchers, which survive host harnesses that reap background waiter processes. Codex jobs that engaged the multi-agent review flow are marked `reviewFlowEngaged: true` (detected from collab-agent items), and `delegate_resume` refuses them fast with `RESUME_UNSUPPORTED`.
 
@@ -31,14 +31,19 @@ Stable types include:
 
 ```text
 job.created, job.state, job.completed, job.cancelled
-session.updated, turn.started, turn.completed
+provider.initialized, session.created, session.updated, turn.started, turn.completed
 message.user, message.delta, message.completed
 activity
 plan.updated
-tool.started, tool.output, tool.completed
+compaction.started, compaction.completed
+tool.started, tool.status, tool.output, tool.completed
 file.changed, diff.updated
-usage.updated
+usage.updated, usage.context
 approval.requested, approval.resolved
+input.requested, input.response.requested, input.resolved
+network.preflight, network.mode-elevated, network.policy.materialized, network.policy.restored
+config.updated, mode.updated, model.updated, commands.updated
+subagent.activity, artifact.created
 correction.requested, correction.applied, correction.queued, correction.restarted
 command.applied, command.rejected
 scope.violation, ingest.diverged
@@ -47,7 +52,17 @@ job.retry, verification.finished
 error, provider.event
 ```
 
-`activity` contains only `{ kind: 'thinking' | 'output', at }`. Codex reasoning items and Cursor ACP thought chunks produce transition markers at most once per two seconds; the event never contains thought/reasoning text. `provider.event` contains only a redacted event name and safe metadata. Raw provider payload persistence and hidden reasoning are intentionally excluded.
+`activity` contains only `{ kind: 'thinking' | 'output', at }`. Codex reasoning items plus Cursor ACP and headless thinking chunks produce transition markers at most once per two seconds; a bounded thought tail exists only in the provider process and is never written to the job record or journal. `provider.event` contains only a redacted event name and safe metadata. Raw provider payload persistence and hidden reasoning are intentionally excluded.
+
+Cursor headless assistant chunks obey the provider's dedupe contract: only chunks with `timestamp_ms` and without `model_call_id` become `message.delta`; buffered pre-tool flushes and the timestamp-free final flush are skipped. `result.result` is the authoritative `message.completed`, with a content-free mismatch diagnostic when streamed text differs. Only the final result envelope supplies headless token usage.
+
+Cursor ACP `tool_call_update` without output emits `tool.status`; completion `rawOutput` becomes bounded/redacted `tool.output` plus `tool.completed` with `exitCode`. Nested `{ path, oldText, newText }` diff content becomes `file.changed` and `diff.updated`. `session_info_update`, current mode, available commands, todo updates, nested task activity, and generated images map to the typed events above.
+
+Every `file.changed` change normalizes at the broker boundary to a cwd-relative path and, when derivable, exact `{ added, removed }` line counts. Unified hunks count leading `+`/`-` lines except file headers; Cursor old/new text uses a line edit diff. Unknown counts are omitted rather than represented as zero. `delegate_transcript` admits these events with one compact plain-text `✎ path (+A −R)` line per change (including rename/delete labels), strips full diff/text bodies from that transcript view, and applies the same normalization when reading legacy journals.
+
+During `session/load`, every replay-derived event has top-level `replay: true`. Replay does not update live message/result assembly, activity, notifications, or usage, and repeat loads suppress already-fingerprinted replay updates. Transcript consumers group it under one collapsed restored-history block.
+
+Codex context-compaction item lifecycles additionally emit `compaction.started` and `compaction.completed` with `{ itemId }`; the existing redacted `provider.event` passthrough remains alongside them for raw event fidelity. Transcript readers admit the first-class lifecycle so compacting is visible without exposing compacted context or hidden reasoning.
 
 ## Error Taxonomy
 
@@ -72,7 +87,9 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 
 Every correction supplies a caller-stable `correctionId`; repeating it returns the existing control record. Every result states how it was applied.
 
-If Codex requests interactive user input, managed v1 records the request and fails explicitly rather than inventing an empty answer. Resume the terminal job with the answer in a new prompt.
+If Codex requests interactive user input, managed v1 records the request and fails explicitly rather than inventing an empty answer. Cursor ACP `cursor/ask_question` and `cursor/create_plan` instead enter the revisioned control inbox: phase becomes `user-input-required`, the redacted payload is inspectable, and MCP `delegate_respond` or CLI `delegate-jobs respond` completes the JSON-RPC request exactly once. Timeout rejects it with `USER_INPUT_REQUIRED` and `stopReason: input-timeout`; plans are never auto-accepted.
+
+ACP permissions remain deny-by-default. Force-level jobs choose only an advertised `allow_once`; `allow_always` is never selected. Approval events carry normalized tool kind, repo-relative paths under cwd (plus explicit outside paths), domain, command, and `ambiguous: true` for shell-like requests lacking a structured command.
 
 ## Attribution
 
@@ -83,6 +100,17 @@ Codex app-server produces provider-level file and aggregated diff events. Cursor
 ## Completion Semantics
 
 `resultText` normalizes the three provider result shapes (Codex string, Cursor ACP object, Cursor headless CLI envelope) into one always-readable field; provider extras are preserved under `result`. Read-mode jobs whose final message is narration-length are flagged `resultSuspect: 'short-final-message'`; opt-in `autoNudge` performs one same-session correction, replaces the result, and preserves `result.firstAttemptText`. `reportSchema` parses only the last fenced JSON object into `result.structured`, surfaces `objectiveMet`, and otherwise sets `structuredMissing`. Cursor sessions that advertise a model only as its fast variant are escaped to the headless transport with the CLI's non-fast id when one exists (`cursor:acp-tier-fallback`), or proceed fast with a `cursor:fast-fallback` event; a session reporting a different model than negotiated raises `cursor:model-mismatch`. Cursor plan-mode plans arrive as ACP `plan` updates, not agent messages: they are journaled as `plan.updated` and folded into the terminal record as `result.plan`, while `result.text` carries only conversational messages. `completed` means the provider turn and optional verification command ended, not that the objective was met. Read `result`, `changedFiles`, `driftReport`, and the diff before treating a job as successful. `delegate-jobs wait` exits 5 when a write-mode job completes with zero observed file changes and 6 when verification is nonzero; verification failure leaves status `completed`. Terminal failures and cancellations include a checkpoint, while `resumable` uses the exact same decision predicate as `delegate_resume`. Codex threads that engaged the multi-agent review flow may refuse direct resume; that surfaces as `RESUME_UNSUPPORTED`, and the recovery is a fresh job whose packet folds in the prior findings.
+
+## Honest Cursor non-parity
+
+The adapter does not simulate capabilities Cursor lacks:
+
+- no same-turn steering; corrections are cancel-and-resume restarts;
+- no live shell stdout (ACP exposes completion `rawOutput` only);
+- no mid-turn token usage (headless reports tokens only in the final result; ACP `usage_update {used,size}` is context occupancy);
+- no rate-limit or allowance feed (Cursor allowance remains manual dashboard state).
+
+ACP initialize advertises fs read/write and terminal capabilities as false. A versioned no-turn health probe may advertise them experimentally and reports observed client requests, but production flags remain false until an installed release actually routes a request through the client.
 
 ## Response Bounds
 

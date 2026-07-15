@@ -300,7 +300,7 @@ function activityStyle(activity) {
           : activity.tone === 'dim' ? palette.dim : palette.body;
 }
 
-export const ANIMATED_ACTIVITY_KINDS = Object.freeze(new Set(['working', 'tool', 'thinking', 'streaming', 'verifying', 'retrying', 'starting']));
+export const ANIMATED_ACTIVITY_KINDS = Object.freeze(new Set(['working', 'tool', 'thinking', 'streaming', 'compacting', 'verifying', 'retrying', 'starting']));
 
 export function activityIndicator(activity, now, options = {}) {
   const animated = ANIMATED_ACTIVITY_KINDS.has(activity?.kind);
@@ -604,7 +604,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
   const now = nowOf(ui, store);
   const query = formatDisplayValue(ui.filter).toLowerCase();
   const sort = ['activity', 'recency', 'provider', 'tokens'].includes(ui.fleetSort) ? ui.fleetSort : 'recency';
-  const activityRank = { approval: 9, 'needs-input': 8, stalled: 7, tool: 6, thinking: 5, streaming: 4, retrying: 3, verifying: 2, quiet: 1 };
+  const activityRank = { approval: 10, 'needs-input': 9, stalled: 8, compacting: 7, tool: 6, thinking: 5, streaming: 4, retrying: 3, verifying: 2, quiet: 1 };
   const entries = (store.jobs || []).map((raw) => {
     const job = effectiveJobRecord(raw, now);
     const usage = jobUsage(job, store.eventsByJob?.[job.id]);
@@ -771,9 +771,12 @@ function transcriptProjector(jobId) {
 function transcriptLineStyle(block, fragment) {
   const kind = fragment?.lineKind || '';
   if (kind === 'body' || kind === 'gap') return palette.body;
+  if (kind === 'file-change') return palette.body;
   if (kind === 'message-header') return block.role === 'user' ? palette.header : palette.accent;
   if (kind === 'tool-failed' || kind === 'notice-error' || kind === 'plan-failed') return palette.failed;
   if (kind === 'tool-running' || kind === 'notice-warning') return palette.badgeWarn;
+  if (kind === 'compaction-active') return palette.accent;
+  if (kind === 'compaction-complete') return palette.dim;
   if (kind === 'plan-complete') return palette.planCompleted;
   if (kind === 'plan-active') return palette.planActive;
   if (kind === 'plan-pending') return palette.planPending;

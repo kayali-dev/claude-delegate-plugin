@@ -2,6 +2,18 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.24.0 — 2026-07-15
+
+- Width probing now returns promptly for the first frame but continues behind an input-safe CPR filter for backpressured tmux-over-SSH sessions, then applies late results in one glyph/cache/redraw upgrade. Preference saves merge per-terminal identities so concurrent direct and tmux sessions retain both measurements; probeVersion remains 3.
+- Codex context compaction is journaled as first-class start/completion events, rendered in transcripts with duration or an in-progress marker, and exposed as an animated `compacting` fleet/detail activity state. Legacy context-compaction provider events normalize through the same TUI path.
+- Headless consult/plan/review now uses streaming NDJSON with Cursor's timestamp/model-call dedupe contract, authoritative final result text/usage, ephemeral content-free thinking activity, structured tool lifecycle, requested sandbox policy, rejection reason, and pre-turn `create-chat` session establishment with an older-CLI fallback.
+- `network=true` is enforced for Cursor ACP and headless. Read-only network jobs elevate to agent mode under a strict injected read-only preamble; sandbox-off adds force-level authorization, while sandbox-on atomically merges/restores a temporary domain policy from `networkAllow`. Every launch emits structured preflight/elevation/policy events and malformed project CLI configuration is diagnosed distinctly.
+- ACP now maps status-only tool progress, completion raw output, nested diffs, session/mode/model/command changes, todos, task/subagent activity, and generated artifacts. Thought text remains process-local. Session-load history is tagged `replay`, excluded from live state, duplicate-suppressed, and collapsed in Transcript.
+- `cursor/ask_question` and `cursor/create_plan` use a revisioned `user-input-required` control-inbox flow with `delegate-jobs respond`, stable command idempotency, configurable reject timeout, and no fabricated answers or plan acceptance. Force permissions select only `allow_once` and journal normalized decision context.
+- ACP initialize/session catalogs are retained, `parameterizedModelPicker` is preferred when present, context occupancy is separated from output-token usage, health prefers `agent status --format json`, and a versioned no-turn terminal/fs capability probe keeps production client capabilities false until observed working.
+- Added advanced Cursor job/CLI fields `addDirs`, `approveMcps`, `cursorWorktree`, and `cursorWorktreeBase`. Documented the remaining honest non-parities: restart-only correction, completion-only shell output, no mid-turn token usage, and no rate-limit/allowance feed.
+- `file.changed` is now visible in CLI/MCP and TUI transcripts as one compact cwd-relative line per file, with normalized added/removed line counts when source diff or old/new text is available. Rename/delete labels, Diff-tab navigation, semantic count colors, glyph fallbacks, and legacy journal normalization are shared across Codex and Cursor.
+
 ## 0.23.3 — 2026-07-14
 
 - Width probe now completes on terminals that pace CPR replies per render frame (bare Ghostty): event-driven incremental reply parsing, budget scaled to the measured reply cadence (cap 500ms), raw-mode enforcement, exclusive stdin ownership during the probe, and distinct unproven(budget)/timeout/no-raw-mode verdicts. probeVersion=3 invalidates prior verdicts. Restores the elegant glyph set on directly-attached fast terminals.

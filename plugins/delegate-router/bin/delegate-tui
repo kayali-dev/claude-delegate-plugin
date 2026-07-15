@@ -254,6 +254,7 @@ notifier.observe(store);
 let quitting = false;
 let inputBatch = false;
 let inputDrawPending = false;
+let widthProbeInputStage = null;
 const ui = {
   screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, version: TUI_PACKAGE_VERSION, now: Date.now(), selectedIndex: 0, scroll: 0,
   activeOnly: false, filter: '', help: false, input: null, confirm: null,
@@ -358,7 +359,8 @@ function quit(code = 0) {
   if (routeAdviceTimer) clearTimeout(routeAdviceTimer);
   source.close();
   bufferedInput.close();
-  process.stdin.off('data', onData);
+  detachTuiInput();
+  widthProbeInputStage?.teardown();
   screen.stop();
   process.exit(code);
 }
@@ -468,13 +470,13 @@ function jumpSearch(direction) {
 }
 
 function handoffText(text) {
-  process.stdin.off('data', onData);
+  detachTuiInput();
   try {
     return editTextInEditor({ screen, text });
   } catch (error) {
     return { available: true, accepted: false, text, status: null, signal: null, error };
   } finally {
-    process.stdin.on('data', onData);
+    attachTuiInput();
   }
 }
 
@@ -910,10 +912,8 @@ function focusedClipboardValue() {
     const block = focusedTranscriptBlock();
     if (!block) return null;
     if (block.kind === 'tool' && block.tool.command) return { value: formatDisplayValue(block.tool.command), label: 'command' };
-    if (block.kind === 'tool' && block.tool.paths?.length) {
-      const paths = normalizeJobPaths(block.tool.paths, selectedJob()?.cwd);
-      if (paths[0]) return { value: paths[0], label: 'file path' };
-    }
+    const paths = transcriptToolPaths(block, selectedJob()?.cwd);
+    if (paths[0]) return { value: paths[0], label: 'file path' };
     return { value: formatDisplayValue(block.text) || formatTranscriptBlock(block), label: 'transcript block' };
   }
   if (ui.detailTab === 1) {
@@ -982,10 +982,10 @@ function toggleFocusedEvent() {
 function openFocusedToolDiff() {
   const block = focusedTranscriptBlock();
   const job = selectedJob();
-  if (block?.kind !== 'tool' || !job) return false;
+  if (!['tool', 'file-change'].includes(block?.kind) || !job) return false;
   const paths = transcriptToolPaths(block, job.cwd);
   if (!paths.length) return false;
-  openDiffPaths(paths, paths.length === 1 ? paths[0] : `${paths.length} tool paths`);
+  openDiffPaths(paths, paths.length === 1 ? paths[0] : `${paths.length} changed paths`);
   return true;
 }
 
@@ -1454,6 +1454,16 @@ function onData(buffer) {
   bufferedInput.push(buffer);
 }
 
+function attachTuiInput() {
+  if (widthProbeInputStage) widthProbeInputStage.attach(onData);
+  else process.stdin.on('data', onData);
+}
+
+function detachTuiInput() {
+  if (widthProbeInputStage) widthProbeInputStage.detach(onData);
+  else process.stdin.off('data', onData);
+}
+
 const bufferedInput = new BufferedInput({
   onFlush(events) {
     inputBatch = true;
@@ -1482,7 +1492,23 @@ clock.unref?.();
 
 screen.start();
 const probeResult = await probeTerminalWidths({
-  screen, input: process.stdin, env: process.env, mode: widthProbeMode(process.env), cached: cachedWidths
+  screen, input: process.stdin, env: process.env, mode: widthProbeMode(process.env), cached: cachedWidths,
+  onBackgroundComplete(result) {
+    if (quitting) return;
+    let redraw = false;
+    if (result.source === 'probe' && Object.keys(result.widths).length) {
+      configureGlyphs({ env: process.env, widths: result.widths });
+      widthProbeCache[widthIdentity] = { widths: result.widths, measuredAt: Date.now() };
+      persistPreferences();
+      invalidateWrapCache();
+      redraw = true;
+    }
+    if (result.mode === 'verbose') {
+      addStatusHistory(formatWidthProbeResult(result), 'info');
+      redraw = true;
+    }
+    if (redraw) draw();
+  }
 });
 configureGlyphs({ env: process.env, widths: probeResult.widths });
 if (probeResult.source === 'probe' && Object.keys(probeResult.widths).length) {
@@ -1490,7 +1516,11 @@ if (probeResult.source === 'probe' && Object.keys(probeResult.widths).length) {
   persistPreferences();
 }
 if (probeResult.mode === 'verbose') addStatusHistory(formatWidthProbeResult(probeResult), 'info');
-process.stdin.on('data', onData);
+widthProbeInputStage = probeResult.background || null;
+attachTuiInput();
 if (probeResult.remainder) bufferedInput.push(probeResult.remainder);
 draw();
+if (widthProbeInputStage) {
+  void widthProbeInputStage.done.then(() => { widthProbeInputStage = null; });
+}
 if (initialJobId) void source.selectJob(initialJobId);

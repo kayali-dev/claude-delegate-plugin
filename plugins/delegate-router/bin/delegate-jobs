@@ -29,7 +29,7 @@ import { aggregateAuditStats, readAuditLog } from './lib/stats.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
   delegate-jobs group <id> [--json]
   delegate-jobs stats [--since 7d|24h] [--json]
@@ -43,7 +43,8 @@ function usage() {
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
   delegate-jobs cancel <job-id> [--expected-revision N]
   delegate-jobs release <job-id> [--expected-revision N]
-  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--sandbox auto|off] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs respond <job-id> --expected-revision N [--request-id id] [--answer text|--accept|--reject|--response-json json] [--command-id id]
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs review-round <job-id> --prompt <findings-or-file> [--prompt-file path]
   delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs usage <job-id> [--json]
@@ -55,6 +56,12 @@ function usage() {
 function value(args, flag, fallback = undefined) {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : fallback;
+}
+
+function values(args, flag) {
+  const result = [];
+  for (let index = 0; index < args.length; index += 1) if (args[index] === flag && args[index + 1] != null) result.push(args[++index]);
+  return result;
 }
 
 function prompt(args) {
@@ -122,6 +129,9 @@ try {
       autoNudge: args.includes('--auto-nudge'), reportSchema: reportSchemaOption(args),
       retryPolicy: retryPolicy(args), verify: verifyOption(args),
       network: args.includes('--network'), sandbox: value(args, '--sandbox'),
+      networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),
+      addDirs: values(args, '--add-dir'), approveMcps: args.includes('--approve-mcps'),
+      cursorWorktree: args.includes('--cursor-worktree'), cursorWorktreeBase: value(args, '--cursor-worktree-base'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
       overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane'),
@@ -278,6 +288,20 @@ try {
     const raw = value(args, '--expected-revision');
     const expectedRevision = raw == null ? job.revision : Number(raw);
     json(submitControl(job.id, { type: 'release', commandId: value(args, '--command-id') }, expectedRevision));
+  } else if (command === 'respond') {
+    const raw = value(args, '--expected-revision');
+    const accepts = args.includes('--accept');
+    const rejects = args.includes('--reject');
+    if (accepts && rejects) throw new Error('choose only one of --accept or --reject');
+    const responseJson = value(args, '--response-json');
+    json(submitControl(args[0], {
+      type: 'respond',
+      commandId: value(args, '--command-id'),
+      requestId: value(args, '--request-id'),
+      answer: value(args, '--answer'),
+      ...(accepts || rejects ? { accept: accepts } : {}),
+      ...(responseJson ? { response: JSON.parse(responseJson) } : {})
+    }, raw == null ? null : Number(raw)));
   } else if (command === 'resume') {
     const rawTimeout = value(args, '--timeout-seconds');
     const rawMaxOutputTokens = value(args, '--max-output-tokens');
@@ -287,6 +311,11 @@ try {
       maxOutputTokens: rawMaxOutputTokens == null ? undefined : Number(rawMaxOutputTokens),
       retryPolicy: retryPolicy(args), verify: verifyOption(args),
       network: args.includes('--network') ? true : undefined, sandbox: value(args, '--sandbox'),
+      networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),
+      addDirs: values(args, '--add-dir').length ? values(args, '--add-dir') : undefined,
+      approveMcps: args.includes('--approve-mcps') ? true : undefined,
+      cursorWorktree: args.includes('--cursor-worktree') ? true : undefined,
+      cursorWorktreeBase: value(args, '--cursor-worktree-base'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive') ? true : undefined,
       overrideLimit: args.includes('--override-limit'), overrideWriter: args.includes('--override-writer')

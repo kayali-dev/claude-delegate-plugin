@@ -46,11 +46,27 @@ export function loadTuiPreferences(options = {}) {
   return preferences;
 }
 
+function mergedWidthProbeCache(stored = {}, incoming = {}) {
+  const newest = new Map();
+  for (const [identity, entry] of [...Object.entries(stored), ...Object.entries(incoming)]) {
+    const previous = newest.get(identity);
+    if (!previous || Number(entry?.measuredAt || 0) >= Number(previous.measuredAt || 0)) newest.set(identity, entry);
+  }
+  return Object.fromEntries([...newest.entries()]
+    .sort((left, right) => Number(left[1]?.measuredAt || 0) - Number(right[1]?.measuredAt || 0))
+    .slice(-16));
+}
+
 export function saveTuiPreferences(preferences, options = {}) {
   const file = tuiPreferencesPath(options);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  let stored = {};
+  try { stored = validated(JSON.parse(fs.readFileSync(file, 'utf8'))); }
+  catch (error) { if (error.code !== 'ENOENT') stored = {}; }
+  const next = validated(preferences);
+  next.widthProbeCache = mergedWidthProbeCache(stored.widthProbeCache, next.widthProbeCache);
   const temporary = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(validated(preferences), null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(temporary, file);
   try { fs.chmodSync(file, 0o600); } catch {}
   return file;

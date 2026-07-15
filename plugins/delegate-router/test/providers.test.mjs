@@ -15,12 +15,12 @@ const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
 const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
 
 async function isolated(fn) {
-  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, crashOnce: process.env.FAKE_CODEX_CRASH_ONCE, collab: process.env.FAKE_CODEX_COLLAB, fileChanges: process.env.FAKE_CODEX_FILE_CHANGES, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE, retryBase: process.env.DELEGATE_RETRY_BASE_MS, minCodex: process.env.DELEGATE_MIN_CODEX_VERSION, minCursor: process.env.DELEGATE_MIN_CURSOR_VERSION };
+  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, crashOnce: process.env.FAKE_CODEX_CRASH_ONCE, collab: process.env.FAKE_CODEX_COLLAB, compaction: process.env.FAKE_CODEX_COMPACTION, fileChanges: process.env.FAKE_CODEX_FILE_CHANGES, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE, retryBase: process.env.DELEGATE_RETRY_BASE_MS, minCodex: process.env.DELEGATE_MIN_CODEX_VERSION, minCursor: process.env.DELEGATE_MIN_CURSOR_VERSION };
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-provider-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
   try { await fn(directory); }
   finally {
-    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_CRASH_ONCE: old.crashOnce, FAKE_CODEX_COLLAB: old.collab, FAKE_CODEX_FILE_CHANGES: old.fileChanges, FAKE_CODEX_GROWING_USAGE: old.growingUsage, DELEGATE_RETRY_BASE_MS: old.retryBase, DELEGATE_MIN_CODEX_VERSION: old.minCodex, DELEGATE_MIN_CURSOR_VERSION: old.minCursor })) {
+    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_CRASH_ONCE: old.crashOnce, FAKE_CODEX_COLLAB: old.collab, FAKE_CODEX_COMPACTION: old.compaction, FAKE_CODEX_FILE_CHANGES: old.fileChanges, FAKE_CODEX_GROWING_USAGE: old.growingUsage, DELEGATE_RETRY_BASE_MS: old.retryBase, DELEGATE_MIN_CODEX_VERSION: old.minCodex, DELEGATE_MIN_CURSOR_VERSION: old.minCursor })) {
       if (value == null) delete process.env[key]; else process.env[key] = value;
     }
   }
@@ -55,6 +55,22 @@ test('Codex app-server maps events and applies true same-turn steering', () => i
   assert.equal(record.changedFiles.count, 1);
   assert.deepEqual(record.changedFiles.files, ['a.js']);
   assert.equal(record.resolvedModel, 'fake');
+}));
+
+test('Codex context-compaction items retain provider passthroughs and add ordered first-class lifecycles', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_COMPACTION = '1';
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'implement' });
+  await runManagedProvider(job);
+  const compaction = readJobEvents(job.id, { limit: 1000 }).filter((event) => event.type.startsWith('compaction.')
+    || (event.type === 'provider.event' && event.data.itemType === 'contextCompaction'));
+  assert.deepEqual(compaction.map((event) => [event.type, event.data.providerEvent || null, event.data.itemId]), [
+    ['provider.event', 'item/started', 'compaction-1'],
+    ['compaction.started', null, 'compaction-1'],
+    ['provider.event', 'item/completed', 'compaction-1'],
+    ['compaction.completed', null, 'compaction-1']
+  ]);
+  assert.ok(compaction.every((event, index) => index === 0 || event.seq > compaction[index - 1].seq));
 }));
 
 test('Cursor ACP maps structured updates and reports correction as restart', () => isolated(async (directory) => {

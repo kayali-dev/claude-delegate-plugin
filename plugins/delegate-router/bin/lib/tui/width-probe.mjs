@@ -50,21 +50,21 @@ export function widthProbeMode(env = process.env) {
 
 // Parse one streaming probe window without assuming one CPR per chunk:
 // Ghostty commonly coalesces replies, while SSH/tmux may split one reply over
-// several chunks. The caller retains only the unconsumed suffix, so an ordered
-// reply is never reparsed or polled. Non-CPR CSI traffic is dropped as terminal
-// chatter. A CPR-shaped but invalid response consumes exactly one ordered probe
-// slot so the next valid CPR can resynchronize.
+// several chunks. Only CPRs addressed to the probe row are consumed. Everything
+// else is returned in order for the real input decoder; this distinction is
+// essential once the patient continuation overlaps ordinary TUI input.
 function parseCprWindow(raw, expectedRow, maximum, finalize = false) {
   const outcomes = [];
+  let passthrough = '';
   let remainder = '';
   let offset = 0;
-  while (offset < raw.length && outcomes.length < maximum) {
+  while (offset < raw.length) {
     const start = raw.indexOf('\u001b[', offset);
     if (start < 0) {
-      remainder += raw.slice(offset);
+      passthrough += raw.slice(offset);
       break;
     }
-    remainder += raw.slice(offset, start);
+    passthrough += raw.slice(offset, start);
     let final = start + 2;
     while (final < raw.length) {
       const code = raw.charCodeAt(final);
@@ -73,8 +73,8 @@ function parseCprWindow(raw, expectedRow, maximum, finalize = false) {
     }
     if (final >= raw.length) {
       const partial = raw.slice(start);
-      if (finalize && /^\u001b\[\d*;\d*$/.test(partial)) outcomes.push({ status: 'parse' });
-      else remainder += partial;
+      if (finalize) passthrough += partial;
+      else remainder = partial;
       break;
     }
     let responseEnd = final;
@@ -87,7 +87,7 @@ function parseCprWindow(raw, expectedRow, maximum, finalize = false) {
       const nextEscape = raw.indexOf('\u001b[', final + 1);
       const terminator = raw.indexOf('R', final + 1);
       const numericPrefix = raw.slice(start + 2, final);
-      if (/^\d+;$/.test(numericPrefix) && terminator >= 0 && (nextEscape < 0 || terminator < nextEscape) && terminator - start <= 64) {
+      if (numericPrefix === `${expectedRow};` && terminator >= 0 && (nextEscape < 0 || terminator < nextEscape) && terminator - start <= 64) {
         responseEnd = terminator;
         finalByte = 'R';
       }
@@ -96,22 +96,21 @@ function parseCprWindow(raw, expectedRow, maximum, finalize = false) {
     if (finalByte === 'R') {
       const match = /^\u001b\[(\d+);(\d+)R$/.exec(sequence);
       if (!match) {
-        outcomes.push({ status: 'parse' });
+        if (sequence.startsWith(`\u001b[${expectedRow};`)) {
+          if (outcomes.length < maximum) outcomes.push({ status: 'parse' });
+        } else passthrough += sequence;
       } else if (Number(match[1]) === expectedRow) {
         const measured = Number(match[2]) - 1;
-        outcomes.push(Number.isInteger(measured) && measured >= 0 && measured <= 2
-          ? { status: 'measured', width: measured }
-          : { status: 'parse' });
-      }
-      // A valid CPR for another row is unrelated chatter. It is skipped and
-      // does not consume a probe slot.
-    }
-    // Focus, mouse, paste and other complete CSI sequences are intentionally
-    // skipped rather than being mistaken for a failed probe response.
+        if (outcomes.length < maximum) {
+          outcomes.push(Number.isInteger(measured) && measured >= 0 && measured <= 2
+            ? { status: 'measured', width: measured }
+            : { status: 'parse' });
+        }
+      } else passthrough += sequence;
+    } else passthrough += sequence;
     offset = responseEnd + 1;
   }
-  if (offset < raw.length && outcomes.length >= maximum) remainder += raw.slice(offset);
-  return { outcomes, remainder };
+  return { outcomes, passthrough, remainder };
 }
 
 function namedOutcomes(probes, parsed, incompleteStatus = 'timeout') {
@@ -178,7 +177,7 @@ function removeDataListener(input, listener) {
   else if (typeof input.removeListener === 'function') input.removeListener('data', listener);
 }
 
-function clampMilliseconds(value, fallback, maximum = 500) {
+function clampMilliseconds(value, fallback, maximum = 5000) {
   return Math.max(1, Math.min(maximum, Number.isFinite(Number(value)) ? Number(value) : fallback));
 }
 
@@ -201,120 +200,166 @@ export async function probeTerminalWidths(options = {}) {
       outcomes: namedOutcomes(probes, [], 'no-raw-mode')
     };
   }
-  // timeoutMs is an idle/first-reply deadline, not a fixed whole-batch budget.
-  // Some terminals serialize CPR responses across render cycles even though
-  // every query was pipelined in one write. The first response and subsequent
-  // cadence therefore expand the global batch budget, bounded at 500 ms.
-  const timeoutMs = clampMilliseconds(options.timeoutMs, 50);
-  const maximumBudgetMs = Math.max(timeoutMs, clampMilliseconds(options.maxBudgetMs, 500));
+  const foregroundMs = clampMilliseconds(options.foregroundMs ?? options.timeoutMs, 50, 500);
+  const backgroundIdleMs = clampMilliseconds(options.backgroundIdleMs, 2000);
+  const backgroundBudgetMs = Math.max(foregroundMs + 1,
+    clampMilliseconds(options.backgroundBudgetMs ?? options.maxBudgetMs, 5000));
   const row = Math.max(0, Math.min(screen.rows - 1, Number(options.row ?? screen.rows - 1)));
-  let parsed = { outcomes: [], remainder: '' };
+  let parsedOutcomes = [];
   let pendingRaw = '';
+  let foregroundPassthrough = '';
+  let queuedPassthrough = '';
   const started = performance.now();
   const packet = probes.map((grapheme) => `${cursorTo(row, 0)}${sequences.clearLine}${grapheme}\u001b[6n`).join('');
   const displacedListeners = rawDataListeners(input);
   const wasPaused = typeof input.isPaused === 'function' ? input.isPaused() : false;
   try { input.pause?.(); } catch {}
   for (const listener of displacedListeners) removeDataListener(input, listener);
-  let completion = 'timeout';
-  const pending = new Promise((resolve) => {
-    let finished = false;
-    let firstReplyTimer;
-    let idleTimer;
-    let budgetTimer;
-    let firstReplyMs = null;
-    let previousProgressAt = null;
-    let observedCadenceMs = 0;
-    let observedCount = 0;
-    const clearTimers = () => {
-      clearTimeout(firstReplyTimer);
-      clearTimeout(idleTimer);
-      clearTimeout(budgetTimer);
+  let state = 'foreground';
+  let foregroundTimer;
+  let idleTimer;
+  let budgetTimer;
+  let foregroundResolve;
+  let backgroundResolve;
+  const targets = [...displacedListeners];
+  const foreground = new Promise((resolve) => { foregroundResolve = resolve; });
+  const backgroundDone = new Promise((resolve) => { backgroundResolve = resolve; });
+
+  const clearTimers = () => {
+    clearTimeout(foregroundTimer);
+    clearTimeout(idleTimer);
+    clearTimeout(budgetTimer);
+  };
+  const emitPassthrough = (value) => {
+    if (!value) return;
+    if (state === 'foreground') {
+      foregroundPassthrough += value;
+      return;
+    }
+    if (targets.length) {
+      for (const listener of [...targets]) listener(value);
+    } else queuedPassthrough += value;
+  };
+  const restoreInput = () => {
+    try { input.pause?.(); } catch {}
+    removeDataListener(input, check);
+    for (const listener of targets) input.on('data', listener);
+    try {
+      if (!wasPaused) input.resume?.();
+    } catch {}
+  };
+  const snapshot = (reason, phase, apply) => {
+    const outcomes = namedOutcomes(probes, parsedOutcomes, reason === 'budget' ? 'budget' : 'timeout');
+    const widths = {};
+    for (const outcome of outcomes) if (outcome.status === 'measured') widths[outcome.grapheme] = outcome.width;
+    if (apply && Object.keys(widths).length) setGraphemeWidthOverrides(widths);
+    return {
+      source: apply && Object.keys(widths).length ? 'probe' : 'fallback',
+      widths: apply ? widths : {}, outcomes, elapsedMs: performance.now() - started,
+      mode, phase, completion: reason, remainder: foregroundPassthrough
     };
-    const restoreInput = () => {
-      try { input.pause?.(); } catch {}
-      removeDataListener(input, check);
-      for (const listener of displacedListeners) input.on('data', listener);
-      try {
-        if (!wasPaused) input.resume?.();
-      } catch {}
-    };
-    const done = (reason) => {
-      if (finished) return;
-      finished = true;
-      completion = reason;
-      clearTimers();
-      restoreInput();
-      resolve();
-    };
-    const scheduleProgressDeadlines = (now) => {
-      const elapsed = Math.max(0.1, now - started);
-      if (firstReplyMs == null) firstReplyMs = elapsed;
-      if (previousProgressAt != null) observedCadenceMs = Math.max(observedCadenceMs, now - previousProgressAt);
-      previousProgressAt = now;
-      const cadence = Math.max(1, firstReplyMs, observedCadenceMs);
-      const remaining = Math.max(0, probes.length - observedCount);
-      const projectedBudget = Math.ceil(elapsed + cadence * (remaining + 2));
-      const idleDelay = Math.min(maximumBudgetMs, Math.max(timeoutMs, Math.ceil(cadence * 3)));
-      const budgetMs = Math.min(maximumBudgetMs, Math.max(timeoutMs, projectedBudget, Math.ceil(elapsed + idleDelay + 1)));
-      clearTimeout(budgetTimer);
-      budgetTimer = setTimeout(() => done('budget'), Math.max(1, budgetMs - elapsed));
-      clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => done('timeout'), idleDelay);
-    };
-    const check = (chunk) => {
-      if (finished || chunk == null) return;
-      pendingRaw += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
-      const next = parseCprWindow(pendingRaw, row + 1, probes.length - parsed.outcomes.length);
-      parsed = { outcomes: [...parsed.outcomes, ...next.outcomes], remainder: next.remainder };
-      pendingRaw = next.remainder;
-      if (parsed.outcomes.length > observedCount) {
-        observedCount = parsed.outcomes.length;
-        clearTimeout(firstReplyTimer);
-        if (observedCount >= probes.length) {
-          done('complete');
-          return;
-        }
-        scheduleProgressDeadlines(performance.now());
+  };
+  const finalize = (reason, apply = true) => {
+    if (state === 'done') return;
+    const finishingPhase = state;
+    const finalParsed = parseCprWindow(pendingRaw, row + 1, probes.length - parsedOutcomes.length, true);
+    parsedOutcomes = [...parsedOutcomes, ...finalParsed.outcomes];
+    pendingRaw = '';
+    emitPassthrough(finalParsed.passthrough);
+    clearTimers();
+    restoreInput();
+    state = 'done';
+    const result = snapshot(reason, finishingPhase, apply);
+    if (finishingPhase === 'foreground') foregroundResolve(result);
+    else {
+      backgroundResolve(result);
+      if (typeof options.onBackgroundComplete === 'function') {
+        try { options.onBackgroundComplete(result); } catch {}
       }
-    };
-    const drainReadable = () => {
-      if (typeof input.read !== 'function') return;
-      let chunk;
-      while ((chunk = input.read()) != null) check(chunk);
-    };
-    input.on('data', check);
-    // Claim already-readable bytes before the decoder is restored. This also
-    // handles an in-memory/synchronous TTY double that buffers its reply before
-    // the output write returns.
-    drainReadable();
-    if (!finished) {
-      if (observedCount === 0) firstReplyTimer = setTimeout(() => done('timeout'), timeoutMs);
-      try { input.resume?.(); } catch {}
-      const pendingPacket = observedCount > 0
-        ? probes.slice(observedCount).map((grapheme) => `${cursorTo(row, 0)}${sequences.clearLine}${grapheme}\u001b[6n`).join('')
-        : packet;
-      if (pendingPacket) screen.writeOutput(pendingPacket, { context: 'probe' });
-      drainReadable();
+    }
+    if (finishingPhase === 'foreground') backgroundResolve(result);
+  };
+  const scheduleBackgroundIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => finalize('timeout'), backgroundIdleMs);
+    idleTimer.unref?.();
+  };
+  const enterBackground = () => {
+    if (state !== 'foreground') return;
+    state = 'background';
+    clearTimeout(foregroundTimer);
+    const initial = snapshot('timeout', 'foreground', false);
+    foregroundResolve({ ...initial, background });
+    scheduleBackgroundIdle();
+    const remainingBudget = Math.max(1, backgroundBudgetMs - (performance.now() - started));
+    budgetTimer = setTimeout(() => finalize('budget'), remainingBudget);
+    budgetTimer.unref?.();
+  };
+  const check = (chunk) => {
+    if (state === 'done' || chunk == null) return;
+    pendingRaw += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+    const before = parsedOutcomes.length;
+    const next = parseCprWindow(pendingRaw, row + 1, probes.length - parsedOutcomes.length);
+    parsedOutcomes = [...parsedOutcomes, ...next.outcomes];
+    pendingRaw = next.remainder;
+    emitPassthrough(next.passthrough);
+    if (state === 'background' && parsedOutcomes.length > before) scheduleBackgroundIdle();
+    if (parsedOutcomes.length >= probes.length) finalize('complete');
+  };
+  const drainReadable = () => {
+    if (typeof input.read !== 'function') return;
+    let chunk;
+    while ((chunk = input.read()) != null) check(chunk);
+  };
+  const background = Object.freeze({
+    get active() { return state === 'background'; },
+    done: backgroundDone,
+    attach(listener) {
+      if (typeof listener !== 'function' || targets.includes(listener)) return false;
+      targets.push(listener);
+      if (state === 'done') input.on('data', listener);
+      if (queuedPassthrough) {
+        const queued = queuedPassthrough;
+        queuedPassthrough = '';
+        listener(queued);
+      }
+      return true;
+    },
+    detach(listener) {
+      const index = targets.indexOf(listener);
+      if (index >= 0) targets.splice(index, 1);
+      if (state === 'done') removeDataListener(input, listener);
+      return index >= 0;
+    },
+    teardown() {
+      if (state !== 'background') return false;
+      finalize('cancelled', false);
+      return true;
     }
   });
-  await pending;
-  const elapsedMs = performance.now() - started;
+
+  input.on('data', check);
+  drainReadable();
+  if (state !== 'done') {
+    try { input.resume?.(); } catch {}
+    const pendingPacket = parsedOutcomes.length > 0
+      ? probes.slice(parsedOutcomes.length).map((grapheme) => `${cursorTo(row, 0)}${sequences.clearLine}${grapheme}\u001b[6n`).join('')
+      : packet;
+    if (pendingPacket) screen.writeOutput(pendingPacket, { context: 'probe' });
+    drainReadable();
+  }
+  if (state !== 'done') {
+    foregroundTimer = setTimeout(enterBackground, foregroundMs);
+    foregroundTimer.unref?.();
+  }
+  const result = await foreground;
   screen.writeOutput(`${cursorTo(row, 0)}${sequences.clearLine}${sequences.home}`, { context: 'probe' });
-  const finalParsed = parseCprWindow(pendingRaw, row + 1, probes.length - parsed.outcomes.length, true);
-  parsed = { outcomes: [...parsed.outcomes, ...finalParsed.outcomes], remainder: finalParsed.remainder };
-  const outcomes = namedOutcomes(probes, parsed.outcomes, completion === 'budget' ? 'budget' : 'timeout');
-  const widths = {};
-  for (const outcome of outcomes) if (outcome.status === 'measured') widths[outcome.grapheme] = outcome.width;
-  if (Object.keys(widths).length) setGraphemeWidthOverrides(widths);
-  return {
-    source: Object.keys(widths).length ? 'probe' : 'fallback',
-    widths, outcomes, elapsedMs, mode, remainder: parsed.remainder
-  };
+  return result;
 }
 
 export function formatWidthProbeResult(result) {
   const entries = Object.entries(result?.widths || {}).map(([grapheme, width]) => `${JSON.stringify(grapheme)}=${width}`).join(', ');
   const families = familyProbeSummary(result?.outcomes || []);
-  return `width probe ${result?.source || 'unknown'} in ${Number(result?.elapsedMs || 0).toFixed(1)}ms${families ? `: ${families}` : ''}${entries ? `; widths ${entries}` : ''}`;
+  const phase = result?.phase ? ` (${result.phase})` : '';
+  return `width probe ${result?.source || 'unknown'}${phase} in ${Number(result?.elapsedMs || 0).toFixed(1)}ms${families ? `: ${families}` : ''}${entries ? `; widths ${entries}` : ''}`;
 }

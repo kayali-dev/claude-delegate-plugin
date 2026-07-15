@@ -45,25 +45,42 @@ test('three-second streaming and thirty-second quiet windows honor boundary cloc
   assert.equal(deriveJobActivity(baseJob, [event(1, 'message.completed', {}, 30_001)], { now: NOW }).kind, 'quiet');
 });
 
-test('transport capability truth table never invents unavailable headless states', () => {
+test('open first-class and legacy compactions are active until completion', () => {
+  const started = event(1, 'compaction.started', { itemId: 'compact' }, 45_000);
+  const current = deriveJobActivity(baseJob, [started], { now: NOW });
+  assert.equal(current.kind, 'compacting');
+  assert.equal(current.label, 'compacting');
+  assert.equal(current.sourceSeq, 1);
+
+  const legacy = deriveJobActivity(baseJob, [event(1, 'provider.event', {
+    providerEvent: 'item/started', itemType: 'contextCompaction', itemId: 'compact'
+  }, 45_000)], { now: NOW });
+  assert.equal(legacy.kind, 'compacting');
+
+  const completed = deriveJobActivity(baseJob, [started, event(2, 'compaction.completed', { itemId: 'compact' }, 1000)], { now: NOW });
+  assert.equal(completed.kind, 'working');
+  assert.notEqual(completed.kind, 'quiet');
+});
+
+test('transport capability truth table reflects streamed headless thinking and tools without inventing approvals', () => {
   assert.equal(ACTIVITY_CAPABILITIES['codex:app-server'].visibility, 'full');
   assert.equal(ACTIVITY_CAPABILITIES['cursor:acp'].visibility, 'near-full');
-  assert.equal(ACTIVITY_CAPABILITIES['cursor:headless'].visibility, 'minimal');
+  assert.equal(ACTIVITY_CAPABILITIES['cursor:headless'].visibility, 'near-full');
   const thought = [event(1, 'activity', { kind: 'thinking' })];
   assert.equal(deriveJobActivity(baseJob, thought, { now: NOW }).kind, 'thinking');
   assert.equal(deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'acp' }, thought, { now: NOW }).kind, 'thinking');
   const headless = deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'headless' }, thought, { now: NOW });
-  assert.equal(headless.kind, 'working');
-  assert.equal(headless.visibilityNote, 'headless transport: reduced visibility');
+  assert.equal(headless.kind, 'thinking');
+  assert.equal(headless.visibilityNote, undefined);
   const headlessTool = deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'headless' }, [event(1, 'tool.started', { toolCallId: 'x', title: 'Edit' })], { now: NOW });
-  assert.equal(headlessTool.kind, 'working');
+  assert.equal(headlessTool.kind, 'tool');
   const sequence = [
     event(1, 'message.delta', { delta: 'x' }, 2000),
     event(2, 'activity', { kind: 'thinking' }, 1000)
   ];
   assert.equal(deriveJobActivity(baseJob, sequence, { now: NOW }).kind, 'thinking');
   assert.equal(deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'acp' }, sequence, { now: NOW }).kind, 'thinking');
-  assert.equal(deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'headless' }, sequence, { now: NOW }).kind, 'streaming');
+  assert.equal(deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'headless' }, sequence, { now: NOW }).kind, 'thinking');
   assert.equal(deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'headless' }, [event(1, 'message.delta', {}, 30_001)], { now: NOW }).kind, 'quiet');
 });
 

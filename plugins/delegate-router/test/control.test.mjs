@@ -382,6 +382,54 @@ test('transcript pages omit deltas by default and paginate with nextSeq', () => 
   assert.equal(jobTranscript(job.id).filter((event) => event.type === 'message.delta').length, 2);
 }));
 
+test('delegate transcript pages admit first-class context-compaction marker events', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+  appendJobEvent(job.id, 'compaction.started', { itemId: 'compact-1' });
+  appendJobEvent(job.id, 'compaction.completed', { itemId: 'compact-1' });
+  appendJobEvent(job.id, 'provider.event', { providerEvent: 'item/completed', itemType: 'contextCompaction', itemId: 'compact-1' });
+  const types = jobTranscriptPage(job.id).events.map((event) => event.type);
+  assert.deepEqual(types, ['message.user', 'compaction.started', 'compaction.completed']);
+}));
+
+test('delegate transcript retroactively normalizes Codex and Cursor file changes into compact counted lines', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+  const journal = path.join(directory, 'jobs', `${job.id}.events.jsonl`);
+  const start = loadJob(job.id).lastSeq;
+  const legacy = [
+    {
+      v: 1, seq: start + 1, at: Date.now(), jobId: job.id, provider: 'codex', type: 'file.changed', redacted: true,
+      data: { changes: [
+        { path: path.join(directory, 'src/a.js'), kind: 'update', diff: '--- a/src/a.js\n+++ b/src/a.js\n-old\n+new\n+extra\n' },
+        { path: path.join(directory, 'src/no-count.js'), kind: 'update' },
+        { path: path.join(directory, 'src/old.js'), newPath: path.join(directory, 'src/new.js'), kind: 'rename', diff: '--- a/src/old.js\n+++ b/src/new.js\n-before\n+after\n' },
+        { path: path.join(directory, 'src/gone.js'), kind: 'delete', diff: '--- a/src/gone.js\n+++ /dev/null\n-one\n-two\n' }
+      ] }
+    },
+    {
+      v: 1, seq: start + 2, at: Date.now(), jobId: job.id, provider: 'cursor', type: 'file.changed', redacted: true,
+      data: { changes: [{ path: path.join(directory, 'src/cursor.js'), oldText: 'same\nold\n', newText: 'same\nnew\nextra\n', kind: 'edit' }] }
+    }
+  ];
+  fs.appendFileSync(journal, `${legacy.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
+
+  const page = jobTranscriptPage(job.id);
+  const changes = page.events.filter((event) => event.type === 'file.changed');
+  assert.equal(changes.length, 2);
+  assert.deepEqual(changes.flatMap((event) => event.data.text.split('\n')), [
+    '✎ src/a.js (+2 −1)',
+    '✎ src/no-count.js',
+    '✎ src/old.js renamed → src/new.js (+1 −1)',
+    '✎ src/gone.js deleted (+0 −2)',
+    '✎ src/cursor.js (+2 −1)'
+  ]);
+  const serialized = JSON.stringify(changes);
+  assert.doesNotMatch(serialized, /\[object Object\]|NaN|oldText|newText|\"diff\"/);
+  assert.equal(changes[0].data.changes[1].added, undefined, 'diff-less legacy changes do not invent zero counts');
+  const full = readJobEvents(job.id).filter((event) => event.type === 'file.changed');
+  assert.deepEqual(full[0].data.changes.map(({ added, removed }) => [added, removed]), [[2, 1], [undefined, undefined], [1, 1], [0, 2]]);
+  assert.deepEqual(full[1].data.changes.map(({ added, removed }) => [added, removed]), [[2, 1]]);
+}));
+
 test('prune removes aged terminal jobs and preserves active ones', () => isolated((directory) => {
   const done = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'old' });
   updateManagedJob(done.id, (current) => { current.status = 'completed'; current.completedAt = Math.floor(Date.now() / 1000) - 30 * 86400; });

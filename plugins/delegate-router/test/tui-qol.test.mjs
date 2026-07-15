@@ -37,6 +37,20 @@ test('TUI preferences persist privately and environment values remain authoritat
   }), { theme: 'dark', notifications: true, timestampMode: 'absolute', fleetDensity: 'wide', widthProbeCache });
 });
 
+test('width-probe cache saves merge concurrent session snapshots by newest measurement', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-prefs-merge-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const direct = { widths: { '⚙': 1 }, measuredAt: 100 };
+  const tmux = { widths: { '⚙': 2 }, measuredAt: 200 };
+  const staleSnapshot = {};
+  saveTuiPreferences({ widthProbeCache: { direct } }, { directory });
+  saveTuiPreferences({ widthProbeCache: { ...staleSnapshot, tmux } }, { directory });
+  assert.deepEqual(loadTuiPreferences({ directory, env: {} }).widthProbeCache, { direct, tmux });
+
+  saveTuiPreferences({ widthProbeCache: { direct: { widths: { '⚙': 2 }, measuredAt: 50 } } }, { directory });
+  assert.deepEqual(loadTuiPreferences({ directory, env: {} }).widthProbeCache.direct, direct, 'an older writer cannot replace a newer identity measurement');
+});
+
 test('clipboard dispatch uses the platform tool and silently declines unavailable platforms', () => {
   const calls = [];
   assert.equal(copyToClipboard('assistant function', {

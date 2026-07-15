@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -5,7 +6,11 @@ import { appendJobEvent, claimCommands, completeCommand, completeIngestedFiles, 
 import {
   availableModelIds,
   buildCursorArgs,
+  cursorLaunchCommand,
+  cursorProjectConfigFailure,
+  evaluateCursorNetworkPreflight,
   findValue,
+  materializeCursorNetworkPolicy,
   resolveCursorBinary,
   resolveCursorModel,
   runCursor
@@ -255,7 +260,7 @@ export function assertProviderVersion(provider, binary) {
   const configuredMinimum = minimumVersion(provider);
   const required = parsedVersion(configuredMinimum);
   if (!required) throw brokerError('INVALID_REQUEST', `invalid minimum ${provider} version: ${configuredMinimum}`, { provider });
-  const launch = provider === 'cursor' ? cursorCommand(binary, ['--version']) : { command: binary, args: ['--version'] };
+  const launch = provider === 'cursor' ? cursorLaunchCommand(binary, ['--version']) : { command: binary, args: ['--version'] };
   const result = spawnSync(launch.command, launch.args, {
     encoding: 'utf8', timeout: 10000, windowsHide: true, maxBuffer: 1024 * 1024
   });
@@ -430,6 +435,7 @@ function mapCodexItem(jobId, phase, params, activity = null) {
     appendJobEvent(jobId, 'file.changed', { changes: item.changes || [], status: item.status, phase }, options);
   } else if (item.type !== 'reasoning' && item.type !== 'userMessage') {
     appendJobEvent(jobId, 'provider.event', { providerEvent: `item/${phase}`, itemType: item.type, itemId: item.id }, options);
+    if (item.type === 'contextCompaction') appendJobEvent(jobId, `compaction.${phase}`, { itemId: item.id }, options);
   }
 }
 
@@ -569,7 +575,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.23.3' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.24.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -723,15 +729,6 @@ async function runCodex(job) {
   }
 }
 
-function cursorCommand(binary, args, interactive = true) {
-  if (process.platform !== 'darwin' || process.env.DELEGATE_CURSOR_LOGIN_SHELL === '0') return { command: binary, args };
-  const shell = process.env.SHELL || '/bin/zsh';
-  // Headless must not use -i: an interactive zsh reads the NDJSON stream as
-  // shell commands. ACP keeps -i for keychain-backed login environments.
-  const flags = interactive ? '-lic' : '-lc';
-  return { command: shell, args: [flags, 'exec "$@"', 'delegate-cursor-shell', binary, ...args] };
-}
-
 // Fail closed on unknown model ids: a silent fallback would report
 // "completed" for a model the caller never requested. Advertised ACP option
 // values may be attribute-serialized ("grok-4.5[effort=high,fast=true]")
@@ -843,36 +840,173 @@ function planEntriesText(entries) {
     .join('\n');
 }
 
-function mapAcpUpdate(job, update, sessionId, messageParts, deltas, planHolder, activity = null) {
+const CURSOR_NETWORK_READ_ONLY_PREAMBLE = [
+  'CURSOR NETWORK MODE ELEVATION: this read-only job is running in agent mode only because Cursor ask/plan modes categorically block network tools.',
+  'Remain strictly read-only: do not create, edit, rename, or delete files; do not run destructive commands; do not change repository, system, or remote state.'
+].join('\n');
+
+function cursorPrompt(job, text) {
+  if (job.network !== true || !readOnly(job)) return text;
+  return `${CURSOR_NETWORK_READ_ONLY_PREAMBLE}\n\n${text}`;
+}
+
+function prepareCursorNetwork(job, transport) {
+  let materialized;
+  try {
+    materialized = materializeCursorNetworkPolicy(job, (type, data) => appendJobEvent(job.id, type, { ...data, transport }));
+    const preflight = evaluateCursorNetworkPreflight(job, materialized.policy);
+    appendJobEvent(job.id, 'network.preflight', { ...preflight, transport });
+    if (preflight.modeElevated) {
+      appendJobEvent(job.id, 'network.mode-elevated', {
+        requestedMode: job.mode,
+        effectiveMode: 'agent',
+        reason: 'Cursor ask/plan modes reject network tools; the injected preamble preserves strict read-only intent'
+      });
+    }
+    return materialized;
+  } catch (error) {
+    materialized?.cleanup?.();
+    throw error;
+  }
+}
+
+class EphemeralCursorActivity {
+  constructor(marker, limit = 2048) {
+    this.marker = marker;
+    this.limit = limit;
+    this.tail = '';
+  }
+
+  thinking(text = '') {
+    this.tail = `${this.tail}${String(text || '')}`.slice(-this.limit);
+    this.marker?.mark('thinking');
+  }
+
+  output() {
+    this.tail = '';
+    this.marker?.mark('output');
+  }
+}
+
+function replayFingerprint(sessionId, update) {
+  return crypto.createHash('sha256').update(`${sessionId || ''}\0${JSON.stringify(update)}`).digest('hex').slice(0, 32);
+}
+
+function claimReplay(jobId, sessionId, update) {
+  const fingerprint = replayFingerprint(sessionId, update);
+  const current = loadJob(jobId);
+  const prior = new Set(current?.cursorReplayFingerprints || []);
+  if (prior.has(fingerprint)) return null;
+  prior.add(fingerprint);
+  updateManagedJob(jobId, (job) => { job.cursorReplayFingerprints = [...prior].slice(-2048); }, { incrementRevision: false });
+  return fingerprint;
+}
+
+function nestedDiffs(value, result = [], seen = new Set()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return result;
+  seen.add(value);
+  if (typeof value.path === 'string' && (typeof value.oldText === 'string' || typeof value.newText === 'string')) {
+    result.push({ path: value.path, oldText: value.oldText || '', newText: value.newText || '' });
+  }
+  for (const child of Array.isArray(value) ? value : Object.values(value)) nestedDiffs(child, result, seen);
+  return result;
+}
+
+function unifiedCursorDiff(change) {
+  const before = String(change.oldText || '').split('\n').map((line) => `-${line}`).join('\n');
+  const after = String(change.newText || '').split('\n').map((line) => `+${line}`).join('\n');
+  return `diff --git a/${change.path} b/${change.path}\n--- a/${change.path}\n+++ b/${change.path}\n@@ -1 +1 @@\n${before}\n${after}\n`;
+}
+
+function recordAcpDiffs(jobId, update, options) {
+  const changes = nestedDiffs(update);
+  if (!changes.length) return;
+  const normalized = changes.map((change) => {
+    const kind = !change.oldText ? 'create' : !change.newText ? 'delete' : 'edit';
+    return { ...change, kind, source: 'cursor-acp' };
+  });
+  appendJobEvent(jobId, 'file.changed', { changes: normalized, source: 'cursor-acp' }, options);
+  appendJobEvent(jobId, 'diff.updated', { diff: changes.map(unifiedCursorDiff).join(''), source: 'cursor-acp' }, options);
+}
+
+function acpToolData(update) {
+  const rawOutput = update.rawOutput || update.output?.rawOutput || null;
+  const args = update.args || update.input || update.toolCall?.args || update.toolCall?.input || null;
+  const requestedSandboxPolicy = findValue(update, ['requestedSandboxPolicy']);
+  return {
+    toolCallId: update.toolCallId || update.callId || update.id,
+    title: update.title || update.name,
+    kind: update.kind || update.toolKind || update.type,
+    status: update.status,
+    locations: update.locations,
+    args,
+    ...(requestedSandboxPolicy ? { requestedSandboxPolicy } : {}),
+    rawOutput
+  };
+}
+
+export function mapCursorAcpUpdate(job, update, context = {}) {
   const jobId = job.id;
   const kind = update.sessionUpdate;
-  const options = { sessionId };
+  const sessionId = context.sessionId;
+  const replay = context.replay === true;
+  const replayId = replay ? claimReplay(jobId, sessionId, update) : null;
+  if (replay && !replayId) return undefined;
+  const options = { sessionId, replay };
+  const eventData = (value) => replay ? { ...value, replayId } : value;
   const signal = cursorAcpActivitySignal(update);
-  if (signal) activity?.mark(signal);
+  if (signal && !replay) {
+    if (signal === 'thinking') context.ephemeral?.thinking(update.content?.text || update.text || '');
+    else context.ephemeral?.output();
+  }
   if (kind === 'agent_message_chunk') {
     const text = update.content?.text || '';
-    messageParts.push(text);
-    appendJobEvent(jobId, 'message.delta', { id: update.messageId, delta: deltas.redactDelta(`message:${update.messageId ?? 'acp'}`, text) }, options);
+    if (!replay) context.messageParts?.push(text);
+    appendJobEvent(jobId, 'message.delta', eventData({ id: update.messageId, delta: context.deltas.redactDelta(`message:${update.messageId ?? 'acp'}`, text) }), options);
+  } else if (kind === 'user_message_chunk') {
+    appendJobEvent(jobId, 'message.user', eventData({ text: context.deltas.redactDelta(`user:${update.messageId ?? 'acp'}`, update.content?.text || update.text || '') }), options);
   } else if (kind === 'plan' || kind === 'plan_update') {
-    appendJobEvent(jobId, 'plan.updated', update, options);
+    appendJobEvent(jobId, 'plan.updated', eventData(update), options);
     // Plan-mode output arrives here, not as agent message chunks; hold the
     // latest entries so the terminal result can carry the actual plan.
     const entries = update.entries || update.plan?.entries || null;
-    if (planHolder && entries) planHolder.entries = entries;
-  }
-  else if (kind === 'tool_call') {
-    appendJobEvent(jobId, 'tool.started', update, options);
+    if (!replay && context.planHolder && entries) context.planHolder.entries = entries;
+  } else if (kind === 'tool_call') {
+    appendJobEvent(jobId, 'tool.started', eventData(acpToolData(update)), options);
     for (const location of update.locations || []) if (location.path) appendJobEvent(jobId, 'file.changed', { path: location.path }, options);
+    recordAcpDiffs(jobId, update, options);
   } else if (kind === 'tool_call_update') {
-    const type = ['completed', 'failed'].includes(update.status) ? 'tool.completed' : 'tool.output';
-    appendJobEvent(jobId, type, update, options);
+    const tool = acpToolData(update);
+    const terminalStatus = ['completed', 'failed', 'cancelled', 'rejected'].includes(String(update.status || '').toLowerCase());
+    const raw = tool.rawOutput;
+    if (raw && (raw.stdout != null || raw.stderr != null || raw.exitCode != null)) {
+      appendJobEvent(jobId, 'tool.output', eventData({
+        toolCallId: tool.toolCallId,
+        stdout: redact(raw.stdout || '', '', 16384),
+        stderr: redact(raw.stderr || '', '', 16384),
+        exitCode: raw.exitCode
+      }), options);
+    } else if (!terminalStatus) {
+      appendJobEvent(jobId, 'tool.status', eventData({ toolCallId: tool.toolCallId, title: tool.title, status: tool.status }), options);
+    }
+    if (terminalStatus) appendJobEvent(jobId, 'tool.completed', eventData({ ...tool, rawOutput: undefined, exitCode: raw?.exitCode }), options);
     for (const location of update.locations || []) if (location.path) appendJobEvent(jobId, 'file.changed', { path: location.path }, options);
+    recordAcpDiffs(jobId, update, options);
   } else if (kind === 'agent_thought_chunk') {
-    return undefined;
+    // Hidden reasoning stays process-local. The content-free marker gives the
+    // TUI activity without journaling any thought text.
+    if (replay) appendJobEvent(jobId, 'activity', eventData({ kind: 'thinking' }), options);
   } else if (kind === 'usage_update') {
-    return recordUsage(job, update, options);
+    if (!replay) {
+      const occupancy = { contextUsed: Number(update.used || 0), contextSize: Number(update.size || 0) };
+      appendJobEvent(jobId, 'usage.context', occupancy, options);
+      updateManagedJob(jobId, (current) => { current.contextOccupancy = occupancy; }, { incrementRevision: false });
+    }
   } else if (kind === 'session_info_update') {
-    appendJobEvent(jobId, 'provider.event', { providerEvent: 'session/update:session_info_update' }, options);
+    appendJobEvent(jobId, 'session.updated', eventData({ title: update.title || update.sessionTitle || null, model: update.model || null }), options);
+    if (!replay && (update.title || update.sessionTitle)) {
+      updateManagedJob(jobId, (current) => { current.sessionTitle = update.title || update.sessionTitle; }, { incrementRevision: false });
+    }
     if (update.model) {
       // The session's own report is the ground truth for resolvedModel, but a
       // silent overwrite hid fast-variant swaps from coordinators; disagreement
@@ -881,10 +1015,32 @@ function mapAcpUpdate(job, update, sessionId, messageParts, deltas, planHolder, 
       if (current?.resolvedModel && current.resolvedModel !== update.model) {
         appendJobEvent(jobId, 'provider.event', { providerEvent: 'cursor:model-mismatch', negotiated: current.resolvedModel, reported: update.model }, options);
       }
-      updateManagedJob(jobId, (job) => { job.resolvedModel = update.model; }, { incrementRevision: false });
+      if (!replay) updateManagedJob(jobId, (current) => { current.resolvedModel = update.model; }, { incrementRevision: false });
     }
-  } else if (kind !== 'agent_thought_chunk' && kind !== 'user_message_chunk') {
-    appendJobEvent(jobId, 'provider.event', { providerEvent: `session/update:${kind}` }, options);
+  } else if (kind === 'current_mode_update') {
+    appendJobEvent(jobId, 'mode.updated', eventData({ mode: update.mode || update.currentMode || update }), options);
+    if (!replay) updateManagedJob(jobId, (current) => { current.cursorMode = update.mode || update.currentMode || null; }, { incrementRevision: false });
+  } else if (kind === 'available_commands_update') {
+    appendJobEvent(jobId, 'commands.updated', eventData({ commands: update.availableCommands || update.commands || [] }), options);
+  } else if (kind === 'config_option_update') {
+    appendJobEvent(jobId, 'config.updated', eventData(update), options);
+    if (update.configId === 'model' || update.id === 'model') appendJobEvent(jobId, 'model.updated', eventData({ model: update.value }), options);
+    if (update.configId === 'mode' || update.id === 'mode') appendJobEvent(jobId, 'mode.updated', eventData({ mode: update.value }), options);
+  } else {
+    appendJobEvent(jobId, 'provider.event', eventData({ providerEvent: `session/update:${kind}` }), options);
+  }
+  return undefined;
+}
+
+export function mapCursorAcpNotification(job, method, params = {}, sessionId = null) {
+  if (method === 'cursor/update_todos') {
+    appendJobEvent(job.id, 'plan.updated', { ...params, merge: params.merge === true }, { sessionId });
+  } else if (method === 'cursor/task') {
+    appendJobEvent(job.id, 'subagent.activity', params, { sessionId });
+  } else if (method === 'cursor/generate_image') {
+    appendJobEvent(job.id, 'artifact.created', { kind: 'image', ...params }, { sessionId });
+  } else {
+    appendJobEvent(job.id, 'provider.event', { providerEvent: method }, { sessionId });
   }
 }
 
@@ -982,13 +1138,151 @@ function recordGitState(job, sessionId) {
   return state;
 }
 
-async function runCursorAcp(job) {
+function cursorAcpArgs(job) {
+  const sandboxValue = job.sandbox === 'off' ? 'disabled' : 'enabled';
+  const elevated = job.network === true && readOnly(job);
+  const force = job.approval === 'force' || (job.network === true && job.sandbox === 'off');
+  const args = [];
+  if (force) args.push('--force');
+  else if (!readOnly(job) || elevated) args.push('--auto-review');
+  args.push('--sandbox', sandboxValue);
+  for (const directory of job.addDirs || []) args.push('--add-dir', directory);
+  if (job.approveMcps) args.push('--approve-mcps');
+  if (job.cursorWorktree) args.push('--worktree');
+  if (job.cursorWorktreeBase) args.push('--worktree-base', job.cursorWorktreeBase);
+  args.push('acp');
+  return args;
+}
+
+export async function probeCursorAcpCapabilities(options = {}) {
+  const binary = options.binary || resolveCursorBinary();
+  const cwd = options.cwd || process.cwd();
+  const timeoutMs = Number(options.timeoutMs || 10000);
+  const report = {
+    probeVersion: 1,
+    binary: binary || null,
+    ok: false,
+    noTurn: true,
+    observedClientRequests: [],
+    honorsClientCapabilities: { terminal: false, fsRead: false, fsWrite: false }
+  };
+  if (!binary) return { ...report, errorCode: 'CURSOR_NOT_INSTALLED' };
+  const launch = cursorLaunchCommand(binary, ['--sandbox', 'enabled', 'acp']);
+  let stderr = '';
+  const requests = new Set();
+  const rpc = new JsonRpcProcess(launch.command, launch.args, {
+    cwd,
+    requestTimeoutMs: timeoutMs,
+    onStderr: (text) => { stderr = `${stderr}${text}`.slice(-4000); },
+    onRequest: async (method) => {
+      requests.add(method);
+      return {};
+    }
+  });
+  try {
+    const initialized = await rpc.request('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
+      clientInfo: { name: 'delegate-router-capability-probe', version: '1' }
+    }, timeoutMs);
+    const session = await rpc.request('session/new', { cwd, mcpServers: [] }, timeoutMs);
+    const capabilities = initialized.capabilities || initialized.agentCapabilities || {};
+    report.ok = true;
+    report.initialize = {
+      loadSession: capabilities.loadSession ?? initialized.loadSession ?? false,
+      sessionList: capabilities.sessionList ?? capabilities.listSessions ?? false,
+      resumeSession: capabilities.resumeSession ?? false,
+      modes: initialized.modes || [],
+      models: initialized.models || []
+    };
+    report.configOptionIds = (session.configOptions || []).map((item) => item.id).filter(Boolean);
+  } catch (error) {
+    const project = cursorProjectConfigFailure(stderr, cwd);
+    report.errorCode = project?.code || error.code || 'ACP_HANDSHAKE_FAILED';
+    report.error = redact(project?.message || error.message, '', 2000);
+  } finally {
+    await rpc.stop();
+  }
+  report.observedClientRequests = [...requests];
+  report.honorsClientCapabilities = {
+    terminal: report.observedClientRequests.some((method) => method.startsWith('terminal/')),
+    fsRead: report.observedClientRequests.some((method) => /fs\/read/i.test(method)),
+    fsWrite: report.observedClientRequests.some((method) => /fs\/write/i.test(method))
+  };
+  return report;
+}
+
+function normalizedPermissionContext(params, cwd) {
+  const toolCall = params.toolCall || params.tool_call || params;
+  const values = [];
+  const visit = (value, key = '') => {
+    if (!value || typeof value !== 'object') return;
+    for (const [name, child] of Object.entries(value)) {
+      if (typeof child === 'string' && /^(?:path|file|filePath|cwd)$/i.test(name)) values.push(child);
+      else if (child && typeof child === 'object') visit(child, name);
+    }
+  };
+  visit(toolCall);
+  const rawDomain = findValue(toolCall, ['domain', 'hostname', 'url']);
+  let domain = rawDomain;
+  if (typeof rawDomain === 'string' && /^https?:\/\//i.test(rawDomain)) {
+    try { domain = new URL(rawDomain).hostname; } catch {}
+  }
+  const rawCommand = findValue(toolCall, ['command', 'commandLine', 'shellCommand']);
+  const command = Array.isArray(rawCommand) ? rawCommand.join(' ') : typeof rawCommand === 'string' ? rawCommand : null;
+  const toolKind = String(findValue(toolCall, ['kind', 'toolKind', 'type', 'name', 'title']) || 'unknown');
+  const shellLike = /shell|terminal|command/i.test(toolKind);
+  const paths = [];
+  const outsidePaths = [];
+  for (const value of new Set(values)) {
+    const absolute = path.isAbsolute(value) ? path.resolve(value) : path.resolve(cwd, value);
+    const relative = path.relative(cwd, absolute);
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) paths.push(relative.replaceAll('\\', '/'));
+    else if (!relative) paths.push('.');
+    else outsidePaths.push(absolute);
+  }
+  return {
+    toolKind,
+    paths: paths.slice(0, 64),
+    ...(outsidePaths.length ? { outsidePaths: outsidePaths.slice(0, 64) } : {}),
+    domain: domain || null,
+    command,
+    ambiguous: shellLike && !command
+  };
+}
+
+function cursorInputTimeoutMs() {
+  const milliseconds = Number(process.env.DELEGATE_CURSOR_INPUT_TIMEOUT_MS);
+  if (Number.isFinite(milliseconds) && milliseconds > 0) return Math.min(milliseconds, 86400000);
+  const seconds = Number(process.env.DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS ?? 300);
+  return (Number.isFinite(seconds) ? Math.min(Math.max(seconds, 10), 86400) : 300) * 1000;
+}
+
+function cursorInputResponse(method, command) {
+  if (command.response && typeof command.response === 'object') return command.response;
+  if (method === 'cursor/create_plan') return { approved: command.accept === true, ...(command.answer ? { feedback: command.answer } : {}) };
+  return { answer: command.answer ?? (command.accept === true ? 'yes' : command.accept === false ? 'no' : '') };
+}
+
+function cursorProjectBrokerError(info, provider = 'cursor') {
+  return brokerError('INVALID_REQUEST', `${info.code}: ${info.message}`, {
+    provider,
+    file: info.file,
+    cursorErrorCode: info.code
+  });
+}
+
+function modelCatalog(option) {
+  const picker = option?.parameterizedModelPicker || option?.parameterized_model_picker;
+  return picker?.options || picker?.values || option?.options || [];
+}
+
+async function runCursorAcpTransport(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   assertProviderVersion('cursor', binary);
-  const sandboxValue = job.sandbox === 'off' ? 'disabled' : 'enabled';
-  const rootArgs = readOnly(job) ? ['--sandbox', sandboxValue, 'acp'] : ['--auto-review', '--sandbox', sandboxValue, 'acp'];
-  const launch = cursorCommand(binary, rootArgs);
+  const rootArgs = cursorAcpArgs(job);
+  const launch = cursorLaunchCommand(binary, rootArgs);
   let sessionId = job.providerSessionId;
   let cancelRequested = false;
   const pendingCorrections = [];
@@ -998,56 +1292,123 @@ async function runCursorAcp(job) {
   const planHolder = { entries: null };
   const deltas = new DeltaRedactor();
   const activity = new ActivityTransitionEmitter(job.id);
+  const ephemeral = new EphemeralCursorActivity(activity);
   let budgetError = null;
+  let replaying = false;
+  let pendingInput = null;
+  let blockingInputError = null;
+  let projectConfigError = null;
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
   const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const rpc = new JsonRpcProcess(launch.command, launch.args, {
     cwd: job.cwd,
-    onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
+    onStderr: (text) => {
+      projectConfigError ||= cursorProjectConfigFailure(text, job.cwd);
+      appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) });
+    },
     onNotification: async (method, params) => {
       if (method === 'session/update') {
-        const exceeded = mapAcpUpdate(job, params.update || {}, params.sessionId, messageParts, deltas, planHolder, activity);
-        if (exceeded && !budgetError) {
-          budgetError = exceeded;
-          recordBudgetExceeded(job, exceeded, { sessionId: params.sessionId });
-          if (!cancelSignalSent && (params.sessionId || sessionId)) {
-            rpc.notify('session/cancel', { sessionId: params.sessionId || sessionId });
-            cancelSignalSent = true;
-          }
-        }
+        mapCursorAcpUpdate(job, params.update || {}, {
+          sessionId: params.sessionId,
+          messageParts,
+          deltas,
+          planHolder,
+          ephemeral,
+          replay: replaying
+        });
+      } else {
+        mapCursorAcpNotification(job, method, params, sessionId);
       }
     },
     onRequest: async (method, params) => {
-      if (method !== 'session/request_permission') throw brokerError('INVALID_REQUEST', `Unsupported ACP request: ${method}`, { provider: job.provider });
-      activity.mark('output');
-      appendJobEvent(job.id, 'approval.requested', { method, toolCall: params.toolCall, options: params.options }, { sessionId });
-      const allow = job.approval === 'force' ? params.options?.find((option) => /allow/i.test(option.kind)) : null;
-      const reject = params.options?.find((option) => /reject|deny/i.test(option.kind));
-      const selected = allow || reject;
-      const outcome = selected ? { outcome: 'selected', optionId: selected.optionId } : { outcome: 'cancelled' };
-      appendJobEvent(job.id, 'approval.resolved', { outcome }, { sessionId });
-      return { outcome };
+      if (method === 'session/request_permission') {
+        ephemeral.output();
+        const context = normalizedPermissionContext(params, job.cwd);
+        const options = Array.isArray(params.options) ? params.options : [];
+        appendJobEvent(job.id, 'approval.requested', { method, context, options }, { sessionId });
+        const force = job.approval === 'force' || (job.network === true && job.sandbox === 'off');
+        const allowOnce = force ? options.find((option) => /allow[_ -]?once|once/i.test(String(option.kind || ''))) : null;
+        const reject = options.find((option) => /reject|deny/i.test(String(option.kind || '')));
+        const selected = allowOnce || reject;
+        const outcome = selected ? { outcome: 'selected', optionId: selected.optionId } : { outcome: 'cancelled' };
+        appendJobEvent(job.id, 'approval.resolved', { outcome, decision: allowOnce ? 'allow_once' : reject ? 'reject' : 'cancelled', context }, { sessionId });
+        return { outcome };
+      }
+      if (!['cursor/ask_question', 'cursor/create_plan'].includes(method)) {
+        throw brokerError('INVALID_REQUEST', `Unsupported ACP request: ${method}`, { provider: job.provider });
+      }
+      if (pendingInput) throw brokerError('USER_INPUT_REQUIRED', `another Cursor input request is already pending: ${pendingInput.requestId}`, { provider: job.provider });
+      ephemeral.output();
+      const requestId = String(params.requestId || params.id || params.toolCallId || `cursor-input-${crypto.randomUUID()}`);
+      const timeout = cursorInputTimeoutMs();
+      const durable = { requestId, method, payload: redact(params), requestedAt: Date.now(), timeoutMs: timeout };
+      updateManagedJob(job.id, (current) => {
+        current.phase = 'user-input-required';
+        current.stopReason = 'USER_INPUT_REQUIRED';
+        current.pendingInput = durable;
+      });
+      appendJobEvent(job.id, 'input.requested', durable, { sessionId });
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (!pendingInput || pendingInput.requestId !== requestId) return;
+          const error = brokerError('USER_INPUT_REQUIRED', `Cursor ${method} timed out waiting for coordinator response after ${Math.round(timeout / 1000)}s`, {
+            provider: job.provider,
+            stopReason: 'input-timeout'
+          });
+          blockingInputError = error;
+          pendingInput = null;
+          updateManagedJob(job.id, (current) => {
+            current.stopReason = 'input-timeout';
+            current.pendingInput = { ...durable, timedOut: true };
+          });
+          appendJobEvent(job.id, 'input.resolved', { requestId, outcome: 'timeout', stopReason: 'input-timeout' }, { sessionId });
+          reject(error);
+        }, timeout);
+        timer.unref?.();
+        pendingInput = { requestId, method, resolve, reject, timer };
+      });
     }
   });
 
   try {
-    await rpc.request('initialize', {
+    const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.23.3' }
+      clientInfo: { name: 'delegate-router', version: '0.24.0' }
     });
+    const initializeRecord = redact({
+      protocolVersion: initialized.protocolVersion,
+      capabilities: initialized.capabilities || initialized.agentCapabilities || {},
+      modes: initialized.modes || [],
+      models: initialized.models || [],
+      authMethods: initialized.authMethods ? '[advertised]' : undefined
+    });
+    updateManagedJob(job.id, (current) => { current.cursorInitialize = initializeRecord; }, { incrementRevision: false });
+    appendJobEvent(job.id, 'provider.initialized', initializeRecord);
+    const loadSession = initialized.capabilities?.loadSession ?? initialized.agentCapabilities?.loadSession ?? initialized.loadSession;
+    if (sessionId && loadSession !== true) {
+      throw brokerError('RESUME_UNSUPPORTED', 'Cursor ACP initialize did not advertise loadSession; cannot load the requested continuation', { provider: job.provider });
+    }
+    replaying = Boolean(sessionId);
     const session = sessionId
       ? await rpc.request('session/load', { sessionId, cwd: job.cwd, mcpServers: [] })
       : await rpc.request('session/new', { cwd: job.cwd, mcpServers: [] });
+    replaying = false;
     sessionId ||= session.sessionId;
     recordSession(job.id, sessionId, null);
     const config = session.configOptions || [];
+    updateManagedJob(job.id, (current) => {
+      current.cursorConfigOptions = redact(config);
+      current.cursorModes = initialized.modes || config.find((item) => item.id === 'mode')?.options || [];
+      const configuredModels = modelCatalog(config.find((item) => item.id === 'model'));
+      current.cursorModels = configuredModels.length ? configuredModels : initialized.models || [];
+    }, { incrementRevision: false });
     const modelOption = config.find((item) => item.id === 'model');
     const modeOption = config.find((item) => item.id === 'mode');
     if (modelOption) {
       let resolvedModel;
       try {
-        const detailed = cursorModelDetailed(modelOption.options || [], job.model);
+        const detailed = cursorModelDetailed(modelCatalog(modelOption), job.model);
         resolvedModel = detailed.value;
         if (detailed.fastCompromise) {
           // The session advertises this model only as a fast variant. The
@@ -1087,14 +1448,22 @@ async function runCursorAcp(job) {
         });
       }
       await rpc.request('session/set_config_option', { sessionId, configId: 'model', value: resolvedModel });
+      appendJobEvent(job.id, 'model.updated', {
+        requested: job.model,
+        model: resolvedModel,
+        catalogSource: modelOption.parameterizedModelPicker || modelOption.parameterized_model_picker ? 'parameterizedModelPicker' : 'config-option'
+      }, { sessionId });
       updateManagedJob(job.id, (current) => {
         current.model = resolvedModel;
         current.resolvedModel = resolvedModel;
       }, { incrementRevision: false });
     }
-    if (modeOption) await rpc.request('session/set_config_option', {
-      sessionId, configId: 'mode', value: readOnly(job) ? (job.mode === 'consult' ? 'ask' : 'plan') : 'agent'
-    });
+    if (modeOption) {
+      const resolvedMode = job.network === true && readOnly(job) ? 'agent' : readOnly(job) ? (job.mode === 'consult' ? 'ask' : 'plan') : 'agent';
+      await rpc.request('session/set_config_option', { sessionId, configId: 'mode', value: resolvedMode });
+      appendJobEvent(job.id, 'mode.updated', { requested: job.mode, mode: resolvedMode }, { sessionId });
+      updateManagedJob(job.id, (current) => { current.cursorMode = resolvedMode; }, { incrementRevision: false });
+    }
 
     if (!await holdBeforeFirstTurn(loadJob(job.id), deadline)) return;
 
@@ -1102,11 +1471,12 @@ async function runCursorAcp(job) {
       messageParts.length = 0;
       cancelSignalSent = false;
       appendJobEvent(job.id, 'turn.started', { transport: 'acp' }, { sessionId });
-      promptPromise = rpc.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }, Math.max(1, deadline - Date.now()));
+      promptPromise = rpc.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: cursorPrompt(loadJob(job.id), text) }] }, Math.max(1, deadline - Date.now()));
     };
     startPrompt(promptFor(loadJob(job.id)));
 
     while (true) {
+      if (blockingInputError) throw blockingInputError;
       if (Date.now() >= deadline) {
         if (!cancelSignalSent) rpc.notify('session/cancel', { sessionId });
         throw brokerError('TIMEOUT', `Cursor managed job exceeded ${Math.round(timeoutMs / 1000)}s`, { provider: job.provider });
@@ -1119,6 +1489,11 @@ async function runCursorAcp(job) {
         const command = claimed.command;
         if (command.type === 'cancel') {
           cancelRequested = true;
+          if (pendingInput) {
+            clearTimeout(pendingInput.timer);
+            pendingInput.reject(brokerError('USER_INPUT_REQUIRED', 'Cursor input request cancelled by coordinator', { provider: job.provider }));
+            pendingInput = null;
+          }
           for (const queued of pendingCorrections) {
             appendJobEvent(job.id, 'correction.rejected', { commandId: queued.commandId, reason: 'job cancelled' }, { sessionId });
             settleQueuedControl(job.id, queued.commandId, { ok: false, error: 'job cancelled before correction started' });
@@ -1126,6 +1501,27 @@ async function runCursorAcp(job) {
           pendingCorrections.length = 0;
           if (!cancelSignalSent) { rpc.notify('session/cancel', { sessionId }); cancelSignalSent = true; }
           completeCommand(job.id, claimed, { ok: true, appliedAs: 'cancel' });
+        } else if (command.type === 'respond') {
+          if (!pendingInput) {
+            completeCommand(job.id, claimed, { ok: false, error: 'no Cursor input request is pending' });
+          } else if (command.requestId && command.requestId !== pendingInput.requestId) {
+            completeCommand(job.id, claimed, { ok: false, error: `response targets ${command.requestId}; pending request is ${pendingInput.requestId}` });
+          } else {
+            const response = cursorInputResponse(pendingInput.method, command);
+            const requestId = pendingInput.requestId;
+            clearTimeout(pendingInput.timer);
+            const resolve = pendingInput.resolve;
+            pendingInput = null;
+            updateManagedJob(job.id, (current) => {
+              current.phase = 'prompting';
+              current.stopReason = null;
+              current.pendingInput = null;
+              current.lastInputResponse = { requestId, respondedAt: Date.now() };
+            });
+            appendJobEvent(job.id, 'input.resolved', { requestId, outcome: 'answered' }, { sessionId });
+            completeCommand(job.id, claimed, { ok: true, appliedAs: 'input-response', requestId });
+            resolve(response);
+          }
         } else if (command.type === 'steer') {
           if (cancelRequested) {
             completeCommand(job.id, claimed, { ok: false, error: 'JOB_CANCELLING: correction rejected' });
@@ -1140,11 +1536,15 @@ async function runCursorAcp(job) {
         } else completeCommand(job.id, claimed, { ok: false, error: `unsupported command: ${command.type}` });
       }
       if (!completed) continue;
-      if (completed.error) throw completed.error;
+      if (blockingInputError) throw blockingInputError;
+      if (completed.error) {
+        if (projectConfigError) throw cursorProjectBrokerError(projectConfigError, job.provider);
+        throw completed.error;
+      }
       if (acpGraceMs()) await delay(acpGraceMs());
       appendJobEvent(job.id, 'turn.completed', completed.response, { sessionId });
       if (messageParts.length) appendJobEvent(job.id, 'message.completed', { text: messageParts.join('') }, { sessionId });
-      if (completed.response.usage) {
+      if (completed.response.usage && usageTotals(completed.response.usage)) {
         const exceeded = recordUsage(job, completed.response.usage, { sessionId });
         if (exceeded && !budgetError) {
           budgetError = exceeded;
@@ -1180,34 +1580,127 @@ async function runCursorAcp(job) {
       });
       break;
     }
+  } catch (error) {
+    if (projectConfigError && error.code !== 'CURSOR_PROJECT_CONFIG_INVALID') {
+      throw cursorProjectBrokerError(projectConfigError, job.provider);
+    }
+    throw error;
   } finally {
+    replaying = false;
+    if (pendingInput) {
+      clearTimeout(pendingInput.timer);
+      pendingInput.reject(brokerError('TRANSPORT_ERROR', 'Cursor ACP stopped while waiting for coordinator input', { provider: job.provider }));
+      pendingInput = null;
+    }
     activity.close();
     await rpc.stop();
   }
 }
 
-function mapHeadlessEvent(job, event, deltas) {
+async function runCursorAcp(job) {
+  const network = prepareCursorNetwork(job, 'acp');
+  try { return await runCursorAcpTransport(job); }
+  finally { network.cleanup(); }
+}
+
+function headlessAssistantText(event) {
+  const content = event.message?.content || event.content;
+  if (Array.isArray(content)) return content.map((item) => typeof item === 'string' ? item : item?.text || '').join('');
+  if (typeof content === 'string') return content;
+  if (typeof event.text === 'string') return event.text;
+  return '';
+}
+
+function headlessToolPayload(event) {
+  const entry = Object.entries(event.tool_call || {})[0] || ['tool', {}];
+  const kind = String(entry[0]).replace(/ToolCall$/, '') || 'tool';
+  const call = entry[1] && typeof entry[1] === 'object' ? entry[1] : {};
+  const args = call.args || call.input || {};
+  const result = call.result || event.result || null;
+  const requestedSandboxPolicy = call.requestedSandboxPolicy || args.requestedSandboxPolicy || event.requestedSandboxPolicy || null;
+  return {
+    toolCallId: event.call_id || event.callId || call.call_id || call.id,
+    kind,
+    title: kind,
+    args,
+    ...(requestedSandboxPolicy ? { requestedSandboxPolicy } : {}),
+    ...(result ? {
+      result: redact(result, '', 16384),
+      success: result.success,
+      rejectedReason: result.rejected?.reason,
+      error: result.error
+    } : {})
+  };
+}
+
+export function mapCursorHeadlessEvent(job, event, context = {}) {
   const jobId = job.id;
   const sessionId = findValue(event, ['session_id', 'sessionId', 'chat_id', 'chatId']);
   if (sessionId) {
     updateManagedJob(jobId, (job) => { job.providerSessionId = sessionId; job.session = sessionId; }, { incrementRevision: false });
   }
   const options = { sessionId };
-  const usage = event.usage || (event.type === 'usage_update' || event.subtype === 'usage_update' ? event : null);
-  const exceeded = usage ? recordUsage(job, usage, options) : null;
   if (event.type === 'assistant') {
-    const text = findValue(event, ['text', 'content', 'message']) || '';
-    appendJobEvent(jobId, 'message.delta', { delta: deltas.redactDelta('message:headless', typeof text === 'string' ? text : JSON.stringify(text)) }, options);
+    // Cursor emits buffered pre-tool and final flush duplicates. Only the
+    // timestamped, model-call-free chunks are genuine stream deltas.
+    if (event.timestamp_ms == null || event.model_call_id != null) return null;
+    const text = headlessAssistantText(event);
+    context.assistantParts?.push(text);
+    context.ephemeral?.output();
+    appendJobEvent(jobId, 'message.delta', { delta: context.deltas.redactDelta('message:headless', text) }, options);
+  } else if (event.type === 'thinking') {
+    context.ephemeral?.thinking(event.text || '');
   } else if (event.type === 'tool_call') {
+    context.ephemeral?.output();
     const type = event.subtype === 'started' ? 'tool.started' : event.subtype === 'completed' ? 'tool.completed' : 'tool.output';
-    appendJobEvent(jobId, type, { toolCall: event.tool_call, subtype: event.subtype }, options);
+    appendJobEvent(jobId, type, { ...headlessToolPayload(event), subtype: event.subtype }, options);
   } else if (event.type === 'result') {
-    if (event.result) appendJobEvent(jobId, 'message.completed', { text: event.result }, options);
-  } else appendJobEvent(jobId, 'provider.event', { providerEvent: `cursor:${event.type || 'unknown'}`, subtype: event.subtype }, options);
-  return exceeded;
+    context.ephemeral?.output();
+    const canonical = typeof event.result === 'string' ? event.result : event.result == null ? '' : JSON.stringify(event.result);
+    const streamed = (context.assistantParts || []).join('');
+    if (streamed && canonical && streamed !== canonical) {
+      appendJobEvent(jobId, 'provider.event', {
+        providerEvent: 'cursor:assistant-final-mismatch',
+        streamedChars: streamed.length,
+        finalChars: canonical.length,
+        resolution: 'result.result-preferred'
+      }, options);
+    }
+    if (canonical) appendJobEvent(jobId, 'message.completed', { text: canonical }, options);
+    return event.usage ? recordUsage(job, event.usage, options) : null;
+  } else if (event.type === 'system' && event.subtype === 'init') {
+    appendJobEvent(jobId, 'session.updated', { model: event.model, permissionMode: event.permissionMode }, options);
+  } else if (event.type !== 'user') {
+    appendJobEvent(jobId, 'provider.event', { providerEvent: `cursor:${event.type || 'unknown'}`, subtype: event.subtype }, options);
+  }
+  return null;
 }
 
-async function runCursorHeadless(job) {
+function createCursorChat(binary, job) {
+  const launch = cursorLaunchCommand(binary, ['create-chat'], false);
+  const result = spawnSync(launch.command, launch.args, {
+    cwd: job.cwd,
+    encoding: 'utf8',
+    timeout: 15000,
+    windowsHide: true,
+    maxBuffer: 1024 * 1024
+  });
+  const configFailure = cursorProjectConfigFailure(result.stderr, job.cwd);
+  if (configFailure) throw cursorProjectBrokerError(configFailure, job.provider);
+  if (result.status !== 0) {
+    if (/unknown|unrecognized|invalid (?:command|subcommand)|create-chat.*(?:not found|unsupported)/i.test(result.stderr || '')) {
+      return { sessionId: null, fallback: 'create-chat-unavailable' };
+    }
+    throw brokerError('TRANSPORT_ERROR', `Cursor create-chat failed before the first turn: ${redact((result.stderr || result.stdout || '').trim(), '', 2000)}`, { provider: job.provider });
+  }
+  const output = String(result.stdout || '').trim();
+  let sessionId = null;
+  try { sessionId = findValue(JSON.parse(output), ['session_id', 'sessionId', 'chat_id', 'chatId', 'id']); } catch {}
+  sessionId ||= output.match(/\b(?:chat|session)[-_][a-zA-Z0-9_-]+\b/)?.[0] || (/^[a-zA-Z0-9_-]{8,}$/.test(output) ? output : null);
+  return sessionId ? { sessionId: String(sessionId), fallback: null } : { sessionId: null, fallback: 'create-chat-output-unrecognized' };
+}
+
+async function runCursorHeadlessTransport(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   assertProviderVersion('cursor', binary);
@@ -1216,26 +1709,52 @@ async function runCursorHeadless(job) {
     : availableModelIds(binary);
   const model = resolveCursorModel(job.model, ids);
   let resume = job.providerSessionId;
+  if (!resume) {
+    const created = createCursorChat(binary, job);
+    if (created.sessionId) {
+      resume = created.sessionId;
+      recordSession(job.id, resume, null);
+      appendJobEvent(job.id, 'session.created', { sessionId: resume, source: 'cursor-create-chat' }, { sessionId: resume });
+    } else {
+      appendJobEvent(job.id, 'provider.event', { providerEvent: 'cursor:create-chat-fallback', reason: created.fallback });
+    }
+  }
   let text = promptFor(job);
   let cancelRequested = false;
   const pendingCorrections = [];
   const deltas = new DeltaRedactor();
+  const activity = new ActivityTransitionEmitter(job.id);
+  const ephemeral = new EphemeralCursorActivity(activity);
   let budgetError = null;
   let budgetTermination = null;
 
-  while (true) {
+  try {
+    while (true) {
     let activeChild = null;
+    const assistantParts = [];
     appendJobEvent(job.id, 'turn.started', { transport: 'headless', resume }, { sessionId: resume });
-    const headless = cursorCommand(binary, buildCursorArgs({ mode: job.mode, model, cwd: job.cwd, approval: job.approval, resume, sandbox: job.sandbox }), false);
+    const headless = cursorLaunchCommand(binary, buildCursorArgs({
+      mode: job.mode,
+      model,
+      cwd: job.cwd,
+      approval: job.approval,
+      resume,
+      sandbox: job.sandbox,
+      network: job.network,
+      addDirs: job.addDirs,
+      approveMcps: job.approveMcps,
+      worktree: job.cursorWorktree,
+      worktreeBase: job.cursorWorktreeBase
+    }), false);
     const running = runCursor({
       binary: headless.command,
       args: headless.args,
       cwd: job.cwd,
-      prompt: text,
+      prompt: cursorPrompt(job, text),
       timeoutMs: jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600),
       onChild: (child) => { activeChild = child; },
       onEvent: (event) => {
-        const exceeded = mapHeadlessEvent(job, event, deltas);
+        const exceeded = mapCursorHeadlessEvent(job, event, { deltas, assistantParts, ephemeral });
         if (exceeded && !budgetError) {
           budgetError = exceeded;
           recordBudgetExceeded(job, exceeded, { sessionId: resume });
@@ -1294,6 +1813,8 @@ async function runCursorHeadless(job) {
     }
     if (outcome.status !== 0) {
       recordGitState(job, resume);
+      const projectConfig = cursorProjectConfigFailure(outcome.stderr, job.cwd);
+      if (projectConfig) throw cursorProjectBrokerError(projectConfig, job.provider);
       if (outcome.timedOut) throw brokerError('TIMEOUT', outcome.error || 'Cursor headless execution timed out', { provider: job.provider });
       throw brokerError('PROVIDER_ERROR', outcome.error || 'Cursor headless execution failed', { provider: job.provider });
     }
@@ -1306,8 +1827,17 @@ async function runCursorHeadless(job) {
     }
     recordGitState(job, sessionId);
     terminal(job, 'completed', 'completed', { result: redact(outcome.payload), session: sessionId });
-    return;
+      return;
+    }
+  } finally {
+    activity.close();
   }
+}
+
+async function runCursorHeadless(job) {
+  const network = prepareCursorNetwork(job, 'headless');
+  try { return await runCursorHeadlessTransport(job); }
+  finally { network.cleanup(); }
 }
 
 function verificationFailure(job, message, exitCode = 127) {

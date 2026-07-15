@@ -1,11 +1,52 @@
 import path from 'node:path';
+import { normalizeFileChangedEvent } from '../control.mjs';
 import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimestamp, joinDisplayParts } from './display.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR, spinnerGlyph } from './glyphs.mjs';
+import { uiPalette as palette } from './palette.mjs';
 import { displayWidth, graphemeWidth, splitGraphemes, truncateToWidth } from './width.mjs';
 
-const TRANSCRIPT_NOTICE = /^(?:approval\.(?:requested|resolved)|correction\.|scope\.violation$|budget\.exceeded$|error$)/;
+const TRANSCRIPT_NOTICE = /^(?:approval\.(?:requested|resolved)|correction\.|scope\.violation$|budget\.exceeded$|error$|network\.|input\.|session\.updated$|mode\.updated$|model\.updated$|commands\.updated$|subagent\.activity$|artifact\.created$)/;
 const SUCCESS = /^(?:completed|complete|success|succeeded|ok|approved|accepted)$/i;
 const FAILURE = /^(?:failed|failure|error|cancelled|canceled|rejected|denied)$/i;
+const compactionNormalizationCache = new WeakMap();
+
+function compactionPhase(event) {
+  if (event?.type === 'compaction.started') return 'started';
+  if (event?.type === 'compaction.completed') return 'completed';
+  const data = event?.data || {};
+  if (event?.type !== 'provider.event' || String(data.itemType || '').toLowerCase() !== 'contextcompaction') return null;
+  if (data.providerEvent === 'item/started') return 'started';
+  if (data.providerEvent === 'item/completed') return 'completed';
+  return null;
+}
+
+function compactionIdentity(event, phase) {
+  return `${phase}:${formatDisplayValue(event?.data?.itemId)}`;
+}
+
+// This is the sole legacy compatibility boundary. Every TUI consumer sees the
+// same canonical lifecycle, while new journals keep the raw provider.event for
+// fidelity without rendering the compaction twice.
+export function normalizeCompactionEvents(events = []) {
+  if (!Array.isArray(events)) return [];
+  const cached = compactionNormalizationCache.get(events);
+  if (cached) return cached;
+  const firstClass = new Set(events
+    .filter((event) => event?.type === 'compaction.started' || event?.type === 'compaction.completed')
+    .map((event) => compactionIdentity(event, compactionPhase(event))));
+  const normalized = events.flatMap((event) => {
+    const phase = compactionPhase(event);
+    if (!phase || event.type !== 'provider.event') return [event];
+    if (firstClass.has(compactionIdentity(event, phase))) return [];
+    return [Object.freeze({
+      ...event,
+      type: `compaction.${phase}`,
+      data: Object.freeze({ itemId: event.data?.itemId })
+    })];
+  });
+  compactionNormalizationCache.set(events, normalized);
+  return normalized;
+}
 
 function stringValue(...values) {
   for (const value of values) {
@@ -188,7 +229,12 @@ export function deriveToolDescriptor(startEvent, completedEvent = null, output =
   const endedAt = Number.isFinite(candidateEnd) && candidateEnd > 0 ? candidateEnd : null;
   const durationMs = explicitDuration != null && explicitDuration >= 0 ? explicitDuration
     : completedEvent && completedEvent !== startEvent && startedAt && endedAt && endedAt >= startedAt ? endedAt - startedAt : null;
-  const outputText = rawStringValue(payload.rich.aggregatedOutput, payload.data.output, payload.call?.output);
+  const outputText = rawStringValue(
+    payload.rich.aggregatedOutput,
+    payload.data.output,
+    payload.call?.output,
+    [payload.data.stdout, payload.data.stderr].filter(Boolean).join('\n')
+  );
   const tracker = output instanceof OutputLineTail ? output : new OutputLineTail();
   if (outputText) tracker.replace(outputText);
   const lowerType = itemType.toLowerCase();
@@ -281,6 +327,19 @@ function noticeText(event) {
   if (event.type.startsWith('correction.')) return joinDisplayParts([`> ${event.type.replace('correction.', 'correction ')}`, data.appliedAs]);
   if (event.type === 'scope.violation') return `! scope violation${CHROME_SEPARATOR}${numberValue(data.count, data.files?.length) || 1} path${Number(data.count || data.files?.length || 1) === 1 ? '' : 's'}`;
   if (event.type === 'budget.exceeded') return joinDisplayParts(['! output budget exceeded', data.maxOutputTokens ? `${formatDisplayValue(data.maxOutputTokens)} tokens` : '']);
+  if (event.type === 'network.preflight') return joinDisplayParts(['~ network preflight', data.expectedEgress, data.sandbox, data.effectiveMode]);
+  if (event.type === 'network.mode-elevated') return joinDisplayParts(['! Cursor mode elevated for network', `${data.requestedMode} -> ${data.effectiveMode}`]);
+  if (event.type === 'network.policy.materialized') return '~ temporary Cursor network policy installed';
+  if (event.type === 'network.policy.restored') return '+ Cursor network policy restored';
+  if (event.type === 'input.requested') return joinDisplayParts(['? coordinator input required', data.method, data.requestId]);
+  if (event.type === 'input.response.requested') return joinDisplayParts(['> coordinator response queued', data.requestId]);
+  if (event.type === 'input.resolved') return joinDisplayParts(['+ coordinator input resolved', data.outcome]);
+  if (event.type === 'session.updated') return joinDisplayParts(['~ session updated', data.title, data.model]);
+  if (event.type === 'mode.updated') return joinDisplayParts(['~ Cursor mode', data.mode]);
+  if (event.type === 'model.updated') return joinDisplayParts(['~ Cursor model', data.model]);
+  if (event.type === 'commands.updated') return joinDisplayParts(['~ Cursor commands updated', `${Array.isArray(data.commands) ? data.commands.length : 0} available`]);
+  if (event.type === 'subagent.activity') return joinDisplayParts(['> Cursor subagent', data.title, data.status, data.task]);
+  if (event.type === 'artifact.created') return joinDisplayParts(['+ artifact', data.kind, data.path, data.uri]);
   return `! ${stringValue(data.code, 'error')}${CHROME_SEPARATOR}${stringValue(data.message, data.error, 'provider error')}`;
 }
 
@@ -288,7 +347,10 @@ function buildDescriptions(events, options) {
   const slots = [];
   const messages = new Map();
   const tools = new Map();
+  const fileGroups = new Map();
+  const compactions = new Map();
   let openAnonymousMessage = null;
+  let openAnonymousCompaction = null;
   let plan = null;
 
   const addMessage = (event, role, key, streaming, text = '') => {
@@ -303,9 +365,34 @@ function buildDescriptions(events, options) {
     tools.set(key, state);
     return state;
   };
+  const addCompaction = (event, key) => {
+    const state = { slot: slots.length, key, start: null, completed: null, seqStart: event.seq || 0, seqEnd: event.seq || 0 };
+    slots.push({ kind: 'compaction', state });
+    compactions.set(key, state);
+    return state;
+  };
+  const addFileGroup = (event, key) => {
+    const state = { key, start: null, completed: null, seqStart: event.seq || 0, seqEnd: event.seq || 0 };
+    slots.push({ kind: 'files', state });
+    fileGroups.set(key, state);
+    return state;
+  };
 
-  for (const event of events || []) {
-    const data = event?.data || {};
+  const normalizedEvents = normalizeCompactionEvents(events);
+  const replayEvents = normalizedEvents.filter((event) => event.replay === true);
+  if (replayEvents.length) {
+    slots.push({
+      kind: 'restored',
+      count: replayEvents.length,
+      seqStart: replayEvents[0].seq || 0,
+      seqEnd: replayEvents.at(-1).seq || 0,
+      at: eventTime(replayEvents[0])
+    });
+  }
+  for (const event of normalizedEvents) {
+    if (event.replay === true) continue;
+    const normalizedEvent = normalizeFileChangedEvent(event, options.jobCwd || '');
+    const data = normalizedEvent?.data || {};
     if (event.type === 'turn.started' || event.type?.startsWith('correction.')) openAnonymousMessage = null;
     if (event.type === 'provider.event' || event.type === 'activity') continue;
     if (event.type === 'message.user') {
@@ -349,23 +436,46 @@ function buildDescriptions(events, options) {
       } else plan.event = event;
       continue;
     }
-    if (event.type === 'tool.started' || event.type === 'tool.completed' || event.type === 'tool.output') {
+    if (event.type === 'compaction.started' || event.type === 'compaction.completed') {
+      const itemId = formatDisplayValue(data.itemId);
+      let key = itemId ? `compaction:${itemId}` : openAnonymousCompaction;
+      let state = key ? compactions.get(key) : null;
+      if (!state) {
+        key = itemId ? `compaction:${itemId}` : `compaction:anon:${event.seq || slots.length}`;
+        state = addCompaction(event, key);
+      }
+      if (event.type === 'compaction.started') {
+        state.start = event;
+        if (!itemId) openAnonymousCompaction = key;
+      } else {
+        state.completed = event;
+        if (!itemId && openAnonymousCompaction === key) openAnonymousCompaction = null;
+      }
+      state.seqStart = Math.min(state.seqStart || event.seq || 0, event.seq || state.seqStart || 0);
+      state.seqEnd = Math.max(state.seqEnd || 0, event.seq || 0);
+      continue;
+    }
+    if (event.type === 'tool.started' || event.type === 'tool.completed' || event.type === 'tool.output' || event.type === 'tool.status') {
       const key = toolEventKey(event) || `seq-${event.seq || slots.length}`;
       const state = tools.get(key) || addTool(event, key);
       if (event.type === 'tool.started') state.start = event;
       else if (event.type === 'tool.completed') state.completed = event;
-      else state.output.append(data.delta ?? data.output ?? data.text ?? '');
+      else if (event.type === 'tool.output') state.output.append(data.delta ?? data.output ?? data.text ?? [data.stdout, data.stderr].filter(Boolean).join('\n') ?? '');
+      else state.start ||= event;
       state.seqEnd = event.seq || state.seqEnd;
       continue;
     }
-    if (event.type === 'file.changed' && (Array.isArray(data.changes) || data.phase)) {
-      const changedPaths = (data.changes || []).map((change) => formatDisplayValue(change?.path || change?.file)).filter(Boolean).join('\0');
-      const key = `file:${formatDisplayValue(data.id) || changedPaths || event.seq || slots.length}`;
-      const state = tools.get(key) || addTool(event, key);
-      if (data.phase === 'started' || data.status === 'inProgress' || data.status === 'in_progress') state.start = event;
+    if (event.type === 'file.changed') {
+      const changes = (data.changes || []).filter((change) => formatDisplayValue(change?.path));
+      if (!changes.length) continue;
+      const changedPaths = changes.map((change) => formatDisplayValue(change.path)).join('\0');
+      const identity = formatDisplayValue(data.id) || (data.phase ? changedPaths : event.seq || slots.length);
+      const key = `file:${identity}`;
+      const state = fileGroups.get(key) || addFileGroup(normalizedEvent, key);
+      if (data.phase === 'started' || data.status === 'inProgress' || data.status === 'in_progress') state.start = normalizedEvent;
       else {
-        state.start ||= event;
-        state.completed = event;
+        state.start ||= normalizedEvent;
+        state.completed = normalizedEvent;
       }
       state.seqEnd = event.seq || state.seqEnd;
       continue;
@@ -394,9 +504,43 @@ function buildDescriptions(events, options) {
         tool: deriveToolDescriptor(state.start || state.completed, state.completed, state.output, options)
       };
     }
+    if (slot.kind === 'files') {
+      const state = slot.state;
+      const event = state.completed || state.start;
+      return (event.data?.changes || []).map((change, index) => ({
+        id: `${state.key}:${index}:${formatDisplayValue(change.path)}`,
+        kind: 'file-change',
+        at: eventTime(event),
+        seqStart: state.seqStart,
+        seqEnd: state.seqEnd,
+        path: formatDisplayValue(change.path),
+        change
+      }));
+    }
+    if (slot.kind === 'compaction') {
+      const state = slot.state;
+      const startedAt = eventTime(state.start || state.completed);
+      const completedAt = eventTime(state.completed);
+      const durationMs = startedAt && completedAt && completedAt >= startedAt ? completedAt - startedAt : null;
+      return {
+        id: state.key, kind: 'compaction', at: startedAt, seqStart: state.seqStart, seqEnd: state.seqEnd,
+        inProgress: !state.completed, durationMs
+      };
+    }
+    if (slot.kind === 'restored') {
+      return {
+        id: `restored:${slot.seqStart}:${slot.seqEnd}`,
+        kind: 'restored',
+        at: slot.at,
+        seqStart: slot.seqStart,
+        seqEnd: slot.seqEnd,
+        count: slot.count,
+        collapsed: true
+      };
+    }
     const event = slot.event;
     return { id: `notice:${event.seq || slots.indexOf(slot)}`, kind: 'notice', noticeType: event.type, at: eventTime(event), seqStart: event.seq || 0, seqEnd: event.seq || 0, text: noticeText(event) };
-  });
+  }).flat();
 }
 
 function fingerprint(block) {
@@ -437,10 +581,11 @@ export class TranscriptProjector {
         ? { ...base.tool, glyph: spinnerGlyph(now), durationMs: Number.isFinite(now) && base.tool.startedAt && now >= base.tool.startedAt ? now - base.tool.startedAt : null }
         : base.tool;
       const planActive = base.kind === 'plan' && base.entries?.some((entry) => planStatusKind(entry.status) === 'active');
+      const compactionActive = base.kind === 'compaction' && base.inProgress;
       return {
         ...base,
         ...(tool ? { tool } : {}),
-        ...((base.streaming || tool?.running || planActive) ? { spinner: spinnerGlyph(now) } : {}),
+        ...((base.streaming || tool?.running || planActive || compactionActive) ? { spinner: spinnerGlyph(now) } : {}),
         timestamp: formatTimestamp(base.at, { mode: options.timestampMode, now }),
         expanded: base.kind === 'tool' && expanded.has(base.tool.key),
         gapAfter: index < this.base.length - 1
@@ -495,6 +640,35 @@ export function transcriptLogicalLines(block) {
     if (block.gapAfter) lines.push({ text: '', kind: 'gap' });
     return lines;
   }
+  if (block.kind === 'file-change') {
+    const elegant = CHROME_GLYPHS.toolFile !== 'F';
+    const glyph = CHROME_GLYPHS.toolFile;
+    const label = formatDisplayValue(block.change?.label || block.path).replaceAll(' \u2192 ', elegant ? ' \u2192 ' : ' -> ');
+    const hasCounts = Number.isSafeInteger(block.change?.added) && block.change.added >= 0
+      && Number.isSafeInteger(block.change?.removed) && block.change.removed >= 0;
+    const added = hasCounts ? `+${block.change.added}` : '';
+    const removed = hasCounts ? `${elegant ? '\u2212' : '-'}${block.change.removed}` : '';
+    const prefix = `${glyph} ${label}`;
+    const countText = hasCounts ? ` (${added} ${removed})` : '';
+    return [
+      {
+        text: `${prefix}${countText}`,
+        kind: 'file-change',
+        nowrap: true,
+        segments: [
+          { text: prefix },
+          ...(hasCounts ? [
+            { text: ' (' },
+            { text: added, style: palette.positive },
+            { text: ' ' },
+            { text: removed, style: palette.negative },
+            { text: ')' }
+          ] : [])
+        ]
+      },
+      ...(block.gapAfter ? [{ text: '', kind: 'gap' }] : [])
+    ];
+  }
   if (block.kind === 'plan') {
     const lines = [{ text: '| plan', rightText: formatDisplayValue(block.timestamp), kind: 'plan-header', nowrap: true }];
     for (const entry of block.entries || []) {
@@ -509,6 +683,25 @@ export function transcriptLogicalLines(block) {
     }
     if (block.gapAfter) lines.push({ text: '', kind: 'gap' });
     return lines;
+  }
+  if (block.kind === 'compaction') {
+    const glyph = block.inProgress ? block.spinner || CHROME_GLYPHS.spinner : CHROME_GLYPHS.success;
+    return [
+      {
+        text: `${glyph} context compaction`,
+        rightText: block.inProgress || block.durationMs == null ? '' : compactDuration(block.durationMs),
+        kind: block.inProgress ? 'compaction-active' : 'compaction-complete',
+        nowrap: true,
+        ...(block.inProgress ? { spinner: glyph } : {})
+      },
+      ...(block.gapAfter ? [{ text: '', kind: 'gap' }] : [])
+    ];
+  }
+  if (block.kind === 'restored') {
+    return [
+      { text: `> restored history (${block.count} event${block.count === 1 ? '' : 's'})`, rightText: formatDisplayValue(block.timestamp), kind: 'restored', nowrap: true },
+      ...(block.gapAfter ? [{ text: '', kind: 'gap' }] : [])
+    ];
   }
   const kind = block.kind === 'thinking' ? 'thinking' : /scope|budget|error/.test(block.noticeType || '') ? 'notice-error'
     : block.noticeType === 'approval.requested' ? 'notice-warning' : 'notice';
@@ -545,7 +738,10 @@ function wrappedLineFragments(line, width, globalStart) {
     const left = truncateToWidth(formatDisplayValue(line.text), leftWidth, { ellipsis: true });
     const gap = Math.max(0, width - displayWidth(left) - rightWidth);
     const text = right ? `${left}${' '.repeat(gap)}${right}` : left;
-    return [{ text, sourceText: text, prefix: '', start: globalStart, end: globalStart + text.length, lineKind: line.kind, ...(line.spinner ? { spinnerChar: line.spinner } : {}) }];
+    const preservesSegments = !right && left === formatDisplayValue(line.text) && Array.isArray(line.segments);
+    return [{ text, sourceText: text, prefix: '', start: globalStart, end: globalStart + text.length, lineKind: line.kind,
+      ...(preservesSegments ? { segments: line.segments } : {}),
+      ...(line.spinner ? { spinnerChar: line.spinner } : {}) }];
   }
   if (!line.text) return [{ text: '', sourceText: '', prefix: '', start: globalStart, end: globalStart, lineKind: line.kind }];
   const glyphs = glyphOffsets(line.text);
@@ -601,6 +797,7 @@ export function normalizeJobPaths(values, jobCwd = '') {
 }
 
 export function transcriptToolPaths(block, jobCwd = '') {
+  if (block?.kind === 'file-change') return normalizeJobPaths([block.path], jobCwd);
   if (block?.kind !== 'tool') return [];
   return normalizeJobPaths(block.tool.paths || [], jobCwd);
 }

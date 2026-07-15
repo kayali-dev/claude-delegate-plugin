@@ -12,6 +12,7 @@ import { CHROME_GLYPHS, configureGlyphs, GLYPH_TIERS, glyphConfiguration, normal
 import { decodeInput } from '../bin/lib/tui/input.mjs';
 import { CellGrid, Screen } from '../bin/lib/tui/screen.mjs';
 import { ReplayVirtualTerminal } from '../bin/lib/tui/vt-model.mjs';
+import { loadTuiPreferences, saveTuiPreferences } from '../bin/lib/tui/preferences.mjs';
 import {
   classifyGraphemeWidth,
   clearGraphemeWidthOverrides,
@@ -93,9 +94,10 @@ async function deliverProbeChunks(chunks, options = {}) {
     }
   };
   const result = await probeTerminalWidths({
-    screen, input, env: {}, probes: options.probes || ['A', 'B', 'C'], timeoutMs: options.timeoutMs || 30
+    screen, input, env: {}, probes: options.probes || ['A', 'B', 'C'], timeoutMs: options.timeoutMs || 30,
+    backgroundIdleMs: options.backgroundIdleMs, backgroundBudgetMs: options.backgroundBudgetMs
   });
-  return { result, writes };
+  return { result: options.awaitBackground && result.background ? await result.background.done : result, foreground: result, writes };
 }
 
 test('width classification is conservative and runtime probe overrides are exact', (t) => {
@@ -284,7 +286,9 @@ test('runtime CPR probe isolates malformed and missing replies by ordered outcom
   assert.deepEqual(malformed.result.widths, { B: 2, C: 1 });
   assert.deepEqual(malformed.result.outcomes.map((entry) => entry.status), ['parse', 'measured', 'measured']);
 
-  const missing = await deliverProbeChunks(['\u001b[20;2R\u001b[20;3R'], { probes: ['A', 'B', 'C', 'D'], timeoutMs: 10 });
+  const missing = await deliverProbeChunks(['\u001b[20;2R\u001b[20;3R'], {
+    probes: ['A', 'B', 'C', 'D'], timeoutMs: 10, backgroundIdleMs: 15, backgroundBudgetMs: 100, awaitBackground: true
+  });
   assert.deepEqual(missing.result.widths, { A: 1, B: 2 });
   assert.deepEqual(missing.result.outcomes.map((entry) => entry.status), ['measured', 'measured', 'timeout', 'timeout']);
 });
@@ -348,9 +352,10 @@ test('probe budget scales with streamed reply cadence and distinguishes budget e
     }
   };
   t.after(() => clearInterval(serialTimer));
-  const serial = await probeTerminalWidths({
+  const serialForeground = await probeTerminalWidths({
     screen: serialScreen, input: serialInput, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 45, maxBudgetMs: 500
   });
+  const serial = serialForeground.background ? await serialForeground.background.done : serialForeground;
   assert.equal(Object.keys(serial.widths).length, 57, 'a render-cycle-paced terminal completes after the old 45ms cutoff');
   assert.ok(serial.elapsedMs > 45 && serial.elapsedMs < 500, `scaled batch completed in ${serial.elapsedMs.toFixed(1)}ms`);
 
@@ -364,12 +369,119 @@ test('probe budget scales with streamed reply cadence and distinguishes budget e
     }
   };
   t.after(() => clearInterval(budgetTimer));
-  const budget = await probeTerminalWidths({
+  const budgetForeground = await probeTerminalWidths({
     screen: budgetScreen, input: budgetInput, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 20, maxBudgetMs: 70
   });
+  const budget = budgetForeground.background ? await budgetForeground.background.done : budgetForeground;
   clearInterval(budgetTimer);
   assert.ok(budget.outcomes.some((entry) => entry.status === 'budget'));
   assert.match(formatWidthProbeResult(budget), /unproven\(budget\)/);
+});
+
+test('late coalesced CPR batches upgrade atomically in the background at tmux-over-SSH delays', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const replies = WIDTH_PROBE_GRAPHEMES.map(() => '\u001b[20;2R').join('');
+  for (const delayMs of [60, 300, 1500]) {
+    clearGraphemeWidthOverrides();
+    const directory = temporaryDirectory(t);
+    const input = new ProbeInput();
+    let redraws = 0;
+    let persisted = 0;
+    const identity = `tmux-delay-${delayMs}`;
+    const screen = {
+      rows: 20, input,
+      writeOutput(value, meta) {
+        if (meta.context === 'probe' && String(value).includes('\u001b[6n')) setTimeout(() => input.emit('data', replies), delayMs);
+      }
+    };
+    const foreground = await probeTerminalWidths({
+      screen, input, probes: WIDTH_PROBE_GRAPHEMES,
+      backgroundIdleMs: 1800, backgroundBudgetMs: 3000,
+      onBackgroundComplete(result) {
+        if (result.source !== 'probe') return;
+        saveTuiPreferences({ widthProbeCache: { [identity]: { widths: result.widths, measuredAt: Date.now() } } }, { directory });
+        persisted += 1;
+        redraws += 1;
+      }
+    });
+    assert.equal(foreground.source, 'fallback', `${delayMs}ms returns conservative foreground`);
+    assert.ok(foreground.elapsedMs < 150, `${delayMs}ms foreground painted in ${foreground.elapsedMs.toFixed(1)}ms`);
+    assert.equal(foreground.background.active, true);
+    const completed = await foreground.background.done;
+    assert.equal(completed.phase, 'background');
+    assert.equal(completed.completion, 'complete');
+    assert.equal(Object.keys(completed.widths).length, WIDTH_PROBE_GRAPHEMES.length);
+    assert.equal(persisted, 1, 'the complete table is persisted once');
+    assert.equal(redraws, 1, 'the glyph upgrade requests one redraw');
+    assert.deepEqual(loadTuiPreferences({ directory, env: {} }).widthProbeCache[identity].widths, completed.widths);
+    assert.equal(foreground.background.active, false);
+  }
+});
+
+test('immediate CPR completion stays foreground-only with no listener or timer residue', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const input = new ProbeInput();
+  const decoder = () => {};
+  input.on('data', decoder);
+  const screen = {
+    rows: 20, input,
+    writeOutput(value, meta) {
+      if (meta.context === 'probe' && String(value).includes('\u001b[6n')) setTimeout(() => input.emit('data', '\u001b[20;2R\u001b[20;2R'), 5);
+    }
+  };
+  const result = await probeTerminalWidths({ screen, input, probes: ['A', 'B'], foregroundMs: 75 });
+  assert.equal(result.source, 'probe');
+  assert.equal(result.phase, 'foreground');
+  assert.equal(result.background, undefined);
+  assert.deepEqual(result.widths, { A: 1, B: 1 });
+  assert.deepEqual(input.listeners('data'), [decoder]);
+});
+
+test('no-reply background expires cleanly and leaves real key input attached', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const input = new ProbeInput();
+  const screen = { rows: 20, input, writeOutput() {} };
+  const started = performance.now();
+  const foreground = await probeTerminalWidths({
+    screen, input, probes: ['A', 'B'], foregroundMs: 60, backgroundIdleMs: 40, backgroundBudgetMs: 200
+  });
+  assert.ok(performance.now() - started < 150, 'the first frame is not held for the patient deadline');
+  const keys = [];
+  const appHandler = (chunk) => keys.push(String(chunk));
+  foreground.background.attach(appHandler);
+  input.emit('data', 'ab');
+  const completed = await foreground.background.done;
+  assert.equal(completed.source, 'fallback');
+  assert.deepEqual(completed.outcomes.map((entry) => entry.status), ['timeout', 'timeout']);
+  input.emit('data', 'c');
+  assert.deepEqual(keys, ['ab', 'c']);
+  assert.deepEqual(input.listeners('data'), [appHandler]);
+  assert.equal(foreground.background.teardown(), false, 'teardown remains idempotent after expiry');
+  foreground.background.detach(appHandler);
+  assert.equal(input.listenerCount('data'), 0);
+});
+
+test('background input filter strips only probe-row CPRs and preserves interleaved keystrokes in order', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const input = new ProbeInput();
+  const screen = {
+    rows: 20, input,
+    writeOutput(value, meta) {
+      if (meta.context !== 'probe' || !String(value).includes('\u001b[6n')) return;
+      setTimeout(() => input.emit('data', 'a\u001b[20;2Rb\u001b[A\u001b[20;2Rc'), 70);
+    }
+  };
+  const foreground = await probeTerminalWidths({
+    screen, input, probes: ['A', 'B'], foregroundMs: 30, backgroundIdleMs: 200, backgroundBudgetMs: 500
+  });
+  const received = [];
+  const appHandler = (chunk) => received.push(String(chunk));
+  foreground.background.attach(appHandler);
+  const completed = await foreground.background.done;
+  assert.deepEqual(completed.widths, { A: 1, B: 1 });
+  assert.equal(received.join(''), 'ab\u001b[Ac');
+  assert.doesNotMatch(received.join(''), /\u001b\[20;/);
+  foreground.background.detach(appHandler);
 });
 
 test('suspect graphemes are isolated by CUP so adversarial width disagreement cannot move neighboring ASCII', () => {

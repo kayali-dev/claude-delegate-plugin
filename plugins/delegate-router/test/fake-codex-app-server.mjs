@@ -58,6 +58,9 @@ lines.on('line', (line) => {
     send({ jsonrpc: '2.0', id: request.id, result: { turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-fake', turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'item/started', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'reasoning', id: 'reasoning-1' } } });
+    if (process.env.FAKE_CODEX_COMPACTION === '1') {
+      send({ jsonrpc: '2.0', method: 'item/started', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'contextCompaction', id: 'compaction-1' } } });
+    }
     send({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-fake', turnId: activeTurn, explanation: null, plan: [{ step: 'test', status: 'inProgress' }] } });
     const fileChanges = Math.max(0, Number(process.env.FAKE_CODEX_FILE_CHANGES ?? 1));
     for (let index = 0; index < fileChanges; index += 1) {
@@ -66,6 +69,9 @@ lines.on('line', (line) => {
     }
     if (process.env.FAKE_CODEX_COLLAB === '1') {
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'collabAgentToolCall', id: 'collab-1', status: 'completed' }, completedAtMs: Date.now() } });
+    }
+    if (process.env.FAKE_CODEX_COMPACTION === '1') {
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'contextCompaction', id: 'compaction-1' }, completedAtMs: Date.now() } });
     }
     const crashOnceMarker = path.join(process.cwd(), '.fake-codex-crashed-once');
     const shouldCrashOnce = process.env.FAKE_CODEX_CRASH_ONCE === '1' && !fs.existsSync(crashOnceMarker);

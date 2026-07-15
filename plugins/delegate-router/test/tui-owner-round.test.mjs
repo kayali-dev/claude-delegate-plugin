@@ -290,7 +290,7 @@ test('history loading stays in the pane title and never inserts a shifting messa
 });
 
 test('activity mapping animates busy states only and every active surface shares one phase', () => {
-  for (const kind of ['working', 'thinking', 'streaming', 'tool']) {
+  for (const kind of ['working', 'thinking', 'streaming', 'compacting', 'tool']) {
     const indicator = activityIndicator({ kind, glyph: '>', label: kind, since: NOW - 1000, age: '1s', tone: 'accent' }, NOW);
     assert.equal(indicator.animated, true, kind);
     assert.equal(indicator.segments[0].spinner, true, kind);

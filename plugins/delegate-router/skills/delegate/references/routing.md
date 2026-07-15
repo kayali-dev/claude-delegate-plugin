@@ -66,3 +66,9 @@ For routine scoped code review and second opinions, default to one managed Codex
 Use the right tool for the model: GPT models run on Codex, Composer/Grok/Auto on Cursor, Claude in-session or via built-in agents. Running a GPT model through Cursor's API pool is refused (`WRONG_LANE`) while Codex is enabled and under its avoid band; it is acceptable only on explicit user request (`overrideLane=true`) or when Codex is disabled or exhausted.
 
 Do not delegate the same question to several expensive models by default. Multiple opinions are justified for high-risk review, uncertain architecture, or explicit comparison; keep them read-only and synthesize the disagreements.
+
+## Cursor transport and network routing
+
+Prefer ACP when its session catalog contains the requested tier; prefer the existing explicit headless transport or the automatic `cursor:acp-tier-fallback` only when ACP cannot honor the tier/start contract. Both transports now expose live assistant/thinking/tool structure, but their remaining limits matter when routing: Cursor has no same-turn steer, no live shell stdout, no mid-turn token usage, and no rate-limit/allowance feed. Route work that depends on any of those properties to Codex app-server.
+
+`network=true` is a privilege decision, not a routing hint. Cursor ask/plan cannot use network, so networked consult/plan/review elevates the provider to agent mode under an injected strict read-only preamble. Sandboxed egress uses the temporary merged `networkAllow` policy; sandbox-off egress necessarily uses force and therefore also auto-approves actions beyond networking. Require explicit sandbox-off-level authorization for that combination.

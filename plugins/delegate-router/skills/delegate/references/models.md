@@ -62,3 +62,9 @@ Sources: https://cursor.com/blog/composer-2-5 and https://cursor.com/blog/compos
 ## Comparison Limits
 
 Provider benchmark numbers are not directly interchangeable: the harness, tools, prompting, and available context differ. Route by task shape, verified local behavior, allowance headroom, and total coordination cost rather than declaring one universal winner.
+
+## Cursor catalog fidelity
+
+The adapter retains ACP initialize capabilities, modes, models, and the session config-option catalogs on the job. When the model option exposes Cursor's `parameterizedModelPicker`, its values are preferred over hand-constructed bracketed IDs; the structural bracket/suffix matcher remains the compatibility fallback. Negotiated and provider-reported model/mode changes emit `model.updated` and `mode.updated` rather than silently mutating the record.
+
+`delegate-health` includes a versioned no-turn ACP probe. It advertises terminal and fs client capabilities only inside the probe and reports whether the installed build actually sends `terminal/*` or `fs/*` requests. Production initialize continues to advertise all three capabilities as false until a build demonstrably honors them.

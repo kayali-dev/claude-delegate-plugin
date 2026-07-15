@@ -28,7 +28,11 @@ function nastyStore() {
     { v: 1, seq: 4, at: NOW - 3000, jobId: id, type: 'tool.output', redacted: true, data: { id: 'argv', output: { stdout: ['real\nlines', { structured: true }], metadata: null } } },
     { v: 1, seq: 5, at: NOW - 2000, jobId: id, type: 'tool.completed', redacted: true, data: { item: { id: 'argv', type: 'commandExecution', command: ['node', '-e', 'done'], status: 'completed', exitCode: 0, locations: [{ path: { uri: '/work/nasty/src/object.mjs' } }] } } },
     { v: 1, seq: 6, at: NOW - 1000, jobId: id, type: 'plan.updated', redacted: true, data: { plan: [{ step: { object: 'plan' }, status: null }] } },
-    { v: 1, seq: 7, at: NOW, jobId: id, type: 'error', redacted: true, data: { code: null, message: { nested: ['safe', false] } } }
+    { v: 1, seq: 7, at: NOW - 500, jobId: id, type: 'file.changed', redacted: true, data: { changes: [
+      { path: '/work/nasty/src/🙂.mjs', oldText: 'old\n', newText: 'new\nextra\n', added: Number.NaN, removed: { invalid: true } },
+      { path: '/work/nasty/src/no-count.mjs', metadata: { structured: true } }
+    ] } },
+    { v: 1, seq: 8, at: NOW, jobId: id, type: 'error', redacted: true, data: { code: null, message: { nested: ['safe', false] } } }
   ];
   return {
     jobs: [job], eventsByJob: { [id]: events }, hydrationByJob: { [id]: { loaded: true } },

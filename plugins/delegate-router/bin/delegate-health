@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspectJob, launchManagedJob } from './lib/control.mjs';
 import { normalizeBrokerError } from './lib/errors.mjs';
-import { availableModelIds, executableOnPath, resolveCursorBinary } from './lib/cursor.mjs';
+import { availableModelIds, cursorLaunchCommand, executableOnPath, inspectCursorProjectConfig, resolveCursorBinary } from './lib/cursor.mjs';
+import { probeCursorAcpCapabilities } from './lib/providers.mjs';
 import { auditLogPath, effectiveUsage, enabledProviders, loadState, mutateState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
@@ -15,6 +16,11 @@ function run(command, args, timeout = 12000, maxOutput = 2000) {
     status: result.status,
     output: (result.stdout || result.stderr || '').trim().slice(0, maxOutput)
   };
+}
+
+function runCursor(binary, args, timeout = 12000, maxOutput = 2000, interactive = false) {
+  const launch = cursorLaunchCommand(binary, args, interactive);
+  return run(launch.command, launch.args, timeout, maxOutput);
 }
 
 const args = process.argv.slice(2);
@@ -48,10 +54,23 @@ if (report.usage.cursor && !report.usage.cursor.known) {
 
 if (report.codex.enabled && codexBinary) report.codex.version = run(codexBinary, ['--version'], 5000);
 if (report.cursor.enabled && cursorBinary) {
-  report.cursor.version = run(cursorBinary, ['--version'], 5000);
+  report.cursor.version = runCursor(cursorBinary, ['--version'], 5000);
+  const projectConfig = inspectCursorProjectConfig(process.cwd());
+  report.cursor.projectConfig = projectConfig.ok
+    ? { ok: true, file: projectConfig.file, exists: projectConfig.exists }
+    : { ok: false, code: 'CURSOR_PROJECT_CONFIG_INVALID', file: projectConfig.file, error: projectConfig.error };
   if (!quick) {
-    report.cursor.acp = run(cursorBinary, ['acp', '--help'], 10000);
-    report.cursor.status = run(cursorBinary, ['status'], 15000);
+    report.cursor.acp = runCursor(cursorBinary, ['acp', '--help'], 10000, 2000, true);
+    report.cursor.status = runCursor(cursorBinary, ['status', '--format', 'json'], 15000);
+    report.cursor.statusFormat = 'json';
+    if (!report.cursor.status.ok) {
+      const fallback = runCursor(cursorBinary, ['status'], 15000);
+      if (fallback.ok) {
+        report.cursor.status = fallback;
+        report.cursor.statusFormat = 'text-fallback';
+      }
+    }
+    report.cursor.capabilityProbe = await probeCursorAcpCapabilities({ binary: cursorBinary, cwd: process.cwd(), timeoutMs: 10000 });
     const models = availableModelIds(cursorBinary, 15000);
     report.cursor.models = {
       ok: models.length > 0,
@@ -128,7 +147,8 @@ report.ok = report.node.ok && report.claude.installed && report.control.installe
   && (!report.codex.enabled || report.codex.installed)
   && (!report.cursor.enabled || report.cursor.installed);
 if (!quick && report.cursor.enabled && report.cursor.installed) {
-  report.ok = report.ok && report.cursor.status?.ok === true && report.cursor.models?.ok === true;
+  report.ok = report.ok && report.cursor.status?.ok === true && report.cursor.models?.ok === true
+    && report.cursor.projectConfig?.ok !== false && report.cursor.capabilityProbe?.ok === true;
 }
 if (deep) report.ok = report.ok && report.lastVerified.every((entry) => entry.ok);
 if (args.includes('--json')) console.log(JSON.stringify(report, null, 2));
@@ -141,6 +161,11 @@ else {
   console.log(`Control MCP: ${report.control.installed ? 'installed' : 'missing'}`);
   console.log(`Audit log: ${report.auditLogFile}`);
   if (report.cursor.acp) console.log(`Cursor ACP: ${report.cursor.acp.ok ? 'available' : 'unavailable (headless fallback)'}`);
+  if (report.cursor.projectConfig?.ok === false) console.log(`Cursor project config: invalid (${report.cursor.projectConfig.code}) ${report.cursor.projectConfig.file}`);
+  if (report.cursor.capabilityProbe) {
+    const honored = report.cursor.capabilityProbe.honorsClientCapabilities;
+    console.log(`Cursor client capabilities: terminal=${honored.terminal} fsRead=${honored.fsRead} fsWrite=${honored.fsWrite} (probe v${report.cursor.capabilityProbe.probeVersion}, no turn)`);
+  }
   if (report.cursor.models) console.log(`Cursor models: ${report.cursor.models.count}`);
   for (const entry of report.lastVerified || []) console.log(`${entry.provider} live probe: ${entry.ok ? 'ok' : `failed (${entry.errorCode})`} in ${entry.durationMs}ms, CLI ${entry.cliVersion || 'unknown'}`);
   for (const name of providerNames()) {

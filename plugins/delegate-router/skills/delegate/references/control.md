@@ -13,16 +13,20 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 ## Access Policies
 
 - Codex uses `approval_policy=on-request` with `approvals_reviewer=auto_review`. This is Approve-for-me: Auto-review evaluates escalations rather than bypassing the sandbox.
-- Cursor write modes use `--auto-review --trust`. Use `--force` only for an explicit `approval=force` override.
+- Cursor write modes use `--auto-review --trust`. `approval=force` selects only ACP `allow_once`, never `allow_always` (which would contaminate global Cursor configuration). `network=true` with `sandbox=off` is also a force-level grant because Cursor requires `--force` for WebFetch and equivalent ACP permission handling; obtain the same explicit authorization as any sandbox-off force run.
 - New Codex starts are blocked by a `PreToolUse` quota hook at or above the avoid threshold. Users can deliberately override with `DELEGATE_ALLOW_OVER_LIMIT=codex`.
-- Network remains off unless the task needs current external information and the user permits it; the explicit control is `network=true` on `delegate_start` (Codex workspace-write sandbox only).
+- Network remains off unless the task needs current external information and the user permits it; the explicit control is `network=true` on `delegate_start` for both providers. Every Cursor launch emits `network.preflight` with the requested/effective mode, sandbox state, `sandbox.networkAccess`, temporary sandbox policy, force state, expected egress, and the separate WebFetch gate.
 - `sandbox=off` disables provider sandboxing entirely (Codex `danger-full-access`, Cursor `--sandbox disabled`) for jobs that require host tools: git push, gh/PR flows, package installs, authenticated CLIs, live web. It is a per-job caller judgment — decide from the task packet, surface to the user when unsure, record the choice in the pre-delegation update, and never pair it with `approval=force` without explicit user acceptance. Codex web search turns on automatically when `network=true` or `sandbox=off`.
-- Consult, plan, and review modes are read-only.
+- Consult, plan, and review modes are read-only. Cursor ask/plan modes categorically reject network tools, so a read-only Cursor job with `network=true` is launched in agent mode with a strict injected no-write/no-destructive-command preamble and a loud `network.mode-elevated` event. This changes the provider mode, never the job's read-only contract.
 - Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. Outbound task packets are scanned for credential-shaped values and fail with `SECRET_IN_PROMPT`; `allowSensitive=true` explicitly overrides both checks and emits `security.warning`. It never removes scope control or the preserve-existing-changes rule. Project tooling may consume secrets internally, but workers must never echo or relocate their contents.
 
 - `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. Prefer it over prose-only fencing for every bounded write job.
 - `ingestFiles` accepts up to 20 absolute regular files outside cwd, each smaller than 10 MB. The broker copies them into `.delegate-staging/<jobId>`, records the source-content hash, and adds that directory when `allowedPaths` is set. Byte-changed staged content copies back only after `completed`; a concurrently changed source is preserved and the staged version is written to `<source>.delegate-new` with `ingest.diverged`. Failures leave staging referenced by the checkpoint. Sensitive names still require `allowSensitive=true`.
-- Cursor read-only modes block the shell entirely, including read-only git commands; a review task that needs `git log`/`git show` history should run on Codex (its read-only sandbox permits read-only shell) or accept the limitation.
+- Cursor headless consult/plan/review runs use streaming NDJSON under `--mode ask|plan`; thinking, assistant, and structured tool events remain visible. Networked read-only work is the explicit agent-mode elevation above. With sandboxing enabled, `networkAllow` materializes a merged temporary `.cursor/sandbox.json` (`default: deny` plus the supplied domains; omitted means `default: allow`) and restores the exact prior file on every exit path. Existing denies win and conflicting requests fail before launch. Project `.cursor/cli.json` supports only `permissions.allow/deny`; malformed or wrong-schema files fail as `CURSOR_PROJECT_CONFIG_INVALID` health detail and an actionable preflight error naming the file.
+
+Advanced Cursor-only start/resume options are `addDirs[]` (`--add-dir`), `approveMcps` (`--approve-mcps`), `cursorWorktree` (`--worktree`), and `cursorWorktreeBase` (`--worktree-base`). CLI spellings are `--add-dir` (repeatable), `--approve-mcps`, `--cursor-worktree`, and `--cursor-worktree-base`.
+
+`delegate_transcript` includes compact `file.changed` entries: one cwd-relative `✎ path (+A −R)` line for each change, with rename/delete labels and counts only when the journal's unified hunk or old/new text can establish them. It never returns the full diff or old/new file bodies through that transcript surface; use `delegate_diff` for hunks.
 
 ## Writer Ownership
 
@@ -58,6 +62,8 @@ A steer that reduces the remaining work can finish the job before any follow-up 
 
 - Codex can accept a genuine same-turn correction through app-server `turn/steer`.
 - Cursor ACP v1 cannot. Its correction path cancels the prompt and resumes the same session, and must be reported as a restart.
+
+Cursor `cursor/ask_question` and `cursor/create_plan` requests are blocking control-inbox items, not provider noise. The job stays running in phase `user-input-required`, persists the redacted request under `pendingInput`, and emits `input.requested`. Inspect the latest revision, then use MCP `delegate_respond` or `delegate-jobs respond <id> --expected-revision N --request-id ... --answer ...` (with `--accept`/`--reject` for plans); retry the same response with the same `commandId`. No answer or plan approval is fabricated. `DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS` (default 300) bounds the wait; expiry rejects the provider request and fails with `stopReason: input-timeout`.
 
 For managed runs, store the job ID and use the `delegate_control` inspection and control tools. Direct Cursor jobs remain available through `delegate-jobs`; official Codex plugin jobs retain their own lifecycle commands. Never describe a foreground MCP call or an external-plugin job as a managed control-plane job.
 

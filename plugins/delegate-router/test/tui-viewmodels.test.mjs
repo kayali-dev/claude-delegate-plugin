@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
 import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
 import { createPalette, uiPalette } from '../bin/lib/tui/palette.mjs';
+import { formatTranscriptBlock } from '../bin/lib/tui/transcript.mjs';
 import { clearGraphemeWidthOverrides, setGraphemeWidthOverrides } from '../bin/lib/tui/width.mjs';
 import { WIDTH_PROBE_GRAPHEMES } from '../bin/lib/tui/width-probe.mjs';
 import {
@@ -100,6 +101,25 @@ test('fleet rows sort active first, expose compact safety badges, and filter id/
   assert.deepEqual(activeOnly.meta.visibleJobIds, ['codex-active-1234567']);
 });
 
+test('open context compaction animates in both fleet row and detail header instead of rendering quiet', () => {
+  const store = syntheticStore();
+  const id = 'codex-active-1234567';
+  store.eventsByJob[id] = [{
+    v: 1, seq: 10, at: NOW - 45_000, jobId: id, type: 'compaction.started', redacted: true, data: { itemId: 'compact-1' }
+  }];
+  const fleet = fleetViewModel(store, { now: NOW }, { width: 100, height: 30 });
+  const activityIndex = fleet.panes[0].content.columns.findIndex((column) => column.key === 'activity');
+  assert.match(fleet.panes[0].content.rows[0].cells[activityIndex].text, /compacting/);
+  assert.doesNotMatch(fleet.panes[0].content.rows[0].cells[activityIndex].text, /quiet/);
+  assert.equal(fleet.panes[0].content.rows[0].cells[activityIndex].animated, true);
+
+  const detail = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW }, { width: 100, height: 30 });
+  assert.equal(detail.meta.activity.kind, 'compacting');
+  assert.match(detail.title.right, /compacting/);
+  assert.equal(detail.headerActivity.animated, true);
+  assert.match(detail.panes[0].content.entries.map(formatTranscriptBlock).join('\n'), /context compaction/);
+});
+
 test('fleet and Record derive failed state for stale queued records before durable reconciliation', () => {
   const store = syntheticStore();
   const stale = {
@@ -172,8 +192,8 @@ test('fleet and detail snapshots expose live activity, transient thinking, and h
   store.jobs = store.jobs.map((job) => job.id === id ? { ...job, provider: 'cursor', transport: 'headless' } : job);
   store.eventsByJob[id] = [{ v: 1, seq: 1, at: NOW - 1000, jobId: id, type: 'activity', redacted: true, data: { kind: 'thinking', at: NOW - 1000 } }];
   const headless = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW }, { width: 100, height: 30 });
-  assert.equal(headless.meta.activity.kind, 'working');
-  assert.match(headless.title.right, /headless transport: reduced visibility/);
+  assert.equal(headless.meta.activity.kind, 'thinking');
+  assert.doesNotMatch(headless.title.right, /reduced visibility/);
 });
 
 test('remote clock offset keeps activity windows aligned to the newest server timeline', () => {

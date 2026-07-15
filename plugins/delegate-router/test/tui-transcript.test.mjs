@@ -116,7 +116,7 @@ test('tool pairs collapse output and expand only journaled command, cwd, files, 
   assert.match(text, /output tail \(3\/3 lines\):\none\ntwo\nthree/);
 });
 
-test('tool one-liners use rich command, file, MCP, Cursor, and fallback fields; d maps file paths into Diff', () => {
+test('tool one-liners use rich command, MCP, Cursor, and fallback fields; file lines and tools map paths into Diff', () => {
   const projector = new TranscriptProjector();
   const events = [
     event(1, 'file.changed', { id: 'files', phase: 'completed', status: 'completed', changes: [
@@ -131,15 +131,51 @@ test('tool one-liners use rich command, file, MCP, Cursor, and fallback fields; 
   ];
   const blocks = projector.project(events, { now: AT + 7000, jobCwd: '/work' });
   const lines = blocks.map(formatTranscriptBlock);
-  assert.match(lines[0], /^F a\.js \(\+2 more\) \| edit\/create\/delete \| \+/);
-  assert.match(lines[1], /^M github\.search \| \+/);
-  assert.match(lines[2], /^[>$›] Edit files \| a\.js \| [x✗]/);
-  assert.match(lines[3], /^\$ tool \| \+/);
-  const diffPaths = transcriptToolPaths(blocks[2], '/work');
+  assert.deepEqual(lines.slice(0, 3).map((line) => line.trim()), ['F src/a.js', 'F src/b.js', 'F src/c.js deleted']);
+  assert.match(lines[3], /^M github\.search \| \+/);
+  assert.match(lines[4], /^[>$›] Edit files \| a\.js \| [x✗]/);
+  assert.match(lines[5], /^\$ tool \| \+/);
+  assert.deepEqual(transcriptToolPaths(blocks[0], '/work'), ['src/a.js']);
+  const diffPaths = transcriptToolPaths(blocks[4], '/work');
   assert.deepEqual(diffPaths, ['src/a.js']);
   const diff = 'diff --git a/src/a.js b/src/a.js\n+a\ndiff --git a/src/b.js b/src/b.js\n+b';
   assert.match(filterDiffPaths(diff, diffPaths), /a\/src\/a\.js/);
   assert.doesNotMatch(filterDiffPaths(diff, diffPaths), /a\/src\/b\.js/);
+});
+
+test('Codex and Cursor file changes render compact per-file counts, actions, colors, and Diff anchors', (t) => {
+  t.after(() => configureGlyphs({ env: process.env, widths: {} }));
+  configureGlyphs({ env: { TERM: 'xterm-256color', LANG: 'en_US.UTF-8' }, widths: { '✎': 1 } });
+  const blocks = new TranscriptProjector().project([
+    event(1, 'file.changed', { id: 'codex-files', phase: 'completed', changes: [
+      { path: '/work/src/a.js', kind: 'update', diff: '--- a/src/a.js\n+++ b/src/a.js\n-old\n+new\n+extra\n' },
+      { path: '/work/src/no-count.js', kind: 'update' },
+      { path: '/work/src/old.js', newPath: '/work/src/new.js', kind: 'rename', diff: '--- a/src/old.js\n+++ b/src/new.js\n-before\n+after\n' },
+      { path: '/work/src/gone.js', kind: 'delete', diff: '--- a/src/gone.js\n+++ /dev/null\n-one\n-two\n' }
+    ] }),
+    event(2, 'file.changed', { changes: [
+      { path: '/work/src/cursor.js', kind: 'edit', oldText: 'same\nold\n', newText: 'same\nnew\nextra\n' }
+    ], source: 'cursor-acp' })
+  ], { jobCwd: '/work', now: AT + 2000 });
+
+  assert.deepEqual(blocks.map((block) => formatTranscriptBlock(block).trimEnd()), [
+    '✎ src/a.js (+2 −1)',
+    '✎ src/no-count.js',
+    '✎ src/old.js renamed → src/new.js (+1 −1)',
+    '✎ src/gone.js deleted (+0 −2)',
+    '✎ src/cursor.js (+2 −1)'
+  ]);
+  assert.deepEqual(blocks.map((block) => transcriptToolPaths(block, '/work')), [
+    ['src/a.js'], ['src/no-count.js'], ['src/new.js'], ['src/gone.js'], ['src/cursor.js']
+  ]);
+  const colored = wrapTranscriptBlock(blocks[0], 120).fragments[0].segments;
+  assert.deepEqual(colored.find((segment) => segment.text === '+2')?.style, uiPalette.positive);
+  assert.deepEqual(colored.find((segment) => segment.text === '−1')?.style, uiPalette.negative);
+  const rendered = blocks.map(formatTranscriptBlock).join('\n');
+  assert.doesNotMatch(rendered, /\[object Object\]|NaN/);
+  configureGlyphs({ env: { TERM: 'dumb', LANG: 'C', DELEGATE_TUI_ASCII: '1' }, widths: {} });
+  assert.equal(formatTranscriptBlock(blocks[0]).trimEnd(), 'F src/a.js (+2 -1)');
+  assert.equal(formatTranscriptBlock(blocks[2]).trimEnd(), 'F src/old.js renamed -> src/new.js (+1 -1)');
 });
 
 test('latest plan replaces earlier plans and provider noise never enters Transcript', () => {
@@ -156,6 +192,46 @@ test('latest plan replaces earlier plans and provider noise never enters Transcr
   assert.match(rendered, new RegExp(`${CHROME_GLYPHS.planCompleted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} done step`));
   assert.match(rendered, new RegExp(`${spinnerGlyph(AT).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} next step`));
   assert.match(rendered, /scope violation/);
+});
+
+test('context compaction renders one timed block for first-class and legacy journals', () => {
+  const firstClass = [
+    event(1, 'message.completed', { id: 'before', text: 'before' }),
+    event(2, 'compaction.started', { itemId: 'compact-1' }),
+    event(5, 'compaction.completed', { itemId: 'compact-1' }),
+    event(6, 'message.completed', { id: 'after', text: 'after' })
+  ];
+  const legacy = firstClass.map((entry) => {
+    if (!entry.type.startsWith('compaction.')) return entry;
+    return event(entry.seq, 'provider.event', {
+      providerEvent: `item/${entry.type.split('.')[1]}`, itemType: 'contextCompaction', itemId: 'compact-1'
+    }, entry.at);
+  });
+  const render = (events) => new TranscriptProjector().project(events, { now: AT + 6000 }).map(formatTranscriptBlock);
+  const current = render(firstClass);
+  const retroactive = render(legacy);
+  assert.equal(current.filter((line) => /context compaction/.test(line)).length, 1);
+  assert.match(current[1], /context compaction/);
+  assert.match(current[1], /3s/);
+  assert.equal(retroactive[1], current[1]);
+});
+
+test('open and nasty context-compaction tails remain animated and display-safe', () => {
+  const projector = new TranscriptProjector();
+  const [open] = projector.project([event(1, 'compaction.started', { itemId: 'open' })], { now: AT + 5000 });
+  assert.equal(open.kind, 'compaction');
+  assert.equal(open.inProgress, true);
+  assert.match(formatTranscriptBlock(open), /context compaction/);
+  assert.ok(open.spinner);
+
+  const [nasty] = new TranscriptProjector().project([{
+    seq: 1, at: 'not-a-time', type: 'provider.event', data: {
+      providerEvent: 'item/completed', itemType: 'contextCompaction', itemId: { nested: true }
+    }
+  }], { now: AT });
+  const rendered = formatTranscriptBlock(nasty);
+  assert.match(rendered, /context compaction/);
+  assert.doesNotMatch(rendered, /\[object Object\]|NaN/);
 });
 
 test('plan checklist glyph tiers and spinner phase snapshot in Unicode and ASCII modes', (t) => {

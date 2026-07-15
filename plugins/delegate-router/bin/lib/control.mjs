@@ -198,6 +198,144 @@ export class DeltaRedactor {
   }
 }
 
+function comparableLines(value) {
+  if (typeof value !== 'string') return null;
+  if (!value) return [];
+  const lines = value.split(/\r?\n/);
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
+function textLineCounts(oldText, newText) {
+  let before = comparableLines(oldText);
+  let after = comparableLines(newText);
+  if (!before || !after) return null;
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let beforeEnd = before.length;
+  let afterEnd = after.length;
+  while (beforeEnd > prefix && afterEnd > prefix && before[beforeEnd - 1] === after[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  before = before.slice(prefix, beforeEnd);
+  after = after.slice(prefix, afterEnd);
+  if (!before.length || !after.length) return { added: after.length, removed: before.length };
+  // Event strings are byte-bounded, but a newline-heavy full-file edit can
+  // still create a pathological quadratic line diff. Unknown is safer than
+  // stalling journal ingestion or inventing counts for that rare shape.
+  if (before.length * after.length > 4_000_000) return null;
+
+  // Myers' shortest-edit-path algorithm gives exact line counts without the
+  // quadratic memory cost of an LCS matrix for full-file Cursor edits.
+  const maximum = before.length + after.length;
+  const offset = maximum + 1;
+  const frontier = new Int32Array(maximum * 2 + 3);
+  frontier.fill(-1);
+  frontier[offset + 1] = 0;
+  for (let distance = 0; distance <= maximum; distance += 1) {
+    for (let diagonal = -distance; diagonal <= distance; diagonal += 2) {
+      const index = offset + diagonal;
+      let x;
+      if (diagonal === -distance || (diagonal !== distance && frontier[index - 1] < frontier[index + 1])) x = frontier[index + 1];
+      else x = frontier[index - 1] + 1;
+      let y = x - diagonal;
+      while (x < before.length && y < after.length && before[x] === after[y]) { x += 1; y += 1; }
+      frontier[index] = x;
+      if (x >= before.length && y >= after.length) {
+        const common = (before.length + after.length - distance) / 2;
+        return { added: after.length - common, removed: before.length - common };
+      }
+    }
+  }
+  return null;
+}
+
+function unifiedDiffLineCounts(diff) {
+  if (typeof diff !== 'string' || !diff) return null;
+  let added = 0;
+  let removed = 0;
+  let observed = false;
+  for (const line of diff.split(/\r?\n/)) {
+    if (/^\+\+\+(?:\s|$)/.test(line) || /^---(?:\s|$)/.test(line)) continue;
+    if (line.startsWith('+')) { added += 1; observed = true; }
+    else if (line.startsWith('-')) { removed += 1; observed = true; }
+  }
+  return observed ? { added, removed } : null;
+}
+
+function normalizedFilePath(value, cwd = '') {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const raw = value.trim();
+  if (cwd && path.isAbsolute(raw)) return (path.relative(path.resolve(cwd), path.resolve(raw)) || '.').replaceAll('\\', '/');
+  return raw.replaceAll('\\', '/').replace(/^\.\//, '');
+}
+
+function knownLineCounts(change) {
+  if (change?.added == null || change?.removed == null) {
+    return unifiedDiffLineCounts(change?.diff ?? change?.patch)
+      || textLineCounts(change?.oldText ?? change?.old_text, change?.newText ?? change?.new_text);
+  }
+  const added = Number(change?.added);
+  const removed = Number(change?.removed);
+  if (Number.isSafeInteger(added) && added >= 0 && Number.isSafeInteger(removed) && removed >= 0) return { added, removed };
+  return unifiedDiffLineCounts(change?.diff ?? change?.patch)
+    || textLineCounts(change?.oldText ?? change?.old_text, change?.newText ?? change?.new_text);
+}
+
+function normalizeFileChange(change, cwd) {
+  const source = change && typeof change === 'object' && !Array.isArray(change) ? change : {};
+  const kind = String(source.kind || source.operation || source.status || '').toLowerCase();
+  const renamed = /rename/.test(kind);
+  const moved = /move/.test(kind);
+  const deleted = /delete|remove|^d\b/.test(kind);
+  const rawPath = source.path ?? source.file ?? source.filePath ?? source.filename;
+  const rawNewPath = source.newPath ?? source.new_path ?? source.toPath ?? source.to;
+  const rawOldPath = source.oldPath ?? source.old_path ?? source.fromPath ?? source.from ?? ((renamed || moved) && rawNewPath ? rawPath : null);
+  const oldPath = normalizedFilePath(rawOldPath, cwd);
+  const newPath = normalizedFilePath(rawNewPath, cwd);
+  const anchorPath = newPath || normalizedFilePath(rawPath, cwd) || oldPath;
+  const counts = knownLineCounts(source);
+  const action = renamed ? 'renamed' : moved ? 'moved' : deleted ? 'deleted' : null;
+  const label = action === 'renamed' || action === 'moved'
+    ? oldPath && anchorPath && oldPath !== anchorPath ? `${oldPath} ${action} → ${anchorPath}` : `${anchorPath || 'file'} ${action}`
+    : `${anchorPath || 'file'}${action ? ` ${action}` : ''}`;
+  const text = `✎ ${label}${counts ? ` (+${counts.added} −${counts.removed})` : ''}`;
+  return {
+    ...source,
+    ...(anchorPath ? { path: anchorPath } : {}),
+    ...(oldPath ? { oldPath } : {}),
+    ...(newPath ? { newPath } : {}),
+    ...(counts || {}),
+    label,
+    text
+  };
+}
+
+function compactFileChange(change) {
+  const { diff, patch, oldText, old_text, newText, new_text, ...compact } = change;
+  return compact;
+}
+
+export function normalizeFileChangedEvent(event, cwd = '', options = {}) {
+  if (!event || event.type !== 'file.changed') return event;
+  const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {};
+  const listed = Array.isArray(data.changes) ? data.changes : [data];
+  const normalized = listed.map((change) => normalizeFileChange(change, cwd));
+  const changes = options.compact === true ? normalized.map(compactFileChange) : normalized;
+  const { diff, patch, oldText, old_text, newText, new_text, changes: ignoredChanges, ...outer } = data;
+  const single = Array.isArray(data.changes) ? {} : changes[0] || {};
+  return {
+    ...event,
+    data: {
+      ...outer,
+      ...single,
+      changes,
+      text: changes.map((change) => change.text).join('\n')
+    }
+  };
+}
+
 function readRawEvents(id) {
   try {
     return fs.readFileSync(eventPath(id), 'utf8').split('\n').filter(Boolean).flatMap((line) => {
@@ -328,7 +466,10 @@ function appendUnlocked(job, type, data = {}, options = {}) {
   const latest = repairAndReadLastEvent(journal)?.seq || 0;
   job.lastSeq = Math.max(job.lastSeq || 0, latest);
   const seq = (job.lastSeq || 0) + 1;
-  let eventData = redact(data);
+  const normalizedData = type === 'file.changed'
+    ? normalizeFileChangedEvent({ type, data }, job.cwd).data
+    : data;
+  let eventData = redact(normalizedData);
   if (type === 'diff.updated' && typeof data.diff === 'string' && data.diff.length > MAX_STRING) {
     const diff = redact(data.diff, '', Number.POSITIVE_INFINITY);
     const directory = paths(job.id).artifacts;
@@ -352,7 +493,8 @@ function appendUnlocked(job, type, data = {}, options = {}) {
     turnId: options.turnId ?? job.providerTurnId ?? null,
     type,
     redacted: true,
-    data: eventData
+    data: eventData,
+    ...(options.replay === true ? { replay: true } : {})
   };
   fs.mkdirSync(jobsDir(), { recursive: true, mode: 0o700 });
   fs.appendFileSync(journal, `${JSON.stringify(event)}\n`, { mode: 0o600 });
@@ -399,9 +541,11 @@ export function readJobEvents(id, options = {}) {
   const afterSeq = Number(options.afterSeq || 0);
   const limit = Math.min(Math.max(Number(options.limit || 200), 1), 1000);
   const types = options.types ? new Set(options.types) : null;
+  const cwd = loadJob(id)?.cwd || '';
   return readRawEvents(id)
     .filter((event) => event.seq > afterSeq && (!types || types.has(event.type)))
-    .slice(0, limit);
+    .slice(0, limit)
+    .map((event) => normalizeFileChangedEvent(event, cwd));
 }
 
 // Long polls hit readJobEventPage every 200ms for a job's whole lifetime, so
@@ -438,7 +582,8 @@ export function readJobEventPage(id, options = {}) {
   const limit = Math.min(Math.max(Number(options.limit || 200), 1), 1000);
   const types = options.types ? new Set(options.types) : null;
   return withLock(id, () => {
-    if (!loadJob(id)) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
     const file = eventPath(id);
     let size = 0;
     try {
@@ -472,7 +617,7 @@ export function readJobEventPage(id, options = {}) {
       lineStart = newline + 1;
       if (event && Number.isFinite(event.seq) && event.seq > afterSeq) {
         nextSeq = event.seq;
-        if (!types || types.has(event.type)) events.push(event);
+        if (!types || types.has(event.type)) events.push(normalizeFileChangedEvent(event, job.cwd));
         if (events.length >= limit) {
           limited = true;
           break;
@@ -528,7 +673,8 @@ export function reconcileJob(id) {
 }
 
 function activityFields(job) {
-  const event = readLastCompleteEvent(eventPath(job.id));
+  let event = readLastCompleteEvent(eventPath(job.id));
+  if (event?.replay === true) event = readRawEvents(job.id).findLast((candidate) => candidate.replay !== true) || null;
   const lastActivityAt = event?.at || (job.createdAt ? job.createdAt * 1000 : null);
   const configured = Number(process.env.DELEGATE_STALL_SECONDS ?? 300);
   const stallSeconds = Number.isFinite(configured) && configured >= 0 ? configured : 300;
@@ -682,7 +828,12 @@ export function groupSummary(groupId) {
 
 const TRANSCRIPT_TYPES = new Set([
   'message.user', 'message.delta', 'message.completed', 'plan.updated',
-  'tool.started', 'tool.output', 'tool.completed',
+  'tool.started', 'tool.status', 'tool.output', 'tool.completed',
+  'file.changed',
+  'session.updated', 'mode.updated', 'model.updated', 'commands.updated', 'subagent.activity', 'artifact.created',
+  'network.preflight', 'network.mode-elevated', 'network.policy.materialized', 'network.policy.restored',
+  'input.requested', 'input.response.requested', 'input.resolved',
+  'compaction.started', 'compaction.completed',
   'correction.requested', 'correction.applied', 'correction.queued', 'correction.restarted',
   'error'
 ]);
@@ -693,13 +844,16 @@ export function jobTranscriptPage(id, options = {}) {
   const afterSeq = Number(options.afterSeq || 0);
   const limit = Math.min(Math.max(Number(options.limit || 200), 1), 1000);
   const verbose = options.verbose === true;
+  const cwd = loadJob(id)?.cwd || '';
   const all = readRawEvents(id);
   const events = [];
   let nextSeq = afterSeq;
   for (const event of all) {
     if (event.seq <= afterSeq) continue;
     nextSeq = event.seq;
-    if (TRANSCRIPT_TYPES.has(event.type) && (verbose || !TRANSCRIPT_VERBOSE_TYPES.has(event.type))) events.push(event);
+    if (TRANSCRIPT_TYPES.has(event.type) && (verbose || !TRANSCRIPT_VERBOSE_TYPES.has(event.type))) {
+      events.push(normalizeFileChangedEvent(event, cwd, { compact: true }));
+    }
     if (events.length >= limit) break;
   }
   const latestSeq = all.at(-1)?.seq || afterSeq;
@@ -853,6 +1007,11 @@ function observedUsage(job) {
   return events.at(-1)?.data || job.usage || null;
 }
 
+function observedContextOccupancy(job) {
+  const events = readRawEvents(job.id).filter((event) => event.type === 'usage.context' && event.replay !== true);
+  return events.at(-1)?.data || job.contextOccupancy || null;
+}
+
 function jobChain(job) {
   const chain = [job];
   const seen = new Set([job.id]);
@@ -871,6 +1030,7 @@ export function jobUsage(id) {
   const job = inspectJob(id);
   const quota = effectiveUsage(loadState(), job.provider);
   const observed = observedUsage(job);
+  const contextOccupancy = observedContextOccupancy(job);
   const chain = jobChain(job);
   const cumulative = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   let observedJobs = 0;
@@ -884,8 +1044,15 @@ export function jobUsage(id) {
   }
   return {
     observed,
+    tokenUsage: observed,
     observedAvailable: Boolean(observed),
     ...(observed ? {} : { note: 'the provider did not emit usage data for this job; Cursor ACP does not always report it' }),
+    contextOccupancy,
+    contextOccupancyAvailable: Boolean(contextOccupancy),
+    dimensions: {
+      outputBudget: 'provider token usage; maxOutputTokens applies only to outputTokens',
+      contextOccupancy: 'ACP context window occupancy; never compared with maxOutputTokens'
+    },
     chainCumulative: {
       rootJobId: chain[0].id,
       throughJobId: job.id,
@@ -1090,6 +1257,27 @@ function validatedReportSchema(value) {
   return redact(value);
 }
 
+function validatedNetworkAllow(value) {
+  if (value == null) return null;
+  if (!Array.isArray(value) || value.length > 64 || !value.every((item) => typeof item === 'string')) {
+    throw brokerError('INVALID_REQUEST', 'networkAllow must be an array of at most 64 domain, wildcard-domain, IP, or CIDR strings');
+  }
+  const entries = [...new Set(value.map((item) => item.trim()))];
+  const valid = /^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)*[a-zA-Z0-9-]+$|^(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?$|^[0-9a-fA-F:]+(?:\/\d{1,3})?$/;
+  if (!entries.every((item) => item && valid.test(item) && !item.includes('..'))) {
+    throw brokerError('INVALID_REQUEST', 'networkAllow entries must be bare domains, *.wildcards, IP addresses, or CIDRs (no URLs or paths)');
+  }
+  return entries;
+}
+
+function validatedAddDirs(value, cwd) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 32 || !value.every((item) => typeof item === 'string' && item.trim())) {
+    throw brokerError('INVALID_REQUEST', 'addDirs must be an array of at most 32 paths');
+  }
+  return [...new Set(value.map((item) => path.resolve(cwd, item)))];
+}
+
 function validatedIngestFiles(value, cwd, allowSensitive) {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > INGEST_MAX_FILES || !value.every((item) => typeof item === 'string' && path.isAbsolute(item))) {
@@ -1214,6 +1402,16 @@ function resolveManagedJobOptions(options, id) {
   if (provider === 'cursor' && options.transport === 'headless' && options.startPaused === true) {
     throw brokerError('INVALID_REQUEST', 'startPaused requires Cursor ACP; headless cannot establish a session before its first prompt', { provider });
   }
+  const networkAllow = validatedNetworkAllow(options.networkAllow);
+  if (networkAllow != null && options.network !== true) throw brokerError('INVALID_REQUEST', 'networkAllow requires network=true', { provider });
+  const addDirs = validatedAddDirs(options.addDirs, cwd);
+  const approveMcps = options.approveMcps === true;
+  const cursorWorktree = options.cursorWorktree === true;
+  const cursorWorktreeBase = options.cursorWorktreeBase == null ? null : path.resolve(cwd, options.cursorWorktreeBase);
+  if (provider !== 'cursor' && (networkAllow != null || addDirs.length || approveMcps || cursorWorktree || cursorWorktreeBase)) {
+    throw brokerError('INVALID_REQUEST', 'networkAllow, addDirs, approveMcps, and native Cursor worktree options are available only for Cursor jobs', { provider });
+  }
+  if (cursorWorktreeBase && !cursorWorktree) throw brokerError('INVALID_REQUEST', 'cursorWorktreeBase requires cursorWorktree=true', { provider });
   const ingestFiles = validatedIngestFiles(options.ingestFiles, cwd, options.allowSensitive === true);
   const transport = provider === 'cursor' ? (options.transport || 'acp') : 'app-server';
   if (provider === 'cursor' && !['acp', 'headless'].includes(transport)) throw brokerError('INVALID_REQUEST', `Invalid Cursor transport: ${transport}`, { provider });
@@ -1242,7 +1440,12 @@ function resolveManagedJobOptions(options, id) {
     allowedPaths,
     ingestPlan,
     effort: validatedEffort(options.effort || null),
-    sandbox: validatedSandbox(options.sandbox)
+    sandbox: validatedSandbox(options.sandbox),
+    networkAllow,
+    addDirs,
+    approveMcps,
+    cursorWorktree,
+    cursorWorktreeBase
   };
 }
 
@@ -1270,6 +1473,11 @@ export function previewManagedJob(options) {
     allowedPaths: resolved.allowedPaths,
     sandbox: resolved.sandbox || 'auto',
     network: prepared.network === true,
+    networkAllow: resolved.networkAllow,
+    addDirs: resolved.addDirs,
+    approveMcps: resolved.approveMcps,
+    cursorWorktree: resolved.cursorWorktree,
+    cursorWorktreeBase: resolved.cursorWorktreeBase,
     timeoutSeconds: resolved.timeoutSeconds,
     maxOutputTokens: resolved.maxOutputTokens,
     idempotencyKey: resolved.idempotencyKey,
@@ -1297,7 +1505,8 @@ export function createManagedJob(options) {
   const resolved = resolveManagedJobOptions(options, id);
   const {
     sensitivePromptDetected, timeoutSeconds, maxOutputTokens, idempotencyKey, groupId, retryPolicy,
-    mode, verify, reportSchema, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox
+    mode, verify, reportSchema, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
+    networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
   const p = paths(id);
@@ -1326,6 +1535,11 @@ export function createManagedJob(options) {
     retries: 0,
     verify: verify ? { command: redact(verify.command), timeoutSeconds: verify.timeoutSeconds } : null,
     network: options.network === true,
+    networkAllow,
+    addDirs,
+    approveMcps,
+    cursorWorktree,
+    cursorWorktreeBase,
     sandbox,
     originalAllowedPaths,
     allowedPaths,
@@ -1361,7 +1575,12 @@ export function createManagedJob(options) {
     baselineHashes: baseline.hashes
   };
   saveJob(job);
-  appendJobEvent(id, 'job.created', { provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, groupId, startPaused: job.startPaused, ...(job.sandbox === 'off' ? { sandbox: 'off' } : {}) });
+  appendJobEvent(id, 'job.created', {
+    provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, groupId, startPaused: job.startPaused,
+    network: job.network, networkAllow: job.networkAllow, addDirs: job.addDirs, approveMcps: job.approveMcps,
+    cursorWorktree: job.cursorWorktree, cursorWorktreeBase: job.cursorWorktreeBase,
+    ...(job.sandbox === 'off' ? { sandbox: 'off' } : {})
+  });
   if (staged.ingested.length) appendJobEvent(id, 'files.ingested', { stagingDir: staged.stagingDir, files: staged.ingested });
   if (sensitivePromptDetected) {
     appendJobEvent(id, 'security.warning', {
@@ -1483,7 +1702,7 @@ export function launchManagedJob(options) {
 export function submitControl(id, command, expectedRevision) {
   assertJobId(id);
   if (!command?.type) throw brokerError('INVALID_REQUEST', 'control command type is required');
-  if (!['steer', 'cancel', 'release'].includes(command.type)) throw brokerError('INVALID_REQUEST', `unsupported control command: ${command.type}`);
+  if (!['steer', 'cancel', 'release', 'respond'].includes(command.type)) throw brokerError('INVALID_REQUEST', `unsupported control command: ${command.type}`);
   return withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
@@ -1508,19 +1727,40 @@ export function submitControl(id, command, expectedRevision) {
       });
     }
     if (command.type === 'steer' && !command.text?.trim()) throw brokerError('INVALID_REQUEST', 'steering text is required', { provider: job.provider });
+    if (command.type === 'respond') {
+      if (!job.pendingInput) throw brokerError('INVALID_REQUEST', 'the job has no pending Cursor question or plan request', { provider: job.provider });
+      if (command.requestId && command.requestId !== job.pendingInput.requestId) {
+        throw brokerError('REVISION_CONFLICT', `response targets ${command.requestId}, current pending request is ${job.pendingInput.requestId}`, {
+          provider: job.provider, currentRevision: job.revision
+        });
+      }
+      const hasAnswer = typeof command.answer === 'string';
+      const hasDecision = typeof command.accept === 'boolean';
+      const hasResponse = command.response && typeof command.response === 'object' && !Array.isArray(command.response);
+      if (!hasAnswer && !hasDecision && !hasResponse) {
+        throw brokerError('INVALID_REQUEST', 'respond requires answer, accept/reject, or a structured response object', { provider: job.provider });
+      }
+    }
     if (command.type === 'release' && !job.startPaused) throw brokerError('INVALID_REQUEST', 'release is available only for startPaused jobs', { provider: job.provider });
     if (command.type === 'steer' && command.strategy === 'same-turn' && job.provider === 'cursor') {
       throw brokerError('UNSUPPORTED_STRATEGY', 'Cursor ACP has no same-turn steering; use strategy=auto or restart (applied as a cancel-and-resume restart)', { provider: job.provider });
     }
-    const record = { ...command, commandId, expectedRevision, requestedAt: Date.now() };
+    const record = command.type === 'respond'
+      ? redact({ ...command, requestId: command.requestId || job.pendingInput.requestId, commandId, expectedRevision, requestedAt: Date.now() })
+      : { ...command, commandId, expectedRevision, requestedAt: Date.now() };
     fs.mkdirSync(paths(id).commands, { recursive: true, mode: 0o700 });
     writePrivate(path.join(paths(id).commands, `${commandId}.json`), `${JSON.stringify(record, null, 2)}\n`);
     job.controls[commandId] = { type: command.type, state: 'queued', requestedAt: record.requestedAt };
     job.revision += 1;
     if (command.type === 'cancel') job.phase = 'cancelling';
     if (command.type === 'release') job.phase = 'releasing';
-    const type = command.type === 'steer' ? 'correction.requested' : command.type === 'cancel' ? 'job.cancel.requested' : 'job.release.requested';
-    appendUnlocked(job, type, { commandId, strategy: command.strategy || null, text: command.text || null });
+    if (command.type === 'respond') job.phase = 'responding';
+    const type = command.type === 'steer' ? 'correction.requested'
+      : command.type === 'cancel' ? 'job.cancel.requested'
+        : command.type === 'release' ? 'job.release.requested' : 'input.response.requested';
+    appendUnlocked(job, type, command.type === 'respond'
+      ? { commandId, requestId: record.requestId, answer: record.answer, accept: record.accept, response: record.response }
+      : { commandId, strategy: command.strategy || null, text: command.text || null });
     saveJob(job);
     return { accepted: true, commandId, revision: job.revision, phase: job.phase };
   });
@@ -1618,6 +1858,11 @@ export function resumeManagedJob(id, options) {
     retryPolicy: options.retryPolicy ?? parent.retryPolicy ?? null,
     verify: options.verify ?? inheritedVerify,
     network: options.network ?? parent.network ?? false,
+    networkAllow: options.networkAllow ?? parent.networkAllow ?? null,
+    addDirs: options.addDirs ?? parent.addDirs ?? [],
+    approveMcps: options.approveMcps ?? parent.approveMcps ?? false,
+    cursorWorktree: options.cursorWorktree ?? parent.cursorWorktree ?? false,
+    cursorWorktreeBase: options.cursorWorktreeBase ?? parent.cursorWorktreeBase ?? null,
     sandbox: options.sandbox ?? parent.sandbox ?? null,
     allowedPaths: options.allowedPaths ?? parent.originalAllowedPaths ?? parent.allowedPaths ?? null,
     autoNudge: options.autoNudge ?? parent.autoNudge ?? false,
