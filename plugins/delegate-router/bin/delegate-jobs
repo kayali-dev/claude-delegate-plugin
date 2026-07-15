@@ -101,6 +101,19 @@ function requireJob(id) {
 function json(value) { console.log(JSON.stringify(value, null, 2)); }
 function terminal(status) { return ['completed', 'failed', 'cancelled'].includes(status); }
 
+function displayModel(job) {
+  const clean = (value) => String(value || '').replace(/\[\]$/, '');
+  const stored = clean(job.model || job.requestedModel);
+  const requested = clean(job.requestedModel || job.model);
+  const resolved = clean(job.resolvedModel);
+  if (requested === 'auto') {
+    return resolved && resolved !== 'auto' && resolved !== 'default' ? `auto \u2192 ${resolved}` : 'auto';
+  }
+  if (!stored) return resolved;
+  if (stored !== requested || !resolved || resolved === stored || resolved === requested) return stored;
+  return `${stored} \u2192 ${resolved}`;
+}
+
 // review-round may emit packet-lint diagnostics while it assembles and launches
 // the continuation. Keep stdout exclusively JSON for callers that pipe it.
 function withStdoutDiagnosticsRedirected(action) {
@@ -172,7 +185,7 @@ try {
     else if (!jobs.length) console.log('No delegation jobs.');
     else {
       console.log('Job ID                         Provider Status     Phase       Model');
-      for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${job.model || job.requestedModel || ''}`);
+      for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${displayModel(job)}`);
     }
   } else if (command === 'group') {
     json(groupSummary(args[0]));

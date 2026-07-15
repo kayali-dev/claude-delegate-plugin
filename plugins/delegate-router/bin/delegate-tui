@@ -31,7 +31,7 @@ import {
 import { tailAllJobs } from './lib/tui/datasource.mjs';
 import { remoteActionMessage } from './lib/tui/action-policy.mjs';
 import { connectRemoteDatasource } from './lib/tui/remote-datasource.mjs';
-import { editTextInEditor } from './lib/tui/editor.mjs';
+import { editTextInEditor, withEditorInputHandoff } from './lib/tui/editor.mjs';
 import { BufferedInput } from './lib/tui/input.mjs';
 import { NotificationDispatcher } from './lib/tui/notifications.mjs';
 import { copyToClipboard } from './lib/tui/clipboard.mjs';
@@ -470,13 +470,16 @@ function jumpSearch(direction) {
 }
 
 function handoffText(text) {
-  detachTuiInput();
+  if (!String(process.env.VISUAL || process.env.EDITOR || '').trim()) return editTextInEditor({ screen, text });
   try {
-    return editTextInEditor({ screen, text });
+    return withEditorInputHandoff({
+      widthProbeStage: widthProbeInputStage,
+      detachInput: detachTuiInput,
+      attachInput: attachTuiInput,
+      handoff: () => editTextInEditor({ screen, text })
+    });
   } catch (error) {
     return { available: true, accepted: false, text, status: null, signal: null, error };
-  } finally {
-    attachTuiInput();
   }
 }
 
@@ -1521,6 +1524,7 @@ attachTuiInput();
 if (probeResult.remainder) bufferedInput.push(probeResult.remainder);
 draw();
 if (widthProbeInputStage) {
-  void widthProbeInputStage.done.then(() => { widthProbeInputStage = null; });
+  const stage = widthProbeInputStage;
+  void stage.released.then(() => { if (widthProbeInputStage === stage) widthProbeInputStage = null; });
 }
 if (initialJobId) void source.selectJob(initialJobId);

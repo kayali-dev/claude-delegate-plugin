@@ -28,6 +28,7 @@ import {
   probeTerminalWidths,
   terminalWidthIdentity,
   WIDTH_PROBE_GRAPHEMES,
+  WIDTH_PROBE_STRAGGLER_GRACE_MS,
   WIDTH_PROBE_VERSION
 } from '../bin/lib/tui/width-probe.mjs';
 
@@ -443,7 +444,7 @@ test('no-reply background expires cleanly and leaves real key input attached', a
   const screen = { rows: 20, input, writeOutput() {} };
   const started = performance.now();
   const foreground = await probeTerminalWidths({
-    screen, input, probes: ['A', 'B'], foregroundMs: 60, backgroundIdleMs: 40, backgroundBudgetMs: 200
+    screen, input, probes: ['A', 'B'], foregroundMs: 60, backgroundIdleMs: 40, backgroundBudgetMs: 200, stragglerGraceMs: 20
   });
   assert.ok(performance.now() - started < 150, 'the first frame is not held for the patient deadline');
   const keys = [];
@@ -455,10 +456,68 @@ test('no-reply background expires cleanly and leaves real key input attached', a
   assert.deepEqual(completed.outcomes.map((entry) => entry.status), ['timeout', 'timeout']);
   input.emit('data', 'c');
   assert.deepEqual(keys, ['ab', 'c']);
+  await foreground.background.released;
   assert.deepEqual(input.listeners('data'), [appHandler]);
   assert.equal(foreground.background.teardown(), false, 'teardown remains idempotent after expiry');
   foreground.background.detach(appHandler);
   assert.equal(input.listenerCount('data'), 0);
+});
+
+test('non-complete backgrounds swallow only late probe-row CPRs for the bounded grace window', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  assert.equal(WIDTH_PROBE_STRAGGLER_GRACE_MS, 10000);
+  for (const ending of ['timeout', 'budget']) {
+    const input = new ProbeInput();
+    const foreground = await probeTerminalWidths({
+      screen: { rows: 20, input, writeOutput() {} }, input, probes: ['A', 'B'], foregroundMs: 50,
+      backgroundIdleMs: ending === 'timeout' ? 20 : 200,
+      backgroundBudgetMs: ending === 'timeout' ? 200 : 70,
+      stragglerGraceMs: 40
+    });
+    const received = [];
+    const appHandler = (chunk) => received.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8'));
+    foreground.background.attach(appHandler);
+    const completed = await foreground.background.done;
+    assert.equal(completed.completion, ending);
+    assert.equal(foreground.background.passive, true);
+
+    const withinGrace = Buffer.from('aé\u001b[20;2Rb\u001b[A\u001b[19;7Rc', 'utf8');
+    input.emit('data', withinGrace.subarray(0, 2));
+    input.emit('data', withinGrace.subarray(2));
+    assert.deepEqual(Buffer.concat(received), Buffer.from('aéb\u001b[A\u001b[19;7Rc', 'utf8'), `${ending}: only matching-row CPR is swallowed byte-identically`);
+    await foreground.background.released;
+    assert.equal(foreground.background.passive, false);
+    assert.deepEqual(input.listeners('data'), [appHandler], `${ending}: wrapper removes itself completely`);
+
+    input.emit('data', Buffer.from('d\u001b[20;2Re', 'utf8'));
+    assert.deepEqual(Buffer.concat(received), Buffer.from('aéb\u001b[A\u001b[19;7Rcd\u001b[20;2Re', 'utf8'), `${ending}: CPR passes after grace`);
+    foreground.background.detach(appHandler);
+  }
+});
+
+test('completion-ended background installs no straggler swallow stage', async (t) => {
+  t.after(clearGraphemeWidthOverrides);
+  const input = new ProbeInput();
+  const screen = {
+    rows: 20, input,
+    writeOutput(value, meta) {
+      if (meta.context === 'probe' && String(value).includes('\u001b[6n')) {
+        setTimeout(() => input.emit('data', '\u001b[20;2R\u001b[20;2R'), 70);
+      }
+    }
+  };
+  const foreground = await probeTerminalWidths({ screen, input, probes: ['A', 'B'], foregroundMs: 50, stragglerGraceMs: 40 });
+  const received = [];
+  const appHandler = (chunk) => received.push(String(chunk));
+  foreground.background.attach(appHandler);
+  const completed = await foreground.background.done;
+  assert.equal(completed.completion, 'complete');
+  assert.equal(foreground.background.passive, false);
+  await foreground.background.released;
+  assert.deepEqual(input.listeners('data'), [appHandler]);
+  input.emit('data', 'x\u001b[20;2Ry');
+  assert.equal(received.join(''), 'x\u001b[20;2Ry');
+  foreground.background.detach(appHandler);
 });
 
 test('background input filter strips only probe-row CPRs and preserves interleaved keystrokes in order', async (t) => {

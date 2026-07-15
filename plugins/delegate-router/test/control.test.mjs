@@ -31,6 +31,8 @@ import {
 import { filterDiffPaths, pathMatchesScope, validatedAllowedPaths } from '../bin/lib/control.mjs';
 import { auditLogPath, loadJob, loadState, saveJob, saveState, setWindow } from '../bin/lib/state.mjs';
 
+const jobsCli = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'delegate-jobs');
+
 async function isolated(fn) {
   const previous = process.env.DELEGATE_STATE_FILE;
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-test-'));
@@ -55,6 +57,31 @@ test('managed jobs persist ordered redacted events and derived views', () => iso
   assert.equal(jobTranscript(job.id)[0].type, 'message.user');
   const eventFile = path.join(directory, 'jobs', `${job.id}.events.jsonl`);
   assert.equal(fs.statSync(eventFile).mode & 0o777, 0o600);
+}));
+
+test('delegate-jobs status keeps requested model display honest and strips empty attributes', () => isolated((directory) => {
+  const auto = createManagedJob({ provider: 'cursor', model: 'auto', mode: 'review', cwd: directory, prompt: 'review' });
+  updateManagedJob(auto.id, (current) => {
+    current.status = 'completed';
+    current.phase = 'completed';
+    current.model = 'auto';
+    current.resolvedModel = 'default[]';
+  });
+  const autoStatus = spawnSync(process.execPath, [jobsCli, 'status', auto.id], { env: process.env, encoding: 'utf8' });
+  assert.equal(autoStatus.status, 0, autoStatus.stderr);
+  assert.match(autoStatus.stdout, /\sauto\s*$/m);
+  assert.doesNotMatch(autoStatus.stdout, /default\[\]/);
+
+  const explicitId = 'grok-4.5[effort=high,fast=true]';
+  const explicit = createManagedJob({ provider: 'cursor', model: explicitId, mode: 'review', cwd: directory, prompt: 'review' });
+  updateManagedJob(explicit.id, (current) => {
+    current.status = 'completed';
+    current.phase = 'completed';
+    current.resolvedModel = explicitId;
+  });
+  const explicitStatus = spawnSync(process.execPath, [jobsCli, 'status', explicit.id], { env: process.env, encoding: 'utf8' });
+  assert.equal(explicitStatus.status, 0, explicitStatus.stderr);
+  assert.equal(explicitStatus.stdout.trim().endsWith(explicitId), true);
 }));
 
 test('outbound prompt scan blocks credentials unless allowSensitive explicitly overrides', () => isolated((directory) => {

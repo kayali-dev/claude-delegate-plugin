@@ -5,6 +5,7 @@ import { setGraphemeWidthOverrides } from './width.mjs';
 // Included in terminalWidthIdentity so transport/parser changes invalidate
 // measurements made by older probe implementations without touching prefs.
 export const WIDTH_PROBE_VERSION = 3;
+export const WIDTH_PROBE_STRAGGLER_GRACE_MS = 10000;
 
 export const WIDTH_PROBE_GRAPHEMES = Object.freeze([
   // UI chrome candidates. Box drawing, blocks, punctuation and symbols are
@@ -208,7 +209,7 @@ export async function probeTerminalWidths(options = {}) {
   let parsedOutcomes = [];
   let pendingRaw = '';
   let foregroundPassthrough = '';
-  let queuedPassthrough = '';
+  let queuedPassthrough = [];
   const started = performance.now();
   const packet = probes.map((grapheme) => `${cursorTo(row, 0)}${sequences.clearLine}${grapheme}\u001b[6n`).join('');
   const displacedListeners = rawDataListeners(input);
@@ -219,16 +220,28 @@ export async function probeTerminalWidths(options = {}) {
   let foregroundTimer;
   let idleTimer;
   let budgetTimer;
+  let stragglerTimer;
+  let stragglerRaw = Buffer.alloc(0);
+  let stragglerActive = false;
   let foregroundResolve;
   let backgroundResolve;
+  let releasedResolve;
   const targets = [...displacedListeners];
   const foreground = new Promise((resolve) => { foregroundResolve = resolve; });
   const backgroundDone = new Promise((resolve) => { backgroundResolve = resolve; });
+  const released = new Promise((resolve) => { releasedResolve = resolve; });
 
   const clearTimers = () => {
     clearTimeout(foregroundTimer);
     clearTimeout(idleTimer);
     clearTimeout(budgetTimer);
+    clearTimeout(stragglerTimer);
+  };
+  const deliverPassthrough = (value) => {
+    if (!value || value.length === 0) return;
+    if (targets.length) {
+      for (const listener of [...targets]) listener(value);
+    } else queuedPassthrough.push(value);
   };
   const emitPassthrough = (value) => {
     if (!value) return;
@@ -236,14 +249,45 @@ export async function probeTerminalWidths(options = {}) {
       foregroundPassthrough += value;
       return;
     }
-    if (targets.length) {
-      for (const listener of [...targets]) listener(value);
-    } else queuedPassthrough += value;
+    deliverPassthrough(value);
   };
-  const restoreInput = () => {
+  const finishStragglerStage = () => {
+    if (!stragglerActive) return false;
+    clearTimeout(stragglerTimer);
+    const finalParsed = parseCprWindow(stragglerRaw.toString('latin1'), row + 1, Number.MAX_SAFE_INTEGER, true);
+    stragglerRaw = Buffer.alloc(0);
+    deliverPassthrough(Buffer.from(finalParsed.passthrough, 'latin1'));
+    try { input.pause?.(); } catch {}
+    removeDataListener(input, swallowStragglers);
+    for (const listener of targets) input.on('data', listener);
+    stragglerActive = false;
+    try {
+      if (!wasPaused) input.resume?.();
+    } catch {}
+    releasedResolve();
+    return true;
+  };
+  const swallowStragglers = (chunk) => {
+    if (!stragglerActive || chunk == null) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk || ''), 'utf8');
+    stragglerRaw = stragglerRaw.length ? Buffer.concat([stragglerRaw, bytes]) : bytes;
+    const parsed = parseCprWindow(stragglerRaw.toString('latin1'), row + 1, Number.MAX_SAFE_INTEGER);
+    stragglerRaw = Buffer.from(parsed.remainder, 'latin1');
+    deliverPassthrough(Buffer.from(parsed.passthrough, 'latin1'));
+  };
+  const restoreInput = (swallowLateCprs = false) => {
     try { input.pause?.(); } catch {}
     removeDataListener(input, check);
-    for (const listener of targets) input.on('data', listener);
+    if (swallowLateCprs) {
+      stragglerActive = true;
+      input.on('data', swallowStragglers);
+      const graceMs = clampMilliseconds(options.stragglerGraceMs, WIDTH_PROBE_STRAGGLER_GRACE_MS, WIDTH_PROBE_STRAGGLER_GRACE_MS);
+      stragglerTimer = setTimeout(finishStragglerStage, graceMs);
+      stragglerTimer.unref?.();
+    } else {
+      for (const listener of targets) input.on('data', listener);
+      releasedResolve();
+    }
     try {
       if (!wasPaused) input.resume?.();
     } catch {}
@@ -267,8 +311,8 @@ export async function probeTerminalWidths(options = {}) {
     pendingRaw = '';
     emitPassthrough(finalParsed.passthrough);
     clearTimers();
-    restoreInput();
     state = 'done';
+    restoreInput(finishingPhase === 'background' && reason !== 'complete');
     const result = snapshot(reason, finishingPhase, apply);
     if (finishingPhase === 'foreground') foregroundResolve(result);
     else {
@@ -313,22 +357,24 @@ export async function probeTerminalWidths(options = {}) {
   };
   const background = Object.freeze({
     get active() { return state === 'background'; },
+    get passive() { return stragglerActive; },
     done: backgroundDone,
+    released,
     attach(listener) {
       if (typeof listener !== 'function' || targets.includes(listener)) return false;
       targets.push(listener);
-      if (state === 'done') input.on('data', listener);
-      if (queuedPassthrough) {
+      if (state === 'done' && !stragglerActive) input.on('data', listener);
+      if (queuedPassthrough.length) {
         const queued = queuedPassthrough;
-        queuedPassthrough = '';
-        listener(queued);
+        queuedPassthrough = [];
+        for (const chunk of queued) listener(chunk);
       }
       return true;
     },
     detach(listener) {
       const index = targets.indexOf(listener);
       if (index >= 0) targets.splice(index, 1);
-      if (state === 'done') removeDataListener(input, listener);
+      if (state === 'done' && !stragglerActive) removeDataListener(input, listener);
       return index >= 0;
     },
     teardown() {

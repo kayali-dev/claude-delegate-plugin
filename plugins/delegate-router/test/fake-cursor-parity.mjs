@@ -52,11 +52,41 @@ let pendingCustomId = null;
 let sessionId = 'acp-parity-session';
 
 function sessionResult() {
+  const modelOptions = scenario === 'picker-extension'
+    ? [{ value: 'regular-fallback[]', name: 'Regular fallback' }]
+    : [
+        { value: 'default[]', name: 'Auto' },
+        { value: 'grok-4.5[effort=high,fast=true]', name: 'grok-4.5' },
+        { value: 'composer-2.5[fast=true]', name: 'composer-2.5' },
+        { value: 'gpt-5.6-sol[context=272k,reasoning=medium,fast=false]', name: 'gpt-5.6-sol' }
+      ];
+  const picker = scenario === 'picker-extension'
+    ? { parameterizedModelPicker: { options: [{ value: 'default[]', name: 'Auto' }, { value: 'composer-2.5[fast=false]', name: 'composer-2.5' }] } }
+    : {};
   return {
     sessionId,
+    modes: {
+      currentModeId: 'agent',
+      availableModes: [
+        { id: 'agent', name: 'Agent', description: 'Full agent capabilities with tool access' },
+        { id: 'plan', name: 'Plan', description: 'Read-only mode for planning and designing before implementation' },
+        { id: 'ask', name: 'Ask', description: 'Q&A mode - no edits or command execution' }
+      ]
+    },
+    models: {
+      currentModelId: 'default[]',
+      availableModels: modelOptions.map((item) => ({ modelId: item.value, name: item.name }))
+    },
     configOptions: [
-      { id: 'model', parameterizedModelPicker: { options: [{ value: 'composer-2.5' }, { value: 'default[]' }] } },
-      { id: 'mode', options: [{ value: 'agent' }, { value: 'plan' }, { value: 'ask' }] }
+      {
+        id: 'mode', name: 'Mode', description: 'Controls how the agent executes tasks', category: 'mode', type: 'select', currentValue: 'agent',
+        options: [{ value: 'agent', name: 'Agent' }, { value: 'plan', name: 'Plan' }, { value: 'ask', name: 'Ask' }]
+      },
+      {
+        id: 'model', name: 'Model', description: 'Controls which model variant is used for responses', category: 'model', type: 'select', currentValue: 'default[]',
+        options: modelOptions,
+        ...picker
+      }
     ]
   };
 }

@@ -575,7 +575,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.24.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.24.1' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1196,6 +1196,12 @@ export async function probeCursorAcpCapabilities(options = {}) {
       models: initialized.models || []
     };
     report.configOptionIds = (session.configOptions || []).map((item) => item.id).filter(Boolean);
+    if (options.includeCatalog === true) {
+      report.session = redact({
+        models: session.models || null,
+        configOptions: session.configOptions || []
+      });
+    }
   } catch (error) {
     const project = cursorProjectConfigFailure(stderr, cwd);
     report.errorCode = project?.code || error.code || 'ACP_HANDSHAKE_FAILED';
@@ -1272,7 +1278,7 @@ function cursorProjectBrokerError(info, provider = 'cursor') {
   });
 }
 
-function modelCatalog(option) {
+export function cursorModelCatalog(option) {
   const picker = option?.parameterizedModelPicker || option?.parameterized_model_picker;
   return picker?.options || picker?.values || option?.options || [];
 }
@@ -1374,7 +1380,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.24.0' }
+      clientInfo: { name: 'delegate-router', version: '0.24.1' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -1400,7 +1406,7 @@ async function runCursorAcpTransport(job) {
     updateManagedJob(job.id, (current) => {
       current.cursorConfigOptions = redact(config);
       current.cursorModes = initialized.modes || config.find((item) => item.id === 'mode')?.options || [];
-      const configuredModels = modelCatalog(config.find((item) => item.id === 'model'));
+      const configuredModels = cursorModelCatalog(config.find((item) => item.id === 'model'));
       current.cursorModels = configuredModels.length ? configuredModels : initialized.models || [];
     }, { incrementRevision: false });
     const modelOption = config.find((item) => item.id === 'model');
@@ -1408,7 +1414,7 @@ async function runCursorAcpTransport(job) {
     if (modelOption) {
       let resolvedModel;
       try {
-        const detailed = cursorModelDetailed(modelCatalog(modelOption), job.model);
+        const detailed = cursorModelDetailed(cursorModelCatalog(modelOption), job.model);
         resolvedModel = detailed.value;
         if (detailed.fastCompromise) {
           // The session advertises this model only as a fast variant. The

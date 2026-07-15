@@ -47,6 +47,17 @@ function privateScratchDirectory(root) {
   return directory;
 }
 
+export function withEditorInputHandoff(options = {}) {
+  const stage = options.widthProbeStage;
+  if (stage?.active === true) stage.teardown();
+  options.detachInput?.();
+  try {
+    return options.handoff();
+  } finally {
+    options.attachInput?.();
+  }
+}
+
 export function editTextInEditor(options = {}) {
   const env = options.env || process.env;
   const command = String(env.VISUAL || env.EDITOR || '').trim();

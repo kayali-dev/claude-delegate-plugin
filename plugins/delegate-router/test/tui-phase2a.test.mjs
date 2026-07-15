@@ -2,18 +2,20 @@ import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
 await useTuiTestHarness(import.meta.url);
 
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { aggregateJobGroups } from '../bin/lib/tui/datasource.mjs';
-import { editTextInEditor } from '../bin/lib/tui/editor.mjs';
+import { editTextInEditor, withEditorInputHandoff } from '../bin/lib/tui/editor.mjs';
 import { decodeInput } from '../bin/lib/tui/input.mjs';
 import { NotificationDispatcher } from '../bin/lib/tui/notifications.mjs';
 import { createPalette, lightBarBg, lightBarFg, lightSearchMatchBg, lightSelectionBg } from '../bin/lib/tui/palette.mjs';
 import { LogicalSearchIndex, nextSearchMatch } from '../bin/lib/tui/search.mjs';
 import { CellGrid, Screen } from '../bin/lib/tui/screen.mjs';
+import { probeTerminalWidths } from '../bin/lib/tui/width-probe.mjs';
 import {
   WrapCache,
   paintFrame,
@@ -117,6 +119,52 @@ test('editor handoff restores terminal, runs a scripted editor, and fully re-ent
   assert.equal(rejected.text, 'keep me');
   screen.stop();
   assert.deepEqual(raw, [true, false, true, false, true, false]);
+});
+
+test('editor handoff cancels one active background probe and returns keys to the app', async () => {
+  const input = new EventEmitter();
+  input.isTTY = true;
+  input.isRaw = false;
+  input.setRawMode = (value) => { input.isRaw = Boolean(value); };
+  input.pause = () => input;
+  input.resume = () => input;
+  input.read = () => null;
+  const foreground = await probeTerminalWidths({
+    screen: { rows: 20, input, writeOutput() {} }, input, probes: ['A', 'B'], foregroundMs: 50,
+    backgroundIdleMs: 500, backgroundBudgetMs: 1000, stragglerGraceMs: 30
+  });
+  const stage = foreground.background;
+  const activeProbeListener = input.listeners('data')[0];
+  const keys = [];
+  const appHandler = (chunk) => keys.push(String(chunk));
+  stage.attach(appHandler);
+  let teardownCalls = 0;
+  const countedStage = {
+    get active() { return stage.active; },
+    teardown() { teardownCalls += 1; return stage.teardown(); }
+  };
+  const handoff = () => withEditorInputHandoff({
+    widthProbeStage: countedStage,
+    detachInput: () => stage.detach(appHandler),
+    attachInput: () => stage.attach(appHandler),
+    handoff() {
+      assert.equal(stage.active, false);
+      assert.equal(input.listeners('data').includes(activeProbeListener), false, 'active CPR checker is detached before editor ownership');
+      return { available: true, accepted: true, text: 'edited' };
+    }
+  });
+
+  assert.equal(handoff().text, 'edited');
+  input.emit('data', 'k');
+  assert.deepEqual(keys, ['k']);
+  assert.equal(handoff().text, 'edited');
+  assert.equal(teardownCalls, 1, 'opening the editor again does not re-teardown a completed probe');
+  input.emit('data', 'm');
+  assert.deepEqual(keys, ['k', 'm']);
+  assert.equal((await stage.done).completion, 'cancelled');
+  await stage.released;
+  assert.deepEqual(input.listeners('data'), [appHandler]);
+  stage.detach(appHandler);
 });
 
 test('route advisor formats primary, top fallback, scores, and observed usage bands', () => {

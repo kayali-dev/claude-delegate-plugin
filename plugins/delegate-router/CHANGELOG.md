@@ -2,6 +2,12 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.24.1 — 2026-07-15
+
+- `delegate-jobs status` preserves requested auto-model labels, strips empty model-attribute suffixes such as `default[]`, and includes resolved detail only when it is informative.
+- The opt-in no-turn Cursor ACP handshake now retains and validates the live session model catalog. The installed build currently exposes ordinary select options rather than `parameterizedModelPicker`; both that real fallback shape and the picker-preference path have regression coverage.
+- Background width probes pass through all real input while swallowing late probe-row CPR stragglers for a bounded ten-second grace after timeout, budget exhaustion, or editor cancellation, then remove the filter completely. Editor handoff cancels an active probe before releasing terminal ownership and never applies partial measurements.
+
 ## 0.24.0 — 2026-07-15
 
 - Width probing now returns promptly for the first frame but continues behind an input-safe CPR filter for backpressured tmux-over-SSH sessions, then applies late results in one glyph/cache/redraw upgrade. Preference saves merge per-terminal identities so concurrent direct and tmux sessions retain both measurements; probeVersion remains 3.

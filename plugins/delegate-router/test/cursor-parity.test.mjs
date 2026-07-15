@@ -24,6 +24,8 @@ import {
   submitControl
 } from '../bin/lib/control.mjs';
 import {
+  cursorModelCatalog,
+  cursorModelDetailed,
   mapCursorAcpUpdate,
   mapCursorAcpNotification,
   mapCursorHeadlessEvent,
@@ -225,7 +227,7 @@ test('ACP mapper covers every update variant, raw output, nested diffs, replay, 
 
 for (const scenario of ['ask-question', 'create-plan']) {
   test(`${scenario} blocks for revisioned coordinator response and idempotent retry`, async () => isolated(async (cwd) => {
-    const job = createManagedJob({ provider: 'cursor', mode: 'review', model: 'composer', cwd, prompt: 'review' });
+    const job = createManagedJob({ provider: 'cursor', mode: 'review', model: 'composer-2.5[fast=true]', cwd, prompt: 'review' });
     const running = runManagedProvider(job);
     const waiting = await waitFor(() => {
       const current = inspectJob(job.id);
@@ -255,7 +257,7 @@ for (const scenario of ['ask-question', 'create-plan']) {
 
 test('blocking Cursor input rejects after the configured timeout with a durable stopReason', async () => isolated(async (cwd) => {
   process.env.DELEGATE_CURSOR_INPUT_TIMEOUT_MS = '40';
-  const job = createManagedJob({ provider: 'cursor', mode: 'review', model: 'composer', cwd, prompt: 'review' });
+  const job = createManagedJob({ provider: 'cursor', mode: 'review', model: 'composer-2.5[fast=true]', cwd, prompt: 'review' });
   await assert.rejects(runManagedProvider(job), (error) => error.code === 'USER_INPUT_REQUIRED' && /timed out/.test(error.message));
   const failed = inspectJob(job.id);
   assert.equal(failed.status, 'failed');
@@ -264,13 +266,13 @@ test('blocking Cursor input rejects after the configured timeout with a durable 
 }, 'ask-question'));
 
 test('ACP force selects allow_once, never allow_always, and journals normalized ambiguous context', async () => isolated(async (cwd) => {
-  const job = createManagedJob({ provider: 'cursor', mode: 'implement', model: 'composer', approval: 'force', cwd, prompt: 'implement' });
+  const job = createManagedJob({ provider: 'cursor', mode: 'implement', model: 'composer-2.5[fast=true]', approval: 'force', cwd, prompt: 'implement' });
   await runManagedProvider(job);
   const resolved = readJobEvents(job.id).find((event) => event.type === 'approval.resolved');
   const completed = inspectJob(job.id);
   assert.equal(completed.cursorInitialize.capabilities.loadSession, true);
   assert.ok(completed.cursorConfigOptions.some((option) => option.id === 'model'));
-  assert.ok(completed.cursorModels.some((option) => option.value === 'composer-2.5'));
+  assert.ok(completed.cursorModels.some((option) => option.value === 'composer-2.5[fast=true]'));
   assert.equal(resolved.data.decision, 'allow_once');
   assert.equal(resolved.data.outcome.optionId, 'once');
   assert.equal(resolved.data.context.ambiguous, true);
@@ -297,7 +299,7 @@ test('create-chat missing is an explicit graceful fallback', async () => isolate
 
 test('session/load replay is tagged, excluded from live result assembly, and grouped as restored history', async () => isolated(async (cwd) => {
   const job = createManagedJob({
-    provider: 'cursor', mode: 'review', model: 'composer', cwd, prompt: 'continue', providerSessionId: 'acp-restored-session'
+    provider: 'cursor', mode: 'review', model: 'composer-2.5[fast=true]', cwd, prompt: 'continue', providerSessionId: 'acp-restored-session'
   });
   await runManagedProvider(job);
   const events = readJobEvents(job.id);
@@ -325,14 +327,33 @@ test('malformed project cli.json is diagnosed distinctly and names the exact fil
   assert.equal(JSON.parse(health.stdout).cursor.projectConfig.code, 'CURSOR_PROJECT_CONFIG_INVALID');
 }));
 
-test('capability probe is no-turn, retains initialize assumptions, and keeps terminal/fs false when unused', async () => isolated(async (cwd) => {
-  const report = await probeCursorAcpCapabilities({ binary: fixture, cwd, timeoutMs: 2000 });
+test('capability probe is no-turn and reproduces the installed select-option catalog shape', async () => isolated(async (cwd) => {
+  const report = await probeCursorAcpCapabilities({ binary: fixture, cwd, timeoutMs: 2000, includeCatalog: true });
   assert.equal(report.ok, true);
   assert.equal(report.noTurn, true);
   assert.equal(report.initialize.loadSession, true);
   assert.deepEqual(report.honorsClientCapabilities, { terminal: false, fsRead: false, fsWrite: false });
   assert.ok(report.configOptionIds.includes('model'));
+  assert.equal(report.session.models.currentModelId, 'default[]');
+  const modelOption = report.session.configOptions.find((option) => option.id === 'model');
+  assert.equal(modelOption.type, 'select');
+  assert.equal(modelOption.parameterizedModelPicker, undefined);
+  const catalog = cursorModelCatalog(modelOption);
+  assert.deepEqual(cursorModelDetailed(catalog, 'composer-2.5'), { value: 'composer-2.5[fast=true]', fastCompromise: true });
+  assert.deepEqual(cursorModelDetailed(catalog, 'grok-4.5[effort=high,fast=true]'), {
+    value: 'grok-4.5[effort=high,fast=true]', fastCompromise: false
+  });
 }));
+
+test('parameterizedModelPicker remains preferred when an ACP build advertises it', async () => isolated(async (cwd) => {
+  const report = await probeCursorAcpCapabilities({ binary: fixture, cwd, timeoutMs: 2000, includeCatalog: true });
+  const modelOption = report.session.configOptions.find((option) => option.id === 'model');
+  assert.ok(modelOption.parameterizedModelPicker);
+  assert.deepEqual(cursorModelCatalog(modelOption), modelOption.parameterizedModelPicker.options);
+  assert.deepEqual(cursorModelDetailed(cursorModelCatalog(modelOption), 'composer-2.5'), {
+    value: 'composer-2.5[fast=false]', fastCompromise: false
+  });
+}, 'picker-extension'));
 
 test('delegate-health prefers status JSON and reports the versioned terminal/fs no-turn detail', async () => isolated(async (cwd) => {
   const result = spawnSync(process.execPath, [healthCli, '--json'], { cwd, env: process.env, encoding: 'utf8', timeout: 15000 });
@@ -372,8 +393,19 @@ test('live installed Cursor no-turn handshake (explicit opt-in)', {
     ? false
     : 'set DELEGATE_LIVE_CURSOR_HANDSHAKE=1; no model prompt is sent'
 }, async () => {
-  const report = await probeCursorAcpCapabilities({ binary: resolveCursorBinary(), cwd: process.cwd(), timeoutMs: 15000 });
+  const report = await probeCursorAcpCapabilities({ binary: resolveCursorBinary(), cwd: process.cwd(), timeoutMs: 15000, includeCatalog: true });
   assert.equal(report.ok, true, report.error || report.errorCode);
   assert.equal(report.initialize.loadSession, true);
   assert.equal(report.initialize.resumeSession, false);
+  const modelOption = report.session.configOptions.find((option) => option.id === 'model');
+  assert.ok(modelOption, 'session/new advertises the model config option');
+  const picker = modelOption.parameterizedModelPicker || modelOption.parameterized_model_picker;
+  const catalog = cursorModelCatalog(modelOption);
+  if (picker) assert.deepEqual(catalog, picker.options || picker.values, 'the picker catalog wins over ordinary options');
+  else assert.equal(modelOption.type, 'select', 'this installed build uses the ordinary select-option fallback');
+  const bracketed = catalog.find((option) => /\[[^\]]+=/.test(option.value));
+  assert.ok(bracketed, 'catalog includes an attributed model variant');
+  const plain = bracketed.name || bracketed.value.slice(0, bracketed.value.indexOf('['));
+  assert.ok(catalog.some((option) => option.value === cursorModelDetailed(catalog, plain).value));
+  assert.deepEqual(cursorModelDetailed(catalog, bracketed.value), { value: bracketed.value, fastCompromise: false });
 });
