@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { brokerError } from './errors.mjs';
 
 const PROFILE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
-const DEFAULT_KEYS = new Set(['mode', 'model', 'effort', 'allowedPaths']);
+const DEFAULT_KEYS = new Set(['mode', 'model', 'effort', 'allowedPaths', 'reportSchema']);
 
 export function profilesDir() {
   return process.env.DELEGATE_PROFILES_DIR || path.join(os.homedir(), '.delegate', 'profiles');
@@ -27,6 +27,14 @@ function parseAllowedPaths(value) {
   return text.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
+function parseReportSchema(value, name) {
+  try {
+    const parsed = JSON.parse(String(value || '').trim());
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch {}
+  throw brokerError('INVALID_REQUEST', `profile '${name}' reportSchema must be a JSON object on one line`);
+}
+
 export function parseProfile(text, name = 'profile') {
   const match = String(text).match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/);
   if (!match) throw brokerError('INVALID_REQUEST', `profile '${name}' must begin with simple --- frontmatter`);
@@ -38,7 +46,9 @@ export function parseProfile(text, name = 'profile') {
     if (!field) throw brokerError('INVALID_REQUEST', `invalid frontmatter line in profile '${name}': ${rawLine}`);
     const key = field[1].trim();
     if (!DEFAULT_KEYS.has(key)) continue;
-    defaults[key] = key === 'allowedPaths' ? parseAllowedPaths(field[2]) : field[2].trim();
+    defaults[key] = key === 'allowedPaths'
+      ? parseAllowedPaths(field[2])
+      : key === 'reportSchema' ? parseReportSchema(field[2], name) : field[2].trim();
   }
   const body = match[2].trim();
   if (!body.includes('{{objective}}')) throw brokerError('INVALID_REQUEST', `profile '${name}' must contain {{objective}} in its body`);

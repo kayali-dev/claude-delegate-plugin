@@ -112,13 +112,17 @@ test('profiles merge defaults, explicit options win, lint warns, and bundled fal
   console.error = (message) => warnings.push(String(message));
   try { createManagedJob({ provider: 'codex', prompt: 'bare objective', cwd }); }
   finally { console.error = originalError; }
+  assert.equal(warnings.length, 1);
   assert.match(warnings.join('\n'), /Objective.*Allowed scope.*Acceptance criteria.*Return/);
+  assert.equal(warnings[0].split('\n\n')[1], 'Objective:\nAllowed scope:\nAcceptance criteria:\nReturn:');
 
   const fallback = loadProfile('independent-review');
   assert.equal(fallback.local, false);
+  assert.equal(fallback.defaults.reportSchema.properties.findings.items.properties.severity.enum[0], 'blocking');
   const fallbackJob = createManagedJob({ provider: 'codex', profile: 'independent-review', prompt: 'Review this diff', cwd });
   assert.equal(fallbackJob.mode, 'review');
   assert.equal(fallbackJob.model, 'sol');
+  assert.deepEqual(fallbackJob.reportSchema, fallback.defaults.reportSchema);
 }));
 
 test('fan-out groups filter list rows and summarize terminal state', () => isolated(({ cwd }) => {
@@ -230,21 +234,23 @@ test('Codex live large-write breaker fails with LARGE_WRITE and a checkpoint', (
   assert.ok(readJobEvents(job.id, { limit: 1000 }).some((event) => event.type === 'large.write' && event.data.enforcement === 'live-interrupt'));
 }));
 
-test('reportSchema parses the last JSON fence and flags missing structured output without failing', () => isolated(async ({ cwd }) => {
+test('independent-review parses conforming findings and flags nonconforming structured output without failing', () => isolated(async ({ cwd }) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
-  process.env.FAKE_CODEX_REPLY = 'Earlier\n```json\n{"objectiveMet":false}\n```\nFinal\n```json\n{"objectiveMet":"partial","findings":2}\n```';
-  const schema = { type: 'object', required: ['objectiveMet'] };
-  const parsedJob = createManagedJob({ provider: 'codex', mode: 'review', cwd, prompt: 'structured report', reportSchema: schema });
+  process.env.FAKE_CODEX_REPLY = 'Complete inline findings.\n```json\n{"objectiveMet":false,"findings":[{"severity":"blocking","file":"src/a.js","line":12,"summary":"Broken guard","evidence":"The branch accepts invalid input."}],"clean":false}\n```';
+  const parsedJob = createManagedJob({ provider: 'codex', profile: 'independent-review', cwd, prompt: 'Review the parser' });
   await runManagedProvider(parsedJob);
   const parsed = inspectJob(parsedJob.id);
-  assert.deepEqual(parsed.result.structured, { objectiveMet: 'partial', findings: 2 });
-  assert.equal(parsed.objectiveMet, 'partial');
+  assert.deepEqual(parsed.result.structured.findings, [{
+    severity: 'blocking', file: 'src/a.js', line: 12, summary: 'Broken guard', evidence: 'The branch accepts invalid input.'
+  }]);
+  assert.equal(parsed.objectiveMet, false);
   assert.equal(parsed.structuredMissing, undefined);
 
-  process.env.FAKE_CODEX_REPLY = 'No structured block here.';
-  const missingJob = createManagedJob({ provider: 'codex', mode: 'review', cwd, prompt: 'structured report', reportSchema: schema });
+  process.env.FAKE_CODEX_REPLY = 'Inline fallback remains available.\n```json\n{"objectiveMet":"partial","findings":[],"clean":true}\n```';
+  const missingJob = createManagedJob({ provider: 'codex', profile: 'independent-review', cwd, prompt: 'Review the parser' });
   await runManagedProvider(missingJob);
   const missing = inspectJob(missingJob.id);
   assert.equal(missing.status, 'completed');
   assert.equal(missing.structuredMissing, true);
+  assert.equal(missing.result.structured, undefined);
 }));

@@ -104,6 +104,19 @@ export function aggregateAuditStats(records, options = {}) {
   return { since: options.since || null, generatedAt: Number(options.now || Date.now()), jobs: selected.length, groups };
 }
 
+export function aggregateAuditTotals(records, options = {}) {
+  const selected = selectedRecords(records, options);
+  const terminalStatuses = { completed: 0, failed: 0, cancelled: 0 };
+  let totalOutputTokens = 0;
+  for (const record of selected) {
+    const status = record.outcome?.status;
+    if (Object.hasOwn(terminalStatuses, status)) terminalStatuses[status] += 1;
+    const tokens = outputTokens(record);
+    if (Number.isFinite(tokens)) totalOutputTokens += tokens;
+  }
+  return { jobs: selected.length, terminalStatuses, outputTokens: totalOutputTokens };
+}
+
 export function auditUsageBands(records, options = {}) {
   const cells = new Map();
   for (const record of selectedRecords(records, options)) {

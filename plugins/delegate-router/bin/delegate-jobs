@@ -114,6 +114,12 @@ function displayModel(job) {
   return `${stored} \u2192 ${resolved}`;
 }
 
+function renderVerificationOrigin(job) {
+  if (job.verificationOrigin === 'worker-sandbox') {
+    console.error(`verification: worker-sandbox — worker-reported checks are partial evidence; re-run checks on the real tree (${job.id})`);
+  }
+}
+
 // review-round may emit packet-lint diagnostics while it assembles and launches
 // the continuation. Keep stdout exclusively JSON for callers that pipe it.
 function withStdoutDiagnosticsRedirected(action) {
@@ -187,6 +193,7 @@ try {
       console.log('Job ID                         Provider Status     Phase       Model');
       for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${displayModel(job)}`);
     }
+    for (const job of jobs) renderVerificationOrigin(job);
   } else if (command === 'group') {
     json(groupSummary(args[0]));
   } else if (command === 'stats') {
@@ -348,9 +355,10 @@ try {
         offset: Number(value(args, '--offset', 0)),
         maxChars: Number(value(args, '--max-chars', 60000))
       });
-      if (args.includes('--json')) json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, ...window });
+      if (args.includes('--json')) json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, verificationOrigin: job.verificationOrigin || null, ...window });
       else process.stdout.write(window.resultText);
-    } else json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, result: job.result, error: job.error });
+    } else json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, verificationOrigin: job.verificationOrigin || null, result: job.result, error: job.error });
+    renderVerificationOrigin(job);
   } else if (command === 'logs') {
     const job = requireJob(args[0]);
     const file = args.includes('--stderr') ? job.stderrPath : job.stdoutPath;

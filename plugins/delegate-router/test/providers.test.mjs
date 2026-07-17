@@ -262,7 +262,7 @@ test('retryPolicy retries a transient Codex crash once on the same job and threa
   assert.deepEqual({ attempt: retry.data.attempt, code: retry.data.code }, { attempt: 2, code: 'TRANSPORT_ERROR' });
 }));
 
-test('completed write jobs run verification and delegate-jobs wait exits 6 on a nonzero verdict', () => isolated(async (directory) => {
+test('terminal jobs tag verification origin and sandbox-only CLI results warn before acceptance', () => isolated(async (directory) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   const job = createManagedJob({
     provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'implement',
@@ -271,6 +271,7 @@ test('completed write jobs run verification and delegate-jobs wait exits 6 on a 
   await runManagedProvider(job);
   const completed = inspectJob(job.id);
   assert.equal(completed.status, 'completed');
+  assert.equal(completed.verificationOrigin, 'broker');
   assert.equal(completed.verification.exitCode, 7);
   assert.match(completed.verification.outputTail, /verification-tail/);
   assert.ok(readJobEvents(job.id, { limit: 1000 }).some((event) => event.type === 'verification.finished' && event.data.exitCode === 7));
@@ -280,6 +281,32 @@ test('completed write jobs run verification and delegate-jobs wait exits 6 on a 
   });
   assert.equal(waited.status, 6, waited.stderr);
   assert.equal(JSON.parse(waited.stdout).verification.exitCode, 7);
+
+  const brokerResult = spawnSync(process.execPath, [cli, 'result', job.id], {
+    encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE }
+  });
+  assert.equal(brokerResult.status, 0, brokerResult.stderr);
+  assert.doesNotMatch(brokerResult.stderr, /worker-reported checks are partial evidence/);
+
+  const sandboxed = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review' });
+  await runManagedProvider(sandboxed);
+  const sandboxedCompleted = inspectJob(sandboxed.id);
+  assert.equal(sandboxedCompleted.verificationOrigin, 'worker-sandbox');
+  const sandboxedStatus = spawnSync(process.execPath, [cli, 'status', sandboxed.id], {
+    encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE }
+  });
+  assert.equal(sandboxedStatus.status, 0, sandboxedStatus.stderr);
+  assert.match(sandboxedStatus.stderr, /verification: worker-sandbox .*re-run checks on the real tree/);
+  const sandboxedResult = spawnSync(process.execPath, [cli, 'result', sandboxed.id], {
+    encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE }
+  });
+  assert.equal(sandboxedResult.status, 0, sandboxedResult.stderr);
+  assert.equal(JSON.parse(sandboxedResult.stdout).verificationOrigin, 'worker-sandbox');
+  assert.match(sandboxedResult.stderr, /worker-reported checks are partial evidence/);
+
+  const unsandboxed = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review', sandbox: 'off' });
+  await runManagedProvider(unsandboxed);
+  assert.equal(inspectJob(unsandboxed.id).verificationOrigin, 'unsandboxed-worker');
 }));
 
 test('Codex output budget interrupts the turn and preserves partial state and continuation', () => isolated(async (directory) => {

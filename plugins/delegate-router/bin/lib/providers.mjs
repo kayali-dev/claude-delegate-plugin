@@ -187,12 +187,44 @@ function codexChangedPaths(item) {
   return (item.changes || []).map((change) => change?.path || change?.file || change?.filename).filter(Boolean);
 }
 
-function parseLastStructuredResult(text) {
+function jsonTypeMatches(value, type) {
+  if (type === 'null') return value === null;
+  if (type === 'array') return Array.isArray(value);
+  if (type === 'object') return value != null && typeof value === 'object' && !Array.isArray(value);
+  if (type === 'integer') return Number.isInteger(value);
+  return typeof value === type;
+}
+
+function structuredResultMatchesSchema(value, schema) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return true;
+  const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
+  if (types.length && !types.some((type) => jsonTypeMatches(value, type))) return false;
+  if (Array.isArray(schema.enum) && !schema.enum.some((item) => JSON.stringify(item) === JSON.stringify(value))) return false;
+  if (Object.hasOwn(schema, 'const') && JSON.stringify(schema.const) !== JSON.stringify(value)) return false;
+  if (Array.isArray(value)) {
+    if (Number.isInteger(schema.minItems) && value.length < schema.minItems) return false;
+    if (Number.isInteger(schema.maxItems) && value.length > schema.maxItems) return false;
+    if (schema.items && !value.every((item) => structuredResultMatchesSchema(item, schema.items))) return false;
+  }
+  if (value != null && typeof value === 'object' && !Array.isArray(value)) {
+    if (Array.isArray(schema.required) && schema.required.some((key) => !Object.hasOwn(value, key))) return false;
+    const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+    if (schema.additionalProperties === false && Object.keys(value).some((key) => !Object.hasOwn(properties, key))) return false;
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (Object.hasOwn(value, key) && !structuredResultMatchesSchema(value[key], propertySchema)) return false;
+    }
+  }
+  return true;
+}
+
+function parseLastStructuredResult(text, schema) {
   const blocks = [...String(text || '').matchAll(/```json\s*([\s\S]*?)```/gi)];
   if (!blocks.length) return null;
   try {
     const parsed = JSON.parse(blocks.at(-1)[1].trim());
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) && structuredResultMatchesSchema(parsed, schema)
+      ? parsed
+      : null;
   } catch {
     return null;
   }
@@ -368,8 +400,13 @@ function terminal(job, status, phase, extra = {}) {
       : typeof current.result.result === 'string' ? current.result.result
       : null;
     if (text != null) current.resultText = text;
+    if (!deferVerification && status === 'completed') {
+      current.verificationOrigin = current.verification
+        ? 'broker'
+        : current.sandbox === 'off' ? 'unsandboxed-worker' : 'worker-sandbox';
+    }
     if (!deferVerification && status === 'completed' && current.reportSchema) {
-      const structured = parseLastStructuredResult(text);
+      const structured = parseLastStructuredResult(text, current.reportSchema);
       if (structured) {
         current.result = current.result && typeof current.result === 'object'
           ? { ...current.result, structured }
@@ -575,7 +612,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.24.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.24.2' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1380,7 +1417,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.24.1' }
+      clientInfo: { name: 'delegate-router', version: '0.24.2' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

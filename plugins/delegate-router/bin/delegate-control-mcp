@@ -2,6 +2,7 @@
 import readline from 'node:readline';
 import { brokerError, normalizeBrokerError } from './lib/errors.mjs';
 import { enabledProviders } from './lib/state.mjs';
+import { aggregateAuditStats, aggregateAuditTotals, readAuditLog } from './lib/stats.mjs';
 import {
   capEventsBySize,
   diffStat,
@@ -64,6 +65,7 @@ const TOOLS = [
   },
   { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, resultWindow: { type: 'object', additionalProperties: false, properties: { find: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } } } },
   { name: 'delegate_list', description: 'List recent delegation jobs, optionally filtered or summarized by fan-out group.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, activeOnly: { type: 'boolean' }, status: { type: 'array', items: { enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] } }, groupId: { type: 'string' }, groupSummary: { type: 'boolean' } } } },
+  { name: 'delegate_stats', description: 'Return read-only aggregate delegation outcomes and token totals from the terminal audit log.', inputSchema: { type: 'object', additionalProperties: false, properties: { since: { type: 'string', description: "Optional duration such as '24h' or '7d'." } } } },
   { name: 'delegate_events', description: 'Read normalized live events using a monotonic sequence cursor, with optional bounded long polling.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, waitMs: { type: 'integer', minimum: 0, maximum: 30000 }, types: { type: 'array', items: { type: 'string' } } } } },
   { name: 'delegate_transcript', description: 'Read user-visible messages, plans, tool activity, and errors, paginated by sequence cursor. Streaming deltas and raw tool output are omitted unless verbose is set. Hidden reasoning is never returned.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, verbose: { type: 'boolean' } } } },
   { name: 'delegate_diff', description: 'Return the latest recorded unified diff (windowed by offset/maxChars for large diffs), a per-file stat summary with statOnly, or a per-file filtered view with paths (e.g. the job allowedPaths).', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, statOnly: { type: 'boolean' }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 }, paths: { type: 'array', items: { type: 'string' } } } } },
@@ -102,6 +104,13 @@ async function dispatch(name, args) {
     return capEventsBySize(page);
   }
   if (name === 'delegate_list') return args.groupSummary ? groupSummary(args.groupId) : listManagedJobs(args);
+  if (name === 'delegate_stats') {
+    const unknown = Object.keys(args).filter((key) => key !== 'since');
+    if (unknown.length) throw brokerError('INVALID_REQUEST', `delegate_stats unknown parameter${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
+    const records = readAuditLog();
+    const options = { since: args.since };
+    return { ...aggregateAuditStats(records, options), totals: aggregateAuditTotals(records, options) };
+  }
   if (name === 'delegate_transcript') return jobTranscriptPage(args.jobId, args);
   if (name === 'delegate_diff') {
     const attributionConfidence = inspectJob(args.jobId).attributionConfidence;
@@ -134,7 +143,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.24.1' }
+        serverInfo: { name: 'delegate-control', version: '0.24.2' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

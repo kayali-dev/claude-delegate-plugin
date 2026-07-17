@@ -28,6 +28,17 @@ const READ_MODES = new Set(['consult', 'plan', 'review']);
 const INGEST_MAX_FILES = 20;
 const INGEST_MAX_BYTES = 10 * 1024 * 1024;
 const SENSITIVE_PATH = /(?:^|\/)(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]*(?:secret|credential|private.?key|token)[^/]*|[^/]+\.(?:pem|key|p12|pfx|crt|cer))$/i;
+const PACKET_SECTION_ORDER = [
+  'Objective',
+  'Mode',
+  'Allowed scope',
+  'Relevant context',
+  'Constraints and non-goals',
+  'Acceptance criteria',
+  'Required verification',
+  'Stop and report when',
+  'Return'
+];
 
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -1344,7 +1355,13 @@ function prepareManagedOptions(options, settings = {}) {
   const prepared = applyProfile(options);
   const missing = lintPacket(prepared.prompt);
   if (missing.length) {
-    if (settings.reportLint !== false) console.error(`delegate-router packet lint: missing ${missing.join(', ')}`);
+    if (settings.reportLint !== false) {
+      const missingSet = new Set(missing);
+      const skeleton = PACKET_SECTION_ORDER.filter((section) => missingSet.has(section))
+        .map((section) => `${section}:`)
+        .join('\n');
+      console.error(`delegate-router packet lint: missing ${missing.join(', ')}\n\n${skeleton}`);
+    }
     prepared.packetWarnings = missing.map((section) => `missing section: ${section}`);
   }
   return prepared;

@@ -2,6 +2,13 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.24.2 — 2026-07-17
+
+- Terminal completions now record `verificationOrigin`; sandbox-only worker checks are surfaced as partial evidence in `delegate-jobs status` and `result`, while broker verification and unsandboxed workers are distinguished structurally.
+- The bundled independent-review profile carries a canonical best-effort findings schema, validates the final fenced JSON object into `result.structured`, and retains inline prose as the fallback.
+- Packet-lint warnings now include one stderr-only copy-paste skeleton containing exactly the missing canonical sections.
+- Added the read-only MCP `delegate_stats` tool with duration filtering, audit aggregates, terminal-status counts, and summed output tokens.
+
 ## 0.24.1 — 2026-07-15
 
 - `delegate-jobs status` preserves requested auto-model labels, strips empty model-attribute suffixes such as `default[]`, and includes resolved detail only when it is informative.

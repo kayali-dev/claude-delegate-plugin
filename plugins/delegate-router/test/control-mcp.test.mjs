@@ -22,13 +22,14 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   await new Promise((resolve) => child.once('exit', resolve));
   assert.equal(responses[0].result.serverInfo.name, 'delegate-control');
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
-    'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_events', 'delegate_transcript', 'delegate_diff',
+    'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage'
   ]);
   const start = responses[1].result.tools.find((tool) => tool.name === 'delegate_start');
   const inspect = responses[1].result.tools.find((tool) => tool.name === 'delegate_inspect');
   const respond = responses[1].result.tools.find((tool) => tool.name === 'delegate_respond');
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
+  const stats = responses[1].result.tools.find((tool) => tool.name === 'delegate_stats');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
   assert.ok(start.inputSchema.properties.retryPolicy);
@@ -48,9 +49,55 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(respond.inputSchema.required, ['jobId', 'expectedRevision']);
   for (const option of ['requestId', 'answer', 'accept', 'response', 'commandId']) assert.ok(respond.inputSchema.properties[option], `delegate_respond.${option}`);
   assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_review_round'));
+  assert.equal(stats.inputSchema.additionalProperties, false);
+  assert.ok(stats.inputSchema.properties.since);
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
   assert.ok(resume.inputSchema.properties.retryPolicy);
   assert.ok(resume.inputSchema.properties.verify);
+});
+
+test('delegate_stats returns filtered audit aggregates and totals and rejects job parameters', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-mcp-stats-'));
+  const stateFile = path.join(directory, 'usage.json');
+  const now = Date.now();
+  const records = [
+    { at: now - 1000, provider: 'codex', model: 'sol', mode: 'review', outcome: { status: 'completed' }, usage: { total: { outputTokens: 120 } } },
+    { at: now - 2000, provider: 'cursor', model: 'grok', mode: 'consult', outcome: { status: 'failed' }, usage: { outputTokens: 30 } },
+    { at: now - 10 * 86400000, provider: 'codex', model: 'sol', mode: 'review', outcome: { status: 'cancelled' }, usage: { total: { outputTokens: 900 } } }
+  ];
+  fs.writeFileSync(path.join(directory, 'audit.jsonl'), `${records.map(JSON.stringify).join('\n')}\n`);
+  const child = spawn(process.execPath, [server], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, DELEGATE_STATE_FILE: stateFile, DELEGATE_ENABLED_PROVIDERS: 'codex' }
+  });
+  const lines = readline.createInterface({ input: child.stdout });
+  const responses = [];
+  lines.on('line', (line) => responses.push(JSON.parse(line)));
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '7d' } } })}\n`);
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '7d', jobId: 'not-allowed' } } })}\n`);
+  for (let i = 0; i < 100 && responses.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  child.stdin.end();
+  await new Promise((resolve) => child.once('exit', resolve));
+  try {
+    const aggregate = JSON.parse(responses.find((response) => response.id === 1).result.content[0].text);
+    assert.equal(aggregate.jobs, 2, JSON.stringify(aggregate));
+    assert.equal(aggregate.groups.length, 2);
+    assert.deepEqual(aggregate.totals, {
+      jobs: 2,
+      terminalStatuses: { completed: 1, failed: 1, cancelled: 0 },
+      outputTokens: 150
+    });
+    const rejected = responses.find((response) => response.id === 2).result;
+    assert.equal(rejected.isError, true);
+    assert.deepEqual(JSON.parse(rejected.content[0].text), {
+      error: 'INVALID_REQUEST: delegate_stats unknown parameter: jobId',
+      code: 'INVALID_REQUEST',
+      retryable: false,
+      provider: null
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('delegate_respond queues a revision-safe answer through the control inbox', async () => {
