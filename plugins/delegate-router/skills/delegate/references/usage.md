@@ -42,6 +42,8 @@ Per-job observed tokens and context occupancy are separate dimensions, neither o
 
 `delegate-jobs stats` reads the never-pruned audit log and reports fleet outcomes, resume/nudge counts, durations, tokens, budgets, timeouts, and scope violations. The read-only MCP `delegate_stats` accepts the same optional `since` duration (for example `24h` or `7d`) and returns those aggregates plus `totals` for jobs, terminal statuses, and summed output tokens, so coordinators can govern spend without shelling out. `delegate-health --deep` intentionally spends real allowance on one bounded managed probe per enabled provider and writes its `{ provider, ok, durationMs, cliVersion, at }` result under `lastVerified`. Ordinary Cursor health uses `agent status --format json` with a text fallback and a no-turn ACP initialize/session-new capability probe; neither spends model allowance.
 
+Stats attribute Codex resume-chain output as chronological deltas because each continuation can carry a thread-cumulative total; standalone jobs and Cursor samples remain unchanged, and a lower Codex counter is treated as a fresh thread and counted in full.
+
 Sources: https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md, https://code.claude.com/docs/en/statusline, and https://docs.cursor.com/account/pricing
 
 Cursor exposes no allowance API: `usage: unknown` for Cursor in `delegate-health` is the expected steady state, not an error. The only reliable source is the dashboard percentage, recorded manually with `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>` (stale entries expire per `DELEGATE_MANUAL_USAGE_TTL_DAYS`).

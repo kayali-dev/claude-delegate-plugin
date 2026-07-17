@@ -2,6 +2,11 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.24.3 — 2026-07-17
+
+- Corrected audit output-token aggregates to delta-attribute thread-cumulative Codex resume chains, use one time snapshot for each `delegate_stats` response, and treat explicit null usage fields as missing rather than zero samples.
+- Fleet rows now show each job's cwd basename and routed effort, with width-aware truncation and compact-density priority dropping.
+
 ## 0.24.2 — 2026-07-17
 
 - Terminal completions now record `verificationOrigin`; sandbox-only worker checks are surfaced as partial evidence in `delegate-jobs status` and `result`, while broker verification and unsandboxed workers are distinguished structurally.

@@ -17,6 +17,7 @@ import { createPalette, setUiTheme, uiPalette } from '../bin/lib/tui/palette.mjs
 import { CHROME_GLYPHS, configureGlyphs, GLYPH_TIERS } from '../bin/lib/tui/glyphs.mjs';
 import { CellGrid } from '../bin/lib/tui/screen.mjs';
 import { advanceSpinnerGrid, SpinnerAnimator } from '../bin/lib/tui/spinner.mjs';
+import { attributeAuditOutputTokens } from '../bin/lib/stats.mjs';
 import {
   activityIndicator,
   attributeAuditUsage,
@@ -186,6 +187,7 @@ test('dashboard and stats attribute cumulative Codex chains without multiplying 
   audit.push({ at: NOW, jobId: 'standalone', provider: 'codex', model: 'gpt-5.4-sol', mode: 'review', outcome: { status: 'completed' }, usage: { total: { inputTokens: 50, cachedInputTokens: 10, outputTokens: 5 } } });
 
   const attributed = attributeAuditUsage(audit, jobs);
+  assert.deepEqual(attributeAuditOutputTokens(audit), attributed.map((entry) => entry.own.output), 'stats and TUI consumers agree on one synthetic chain fixture');
   const chainUsage = attributed.filter((row) => row.providerSessionId === session).map((row) => row.own);
   assert.deepEqual(chainUsage, Array.from({ length: 5 }, () => ({ input: 100, output: 10, cached: 40 })));
   assert.deepEqual(chainUsage.reduce((sum, usage) => ({

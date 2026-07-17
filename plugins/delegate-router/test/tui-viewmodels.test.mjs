@@ -10,7 +10,7 @@ import { paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
 import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
 import { createPalette, uiPalette } from '../bin/lib/tui/palette.mjs';
 import { formatTranscriptBlock } from '../bin/lib/tui/transcript.mjs';
-import { clearGraphemeWidthOverrides, setGraphemeWidthOverrides } from '../bin/lib/tui/width.mjs';
+import { clearGraphemeWidthOverrides, setGraphemeWidthOverrides, truncateToWidth } from '../bin/lib/tui/width.mjs';
 import { WIDTH_PROBE_GRAPHEMES } from '../bin/lib/tui/width-probe.mjs';
 import {
   dashboardViewModel,
@@ -32,6 +32,7 @@ const packageVersion = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'package
 function syntheticStore() {
   const active = {
     id: 'codex-active-1234567', provider: 'codex', model: 'sol', resolvedModel: 'gpt-5.4-sol', mode: 'implement',
+    effort: 'xhigh',
     status: 'running', phase: 'working', revision: 4, cwd: '/work/alpha', createdAt: NOW / 1000 - 125,
     updatedAt: NOW / 1000 - 2, lastActivityAt: NOW - 5000, workerPid: 1234, workerAlive: true,
     maxOutputTokens: 8000, rootJobId: 'codex-root-7654321',
@@ -94,11 +95,33 @@ test('fleet rows sort active first, expose compact safety badges, and filter id/
   assert.deepEqual(frame.meta.visibleJobIds, ['codex-active-1234567', 'cursor-done-abcdef0']);
   const columns = frame.panes[0].content.columns;
   const badgesIndex = columns.findIndex((column) => column.key === 'badges');
+  const directoryIndex = columns.findIndex((column) => column.key === 'dir');
+  const effortIndex = columns.findIndex((column) => column.key === 'effort');
+  assert.deepEqual(frame.panes[0].content.rows.map((row) => row.cells[directoryIndex]), ['alpha', 'beta']);
+  assert.deepEqual(frame.panes[0].content.rows.map((row) => row.cells[effortIndex]), ['xhigh', '-']);
   assert.equal(frame.panes[0].content.rows[0].cells[badgesIndex].text, 'S1,L,RF');
   const filtered = fleetViewModel(store, { now: NOW, filter: 'beta' }, { width: 100, height: 30 });
   assert.deepEqual(filtered.meta.visibleJobIds, ['cursor-done-abcdef0']);
   const activeOnly = fleetViewModel(store, { now: NOW, activeOnly: true }, { width: 100, height: 30 });
   assert.deepEqual(activeOnly.meta.visibleJobIds, ['codex-active-1234567']);
+});
+
+test('fleet directory truncates by display width and compact density drops directory before effort', () => {
+  const store = syntheticStore();
+  const dirname = 'a-very-long-delegation-directory';
+  store.jobs[1].cwd = `/work/${dirname}`;
+  const wide = fleetViewModel(store, { now: NOW, fleetDensity: 'wide' }, { width: 100, height: 30 });
+  const directory = wide.panes[0].content.columns.find((column) => column.key === 'dir');
+  const expected = truncateToWidth(dirname, directory.width - 1, { ellipsis: true });
+  const rendered = renderFrameToString(wide);
+  assert.ok(rendered.includes(expected));
+  assert.ok(!rendered.includes(dirname));
+
+  const directoryDropped = fleetViewModel(store, { now: NOW, fleetDensity: 'compact' }, { width: 60, height: 30 });
+  assert.ok(!directoryDropped.panes[0].content.columns.some((column) => column.key === 'dir'));
+  assert.ok(directoryDropped.panes[0].content.columns.some((column) => column.key === 'effort'));
+  const bothDropped = fleetViewModel(store, { now: NOW, fleetDensity: 'compact' }, { width: 50, height: 30 });
+  assert.ok(!bothDropped.panes[0].content.columns.some((column) => ['dir', 'effort'].includes(column.key)));
 });
 
 test('open context compaction animates in both fleet row and detail header instead of rendering quiet', () => {

@@ -16,7 +16,15 @@ import {
 } from '../bin/lib/control.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
 import { routeTask } from '../bin/lib/router.mjs';
-import { aggregateAuditStats, auditUsageBands, usageBandKey } from '../bin/lib/stats.mjs';
+import {
+  aggregateAudit,
+  aggregateAuditStats,
+  aggregateAuditTotals,
+  attributeAuditOutputTokens,
+  auditUsageBands,
+  outputTokens,
+  usageBandKey
+} from '../bin/lib/stats.mjs';
 import { loadProfile } from '../bin/lib/profiles.mjs';
 import { loadJob } from '../bin/lib/state.mjs';
 
@@ -81,6 +89,63 @@ test('stats aggregate synthetic audit records and the CLI reads audit.jsonl', ()
   assert.equal(cli.status, 0, cli.stderr);
   assert.equal(JSON.parse(cli.stdout).jobs, 2);
 }));
+
+test('stats attribute Codex chain deltas across every token aggregate and preserve reset and window semantics', () => {
+  const base = { provider: 'codex', model: 'gpt-5.6-sol', mode: 'review', effort: 'xhigh', outcome: { status: 'completed' } };
+  const records = [
+    { ...base, at: 1000, jobId: 'root', rootJobId: 'root', usage: { total: { outputTokens: 100 } } },
+    { ...base, at: 2000, jobId: 'round-1', parentJobId: 'root', rootJobId: 'root', usage: { total: { outputTokens: 300 } } },
+    { ...base, at: 3000, jobId: 'round-2', parentJobId: 'root', rootJobId: 'root', usage: { total: { outputTokens: 450 } } },
+    { ...base, at: 4000, jobId: 'standalone', rootJobId: 'standalone', usage: { total: { outputTokens: 50 } } }
+  ];
+  assert.deepEqual(attributeAuditOutputTokens(records), [100, 200, 150, 50]);
+  const aggregate = aggregateAudit(records, { now: 5000 });
+  assert.equal(aggregate.groups[0].meanOutputTokens, 125);
+  assert.equal(aggregate.totals.outputTokens, 500);
+  assert.equal(aggregateAuditTotals(records, { now: 5000 }).outputTokens, 500);
+  assert.deepEqual(auditUsageBands(records, { now: 5000 })[usageBandKey('codex', 'sol', 'xhigh')], {
+    p50OutputTokens: 100,
+    p90OutputTokens: 200,
+    samples: 4
+  });
+
+  const reset = [
+    { ...base, at: 1000, jobId: 'reset-root', rootJobId: 'reset-root', usage: { total: { outputTokens: 100 } } },
+    { ...base, at: 2000, jobId: 'reset-1', parentJobId: 'reset-root', rootJobId: 'reset-root', usage: { total: { outputTokens: 50 } } },
+    { ...base, at: 3000, jobId: 'reset-2', parentJobId: 'reset-root', rootJobId: 'reset-root', usage: { total: { outputTokens: 70 } } }
+  ];
+  assert.deepEqual(attributeAuditOutputTokens(reset), [100, 50, 20], 'a lower counter is a full fresh-thread sample and resets the delta baseline');
+
+  const windowNow = 8 * 86400000;
+  const crossWindow = [
+    { ...base, at: windowNow - 7 * 86400000 - 1, jobId: 'older-root', rootJobId: 'older-root', usage: { total: { outputTokens: 100 } } },
+    { ...base, at: windowNow - 7 * 86400000, jobId: 'boundary-child', parentJobId: 'older-root', rootJobId: 'older-root', usage: { total: { outputTokens: 160 } } }
+  ];
+  assert.deepEqual(aggregateAuditTotals(crossWindow, { since: '7d', now: windowNow }), {
+    jobs: 1,
+    terminalStatuses: { completed: 1, failed: 0, cancelled: 0 },
+    outputTokens: 60
+  });
+});
+
+test('stats token parsing skips nulls but preserves real zero and numeric strings', () => {
+  assert.equal(outputTokens({ usage: { outputTokens: null } }), null);
+  assert.equal(outputTokens({ usage: { outputTokens: undefined } }), null);
+  assert.equal(outputTokens({ usage: { outputTokens: 0 } }), 0);
+  assert.equal(outputTokens({ usage: { outputTokens: '1200' } }), 1200);
+  assert.equal(outputTokens({ usage: { outputTokens: null, completionTokens: '1200' } }), 1200);
+});
+
+test('combined audit aggregate captures one clock snapshot for groups, totals, and generatedAt', () => {
+  const options = { since: '1s' };
+  let clockReads = 0;
+  Object.defineProperty(options, 'now', { get: () => 10_000 + clockReads++ });
+  const aggregate = aggregateAudit([{ at: 9000, provider: 'codex', outcome: { status: 'completed' }, usage: { total: { outputTokens: 1 } } }], options);
+  assert.equal(clockReads, 1);
+  assert.equal(aggregate.generatedAt, 10_000);
+  assert.equal(aggregate.jobs, 1);
+  assert.equal(aggregate.totals.jobs, 1);
+});
 
 test('route candidates gain advisory usage bands without changing selection', () => {
   const records = [100, 200, 900].map((outputTokens) => ({ provider: 'codex', model: 'gpt-5.6-sol', effort: 'xhigh', usage: { total: { outputTokens } } }));

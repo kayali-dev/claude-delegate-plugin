@@ -1,9 +1,9 @@
  delegate | fleet                            local | v?                     codex 42%   cursor off
 
 +- Managed jobs --------------------------------------------------------------------------- 1-2/2 -+
-| Job       Provi.. Model    Mode    Activity            Elapsed    Out/budget Chain    Badges     #
-|>C:1234567 codex   gpt-5... imple.. | working | 4s        2m05s 2.0k/8.0k 25% >654321   S1 L RF   #
-| C:abcdef0 cursor  compos.. review  + completed           7m20s           120 -         ?         #
+| Job       Provi.. Directory   Model   Effort Mode   Activity  Elap.. Out/bud.. Chain   Badges    #
+|>C:1234567 codex   alpha       gpt-5.. xhigh  impl.. | worki..  2m05s 2.0k/8... >654321  S1 L RF  #
+| C:abcdef0 cursor  beta        compo.. -      review + compl..  7m20s       120 -        ?        #
 |                                                                                                  #
 |                                                                                                  #
 |                                                                                                  #

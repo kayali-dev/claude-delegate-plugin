@@ -2,7 +2,7 @@
 import readline from 'node:readline';
 import { brokerError, normalizeBrokerError } from './lib/errors.mjs';
 import { enabledProviders } from './lib/state.mjs';
-import { aggregateAuditStats, aggregateAuditTotals, readAuditLog } from './lib/stats.mjs';
+import { aggregateAudit, readAuditLog } from './lib/stats.mjs';
 import {
   capEventsBySize,
   diffStat,
@@ -107,9 +107,7 @@ async function dispatch(name, args) {
   if (name === 'delegate_stats') {
     const unknown = Object.keys(args).filter((key) => key !== 'since');
     if (unknown.length) throw brokerError('INVALID_REQUEST', `delegate_stats unknown parameter${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
-    const records = readAuditLog();
-    const options = { since: args.since };
-    return { ...aggregateAuditStats(records, options), totals: aggregateAuditTotals(records, options) };
+    return aggregateAudit(readAuditLog(), { since: args.since });
   }
   if (name === 'delegate_transcript') return jobTranscriptPage(args.jobId, args);
   if (name === 'delegate_diff') {
@@ -143,7 +141,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.24.2' }
+        serverInfo: { name: 'delegate-control', version: '0.24.3' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

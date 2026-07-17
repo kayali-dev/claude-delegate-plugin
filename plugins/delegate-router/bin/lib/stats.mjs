@@ -32,13 +32,57 @@ export function normalizeStatsModel(model) {
   return value;
 }
 
-function outputTokens(record) {
+export function outputTokens(record) {
   const usage = record?.usage?.total && typeof record.usage.total === 'object' ? record.usage.total : record?.usage;
   for (const name of ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens']) {
-    const value = Number(usage?.[name]);
+    const candidate = usage?.[name];
+    if (candidate == null) continue;
+    if (typeof candidate !== 'number' && (typeof candidate !== 'string' || candidate.trim() === '')) continue;
+    const value = Number(candidate);
     if (Number.isFinite(value)) return value;
   }
   return null;
+}
+
+function auditChainKey(record, chainedRoots) {
+  if (record?.provider !== 'codex') return null;
+  const explicit = record.rootJobId || record.parentJobId;
+  if (explicit && chainedRoots.has(String(explicit))) return String(explicit);
+  const jobId = record.jobId == null ? null : String(record.jobId);
+  return jobId && chainedRoots.has(jobId) ? jobId : null;
+}
+
+// Codex reports thread-cumulative totals on resumed jobs. Attribute only the
+// increase within each chronological chain so callers do not multiply the
+// same tokens across review rounds. A decreasing counter starts a fresh
+// cumulative sequence and is therefore counted in full.
+export function attributeAuditOutputTokens(records = []) {
+  const values = records.map(outputTokens);
+  const chainedRoots = new Set(records.flatMap((record) => {
+    if (record?.provider !== 'codex' || !record.parentJobId) return [];
+    const root = record.rootJobId || record.parentJobId;
+    return root == null ? [] : [String(root)];
+  }));
+  const chains = new Map();
+  records.forEach((record, index) => {
+    const chain = auditChainKey(record, chainedRoots);
+    if (!chain || !Number.isFinite(values[index])) return;
+    if (!chains.has(chain)) chains.set(chain, []);
+    chains.get(chain).push({ index, at: Number(record.at || 0), value: values[index] });
+  });
+  for (const chain of chains.values()) {
+    let maximum = null;
+    chain.sort((left, right) => left.at - right.at || left.index - right.index).forEach((entry) => {
+      if (maximum == null || entry.value < maximum) {
+        values[entry.index] = Math.max(0, entry.value);
+        maximum = entry.value;
+        return;
+      }
+      values[entry.index] = Math.max(0, entry.value - maximum);
+      maximum = Math.max(maximum, entry.value);
+    });
+  }
+  return values;
 }
 
 function mean(values) {
@@ -51,47 +95,54 @@ function percentile(values, fraction) {
   return sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
 }
 
-function selectedRecords(records, options = {}) {
-  const windowMs = durationMs(options.since);
-  const now = Number(options.now || Date.now());
-  return windowMs == null ? records : records.filter((record) => Number(record.at || 0) >= now - windowMs);
+function snapshotNow(options = {}) {
+  const value = options.now;
+  return Number(value == null ? Date.now() : value);
 }
 
-export function aggregateAuditStats(records, options = {}) {
-  const selected = selectedRecords(records, options);
+function selectedRecords(records, attributedTokens, options, now) {
+  const windowMs = durationMs(options.since);
+  return records.flatMap((record, index) => windowMs == null || Number(record.at || 0) >= now - windowMs
+    ? [{ record, outputTokens: attributedTokens[index] }]
+    : []);
+}
+
+function aggregateSelectedStats(selected, options, now) {
   const cells = new Map();
-  for (const record of selected) {
+  for (const entry of selected) {
+    const { record } = entry;
     const provider = record.provider || 'unknown';
     const model = normalizeStatsModel(record.model);
     const mode = record.mode || 'unknown';
     const key = JSON.stringify([provider, model, mode]);
     if (!cells.has(key)) cells.set(key, { provider, model, mode, records: [] });
-    cells.get(key).records.push(record);
+    cells.get(key).records.push(entry);
   }
   const groups = [...cells.values()].map((cell) => {
-    const durations = cell.records.filter((record) => record.durationMs != null).map((record) => Number(record.durationMs)).filter(Number.isFinite);
-    const tokens = cell.records.map(outputTokens).filter(Number.isFinite);
-    const successes = cell.records.filter((record) => record.outcome?.status === 'completed'
+    const records = cell.records.map((entry) => entry.record);
+    const durations = records.filter((record) => record.durationMs != null).map((record) => Number(record.durationMs)).filter(Number.isFinite);
+    const tokens = cell.records.map((entry) => entry.outputTokens).filter(Number.isFinite);
+    const successes = records.filter((record) => record.outcome?.status === 'completed'
       && Number(record.scopeViolationsCount || 0) === 0
       && (record.verification == null || (Number.isFinite(Number(record.verification.exitCode)) && Number(record.verification.exitCode) === 0))).length;
-    const resumed = cell.records.filter((record) => Boolean(record.parentJobId)).length;
-    const resumeChains = new Set(cell.records.filter((record) => record.parentJobId).map((record) => record.rootJobId || record.parentJobId)).size;
-    const nudgeCount = cell.records.reduce((sum, record) => sum + Number(record.nudgeCount || record.nudges || 0), 0);
-    const violationCount = cell.records.reduce((sum, record) => sum + Number(record.scopeViolationsCount || 0), 0);
-    const violationJobs = cell.records.filter((record) => Number(record.scopeViolationsCount || 0) > 0).length;
-    const budgetCount = cell.records.filter((record) => record.outcome?.errorCode === 'BUDGET_EXCEEDED' || record.outcome?.stoppedReason === 'budget').length;
-    const timeoutCount = cell.records.filter((record) => record.outcome?.errorCode === 'TIMEOUT' || record.outcome?.stoppedReason === 'timeout').length;
+    const resumed = records.filter((record) => Boolean(record.parentJobId)).length;
+    const resumeChains = new Set(records.filter((record) => record.parentJobId).map((record) => record.rootJobId || record.parentJobId)).size;
+    const nudgeCount = records.reduce((sum, record) => sum + Number(record.nudgeCount || record.nudges || 0), 0);
+    const violationCount = records.reduce((sum, record) => sum + Number(record.scopeViolationsCount || 0), 0);
+    const violationJobs = records.filter((record) => Number(record.scopeViolationsCount || 0) > 0).length;
+    const budgetCount = records.filter((record) => record.outcome?.errorCode === 'BUDGET_EXCEEDED' || record.outcome?.stoppedReason === 'budget').length;
+    const timeoutCount = records.filter((record) => record.outcome?.errorCode === 'TIMEOUT' || record.outcome?.stoppedReason === 'timeout').length;
     return {
       provider: cell.provider,
       model: cell.model,
       mode: cell.mode,
-      jobs: cell.records.length,
+      jobs: records.length,
       successes,
-      successRate: cell.records.length ? successes / cell.records.length : 0,
+      successRate: records.length ? successes / records.length : 0,
       resumedJobs: resumed,
       resumeChains,
       nudgeCount,
-      nudgeRate: cell.records.length ? nudgeCount / cell.records.length : 0,
+      nudgeRate: records.length ? nudgeCount / records.length : 0,
       meanDurationMs: mean(durations),
       medianDurationMs: percentile(durations, 0.5),
       meanOutputTokens: mean(tokens),
@@ -101,26 +152,48 @@ export function aggregateAuditStats(records, options = {}) {
       violationCount
     };
   }).sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model) || a.mode.localeCompare(b.mode));
-  return { since: options.since || null, generatedAt: Number(options.now || Date.now()), jobs: selected.length, groups };
+  return { since: options.since || null, generatedAt: now, jobs: selected.length, groups };
 }
 
-export function aggregateAuditTotals(records, options = {}) {
-  const selected = selectedRecords(records, options);
+function aggregateSelectedTotals(selected) {
   const terminalStatuses = { completed: 0, failed: 0, cancelled: 0 };
   let totalOutputTokens = 0;
-  for (const record of selected) {
+  for (const entry of selected) {
+    const { record } = entry;
     const status = record.outcome?.status;
     if (Object.hasOwn(terminalStatuses, status)) terminalStatuses[status] += 1;
-    const tokens = outputTokens(record);
+    const tokens = entry.outputTokens;
     if (Number.isFinite(tokens)) totalOutputTokens += tokens;
   }
   return { jobs: selected.length, terminalStatuses, outputTokens: totalOutputTokens };
 }
 
+function aggregateSelection(records, options = {}) {
+  const now = snapshotNow(options);
+  const selected = selectedRecords(records, attributeAuditOutputTokens(records), options, now);
+  return { now, selected };
+}
+
+export function aggregateAudit(records, options = {}) {
+  const { now, selected } = aggregateSelection(records, options);
+  return { ...aggregateSelectedStats(selected, options, now), totals: aggregateSelectedTotals(selected) };
+}
+
+export function aggregateAuditStats(records, options = {}) {
+  const { now, selected } = aggregateSelection(records, options);
+  return aggregateSelectedStats(selected, options, now);
+}
+
+export function aggregateAuditTotals(records, options = {}) {
+  return aggregateSelectedTotals(aggregateSelection(records, options).selected);
+}
+
 export function auditUsageBands(records, options = {}) {
   const cells = new Map();
-  for (const record of selectedRecords(records, options)) {
-    const tokens = outputTokens(record);
+  const { selected } = aggregateSelection(records, options);
+  for (const entry of selected) {
+    const { record } = entry;
+    const tokens = entry.outputTokens;
     if (!Number.isFinite(tokens) || !record.provider || !record.model || !record.effort) continue;
     const models = new Set([record.model, record.requestedModel].filter(Boolean).map(normalizeStatsModel));
     for (const model of models) {

@@ -157,18 +157,35 @@ function badges(job) {
   return values.join(',') || '-';
 }
 
+function jobDirectory(job) {
+  if (typeof job?.cwd !== 'string' || !job.cwd.trim()) return '-';
+  return path.basename(job.cwd) || '-';
+}
+
+function jobEffort(job) {
+  return typeof job?.effort === 'string' && job.effort.trim() ? job.effort.trim() : '-';
+}
+
 function fleetColumns(width, remote = null, density = 'wide') {
-  const columns = width >= 90 && density !== 'compact' ? [
+  const hostWidth = remote?.enabled ? 16 : 0;
+  const wide = density !== 'compact' && width >= 96 + hostWidth;
+  const compactBaseWidth = 45;
+  const showEffort = wide || width >= compactBaseWidth + 7;
+  const showDirectory = wide || width >= compactBaseWidth + 7 + 12;
+  const columns = wide ? [
     { key: 'id', title: 'Job', width: 10, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
-    ...(remote?.enabled ? [{ key: 'host', title: 'Host', width: 16 }] : []),
-    { key: 'model', title: 'Model', width: 10, flexible: true }, { key: 'mode', title: 'Mode', width: 8 },
-    { key: 'activity', title: 'Activity', width: 20 },
-    { key: 'elapsed', title: 'Elapsed', width: 8, align: 'right' }, { key: 'tokens', title: 'Out/budget', width: 14, align: 'right' },
-    { key: 'chain', title: 'Chain', width: 9 }, { key: 'badges', title: 'Badges', width: 10 }
+    ...(remote?.enabled ? [{ key: 'host', title: 'Host', width: hostWidth }] : []),
+    { key: 'dir', title: 'Directory', width: 12 }, { key: 'model', title: 'Model', width: 8, flexible: true },
+    { key: 'effort', title: 'Effort', width: 7 }, { key: 'mode', title: 'Mode', width: 7 },
+    { key: 'activity', title: 'Activity', width: 10 },
+    { key: 'elapsed', title: 'Elapsed', width: 7, align: 'right' }, { key: 'tokens', title: 'Out/budget', width: 10, align: 'right' },
+    { key: 'chain', title: 'Chain', width: 8 }, { key: 'badges', title: 'Badges', width: 9 }
   ] : [
-    { key: 'id', title: 'Job', width: 10, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
-    { key: 'model', title: 'Model', width: 8, flexible: true }, { key: 'activity', title: 'Activity', width: 14 },
-    { key: 'badges', title: 'Badges', width: 7 }
+    { key: 'id', title: 'Job', width: 9, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
+    ...(showDirectory ? [{ key: 'dir', title: 'Directory', width: 12 }] : []),
+    { key: 'model', title: 'Model', width: 8, flexible: true },
+    ...(showEffort ? [{ key: 'effort', title: 'Effort', width: 7 }] : []),
+    { key: 'activity', title: 'Activity', width: 13 }, { key: 'badges', title: 'Badges', width: 7 }
   ];
   const total = columns.reduce((sum, column) => sum + column.width, 0);
   const flexible = columns.find((column) => column.flexible);
@@ -633,7 +650,9 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
       id: shortId(job),
       provider: displayOr(job.provider, '-'),
       host: displayOr(ui.remote?.host, '-'),
+      dir: jobDirectory(job),
       model: displayOr(job.resolvedModel || job.model || job.requestedModel, 'auto'),
+      effort: jobEffort(job),
       mode: displayOr(job.mode, '-'),
       activity: activityIndicator(activity, now),
       elapsed: duration(((job.completedAt ? job.completedAt * 1000 : now) - (job.createdAt || 0) * 1000)),

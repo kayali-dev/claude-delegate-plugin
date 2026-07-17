@@ -55,6 +55,10 @@ test('safe display formatting handles every provider value shape without implici
 
 test('nasty journal renders every detail tab and fleet without coercion artifacts or frame overflow', () => {
   const store = nastyStore();
+  const malformedFleetStore = nastyStore();
+  malformedFleetStore.jobs[0] = { ...malformedFleetStore.jobs[0], cwd: { path: '/work/object' }, effort: { tier: 'xhigh' } };
+  const malformedFleet = renderFrameToString(fleetViewModel(malformedFleetStore, { now: NOW }, { width: 100, height: 30 }));
+  for (const forbidden of ['[object Object]', 'undefined']) assert.ok(!malformedFleet.includes(forbidden));
   const frames = [fleetViewModel(store, { now: NOW }, { width: 100, height: 30 })];
   for (let detailTab = 0; detailTab < 5; detailTab += 1) {
     frames.push(detailViewModel(store, {
