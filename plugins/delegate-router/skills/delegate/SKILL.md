@@ -65,7 +65,7 @@ Inspect the returned job revision before controlling it. `delegate_steer` with `
 
 For scoped code reviews and independent second opinions, default to managed `delegate_start` with `mode=review`, `model=sol`, `effort=xhigh`, and the read-only sandbox. Inspect its transcript, diff, and usage. Reserve multi-agent review workflows for exhaustive audits, not routine scoped review.
 
-Use direct `mcp__delegate_codex__codex` and `codex-reply` only as a foreground compatibility fallback when `delegate_control` is unavailable. Direct MCP work is not visible to the unified transcript, diff, or live-control tools. Record fallback starts and outcomes with `delegate-usage record`.
+Use direct `mcp__delegate_codex__codex` and `codex-reply` only as foreground unmanaged compatibility fallbacks when `delegate_control` is unavailable; `delegate_start` remains the preferred supervised path. Each call is shadow-journaled as a new `direct-mcp` job, and `codex-reply` links that job to its originating shadow while retaining the provider thread. Messages, normalized provider events, diffs, files, usage, terminal audit, stats, and the TUI transcript remain visible. The caller still owns the provider loop, so steer, cancel, release, respond, resume, review round, and revert reject with `DIRECT_TRANSPORT`; inspection surfaces remain read-only. If shadow storage fails, the foreground call continues with its original result and no partial record.
 
 OpenAI's official plugin remains an optional fallback for its review and rescue commands:
 
@@ -86,9 +86,11 @@ Use the direct headless adapter only as a compatibility fallback:
 delegate-cursor --model <composer|grok|explicit-id> --mode <mode> --cwd "${CLAUDE_PROJECT_DIR}" --timeout-seconds <seconds> --prompt-file <task-packet-file>
 ```
 
+Foreground and `--background` runs each create exactly one `direct-cli` shadow job. Cursor's normalized message, ephemeral thinking activity, typed tools, file-change edit lines, usage, audit, and terminal sentinel are visible through the ordinary inspection, transcript, diff, files, stats, and TUI surfaces. These shadows are read-only from the control plane with `DIRECT_TRANSPORT`; use managed `delegate_start` when steering, cancellation, response, or resume ownership is required. Shadow-journal failure never changes the CLI's stdout or provider run.
+
 Both adapters prefer `agent`, fall back to `cursor-agent`, and accept `DELEGATE_CURSOR_BIN`. Managed ACP uses Cursor Smart Auto review and sandboxing for write modes. `approval=force` is the only mode allowed to approve an unresolved ACP permission request; normal `auto` keeps Smart Auto's safety decision and rejects anything still escalated to the client.
 
-For long work inside Claude Code, run the foreground `delegate-cursor` command with the Bash tool's native `run_in_background: true`; this keeps lifecycle and completion notifications visible to Claude. Use `--background` plus `delegate-jobs status|result|cancel` only when the command is launched directly from a normal terminal or another host that preserves detached processes. Do not poll rapidly.
+For long work inside Claude Code, run the foreground `delegate-cursor` command with the Bash tool's native `run_in_background: true`; this keeps host lifecycle and completion notifications visible to Claude. Use `--background` plus `delegate-jobs status|result` only when the command is launched directly from a normal terminal or another host that preserves detached processes. Direct shadows cannot be cancelled through `delegate-jobs`; the launching caller owns the process. Do not poll rapidly.
 
 ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|restart` cancels the current prompt, waits for it to settle, and sends the correction to the same session. It reports `appliedAs=restart`; never describe this as same-turn steering. `strategy=same-turn` must be rejected for Cursor. Continue completed work with `delegate_resume`, which loads the same Cursor session. Use sensitive paths only when explicitly authorized.
 

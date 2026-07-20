@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { DeltaRedactor, latestShadowJobForSession } from './lib/control.mjs';
+import { beginDirectShadow } from './lib/direct-shadow.mjs';
+import { ActivityTransitionEmitter, mapCodexMcpEvent } from './lib/providers.mjs';
 import { providerEnabled } from './lib/state.mjs';
 
 if (providerEnabled('codex')) {
@@ -12,11 +16,150 @@ if (providerEnabled('codex')) {
     '-c', 'sandbox_workspace_write.network_access=false',
     '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]'
   ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+
+  const calls = new Map();
+  const toolLists = new Set();
+  const requestKey = (id) => JSON.stringify(id);
+  const directDescription = {
+    codex: 'Run a Codex session as an unmanaged fallback. Delegate Router shadow-journals this call for fleet, transcript, diff, usage, and stats visibility; the shadow job is read-only from the control plane. Prefer delegate_start for managed execution.',
+    'codex-reply': 'Continue a Codex conversation as an unmanaged fallback. Delegate Router creates a new shadow-journaled resume job for fleet, transcript, diff, usage, and stats visibility; the shadow job is read-only from the control plane. Prefer delegate_start or delegate_resume for managed execution.'
+  };
+
+  const callOptions = (name, args) => {
+    const threadId = args.threadId || args.conversationId || null;
+    let parent = null;
+    if (name === 'codex-reply' && threadId) {
+      try { parent = latestShadowJobForSession('codex', threadId); } catch {}
+    }
+    const config = args.config && typeof args.config === 'object' ? args.config : {};
+    const sandbox = args.sandbox || config.sandbox_mode || parent?.sandbox || 'workspace-write';
+    const writeCapable = sandbox !== 'read-only';
+    return {
+      provider: 'codex',
+      transport: 'direct-mcp',
+      prompt: String(args.prompt || ''),
+      cwd: parent?.cwd || path.resolve(args.cwd || process.cwd()),
+      model: parent?.model || args.model || 'auto',
+      resolvedModel: parent?.resolvedModel || null,
+      mode: parent?.mode || (writeCapable ? 'implement' : 'review'),
+      effort: parent?.effort || config.model_reasoning_effort || null,
+      sandbox,
+      approval: args['approval-policy'] || parent?.approval || 'on-request',
+      providerSessionId: threadId,
+      parentJobId: parent?.id || null,
+      pid: child.pid,
+      workerPid: child.pid,
+      writeCapable,
+      params: Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'prompt'))
+    };
+  };
+
+  const observeRequest = (message) => {
+    if (message?.id == null) return;
+    if (message.method === 'tools/list') {
+      toolLists.add(requestKey(message.id));
+      return;
+    }
+    if (message.method !== 'tools/call') return;
+    const name = message.params?.name;
+    if (!['codex', 'codex-reply'].includes(name)) return;
+    const args = message.params?.arguments || {};
+    const shadow = beginDirectShadow(callOptions(name, args), { prefix: 'delegate-codex-mcp' });
+    const eventContext = { deltas: new DeltaRedactor(), lastCompletedText: null, activity: null };
+    if (shadow.id) {
+      eventContext.activity = new ActivityTransitionEmitter(shadow.id, {
+        emit: (kind, at) => shadow.event('activity', { kind, at })
+      });
+    }
+    calls.set(requestKey(message.id), { name, args, shadow, eventContext });
+  };
+
+  const observeResponse = (message) => {
+    if (message?.method === 'codex/event') {
+      const key = requestKey(message.params?._meta?.requestId);
+      const call = calls.get(key);
+      if (!call) return;
+      call.shadow.safe((job) => mapCodexMcpEvent(job, message.params, call.eventContext));
+      return;
+    }
+    if (message?.id == null) return;
+    const key = requestKey(message.id);
+    const call = calls.get(key);
+    if (!call || message.method) return;
+    const toolResult = message.result;
+    const text = typeof toolResult?.structuredContent?.content === 'string'
+      ? toolResult.structuredContent.content
+      : Array.isArray(toolResult?.content)
+        ? toolResult.content.filter((item) => item?.type === 'text').map((item) => item.text || '').join('')
+        : '';
+    const sessionId = toolResult?.structuredContent?.threadId
+      || message.params?._meta?.threadId
+      || call.args.threadId
+      || call.args.conversationId
+      || null;
+    call.shadow.setSession(sessionId);
+    call.shadow.lastCompletedText = call.eventContext.lastCompletedText;
+    call.shadow.messageCompleted(text, { sessionId });
+    const failed = Boolean(message.error || toolResult?.isError);
+    call.shadow.complete({
+      status: failed ? 'failed' : 'completed',
+      providerSessionId: sessionId,
+      result: toolResult,
+      resultText: text,
+      ...(failed ? { error: message.error?.message || text || 'direct Codex call failed', errorCode: 'PROVIDER_ERROR' } : {})
+    });
+    call.eventContext.activity?.close();
+    calls.delete(key);
+  };
+
+  let inputBuffer = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    inputBuffer += chunk;
+    for (;;) {
+      const newline = inputBuffer.indexOf('\n');
+      if (newline < 0) break;
+      const line = inputBuffer.slice(0, newline).replace(/\r$/, '');
+      inputBuffer = inputBuffer.slice(newline + 1);
+      if (!line) continue;
+      try { observeRequest(JSON.parse(line)); } catch {}
+    }
+  });
   process.stdin.pipe(child.stdin);
-  child.stdout.pipe(process.stdout);
+
+  let outputBuffer = Buffer.alloc(0);
+  child.stdout.on('data', (chunk) => {
+    outputBuffer = Buffer.concat([outputBuffer, chunk]);
+    for (;;) {
+      const newline = outputBuffer.indexOf(0x0a);
+      if (newline < 0) break;
+      const raw = outputBuffer.subarray(0, newline + 1);
+      outputBuffer = outputBuffer.subarray(newline + 1);
+      let message = null;
+      try { message = JSON.parse(raw.subarray(0, raw.length - 1).toString('utf8').replace(/\r$/, '')); } catch {}
+      const key = message?.id == null ? null : requestKey(message.id);
+      if (key && toolLists.delete(key) && Array.isArray(message?.result?.tools)) {
+        const rewritten = {
+          ...message,
+          result: {
+            ...message.result,
+            tools: message.result.tools.map((tool) => directDescription[tool.name]
+              ? { ...tool, description: directDescription[tool.name] }
+              : tool)
+          }
+        };
+        process.stdout.write(`${JSON.stringify(rewritten)}\n`);
+      } else process.stdout.write(raw);
+      try { observeResponse(message); } catch {}
+    }
+  });
   child.stderr.pipe(process.stderr);
   child.once('error', (error) => { console.error(`delegate-codex-mcp: ${error.message}`); process.exitCode = 1; });
-  child.once('exit', (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
+  child.once('exit', (code, signal) => {
+    if (outputBuffer.length) process.stdout.write(outputBuffer);
+    for (const call of calls.values()) call.eventContext.activity?.close();
+    process.exitCode = code ?? (signal ? 1 : 0);
+  });
   process.once('SIGINT', () => child.kill('SIGINT'));
   process.once('SIGTERM', () => child.kill('SIGTERM'));
 } else {
@@ -30,7 +173,7 @@ if (providerEnabled('codex')) {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-codex-disabled', version: '0.24.3' }
+        serverInfo: { name: 'delegate-codex-disabled', version: '0.25.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: [] } });
     else if (request.method === 'resources/list') send({ jsonrpc: '2.0', id: request.id, result: { resources: [] } });

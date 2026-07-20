@@ -149,6 +149,8 @@ function jobState(job) {
 
 function badges(job) {
   const values = [];
+  if (job.direct === true || ['direct-mcp', 'direct-cli', 'direct-acp'].includes(job.transport)) values.push('direct');
+  if (job.overlapsManagedWriter === true) values.push('writer!');
   if (job.resultSuspect) values.push('?');
   const violations = Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Number(job.scopeViolations || 0);
   if (violations) values.push(`S${violations}`);
@@ -179,13 +181,13 @@ function fleetColumns(width, remote = null, density = 'wide') {
     { key: 'effort', title: 'Effort', width: 7 }, { key: 'mode', title: 'Mode', width: 7 },
     { key: 'activity', title: 'Activity', width: 10 },
     { key: 'elapsed', title: 'Elapsed', width: 7, align: 'right' }, { key: 'tokens', title: 'Out/budget', width: 10, align: 'right' },
-    { key: 'chain', title: 'Chain', width: 8 }, { key: 'badges', title: 'Badges', width: 9 }
+    { key: 'chain', title: 'Chain', width: 8 }, { key: 'badges', title: 'Badges', width: 15 }
   ] : [
     { key: 'id', title: 'Job', width: 9, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
     ...(showDirectory ? [{ key: 'dir', title: 'Directory', width: 12 }] : []),
     { key: 'model', title: 'Model', width: 8, flexible: true },
     ...(showEffort ? [{ key: 'effort', title: 'Effort', width: 7 }] : []),
-    { key: 'activity', title: 'Activity', width: 13 }, { key: 'badges', title: 'Badges', width: 7 }
+    { key: 'activity', title: 'Activity', width: 13 }, { key: 'badges', title: 'Badges', width: 12 }
   ];
   const total = columns.reduce((sum, column) => sum + column.width, 0);
   const flexible = columns.find((column) => column.flexible);
@@ -676,7 +678,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     title: { text: `${ui.groupId ? `Group ${formatDisplayValue(ui.groupId)}` : 'Delegate fleet'}${ui.activeOnly ? `${CHROME_SEPARATOR}active` : ''}${ui.filter ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.filter)}` : ''}`, right: `${entries.length} jobs` },
     panes: [{
       rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) },
-      title: store.error ? `Store warning: ${formatDisplayValue(store.error)}` : 'Managed jobs',
+      title: store.error ? `Store warning: ${formatDisplayValue(store.error)}` : 'Delegation jobs',
       content: { kind: 'table', columns, rows, selected, scroll: ui.scroll || 0, empty: { message: 'no jobs match the filter', action: 'N to launch a job' } }
     }],
     status: statusOverride || {
@@ -805,6 +807,7 @@ function transcriptLineStyle(block, fragment) {
 
 function derivedResumable(job) {
   if (job.resumable) return job.resumable;
+  if (['direct-mcp', 'direct-cli', 'direct-acp'].includes(job.transport)) return { ok: false, reason: 'direct-transport job' };
   if (job.managedBy !== 'delegate-control') return { ok: false, reason: 'legacy job' };
   if (!TERMINAL.has(job.status)) return { ok: false, reason: 'job is active' };
   if (!job.providerSessionId && !job.session) return { ok: false, reason: 'no continuation id' };

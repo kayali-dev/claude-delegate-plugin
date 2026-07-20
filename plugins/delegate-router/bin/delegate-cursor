@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   availableModelIds,
   buildCursorArgs,
+  cursorLaunchCommand,
   findValue,
   resolveCursorBinary,
   resolveCursorModel,
@@ -13,16 +14,21 @@ import {
   stripPromptArgs
 } from './lib/cursor.mjs';
 import { terminateProcessTree } from './lib/process.mjs';
-import { appendJobEvent, redact, updateManagedJob } from './lib/control.mjs';
-import { securityPreamble } from './lib/providers.mjs';
+import { DeltaRedactor } from './lib/control.mjs';
+import { adoptDirectShadow, beginDirectShadow } from './lib/direct-shadow.mjs';
+import {
+  ActivityTransitionEmitter,
+  EphemeralCursorActivity,
+  mapCursorHeadlessEvent,
+  recordGitState,
+  securityPreamble
+} from './lib/providers.mjs';
 import {
   avoidPercentFor,
   effectiveUsage,
   jobsDir,
-  loadJob,
   loadState,
   recordEvent,
-  saveJob,
   saveState,
   setWindow,
   providerEnabled
@@ -99,8 +105,42 @@ function createJobId() {
   return `cursor-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function directShadowOptions(options, extra = {}) {
+  return {
+    provider: 'cursor',
+    transport: 'direct-cli',
+    prompt: options.prompt,
+    cwd: options.cwd,
+    model: extra.model || options.model,
+    resolvedModel: extra.resolvedModel || null,
+    mode: options.mode,
+    effort: null,
+    sandbox: options.sandbox === 'off' ? 'off' : 'auto',
+    approval: options.approval,
+    providerSessionId: options.resume,
+    pid: process.pid,
+    workerPid: process.pid,
+    writeCapable: !['consult', 'plan', 'review'].includes(options.mode),
+    params: {
+      model: options.model,
+      mode: options.mode,
+      cwd: options.cwd,
+      approval: options.approval,
+      threshold: options.threshold,
+      timeoutSeconds: options.timeoutSeconds,
+      sandbox: options.sandbox,
+      resume: options.resume,
+      overrideLimit: options.overrideLimit,
+      overrideLane: options.overrideLane,
+      allowSensitive: options.allowSensitive,
+      background: extra.background === true
+    }
+  };
+}
+
 function launchBackground(originalArgs, options) {
-  const id = createJobId();
+  const shadow = beginDirectShadow(directShadowOptions(options, { background: true }), { prefix: 'delegate-cursor' });
+  const id = shadow.id || createJobId();
   fs.mkdirSync(jobsDir(), { recursive: true, mode: 0o700 });
   const stdoutPath = path.join(jobsDir(), `${id}.out.log`);
   const stderrPath = path.join(jobsDir(), `${id}.err.log`);
@@ -111,7 +151,8 @@ function launchBackground(originalArgs, options) {
   const promptPath = path.join(jobsDir(), `${id}.prompt`);
   fs.writeFileSync(promptPath, options.prompt, { mode: 0o600 });
   const forwarded = stripPromptArgs(originalArgs.filter((value) => value !== '--background'));
-  forwarded.push('--prompt-file', promptPath, '--job-id', id);
+  forwarded.push('--prompt-file', promptPath);
+  if (shadow.id) forwarded.push('--job-id', id);
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...forwarded], {
     cwd: options.cwd,
     detached: true,
@@ -121,18 +162,11 @@ function launchBackground(originalArgs, options) {
   });
   fs.closeSync(stdout);
   fs.closeSync(stderr);
-  saveJob({
-    id,
-    provider: 'cursor',
-    requestedModel: options.model,
-    mode: options.mode,
-    status: 'running',
-    pid: child.pid,
-    cwd: options.cwd,
-    createdAt: Math.floor(Date.now() / 1000),
-    updatedAt: Math.floor(Date.now() / 1000),
-    stdoutPath,
-    stderrPath
+  shadow.update((job) => {
+    job.pid = child.pid;
+    job.workerPid = child.pid;
+    job.stdoutPath = stdoutPath;
+    job.stderrPath = stderrPath;
   });
   child.unref();
   console.log(JSON.stringify({ jobId: id, status: 'running', command: `delegate-jobs status ${id}` }, null, 2));
@@ -212,9 +246,21 @@ if (options.dryRun) {
 }
 
 const started = Date.now();
+let shadow = options.jobId ? adoptDirectShadow(options.jobId, { prefix: 'delegate-cursor' }) : null;
+if (!shadow) shadow = beginDirectShadow(directShadowOptions(options, { model, resolvedModel: model }), { prefix: 'delegate-cursor' });
+shadow.update((job) => {
+  job.pid = process.pid;
+  job.workerPid = process.pid;
+  job.model = model;
+  job.resolvedModel = model;
+  job.phase = 'running';
+});
+shadow.event('provider.initialized', { transport: 'direct-cli', model });
+shadow.event('turn.started', { transport: 'direct-cli', resume: options.resume }, { sessionId: options.resume });
+
 recordEvent(state, {
   provider: 'cursor', model, mode: options.mode, status: 'started',
-  promptChars: options.prompt.length, jobId: options.jobId
+  promptChars: options.prompt.length, jobId: shadow.id
 });
 saveState(state);
 
@@ -228,45 +274,23 @@ async function stop() {
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
 
-if (options.jobId) {
-  const now = Math.floor(Date.now() / 1000);
-  const existing = loadJob(options.jobId) || {};
-  saveJob({
-    ...existing,
-    id: options.jobId,
-    provider: 'cursor',
-    model,
-    requestedModel: options.model,
-    mode: options.mode,
-    status: 'running',
-    pid: process.pid,
-    cwd: options.cwd,
-    createdAt: now,
-    updatedAt: now
-  });
-}
-
 const seenProgress = new Set();
+const deltas = new DeltaRedactor();
+const assistantParts = [];
+const activity = shadow.id ? new ActivityTransitionEmitter(shadow.id, {
+  emit: (kind, at) => shadow.event('activity', { kind, at })
+}) : null;
+const ephemeral = activity ? new EphemeralCursorActivity(activity) : null;
+const launch = cursorLaunchCommand(binary, cursorArgs, false);
 const outcome = await runCursor({
-  binary,
-  args: cursorArgs,
+  binary: launch.command,
+  args: launch.args,
   cwd: options.cwd,
   prompt,
   timeoutMs: options.timeoutSeconds * 1000,
   onChild: (child) => { activeChild = child; },
   onEvent: (event) => {
-    if (!options.jobId) return;
-    appendJobEvent(options.jobId, 'provider.event', {
-      providerEvent: `cursor:${event.type || 'unknown'}`,
-      subtype: event.subtype
-    });
-    const earlySession = findValue(event, ['session_id', 'sessionId', 'chat_id', 'chatId']);
-    if (earlySession) {
-      updateManagedJob(options.jobId, (job) => {
-        job.providerSessionId = earlySession;
-        job.session = earlySession;
-      }, { incrementRevision: false });
-    }
+    shadow.safe((job) => mapCursorHeadlessEvent(job, event, { deltas, assistantParts, ephemeral }));
   },
   onProgress: (message) => {
     if (!seenProgress.has(message)) {
@@ -287,7 +311,7 @@ recordEvent(state, {
   session,
   inputTokens,
   outputTokens,
-  jobId: options.jobId,
+  jobId: shadow.id,
   timedOut: outcome.timedOut,
   cancelled: outcome.cancelled || stopping
 });
@@ -296,28 +320,19 @@ if (outcome.status !== 0 && /(?:quota|usage limit|rate limit|allowance)/i.test(o
 }
 saveState(state);
 
-if (options.jobId) {
-  const existing = loadJob(options.jobId) || {};
-  saveJob({
-    ...existing,
-    id: options.jobId,
-    provider: 'cursor',
-    model,
-    requestedModel: options.model,
-    mode: options.mode,
-    status: outcome.status === 0 ? 'completed' : outcome.cancelled || stopping ? 'cancelled' : 'failed',
-    pid: process.pid,
-    cwd: options.cwd,
-    createdAt: existing.createdAt || Math.floor(started / 1000),
-    updatedAt: Math.floor(Date.now() / 1000),
-    completedAt: Math.floor(Date.now() / 1000),
-    session,
-    result: redact(outcome.payload),
-    error: redact(outcome.error),
-    usage: { inputTokens, outputTokens },
-    durationMs: Date.now() - started
-  });
-}
+shadow.setSession(session, model);
+shadow.event('turn.completed', { status: outcome.status, error: outcome.error }, { sessionId: session });
+shadow.safe((job) => recordGitState(job, session, { includeLineCounts: true }));
+shadow.complete({
+  status: outcome.status === 0 ? 'completed' : outcome.cancelled || stopping ? 'cancelled' : 'failed',
+  providerSessionId: session,
+  resolvedModel: model,
+  result: outcome.payload,
+  resultText: typeof outcome.payload?.result === 'string' ? outcome.payload.result : '',
+  usage: inputTokens != null || outputTokens != null ? { inputTokens, outputTokens } : null,
+  ...(outcome.error ? { error: outcome.error, errorCode: outcome.timedOut ? 'TIMEOUT' : 'PROVIDER_ERROR' } : {})
+});
+activity?.close();
 
 if (outcome.payload) console.log(JSON.stringify(outcome.payload));
 if (outcome.error) console.error(`delegate-cursor: ${outcome.error}`);

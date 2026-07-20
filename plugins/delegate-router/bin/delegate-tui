@@ -29,7 +29,7 @@ import {
   virtualLogBottomPosition
 } from './lib/tui/components.mjs';
 import { tailAllJobs } from './lib/tui/datasource.mjs';
-import { remoteActionMessage } from './lib/tui/action-policy.mjs';
+import { directTransportActionMessage, remoteActionMessage } from './lib/tui/action-policy.mjs';
 import { connectRemoteDatasource } from './lib/tui/remote-datasource.mjs';
 import { editTextInEditor, withEditorInputHandoff } from './lib/tui/editor.mjs';
 import { BufferedInput } from './lib/tui/input.mjs';
@@ -1257,6 +1257,12 @@ function handleKey(key) {
   const blocked = remoteActionMessage(ui, key);
   if (blocked) {
     setStatus(blocked, 'error');
+    draw();
+    return;
+  }
+  const directBlocked = directTransportActionMessage(ui, key, selectedJob());
+  if (directBlocked) {
+    setStatus(directBlocked, 'error');
     draw();
     return;
   }

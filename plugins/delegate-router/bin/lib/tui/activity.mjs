@@ -12,7 +12,7 @@ export const ACTIVITY_CAPABILITIES = Object.freeze({
 });
 
 export function activityTransportKey(job = {}) {
-  if (job.provider === 'cursor') return job.transport === 'headless' ? 'cursor:headless' : 'cursor:acp';
+  if (job.provider === 'cursor') return ['headless', 'direct-cli'].includes(job.transport) ? 'cursor:headless' : 'cursor:acp';
   return 'codex:app-server';
 }
 

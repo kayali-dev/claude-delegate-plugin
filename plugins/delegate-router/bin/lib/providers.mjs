@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, completeIngestedFiles, DeltaRedactor, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, completeIngestedFiles, DeltaRedactor, diffStat, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -311,7 +311,7 @@ export function assertProviderVersion(provider, binary) {
   return { provider, observedVersion: observed, requiredVersion: required };
 }
 
-function recordUsage(job, usage, options = {}) {
+export function recordUsage(job, usage, options = {}) {
   appendJobEvent(job.id, 'usage.updated', usage, options);
   updateManagedJob(job.id, (current) => { current.usage = usage; }, { incrementRevision: false });
   const totals = usageTotals(usage);
@@ -476,6 +476,223 @@ function mapCodexItem(jobId, phase, params, activity = null) {
   }
 }
 
+function directCodexSession(params, msg) {
+  return params?._meta?.threadId || msg?.thread_id || msg?.threadId || msg?.session_id || msg?.sessionId || null;
+}
+
+function directCodexTurn(msg) {
+  return msg?.turn_id || msg?.turnId || null;
+}
+
+function directCodexType(value) {
+  return String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[-\s]+/g, '_')
+    .toLowerCase();
+}
+
+function directCodexMessageText(item) {
+  if (typeof item?.text === 'string') return item.text;
+  if (typeof item?.message === 'string') return item.message;
+  if (!Array.isArray(item?.content)) return '';
+  return item.content
+    .filter((part) => directCodexType(part?.type) === 'text' || directCodexType(part?.type) === 'output_text')
+    .map((part) => typeof part.text === 'string' ? part.text : '')
+    .join('');
+}
+
+function directCodexChanges(msg) {
+  const raw = msg?.changes ?? msg?.file_changes ?? msg?.fileChanges;
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === 'object') {
+    return Object.entries(raw).map(([file, change]) => change && typeof change === 'object'
+      ? { path: file, ...change }
+      : { path: file, kind: change == null ? 'edit' : String(change) });
+  }
+  const file = msg?.path || msg?.file || msg?.file_path || msg?.filePath;
+  return file ? [{ path: file, kind: msg?.kind || msg?.status || 'edit' }] : [];
+}
+
+function directCodexTool(msg, event, kind = null) {
+  return {
+    toolCallId: msg?.call_id || msg?.callId || msg?.item_id || msg?.itemId || event?.id,
+    kind: kind || msg?.type || 'tool',
+    title: msg?.name || msg?.command || kind || msg?.type || 'tool',
+    command: msg?.command,
+    cwd: msg?.cwd,
+    status: msg?.status,
+    exitCode: msg?.exit_code ?? msg?.exitCode
+  };
+}
+
+function directCodexUsage(msg) {
+  const info = msg?.info || {};
+  const total = info.total_token_usage || info.totalTokenUsage || msg?.total_token_usage || msg?.totalTokenUsage;
+  const last = info.last_token_usage || info.lastTokenUsage || msg?.last_token_usage || msg?.lastTokenUsage;
+  const direct = msg?.token_usage || msg?.tokenUsage || msg?.usage;
+  if (total) return { total, ...(last ? { last } : {}) };
+  return direct || null;
+}
+
+// `codex mcp-server` exposes the same provider stream as custom
+// `codex/event` notifications, tagged with the originating MCP request id.
+// Normalize those legacy EventMsg envelopes into the durable event vocabulary
+// used by the managed app-server adapter.
+export function mapCodexMcpEvent(job, params = {}, context = {}) {
+  const msg = params?.msg && typeof params.msg === 'object' ? params.msg : {};
+  const type = directCodexType(msg.type || 'unknown');
+  const sessionId = directCodexSession(params, msg) || job.providerSessionId || null;
+  const turnId = directCodexTurn(msg);
+  const options = { sessionId, turnId };
+  const activity = context.activity;
+  const deltas = context.deltas || new DeltaRedactor();
+  const output = () => activity?.mark('output');
+  const thinking = () => activity?.mark('thinking');
+
+  if (type === 'session_configured') {
+    output();
+    updateManagedJob(job.id, (current) => {
+      if (sessionId) {
+        current.providerSessionId = sessionId;
+        current.session = sessionId;
+      }
+      if (msg.model) current.resolvedModel = msg.model;
+      if (msg.reasoning_effort && !current.effort) current.effort = msg.reasoning_effort;
+    }, { incrementRevision: false });
+    appendJobEvent(job.id, 'provider.initialized', { transport: 'direct-mcp', model: msg.model }, options);
+    appendJobEvent(job.id, 'session.created', { sessionId, model: msg.model }, options);
+  } else if (type === 'turn_started') {
+    output();
+    appendJobEvent(job.id, 'turn.started', { transport: 'direct-mcp' }, options);
+  } else if (type === 'agent_message_content_delta' || type === 'agent_message_delta') {
+    output();
+    const delta = msg.delta || msg.text || '';
+    appendJobEvent(job.id, 'message.delta', {
+      id: msg.item_id || msg.itemId || params.id,
+      delta: deltas.redactDelta(`message:${msg.item_id || msg.itemId || 'direct-mcp'}`, delta)
+    }, options);
+  } else if (type === 'agent_message') {
+    output();
+    const text = msg.message || msg.text || '';
+    if (text && text !== context.lastCompletedText) {
+      appendJobEvent(job.id, 'message.completed', { id: msg.item_id || msg.itemId || params.id, text }, options);
+      storeProviderResult(job.id, text);
+      context.lastCompletedText = text;
+    }
+  } else if (/reasoning/.test(type)) {
+    thinking();
+  } else if (type === 'plan_update' || type === 'plan_delta') {
+    output();
+    appendJobEvent(job.id, 'plan.updated', msg.plan || msg, options);
+  } else if (type === 'exec_command_begin') {
+    output();
+    appendJobEvent(job.id, 'tool.started', directCodexTool(msg, params, 'commandExecution'), options);
+  } else if (type === 'exec_command_output_delta' || type === 'terminal_interaction') {
+    output();
+    appendJobEvent(job.id, 'tool.output', {
+      ...directCodexTool(msg, params, 'commandExecution'),
+      delta: deltas.redactDelta(`tool:${msg.call_id || msg.callId || params.id || 'direct-mcp'}`, msg.delta || msg.chunk || msg.output || '')
+    }, options);
+  } else if (type === 'exec_command_end') {
+    output();
+    appendJobEvent(job.id, 'tool.completed', directCodexTool(msg, params, 'commandExecution'), options);
+  } else if (type === 'mcp_tool_call_begin' || type === 'dynamic_tool_call_request'
+    || type === 'web_search_begin' || type === 'image_generation_begin' || type === 'view_image_tool_call') {
+    output();
+    appendJobEvent(job.id, 'tool.started', directCodexTool(msg, params), options);
+  } else if (type === 'mcp_tool_call_end' || type === 'dynamic_tool_call_response'
+    || type === 'web_search_end' || type === 'image_generation_end') {
+    output();
+    appendJobEvent(job.id, 'tool.completed', directCodexTool(msg, params), options);
+  } else if (type === 'patch_apply_begin' || type === 'patch_apply_updated' || type === 'patch_apply_end') {
+    output();
+    const phase = type === 'patch_apply_begin' ? 'started' : type === 'patch_apply_end' ? 'completed' : 'updated';
+    const toolType = phase === 'started' ? 'tool.started' : phase === 'completed' ? 'tool.completed' : 'tool.status';
+    appendJobEvent(job.id, toolType, directCodexTool(msg, params, 'fileChange'), options);
+    const changes = directCodexChanges(msg);
+    if (changes.length) appendJobEvent(job.id, 'file.changed', { changes, phase }, options);
+  } else if (type === 'item_started' || type === 'item_completed') {
+    const phase = type === 'item_started' ? 'started' : 'completed';
+    const item = msg.item || {};
+    const itemType = directCodexType(item.type);
+    if (itemType === 'reasoning') {
+      thinking();
+    } else if (itemType === 'user_message') {
+      // The prompt is already stored through the ordinary redacted
+      // message.user path; never duplicate provider-echoed prompt content.
+    } else if (itemType === 'file_change') {
+      output();
+      const changes = directCodexChanges(item);
+      if (changes.length) appendJobEvent(job.id, 'file.changed', { changes, phase, status: item.status }, options);
+    } else if (itemType === 'agent_message' && phase === 'completed') {
+      output();
+      const text = directCodexMessageText(item);
+      if (text && text !== context.lastCompletedText) {
+        appendJobEvent(job.id, 'message.completed', { id: item.id, text }, options);
+        storeProviderResult(job.id, text);
+        context.lastCompletedText = text;
+      }
+    } else if (itemType === 'agent_message') {
+      output();
+    } else if (itemType === 'plan') {
+      output();
+      appendJobEvent(job.id, 'plan.updated', { id: item.id, text: item.text, phase }, options);
+    } else if (itemType === 'context_compaction') {
+      output();
+      appendJobEvent(job.id, `compaction.${phase}`, { itemId: item.id }, options);
+    } else if (['command_execution', 'mcp_tool_call', 'dynamic_tool_call', 'collab_agent_tool_call',
+      'web_search', 'image_generation', 'view_image_tool_call'].includes(itemType)) {
+      output();
+      if (itemType === 'collab_agent_tool_call') {
+        updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; }, { incrementRevision: false });
+      }
+      appendJobEvent(job.id, phase === 'started' ? 'tool.started' : 'tool.completed', {
+        ...directCodexTool(item, params, itemType),
+        item
+      }, options);
+    } else if (itemType) {
+      appendJobEvent(job.id, 'provider.event', { providerEvent: `codex:item_${phase}`, itemType, itemId: item.id }, options);
+    }
+  } else if (type === 'turn_diff') {
+    output();
+    const diff = msg.unified_diff || msg.unifiedDiff || msg.diff || '';
+    if (diff) appendJobEvent(job.id, 'diff.updated', { diff }, options);
+  } else if (type === 'token_count') {
+    const usage = directCodexUsage(msg);
+    if (usage) recordUsage(job, usage, options);
+  } else if (type === 'context_compacted') {
+    output();
+    appendJobEvent(job.id, 'compaction.completed', { itemId: msg.item_id || msg.itemId || params.id }, options);
+  } else if (type === 'exec_approval_request' || type === 'apply_patch_approval_request' || type === 'request_permissions') {
+    output();
+    appendJobEvent(job.id, 'approval.requested', { kind: type, callId: msg.call_id || msg.callId, command: msg.command, cwd: msg.cwd }, options);
+  } else if (type === 'request_user_input' || type === 'elicitation_request') {
+    output();
+    appendJobEvent(job.id, 'input.requested', { kind: type, requestId: msg.id || params.id }, options);
+  } else if (type === 'turn_complete' || type === 'turn_aborted') {
+    output();
+    appendJobEvent(job.id, 'turn.completed', { status: type === 'turn_complete' ? 'completed' : 'aborted' }, options);
+  } else if (type === 'error') {
+    output();
+    appendJobEvent(job.id, 'error', { code: msg.error_code || msg.code || 'PROVIDER_ERROR', error: msg.message || msg.error }, options);
+  } else if (type === 'warning' || type === 'guardian_warning') {
+    output();
+    appendJobEvent(job.id, 'provider.event', { providerEvent: `codex:${type}`, message: msg.message }, options);
+  } else if (/^collab_|^sub_agent_/.test(type)) {
+    output();
+    updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; }, { incrementRevision: false });
+    appendJobEvent(job.id, 'subagent.activity', { providerEvent: `codex:${type}` }, options);
+  } else if (!['user_message', 'thread_settings_applied', 'model_verification'].includes(type)) {
+    appendJobEvent(job.id, 'provider.event', { providerEvent: `codex:${type}` }, options);
+  }
+  return {
+    sessionId,
+    resolvedModel: type === 'session_configured' ? msg.model || null : null,
+    completedText: context.lastCompletedText || null,
+    usage: type === 'token_count' ? directCodexUsage(msg) : null
+  };
+}
+
 // sandbox: 'off' maps to Codex danger-full-access — the job explicitly needs
 // host tools (git, CLIs, live web). Web search follows the same intent: it is
 // enabled whenever the job has any form of outside access.
@@ -612,7 +829,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.24.3' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.25.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -907,7 +1124,7 @@ function prepareCursorNetwork(job, transport) {
   }
 }
 
-class EphemeralCursorActivity {
+export class EphemeralCursorActivity {
   constructor(marker, limit = 2048) {
     this.marker = marker;
     this.limit = limit;
@@ -1152,15 +1369,18 @@ function gitWorkspaceState(job) {
   return { diff, files, includesPreexisting, error: errors.filter(Boolean).join('; ') || null };
 }
 
-function recordGitState(job, sessionId) {
+export function recordGitState(job, sessionId, options = {}) {
   const state = gitWorkspaceState(job);
   const changed = state.files.filter((file) => !file.unchangedSinceBaseline);
+  const counts = options.includeLineCounts === true
+    ? new Map(diffStat(state.diff).files.map((file) => [file.path, { added: file.additions, removed: file.deletions }]))
+    : new Map();
   for (const file of state.files) {
     // Pre-existing files proven byte-identical to the job-start baseline were
     // at most read, never changed — emitting file.changed for them is exactly
     // the attribution noise this filter removes.
     if (file.unchangedSinceBaseline) continue;
-    appendJobEvent(job.id, 'file.changed', file, { sessionId });
+    appendJobEvent(job.id, 'file.changed', { ...file, ...counts.get(file.path) }, { sessionId });
   }
   if (state.diff) appendJobEvent(job.id, 'diff.updated', { diff: state.diff, includesPreexistingChanges: state.includesPreexisting === true }, { sessionId });
   if (state.error) appendJobEvent(job.id, 'provider.event', { providerEvent: 'git-inventory-warning', error: state.error }, { sessionId });
@@ -1417,7 +1637,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.24.3' }
+      clientInfo: { name: 'delegate-router', version: '0.25.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

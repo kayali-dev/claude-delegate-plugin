@@ -1,6 +1,6 @@
 # Usage Tracking
 
-`delegate-usage` maintains a small JSON state file and append-only invocation history. It does not store prompts or source code. Managed supervision is separate: it stores local user-visible transcripts, tool activity, and diffs in user-only job artifacts so Claude can inspect delegated work.
+`delegate-usage` maintains a small JSON state file and append-only invocation history. It does not store prompts or source code. Job supervision is separate: managed runs and direct-transport shadows store local user-visible transcripts, tool activity, and diffs in user-only job artifacts so Claude can inspect delegated work.
 
 Default path:
 
@@ -40,9 +40,9 @@ The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex w
 
 Per-job observed tokens and context occupancy are separate dimensions, neither of which is a subscription allowance percentage. `delegate_usage.tokenUsage` / `observed` contains input/output/total tokens and feeds the `maxOutputTokens` check; `chainCumulative` sums those token counters from the root job through the inspected continuation. Cursor ACP `usage_update {used,size}` is stored only as `contextOccupancy: { contextUsed, contextSize }`, never interpreted as output tokens and never compared with `maxOutputTokens`. Headless Cursor records tokens only from its final `result.usage` envelope. Routing continues to use the provider windows in `usage.json`.
 
-`delegate-jobs stats` reads the never-pruned audit log and reports fleet outcomes, resume/nudge counts, durations, tokens, budgets, timeouts, and scope violations. The read-only MCP `delegate_stats` accepts the same optional `since` duration (for example `24h` or `7d`) and returns those aggregates plus `totals` for jobs, terminal statuses, and summed output tokens, so coordinators can govern spend without shelling out. `delegate-health --deep` intentionally spends real allowance on one bounded managed probe per enabled provider and writes its `{ provider, ok, durationMs, cliVersion, at }` result under `lastVerified`. Ordinary Cursor health uses `agent status --format json` with a text fallback and a no-turn ACP initialize/session-new capability probe; neither spends model allowance.
+`delegate-jobs stats` reads the never-pruned audit log and reports fleet outcomes, resume/nudge counts, durations, tokens, budgets, timeouts, and scope violations across managed jobs and direct Codex/Cursor shadows. The read-only MCP `delegate_stats` accepts the same optional `since` duration (for example `24h` or `7d`) and returns those aggregates plus `totals` for jobs, terminal statuses, and summed output tokens, so coordinators can govern spend without shelling out. `delegate-health --deep` intentionally spends real allowance on one bounded managed probe per enabled provider and writes its `{ provider, ok, durationMs, cliVersion, at }` result under `lastVerified`. Ordinary Cursor health uses `agent status --format json` with a text fallback and a no-turn ACP initialize/session-new capability probe; neither spends model allowance.
 
-Stats attribute Codex resume-chain output as chronological deltas because each continuation can carry a thread-cumulative total; standalone jobs and Cursor samples remain unchanged, and a lower Codex counter is treated as a fresh thread and counted in full.
+Stats attribute Codex resume-chain output as chronological deltas because each continuation can carry a thread-cumulative total. This includes `codex-reply` shadow children linked to the originating direct call; standalone jobs and Cursor samples remain unchanged, and a lower Codex counter is treated as a fresh thread and counted in full.
 
 Sources: https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md, https://code.claude.com/docs/en/statusline, and https://docs.cursor.com/account/pricing
 

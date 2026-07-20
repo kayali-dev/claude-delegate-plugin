@@ -34,7 +34,7 @@ Allow only one writer for a path set. A read-only reviewer may inspect a stable 
 
 The broker enforces this for managed jobs: a write-mode start (`implement` or `verify`) in a cwd that already has an active write-mode job fails with `WRITER_ACTIVE` and the blocking job's ID. Orphaned writers (dead worker process) are reconciled to `failed` automatically and stop blocking. Worktree-isolated jobs are exempt. `overrideWriter=true` bypasses the guard; use it only with explicit user acceptance of concurrent writers.
 
-This guard cannot see unmanaged editors, including the current coordinator or a built-in subagent. A write job launched from a non-empty Git baseline emits `baseline.dirty` with a bounded path list; treat it as a coordination warning, not proof that no other editor is active.
+This guard cannot see unmanaged editors, including the current coordinator or a built-in subagent. Direct Codex MCP and Cursor CLI launches remain behavior-compatible and are never blocked by the managed writer guard. Their shadow record instead sets `overlapsManagedWriter: true` and emits `DIRECT_WRITER_OVERLAP` as a warning when a write-capable direct call shares a cwd with an active managed writer. A write job launched from a non-empty Git baseline emits `baseline.dirty` with a bounded path list; treat either signal as a coordination warning, not proof that no other editor is active.
 
 Give any start that may be retried a stable `idempotencyKey`. Lookup and job creation are atomic under the per-cwd launch lock, so a replay returns the existing job instead of launching a second worker.
 
@@ -65,7 +65,7 @@ A steer that reduces the remaining work can finish the job before any follow-up 
 
 Cursor `cursor/ask_question` and `cursor/create_plan` requests are blocking control-inbox items, not provider noise. The job stays running in phase `user-input-required`, persists the redacted request under `pendingInput`, and emits `input.requested`. Inspect the latest revision, then use MCP `delegate_respond` or `delegate-jobs respond <id> --expected-revision N --request-id ... --answer ...` (with `--accept`/`--reject` for plans); retry the same response with the same `commandId`. No answer or plan approval is fabricated. `DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS` (default 300) bounds the wait; expiry rejects the provider request and fails with `stopReason: input-timeout`.
 
-For managed runs, store the job ID and use the `delegate_control` inspection and control tools. Direct Cursor jobs remain available through `delegate-jobs`; official Codex plugin jobs retain their own lifecycle commands. Never describe a foreground MCP call or an external-plugin job as a managed control-plane job.
+For managed runs, store the job ID and use the `delegate_control` inspection and control tools. Direct Codex MCP calls and Cursor foreground/background CLI runs create observable shadow jobs (`direct-mcp` and `direct-cli`) in the same store, event journal, transcript, diff/files, usage, audit/stats, orphan-reconciliation, and terminal-sentinel pipeline. They remain unmanaged provider loops: steer, cancel, release, respond, resume, review round, and revert return `DIRECT_TRANSPORT`, while inspect, list, events, transcript, diff, files, and usage stay available. Official Codex plugin jobs retain their own independent lifecycle commands. Never describe a direct or external-plugin job as a managed control-plane job.
 
 ## Idempotency
 

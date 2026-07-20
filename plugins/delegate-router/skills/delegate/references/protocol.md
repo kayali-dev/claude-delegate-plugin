@@ -15,6 +15,8 @@ Terminal jobs older than `DELEGATE_JOB_RETENTION_DAYS` (default 14) are pruned o
 
 Every first transition into a terminal status appends one redacted, private JSON line to the separate `audit.jsonl` beside the state file. It records actor, provider/model/mode/effort, resume/group provenance, access policy, cwd, observed change/violation counts, verification, nudges, outcome, usage, and duration. Job pruning never removes this log; `delegate-jobs stats` aggregates it and `delegate-health` reports its path. `delegate-jobs audit backfill` uses the same record builder to append missing retained terminal jobs with `backfilled: true`, once per job ID.
 
+Direct Codex MCP calls and Cursor foreground/background CLI runs enter the same storage pipeline as shadow jobs with `transport: 'direct-mcp'` or `transport: 'direct-cli'`. Raw caller parameters are recursively redacted and bounded; the prompt is a normal `message.user`. Provider notifications are tee'd through the managed event normalizers without changing caller-visible output. Each call owns a distinct running record, PID/heartbeat-compatible liveness fields, terminal sentinel, and audit entry. A Codex reply creates a child shadow with the same thread ID so cumulative thread usage is delta-attributed across the chain. Shadow creation is atomic: any storage failure removes its partial files, logs once to stderr, and leaves the direct provider call on its legacy path.
+
 Inspection reconciles liveness: a job recorded as `running` whose worker process no longer exists is transitioned to `failed` with an `ORPHANED` error event before the snapshot is returned. `delegate_list` rediscovers jobs by recency when an ID is no longer in context.
 
 Inspect and list rows expose `lastActivityAt` from the last complete non-replay journal line (the ordinary fast path reads only the tail; a replay tail falls back to the newest live event). `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
@@ -71,9 +73,11 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 | Retryable | Codes |
 | --- | --- |
 | `true` | `LOCK_TIMEOUT`, `WRITER_ACTIVE`, `REVISION_CONFLICT`, `ORPHANED`, `PARENT_ACTIVE`, `TIMEOUT`, `RPC_TIMEOUT`, `TRANSPORT_ERROR`, `PROVIDER_ERROR`, `STATE_ERROR` |
-| `false` | `INVALID_REQUEST`, `NOT_FOUND`, `QUOTA_GUARD`, `INVALID_MODEL`, `WRONG_LANE`, `RESUME_UNSUPPORTED`, `ACP_TIER_UNAVAILABLE`, `USER_INPUT_REQUIRED`, `SECRET_IN_PROMPT`, `BUDGET_EXCEEDED`, `LARGE_WRITE`, `PROVIDER_DISABLED`, `PROVIDER_TOO_OLD`, `SESSION_UNAVAILABLE`, `UNMANAGED_JOB`, `JOB_TERMINAL`, `UNSUPPORTED_STRATEGY`, `INTERNAL` |
+| `false` | `INVALID_REQUEST`, `NOT_FOUND`, `QUOTA_GUARD`, `INVALID_MODEL`, `WRONG_LANE`, `RESUME_UNSUPPORTED`, `DIRECT_TRANSPORT`, `ACP_TIER_UNAVAILABLE`, `USER_INPUT_REQUIRED`, `SECRET_IN_PROMPT`, `BUDGET_EXCEEDED`, `LARGE_WRITE`, `PROVIDER_DISABLED`, `PROVIDER_TOO_OLD`, `SESSION_UNAVAILABLE`, `UNMANAGED_JOB`, `JOB_TERMINAL`, `UNSUPPORTED_STRATEGY`, `INTERNAL` |
 
 `retryable: true` means retrying the same request, possibly after backoff, can succeed. `QUOTA_GUARD` needs a window reset or different provider; `ACP_TIER_UNAVAILABLE` needs a catalog or transport change; `USER_INPUT_REQUIRED` needs new information in a resume; and `BUDGET_EXCEEDED` needs a higher cap. `REVISION_CONFLICT` includes `currentRevision`; budget and timeout failures retain partial state for an explicit resume.
+
+`DIRECT_TRANSPORT` means the record is an observability shadow whose original caller owns the provider loop. All mutation controls reject without signalling the provider; read-only inspection, events, transcript, diff, files, usage, and aggregate stats remain available.
 
 `retryPolicy` is narrower than the taxonomy: only retryable `TRANSPORT_ERROR`, `RPC_TIMEOUT`, or `PROVIDER_ERROR` failures during provider startup/turn execution qualify as `transport`; provider 429/5xx signatures qualify as `rate-limit`. Each retry stays on the same job, reuses a continuation when present, increments `retries`, and emits `job.retry`. The default is no retries. Commands are claimed after backoff and immediately before relaunch: cancel terminals the job without another spawn, and steer is rejected because there is no active attempt.
 
@@ -86,6 +90,8 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 - Cursor `same-turn`: reject as unsupported by ACP v1.
 
 Every correction supplies a caller-stable `correctionId`; repeating it returns the existing control record. Every result states how it was applied.
+
+Direct-transport shadows support none of these correction or continuation operations. A direct `codex-reply` call is journaled as a new caller-owned child shadow rather than a broker resume.
 
 If Codex requests interactive user input, managed v1 records the request and fails explicitly rather than inventing an empty answer. Cursor ACP `cursor/ask_question` and `cursor/create_plan` instead enter the revisioned control inbox: phase becomes `user-input-required`, the redacted payload is inspectable, and MCP `delegate_respond` or CLI `delegate-jobs respond` completes the JSON-RPC request exactly once. Timeout rejects it with `USER_INPUT_REQUIRED` and `stopReason: input-timeout`; plans are never auto-accepted.
 

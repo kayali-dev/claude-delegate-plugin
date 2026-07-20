@@ -25,6 +25,7 @@ const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WRITE_MODES = new Set(['implement', 'verify']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
+export const DIRECT_TRANSPORTS = Object.freeze(new Set(['direct-mcp', 'direct-cli', 'direct-acp']));
 const INGEST_MAX_FILES = 20;
 const INGEST_MAX_BYTES = 10 * 1024 * 1024;
 const SENSITIVE_PATH = /(?:^|\/)(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]*(?:secret|credential|private.?key|token)[^/]*|[^/]+\.(?:pem|key|p12|pfx|crt|cer))$/i;
@@ -136,6 +137,8 @@ export function terminalAuditRecord(job, options = {}) {
     requestedModel: job.requestedModel || job.model || null,
     mode: job.mode || null,
     effort: job.effort || null,
+    transport: job.transport || null,
+    providerSessionId: job.providerSessionId || job.session || null,
     parentJobId: job.parentJobId || null,
     rootJobId: rootJobIdOf(job) || job.id,
     groupId: job.groupId || null,
@@ -359,6 +362,9 @@ function readRawEvents(id) {
 }
 
 function resumabilityFor(job) {
+  if (isDirectTransport(job)) {
+    return { ok: false, reason: 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', code: 'DIRECT_TRANSPORT' };
+  }
   if (job.managedBy !== 'delegate-control') {
     return { ok: false, reason: 'legacy jobs cannot be resumed through delegate_resume', code: 'UNMANAGED_JOB' };
   }
@@ -547,6 +553,43 @@ export function updateManagedJob(id, mutate, options = {}) {
   });
 }
 
+export function completeShadowJob(id, outcome = {}) {
+  const status = ['completed', 'failed', 'cancelled'].includes(outcome.status) ? outcome.status : 'failed';
+  const files = jobFiles(id);
+  const entries = files.slice(0, 1000).map((file) => {
+    const finalHash = file.path ? hashWorkingFile(loadJob(id)?.cwd || process.cwd(), file.path) : null;
+    return {
+      ...file,
+      ...(finalHash ? { finalHash } : {})
+    };
+  });
+  const names = [...new Set(entries.map((entry) => entry.path).filter(Boolean))];
+  const completedAt = Math.floor(Date.now() / 1000);
+  const completed = updateManagedJob(id, (job) => {
+    job.status = status;
+    job.phase = status;
+    job.completedAt = completedAt;
+    job.durationMs = Math.max(0, completedAt * 1000 - Number(job.createdAt || completedAt) * 1000);
+    job.changedFiles = { count: names.length, files: names.slice(0, 50), entries };
+    if (outcome.providerSessionId) {
+      job.providerSessionId = outcome.providerSessionId;
+      job.session = outcome.providerSessionId;
+    }
+    if (outcome.resolvedModel) job.resolvedModel = outcome.resolvedModel;
+    if (Object.hasOwn(outcome, 'result')) job.result = redact(outcome.result);
+    if (typeof outcome.resultText === 'string') job.resultText = redact(outcome.resultText);
+    if (outcome.usage) job.usage = redact(outcome.usage);
+    if (outcome.error) job.error = redact(outcome.error);
+    if (outcome.errorCode) job.errorCode = outcome.errorCode;
+    if (outcome.errorRetryable != null) job.errorRetryable = outcome.errorRetryable === true;
+  });
+  appendJobEvent(id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', {
+    status,
+    ...(outcome.error ? { error: outcome.error, code: outcome.errorCode || 'PROVIDER_ERROR' } : {})
+  });
+  return inspectJob(completed.id);
+}
+
 export function readJobEvents(id, options = {}) {
   assertJobId(id);
   const afterSeq = Number(options.afterSeq || 0);
@@ -697,6 +740,7 @@ function activityFields(job) {
 
 export function inspectJob(id) {
   const job = reconcileJob(id);
+  const shadow = job.managedBy === 'delegate-shadow' || isDirectTransport(job);
   return {
     ...job,
     ...activityFields(job),
@@ -704,8 +748,10 @@ export function inspectJob(id) {
     driftReport: driftReportFor(job),
     promptPath: undefined,
     verifyCommandPath: undefined,
-    managed: job.managedBy === 'delegate-control',
-    legacy: job.managedBy !== 'delegate-control'
+    managed: job.managedBy === 'delegate-control' || shadow,
+    shadow,
+    direct: isDirectTransport(job),
+    legacy: job.managedBy !== 'delegate-control' && !shadow
   };
 }
 
@@ -767,7 +813,11 @@ export function listManagedJobs(options = {}) {
       revision: job.revision ?? null,
       cwd: job.cwd || null,
       transport: job.transport || null,
-      managed: job.managedBy === 'delegate-control',
+      managed: job.managedBy === 'delegate-control' || job.managedBy === 'delegate-shadow' || isDirectTransport(job),
+      shadow: job.managedBy === 'delegate-shadow' || isDirectTransport(job) ? true : undefined,
+      direct: isDirectTransport(job) ? true : undefined,
+      overlapsManagedWriter: job.overlapsManagedWriter === true ? true : undefined,
+      effort: job.effort || null,
       reviewFlowEngaged: job.reviewFlowEngaged === true ? true : undefined,
       scopeViolations: job.scopeViolations?.length ? job.scopeViolations.length : undefined,
       session: job.providerSessionId || job.session || null,
@@ -1157,7 +1207,7 @@ export function completeIngestedFiles(job) {
   return { copiedBack, diverged, removed: true };
 }
 
-function gitBaseline(cwd) {
+function gitBaseline(cwd, options = {}) {
   const result = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
     cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 8 * 1024 * 1024
   });
@@ -1173,6 +1223,7 @@ function gitBaseline(cwd) {
   const unique = [...new Set(files)];
   const hashes = {};
   for (const file of unique) {
+    if (options.excludeSensitive === true && SENSITIVE_PATH.test(file.replaceAll('\\', '/'))) continue;
     const hash = hashWorkingFile(cwd, file);
     if (hash) hashes[file] = hash;
   }
@@ -1612,6 +1663,148 @@ export function createManagedJob(options) {
   return inspectJob(id);
 }
 
+export function isDirectTransport(value) {
+  const transport = typeof value === 'string' ? value : value?.transport;
+  return DIRECT_TRANSPORTS.has(transport);
+}
+
+function boundedDirectParams(value) {
+  const safe = redact(value || {});
+  let serialized;
+  try { serialized = JSON.stringify(safe); }
+  catch { return { truncated: true, value: '[unserializable direct parameters]' }; }
+  if (serialized.length <= MAX_STRING) return safe;
+  return { truncated: true, serialized: redact(serialized) };
+}
+
+function cleanupShadowCreation(id) {
+  const p = paths(id);
+  const files = [
+    path.join(jobsDir(), `${id}.json`), p.events, p.finished, p.prompt,
+    p.verifyCommand, p.stdout, p.stderr, p.lock
+  ];
+  for (const file of files) {
+    try { fs.rmSync(file, { force: true }); } catch {}
+  }
+  for (const directory of [p.commands, p.artifacts]) {
+    try { fs.rmSync(directory, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function shadowCapabilities(provider) {
+  return {
+    events: true,
+    transcript: 'live',
+    diff: provider === 'codex' ? 'provider' : 'best-effort',
+    files: provider === 'codex' ? 'provider' : 'best-effort',
+    correction: 'read-only',
+    cancel: false,
+    resume: false,
+    usage: true,
+    selfEnforcesProjectHooks: provider === 'codex'
+  };
+}
+
+// Direct transports keep ownership of their provider loop. This creates only
+// an observability record: it deliberately skips quota/writer admission and
+// never stages inputs or changes provider launch behavior.
+export function createShadowJob(options) {
+  const provider = validateProvider(options.provider);
+  if (!isDirectTransport(options.transport)) {
+    throw brokerError('INVALID_REQUEST', `Invalid shadow transport: ${options.transport}`, { provider });
+  }
+  const id = jobId(provider);
+  const createdAtMs = Date.now();
+  const now = Math.floor(createdAtMs / 1000);
+  const cwd = path.resolve(options.cwd || process.cwd());
+  const prompt = String(options.prompt || '');
+  const p = paths(id);
+  const baseline = gitBaseline(cwd, { excludeSensitive: true });
+  const writeCapable = options.writeCapable === true || WRITE_MODES.has(options.mode);
+  const managedRecords = listJobs().map((candidate) => {
+    if (candidate.managedBy !== 'delegate-control' || TERMINAL_STATUSES.has(candidate.status)) return candidate;
+    try { return reconcileJob(candidate.id); } catch { return candidate; }
+  });
+  const overlapsManagedWriter = writeCapable && activeWriterLocks(managedRecords).some((writer) => writer.cwd === cwd);
+  const job = {
+    schemaVersion: 2,
+    id,
+    provider,
+    requestedModel: options.model || 'auto',
+    model: options.model || 'auto',
+    resolvedModel: options.resolvedModel || null,
+    mode: options.mode || (writeCapable ? 'implement' : 'review'),
+    approval: options.approval || 'auto',
+    effort: options.effort || null,
+    sandbox: options.sandbox || null,
+    status: 'running',
+    phase: 'running',
+    revision: 0,
+    lastSeq: 0,
+    cwd,
+    transport: options.transport,
+    managedBy: 'delegate-shadow',
+    capabilities: shadowCapabilities(provider),
+    promptPath: p.prompt,
+    stdoutPath: p.stdout,
+    stderrPath: p.stderr,
+    finishedPath: p.finished,
+    providerSessionId: options.providerSessionId || null,
+    parentJobId: options.parentJobId || null,
+    pid: options.pid || process.pid,
+    workerPid: options.workerPid || options.pid || process.pid,
+    createdAt: now,
+    createdAtMs,
+    updatedAt: now,
+    isolation: 'shared',
+    attributionConfidence: 'best-effort',
+    baselineFiles: baseline.files,
+    baselineHashes: baseline.hashes,
+    directParams: boundedDirectParams(options.params),
+    overlapsManagedWriter
+  };
+  try {
+    // Direct calls may contain material the managed admission path would
+    // reject. The shadow is observability-only, so persist only its redacted,
+    // bounded form and never change the caller's execution decision.
+    writePrivate(p.prompt, redact(prompt));
+    saveJob(job);
+    appendJobEvent(id, 'job.created', {
+      provider,
+      model: job.model,
+      mode: job.mode,
+      effort: job.effort,
+      transport: job.transport,
+      isolation: job.isolation,
+      direct: true,
+      params: job.directParams,
+      ...(job.sandbox ? { sandbox: job.sandbox } : {})
+    });
+    appendJobEvent(id, 'message.user', { text: prompt });
+    if (overlapsManagedWriter) {
+      appendJobEvent(id, 'security.warning', {
+        code: 'DIRECT_WRITER_OVERLAP',
+        message: 'direct write-capable delegation overlaps an active managed writer in this cwd',
+        cwd
+      });
+    }
+    appendJobEvent(id, 'job.state', { status: 'running', phase: 'running', transport: job.transport }, { lifecycle: true });
+    return inspectJob(id);
+  } catch (error) {
+    cleanupShadowCreation(id);
+    throw error;
+  }
+}
+
+export function latestShadowJobForSession(provider, providerSessionId) {
+  if (!providerSessionId) return null;
+  return listJobs().filter((job) => job.provider === provider
+    && isDirectTransport(job)
+    && (job.providerSessionId === providerSessionId || job.session === providerSessionId))
+    .sort((left, right) => Number(right.createdAtMs || Number(right.createdAt || 0) * 1000)
+      - Number(left.createdAtMs || Number(left.createdAt || 0) * 1000))[0] || null;
+}
+
 function assertNoActiveWriter(options) {
   if (!WRITE_MODES.has(options.mode) || options.isolation === 'worktree' || options.overrideWriter === true) return;
   const cwd = path.resolve(options.cwd || process.cwd());
@@ -1723,6 +1916,9 @@ export function submitControl(id, command, expectedRevision) {
   return withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    if (isDirectTransport(job)) {
+      throw brokerError('DIRECT_TRANSPORT', 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', { provider: job.provider });
+    }
     if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'live control is unavailable for this legacy job', { provider: job.provider });
     if (TERMINAL_STATUSES.has(job.status)) throw brokerError('JOB_TERMINAL', `job is already ${job.status}`, { provider: job.provider });
     const requestedId = command.commandId || command.correctionId || crypto.randomUUID();
@@ -1950,6 +2146,9 @@ function trackedInIndex(cwd, file) {
 
 export function revertManagedJob(id, options = {}) {
   const job = inspectJob(id);
+  if (isDirectTransport(job)) {
+    throw brokerError('DIRECT_TRANSPORT', 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', { provider: job.provider });
+  }
   if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'revert is unavailable for legacy jobs', { provider: job.provider });
   if (!TERMINAL_STATUSES.has(job.status)) throw brokerError('INVALID_REQUEST', `job must be terminal before revert; current status is ${job.status}`, { provider: job.provider });
   const eventInventory = new Map(jobFiles(id).map((entry) => [entry.path, entry]));

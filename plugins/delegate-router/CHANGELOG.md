@@ -2,6 +2,12 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.25.0 — 2026-07-20
+
+- Direct Codex MCP calls and Cursor foreground/background CLI runs now create durable read-only shadow jobs in the ordinary store. Their redacted prompts and parameters, normalized live messages/plans/tools/file edits/usage, diffs, liveness, terminal sentinels, audits, and stats are visible in the CLI, MCP inspection surfaces, and TUI without changing provider results; journaling failure falls back to the prior unobserved behavior.
+- `codex-reply` creates a child shadow on the same provider thread so cumulative usage retains chain-delta attribution. Direct shadows reject mutation controls with `DIRECT_TRANSPORT`, while inspection remains available.
+- Fleet rows mark shadows with `direct` and flag observational overlap with an active managed writer as `writer!`; direct launches remain unblocked and caller-owned. The direct Cursor adapter now uses the shared macOS login-shell headless launch path.
+
 ## 0.24.3 — 2026-07-17
 
 - Corrected audit output-token aggregates to delta-attribute thread-cumulative Codex resume chains, use one time snapshot for each `delegate_stats` response, and treat explicit null usage fields as missing rather than zero samples.

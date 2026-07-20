@@ -10,3 +10,8 @@ export function remoteActionMessage(ui = {}, key) {
   return null;
 }
 
+export function directTransportActionMessage(ui = {}, key, job = null) {
+  if (ui.screen !== 'detail' || !DETAIL_MUTATIONS.has(key)) return null;
+  if (!['direct-mcp', 'direct-cli', 'direct-acp'].includes(job?.transport)) return null;
+  return 'read-only: direct-transport job';
+}
