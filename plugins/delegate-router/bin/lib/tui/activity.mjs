@@ -1,6 +1,7 @@
 import { deriveToolDescriptor, normalizeCompactionEvents, toolActivityLabel, toolEventKey } from './transcript.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR } from './glyphs.mjs';
 import { formatDisplayValue } from './display.mjs';
+import { classifySession, DEFAULT_SESSION_ACTIVE_SECONDS } from './sessions.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const PHASES = new Set(['verifying', 'retrying', 'paused', 'starting']);
@@ -103,6 +104,13 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   const signals = activitySignals(events);
   const lastEvent = signals.lastEvent;
   const lastAt = eventAt(lastEvent) || Number(job.lastActivityAt || job.updatedAt * 1000 || job.createdAt * 1000 || now);
+  if (job.transport === 'claude-agent' && job.agentLifecycle === 'spawn-returned') {
+    const transcriptAt = Number(job.transcriptMtimeMs || job.spawnReturnedAtMs || job.createdAtMs || lastAt);
+    const { active } = classifySession(transcriptAt, { now, activeSeconds: DEFAULT_SESSION_ACTIVE_SECONDS });
+    return result(active ? 'active' : 'idle', active ? 'active' : 'idle', active ? '>' : '.', transcriptAt, now, active ? 'body' : 'dim', {
+      capabilities, transportKey: key, visibilityNote: 'background completion is not exposed'
+    });
+  }
   if (job.external || job.transport === 'external') {
     return result('external', formatDisplayValue(job.activityLabel) || 'external activity', '.', lastAt, now, 'dim', {
       capabilities, transportKey: key, visibilityNote: 'bounded read-only tail'

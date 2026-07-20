@@ -42,6 +42,9 @@ test('encoded Claude project directories decode round-trip, including hyphenated
   const encoded = encodeProjectDirectory(cwd);
   assert.equal(encodeProjectDirectory(decodeProjectDirectory(encoded)), encoded);
   assert.equal(decodeProjectDirectory(encoded), cwd);
+  // Verified against the real ~/.claude/projects/-private-tmp directory on
+  // the defect machine; keep the observed Claude Code encoding shape pinned.
+  assert.equal(encodeProjectDirectory(path.join(path.parse(process.cwd()).root, 'private', 'tmp')), '-private-tmp');
 });
 
 test('tail parsing skips garbage, truncated starts, huge lines, and empty files without throwing', (t) => {

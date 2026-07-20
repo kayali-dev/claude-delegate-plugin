@@ -2,6 +2,11 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.26.1 — 2026-07-20
+
+- Claude Agent stubs retain the agent id and coordinator sidecar needed to resolve transcripts after `PostToolUse`, retry bounded cwd-scoped linkage when detail is viewed, persist successful linkage without a revision bump, and explain transcripts that have not appeared yet. Selected Claude Agent and external Codex transcripts now refresh only after an mtime/size change and stop tailing on deselection.
+- Background Agent spawn acknowledgements remain nonterminal and display transcript-mtime `active`/`idle` age because the hook receives no background completion signal; foreground Agent results keep their true completed lifecycle.
+
 ## 0.26.0 — 2026-07-20
 
 - Fleet now discovers bounded, read-only external Codex session metadata under `~/.codex/sessions`, includes only threads whose persisted origin metadata proves a Claude-adjacent tool origin, excludes broker-owned and personal-by-default sessions, and exposes exact carried token counters when present. Allowance snapshots can also record aggregate-only, approximate `unattributed-burn` windows when allowance moved with no tracked Codex job capable of accounting for it.

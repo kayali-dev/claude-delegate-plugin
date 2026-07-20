@@ -9,8 +9,10 @@ import {
   jobNeedsReconciliation,
   readJobEventPage,
   readLastCompleteEvent,
-  reconcileJob
+  reconcileJob,
+  updateManagedJob
 } from '../control.mjs';
+import { resolveStoredAgentTranscriptPath } from '../agent-stubs.mjs';
 import { isProcessAlive } from '../process.mjs';
 import { profilesDir } from '../profiles.mjs';
 import {
@@ -147,6 +149,14 @@ function fileStamp(file) {
   } catch { return '-'; }
 }
 
+function fileSnapshot(file) {
+  if (typeof file !== 'string' || !path.isAbsolute(file)) return { exists: false, stamp: '-', mtimeMs: null, size: 0 };
+  try {
+    const stat = fs.statSync(file);
+    return { exists: stat.isFile(), stamp: `${file}:${stat.size}:${stat.mtimeMs}`, mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch { return { exists: false, stamp: `${file}:-`, mtimeMs: null, size: 0 }; }
+}
+
 function cloneState(state) {
   return {
     ...state,
@@ -195,6 +205,12 @@ export class DelegateDataSource extends EventEmitter {
       ...(options.externalTailBytes == null ? {} : { tailBytes: options.externalTailBytes }),
       ...(options.externalSnippetWidth == null ? {} : { snippetWidth: options.externalSnippetWidth })
     };
+    this.agentTranscriptOptions = {
+      projectsDir: this.sessionProjectsDir,
+      ...(options.agentTranscriptMaxSessionDirs == null ? {} : { maxSessionDirs: options.agentTranscriptMaxSessionDirs }),
+      ...(options.agentTranscriptMaxProjectEntries == null ? {} : { maxProjectEntries: options.agentTranscriptMaxProjectEntries }),
+      ...(options.agentTranscriptMaxEntries == null ? {} : { maxEntries: options.agentTranscriptMaxEntries })
+    };
     this.externalJobs = new Map();
     this.externalSources = new Map();
     this.journalCursors = new Map();
@@ -204,6 +220,7 @@ export class DelegateDataSource extends EventEmitter {
     this.events = new Map();
     this.activityEvents = new Map();
     this.activityTailStamps = new Map();
+    this.readOnlyTranscriptStamps = new Map();
     this.diffs = new Map();
     this.followJobId = null;
     this.watchers = [];
@@ -219,7 +236,7 @@ export class DelegateDataSource extends EventEmitter {
     this.closed = false;
     this.recordsDigest = null;
     this.metadataStamp = null;
-    this.metrics = { refreshes: 0, sessionScans: 0, activityTailReads: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
+    this.metrics = { refreshes: 0, sessionScans: 0, activityTailReads: 0, readOnlyTranscriptReads: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
     this.state = {
       jobs: [], eventsByJob: {}, activityEventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
       usage: null, providers: [], writerLocks: [], profiles: [], groups: [], audit: [], metadataReady: false,
@@ -323,6 +340,10 @@ export class DelegateDataSource extends EventEmitter {
   }
 
   activityFields(job, cached = null) {
+    if (job.transport === 'claude-agent' && job.agentLifecycle === 'spawn-returned') {
+      const lastActivityAt = Number(cached?.transcriptMtimeMs || job.transcriptMtimeMs || job.spawnReturnedAtMs || job.createdAtMs || job.createdAt * 1000 || 0) || null;
+      return { lastActivityAt, stalled: false };
+    }
     const recordActivityAt = job.updatedAt || job.createdAt ? (job.updatedAt || job.createdAt) * 1000 : null;
     const lastActivityAt = cached?.lastActivityAt == null
       ? recordActivityAt
@@ -344,13 +365,19 @@ export class DelegateDataSource extends EventEmitter {
       const ids = new Set(allRecords.map((job) => job.id));
       const jobsById = new Map(allRecords.map((job) => [job.id, job]));
       const cachedById = new Map(this.state.jobs.map((job) => [job.id, job]));
-      const jobs = allRecords.map((job) => ({
-        ...job,
-        ...this.activityFields(job, cachedById.get(job.id)),
-        workerAlive: job.external || TERMINAL.has(job.status) ? undefined : isProcessAlive(job.workerPid || job.pid),
-        tuiReconciledFrom: this.reconciledByTui.get(job.id) || null,
-        rootJobId: rootJobId(job, jobsById)
-      }));
+      const jobs = allRecords.map((job) => {
+        const cached = cachedById.get(job.id);
+        return {
+          ...job,
+          ...(cached?.transcriptMtimeMs == null ? {} : { transcriptMtimeMs: cached.transcriptMtimeMs }),
+          ...(cached?.transcriptSize == null ? {} : { transcriptSize: cached.transcriptSize }),
+          ...(cached?.transcriptAvailable == null ? {} : { transcriptAvailable: cached.transcriptAvailable }),
+          ...this.activityFields(job, cached),
+          workerAlive: job.external || job.transport === 'claude-agent' || TERMINAL.has(job.status) ? undefined : isProcessAlive(job.workerPid || job.pid),
+          tuiReconciledFrom: this.reconciledByTui.get(job.id) || null,
+          rootJobId: rootJobId(job, jobsById)
+        };
+      });
       for (const id of [...this.journalCursors.keys()]) {
         if (ids.has(id)) continue;
         this.journalCursors.delete(id);
@@ -359,6 +386,7 @@ export class DelegateDataSource extends EventEmitter {
         this.events.delete(id);
         this.activityEvents.delete(id);
         this.activityTailStamps.delete(id);
+        this.readOnlyTranscriptStamps.delete(id);
         this.diffs.delete(id);
         this.reconcileAttempts.delete(id);
         this.reconciledByTui.delete(id);
@@ -367,7 +395,9 @@ export class DelegateDataSource extends EventEmitter {
         job.id, job.revision, job.status, job.phase, job.updatedAt, job.lastActivityAt, job.stalled, job.workerAlive,
         job.groupId || null, Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Number(job.scopeViolations || 0),
         job.errorCode || null, job.stoppedReason || null,
-        job.external === true, job.approximateSize || null, job.activityLabel || null
+        job.external === true, job.approximateSize || null, job.activityLabel || null,
+        job.agentId || null, job.agentLifecycle || null, job.coordinatorSidecarDir || null, job.transcriptPath || null,
+        job.transcriptMtimeMs || null, job.transcriptSize || null
       ]));
       const changed = options.force || digest !== this.recordsDigest;
       this.recordsDigest = digest;
@@ -383,7 +413,7 @@ export class DelegateDataSource extends EventEmitter {
       const followed = this.followJobId ? jobsById.get(this.followJobId) : null;
       if (followed?.external) {
         void this.hydrateReadOnlyTranscript(this.followJobId, 'external');
-      } else if (followed?.transport === 'claude-agent' && followed.transcriptPath) {
+      } else if (followed?.transport === 'claude-agent') {
         void this.hydrateReadOnlyTranscript(this.followJobId, 'claude-agent');
       } else if (followed && this.journalStamps.get(this.followJobId) !== fileStamp(eventPath(this.followJobId))) {
         void this.hydrateJob(this.followJobId);
@@ -526,26 +556,70 @@ export class DelegateDataSource extends EventEmitter {
     if (!id) return Promise.resolve(this.getState());
     const selected = this.state.jobs.find((job) => job.id === id);
     if (selected?.external) return this.hydrateReadOnlyTranscript(id, 'external');
-    if (selected?.transport === 'claude-agent' && selected.transcriptPath) return this.hydrateReadOnlyTranscript(id, 'claude-agent');
+    if (selected?.transport === 'claude-agent') return this.hydrateReadOnlyTranscript(id, 'claude-agent');
     const loaded = this.state.hydrationByJob[id]?.loaded === true;
     if (loaded && this.journalStamps.get(id) === fileStamp(eventPath(id))) return Promise.resolve(this.getState());
     return this.hydrateJob(id);
   }
 
-  hydrateReadOnlyTranscript(id, kind) {
-    const job = this.state.jobs.find((entry) => entry.id === id);
-    const file = kind === 'external' ? this.externalSources.get(id) : job?.transcriptPath;
-    const result = file
-      ? kind === 'external' ? readCodexThreadTail(file) : readClaudeTranscriptTail(file)
-      : { events: [] };
-    this.events.set(id, result.events || []);
-    this.diffs.set(id, '');
+  resolveClaudeAgentTranscript(job) {
+    if (!job || job.transport !== 'claude-agent') return null;
+    if (typeof job.transcriptPath === 'string' && path.isAbsolute(job.transcriptPath)) return path.normalize(job.transcriptPath);
+    const resolved = resolveStoredAgentTranscriptPath({
+      agentId: job.agentId,
+      coordinatorSidecarDir: job.coordinatorSidecarDir,
+      cwd: job.cwd,
+      ...this.agentTranscriptOptions
+    });
+    if (!resolved) return null;
+    let persisted = null;
+    try {
+      persisted = updateManagedJob(job.id, (record) => {
+        if (!record.transcriptPath) record.transcriptPath = resolved;
+      }, { incrementRevision: false });
+    } catch {}
+    const transcriptPath = persisted?.transcriptPath || resolved;
     this.state = {
       ...this.state,
+      jobs: this.state.jobs.map((entry) => entry.id === job.id ? { ...entry, transcriptPath } : entry)
+    };
+    return transcriptPath;
+  }
+
+  hydrateReadOnlyTranscript(id, kind) {
+    if (this.closed || this.followJobId !== id) return Promise.resolve(this.getState());
+    let job = this.state.jobs.find((entry) => entry.id === id);
+    const file = kind === 'external' ? this.externalSources.get(id) : this.resolveClaudeAgentTranscript(job);
+    job = this.state.jobs.find((entry) => entry.id === id) || job;
+    const snapshot = fileSnapshot(file);
+    const previousStamp = this.readOnlyTranscriptStamps.get(id);
+    const hydration = this.state.hydrationByJob[id];
+    if (hydration?.loaded === true && previousStamp === snapshot.stamp) return Promise.resolve(this.getState());
+    this.readOnlyTranscriptStamps.set(id, snapshot.stamp);
+    const result = snapshot.exists
+      ? kind === 'external' ? readCodexThreadTail(file) : readClaudeTranscriptTail(file)
+      : { events: [] };
+    if (snapshot.exists) this.metrics.readOnlyTranscriptReads += 1;
+    this.events.set(id, result.events || []);
+    this.diffs.set(id, '');
+    const jobs = this.state.jobs.map((entry) => entry.id === id ? {
+      ...entry,
+      ...(kind === 'claude-agent' && file ? { transcriptPath: file } : {}),
+      transcriptMtimeMs: snapshot.mtimeMs,
+      transcriptSize: snapshot.size,
+      transcriptAvailable: snapshot.exists,
+      ...this.activityFields(entry, { ...entry, transcriptMtimeMs: snapshot.mtimeMs })
+    } : entry);
+    this.state = {
+      ...this.state,
+      jobs,
       eventsByJob: { ...this.state.eventsByJob, [id]: result.events || [] },
       diffsByJob: { ...this.state.diffsByJob, [id]: '' },
       diffStatsByJob: { ...this.state.diffStatsByJob, [id]: { files: [], totalAdditions: 0, totalDeletions: 0 } },
-      hydrationByJob: { ...this.state.hydrationByJob, [id]: { loading: false, loaded: true, error: null, bounded: true } },
+      hydrationByJob: {
+        ...this.state.hydrationByJob,
+        [id]: { loading: false, loaded: true, error: null, bounded: true, transcriptMissing: !snapshot.exists, sourceStamp: snapshot.stamp }
+      },
       updatedAt: Date.now()
     };
     this.emit('change', this.getState());

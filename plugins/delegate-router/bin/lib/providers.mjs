@@ -831,7 +831,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.26.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.26.1' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1639,7 +1639,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.26.0' }
+      clientInfo: { name: 'delegate-router', version: '0.26.1' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

@@ -15,6 +15,13 @@ import {
   readCodexThreadTail,
   scanExternalCodexThreads
 } from '../bin/lib/codex-sessions.mjs';
+import {
+  agentResultStatus,
+  completeClaudeAgentStub,
+  coordinatorSidecarDirectory,
+  createClaudeAgentStub,
+  deriveAgentId
+} from '../bin/lib/agent-stubs.mjs';
 import { captureCodexAllowanceSnapshot } from '../bin/lib/allowance.mjs';
 import { inspectJob, readJobEvents } from '../bin/lib/control.mjs';
 import { loadJob, listJobs } from '../bin/lib/state.mjs';
@@ -25,9 +32,11 @@ import {
 } from '../bin/lib/stats.mjs';
 import { CompositeDatasource } from '../bin/lib/tui/composite-datasource.mjs';
 import { directTransportActionMessage } from '../bin/lib/tui/action-policy.mjs';
+import { DelegateDataSource } from '../bin/lib/tui/datasource.mjs';
 import { RemoteDatasource } from '../bin/lib/tui/remote-datasource.mjs';
 import { resolveRemoteTargets } from '../bin/lib/tui/remote-config.mjs';
-import { fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
+import { encodeProjectDirectory } from '../bin/lib/tui/sessions.mjs';
+import { detailViewModel, fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
 import { renderFrameToString } from '../bin/lib/tui/components.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -165,26 +174,173 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
   assert.equal(postRun.status, 0, postRun.stderr);
   const completed = inspectJob(stub.id);
   assert.equal(completed.status, 'completed');
+  assert.equal(completed.agentLifecycle, 'completed');
+  assert.equal(completed.agentId, 'reviewer');
+  assert.equal(completed.coordinatorSidecarDir, coordinator.replace(/\.jsonl$/, ''));
   assert.equal(completed.transcriptPath, transcript);
   assert.deepEqual(readJobEvents(stub.id, { limit: 20 }).map((event) => event.type), ['job.created', 'job.completed']);
   const stats = aggregateAuditStats([JSON.parse(fs.readFileSync(path.join(root, 'state', 'audit.jsonl'), 'utf8').trim())]);
   assert.equal(stats.groups[0].transport, 'claude-agent');
 
-  const killedRoot = path.join(root, 'killed');
-  const killed = spawnSync(process.execPath, [hook], {
-    input: JSON.stringify({ ...pre, tool_use_id: 'toolu_killed' }), encoding: 'utf8',
-    env: { ...environment, DELEGATE_STATE_FILE: path.join(killedRoot, 'usage.json'), DELEGATE_AGENT_STUBS: '0' }
+  const backgroundCoordinator = path.join(root, 'projects', 'background-coordinator.jsonl');
+  fs.writeFileSync(backgroundCoordinator, '');
+  const backgroundPayload = {
+    ...pre,
+    tool_use_id: 'toolu_background',
+    transcript_path: backgroundCoordinator,
+    tool_input: { ...pre.tool_input, prompt: 'Work in the background' }
+  };
+  createClaudeAgentStub({
+    sessionId: backgroundPayload.session_id,
+    toolUseId: backgroundPayload.tool_use_id,
+    cwd: backgroundPayload.cwd,
+    coordinatorSidecarDir: coordinatorSidecarDirectory(backgroundPayload.transcript_path),
+    prompt: backgroundPayload.tool_input.prompt,
+    agentType: backgroundPayload.tool_input.subagent_type,
+    agentName: backgroundPayload.tool_input.name,
+    model: backgroundPayload.tool_input.model
   });
-  assert.equal(killed.status, 0);
-  assert.equal(fs.existsSync(path.join(killedRoot, 'jobs')), false);
+  const backgroundPost = spawnSync(process.execPath, [hook], {
+    input: JSON.stringify({
+      ...backgroundPayload,
+      hook_event_name: 'PostToolUse',
+      tool_response: {
+        status: 'async_launched', agentId: 'background123', description: 'background review',
+        prompt: 'Work in the background', outputFile: path.join(root, 'agent-output.txt'), resolvedModel: 'claude-opus'
+      }
+    }),
+    encoding: 'utf8', env: environment
+  });
+  assert.equal(backgroundPost.status, 0, backgroundPost.stderr);
+  const background = listJobs().find((job) => job.toolUseId === 'toolu_background');
+  assert.equal(background.status, 'running');
+  assert.equal(background.phase, 'spawn-returned');
+  assert.equal(background.agentLifecycle, 'spawn-returned');
+  assert.equal(background.agentId, 'background123');
+  assert.equal(background.coordinatorSidecarDir, backgroundCoordinator.replace(/\.jsonl$/, ''));
+  assert.equal(background.transcriptPath, null, 'PostToolUse precedes the background transcript file');
+  assert.deepEqual(readJobEvents(background.id, { limit: 20 }).map((event) => event.type), ['job.created', 'job.spawn-returned']);
 
-  const broken = spawnSync(process.execPath, [hook], {
-    input: JSON.stringify({ ...pre, tool_use_id: 'toolu_broken' }), encoding: 'utf8',
-    env: { ...environment, DELEGATE_STATE_FILE: '/dev/null/usage.json' }
-  });
-  assert.equal(broken.status, 0);
-  assert.match(broken.stderr, /Agent call continues/);
-  assert.equal(broken.stderr.trim().split('\n').length, 1);
+  const projectsDir = path.join(root, 'claude-projects');
+  const source = new DelegateDataSource({ watch: false, pollMs: 100_000, projectsDir });
+  source.refreshRecords({ force: true });
+  const revisionBeforeLink = inspectJob(background.id).revision;
+  return (async () => {
+    try {
+      let selected = await source.selectJob(background.id);
+      assert.equal(selected.hydrationByJob[background.id].transcriptMissing, true);
+      const missingFrame = detailViewModel(selected, { jobId: background.id, detailTab: 0, follow: true }, { width: 150, height: 20 });
+      assert.equal(missingFrame.panes[0].content.kind, 'empty');
+      assert.equal(missingFrame.panes[0].content.message, 'subagent transcript not found (yet) — background agents link once the file appears; reopen to retry');
+      assert.match(renderFrameToString(missingFrame), /subagent transcript not found \(yet\).*reopen to retry/);
+
+      const backgroundSubagents = path.join(backgroundCoordinator.replace(/\.jsonl$/, ''), 'subagents');
+      fs.mkdirSync(backgroundSubagents, { recursive: true });
+      const backgroundTranscript = path.join(backgroundSubagents, 'agent-background123.jsonl');
+      const activeAt = Date.now() - 30_000;
+      fs.writeFileSync(backgroundTranscript, `${JSON.stringify({ type: 'assistant', timestamp: new Date(activeAt).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'first live line' }] } })}\n`);
+      fs.utimesSync(backgroundTranscript, new Date(activeAt), new Date(activeAt));
+      await source.selectJob(null);
+      selected = await source.selectJob(background.id);
+      assert.equal(selected.jobs.find((job) => job.id === background.id).transcriptPath, backgroundTranscript);
+      assert.equal(selected.eventsByJob[background.id].length, 1);
+      assert.equal(source.metrics.readOnlyTranscriptReads, 1);
+      const persisted = inspectJob(background.id);
+      assert.equal(persisted.transcriptPath, backgroundTranscript);
+      assert.equal(persisted.revision, revisionBeforeLink, 'lazy transcript persistence does not advance revision');
+
+      let fleet = fleetViewModel(selected, { now: activeAt + 30_000 }, { width: 110, height: 20 });
+      let activityColumn = fleet.panes[0].content.columns.findIndex((column) => column.key === 'activity');
+      let backgroundRow = fleet.panes[0].content.rows.find((row) => row.id === background.id);
+      assert.match(backgroundRow.cells[activityColumn].text, /active.*30s/);
+
+      const secondAt = activeAt + 1000;
+      fs.appendFileSync(backgroundTranscript, `${JSON.stringify({ type: 'assistant', timestamp: new Date(secondAt).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'second live line' }] } })}\n`);
+      fs.utimesSync(backgroundTranscript, new Date(secondAt), new Date(secondAt));
+      selected = source.refreshRecords();
+      assert.equal(selected.eventsByJob[background.id].length, 2, 'followed transcript picks up appended lines');
+      assert.equal(source.metrics.readOnlyTranscriptReads, 2);
+      source.refreshRecords();
+      assert.equal(source.metrics.readOnlyTranscriptReads, 2, 'unchanged mtime and size cost no transcript read');
+
+      await source.selectJob(null);
+      fs.appendFileSync(backgroundTranscript, `${JSON.stringify({ type: 'assistant', timestamp: new Date(secondAt + 1000).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'unselected line' }] } })}\n`);
+      fs.utimesSync(backgroundTranscript, new Date(secondAt + 1000), new Date(secondAt + 1000));
+      source.refreshRecords();
+      assert.equal(source.metrics.readOnlyTranscriptReads, 2, 'deselected read-only transcript is not polled');
+
+      selected = await source.selectJob(background.id);
+      assert.equal(selected.eventsByJob[background.id].length, 3);
+      const idleAt = Date.now() - 301_000;
+      fs.utimesSync(backgroundTranscript, new Date(idleAt), new Date(idleAt));
+      selected = source.refreshRecords();
+      fleet = fleetViewModel(selected, { now: idleAt + 301_000 }, { width: 110, height: 20 });
+      activityColumn = fleet.panes[0].content.columns.findIndex((column) => column.key === 'activity');
+      backgroundRow = fleet.panes[0].content.rows.find((row) => row.id === background.id);
+      assert.match(backgroundRow.cells[activityColumn].text, /idle.*5m/);
+
+      const fallbackCwd = path.join(root, 'fallback-cwd');
+      fs.mkdirSync(fallbackCwd);
+      const fallbackPayload = {
+        ...pre, cwd: fallbackCwd, tool_use_id: 'toolu_fallback',
+        tool_input: { ...pre.tool_input, prompt: 'Find my sidecar without a coordinator transcript' }
+      };
+      delete fallbackPayload.transcript_path;
+      createClaudeAgentStub({
+        sessionId: fallbackPayload.session_id,
+        toolUseId: fallbackPayload.tool_use_id,
+        cwd: fallbackPayload.cwd,
+        prompt: fallbackPayload.tool_input.prompt,
+        agentType: fallbackPayload.tool_input.subagent_type,
+        agentName: fallbackPayload.tool_input.name,
+        model: fallbackPayload.tool_input.model
+      });
+      const fallbackResult = { status: 'async_launched', agentId: 'fallback456', description: 'fallback' };
+      completeClaudeAgentStub({
+        sessionId: fallbackPayload.session_id,
+        toolUseId: fallbackPayload.tool_use_id,
+        cwd: fallbackPayload.cwd,
+        ...agentResultStatus(fallbackResult),
+        agentId: deriveAgentId(fallbackResult),
+        transcriptPath: null
+      });
+      const fallback = listJobs().find((job) => job.toolUseId === 'toolu_fallback');
+      assert.equal(fallback.coordinatorSidecarDir, null);
+      const olderSession = path.join(projectsDir, encodeProjectDirectory(fallbackCwd), 'older-session');
+      const olderSubagents = path.join(olderSession, 'subagents');
+      fs.mkdirSync(olderSubagents, { recursive: true });
+      fs.writeFileSync(path.join(olderSubagents, 'agent-fallback456.jsonl'), `${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'stale fallback' } })}\n`);
+      fs.utimesSync(olderSession, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+      const fallbackSession = path.join(projectsDir, encodeProjectDirectory(fallbackCwd), 'newest-session');
+      const fallbackSubagents = path.join(fallbackSession, 'subagents');
+      fs.mkdirSync(fallbackSubagents, { recursive: true });
+      const fallbackTranscript = path.join(fallbackSubagents, 'agent-fallback456.jsonl');
+      fs.writeFileSync(fallbackTranscript, `${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'cwd-scoped fallback' } })}\n`);
+      fs.utimesSync(fallbackSession, new Date(), new Date());
+      source.refreshRecords({ force: true });
+      const fallbackSelected = await source.selectJob(fallback.id);
+      assert.equal(fallbackSelected.jobs.find((job) => job.id === fallback.id).transcriptPath, fallbackTranscript);
+      assert.equal(inspectJob(fallback.id).transcriptPath, fallbackTranscript);
+    } finally {
+      source.close();
+    }
+
+    const killedRoot = path.join(root, 'killed');
+    const killed = spawnSync(process.execPath, [hook], {
+      input: JSON.stringify({ ...pre, tool_use_id: 'toolu_killed' }), encoding: 'utf8',
+      env: { ...environment, DELEGATE_STATE_FILE: path.join(killedRoot, 'usage.json'), DELEGATE_AGENT_STUBS: '0' }
+    });
+    assert.equal(killed.status, 0);
+    assert.equal(fs.existsSync(path.join(killedRoot, 'jobs')), false);
+
+    const broken = spawnSync(process.execPath, [hook], {
+      input: JSON.stringify({ ...pre, tool_use_id: 'toolu_broken' }), encoding: 'utf8',
+      env: { ...environment, DELEGATE_STATE_FILE: '/dev/null/usage.json' }
+    });
+    assert.equal(broken.status, 0);
+    assert.match(broken.stderr, /Agent call continues/);
+    assert.equal(broken.stderr.trim().split('\n').length, 1);
+  })();
 });
 
 class FakeDatasource extends EventEmitter {

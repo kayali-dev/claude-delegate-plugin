@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { encodeClaudeProjectDirectory } from '../agent-stubs.mjs';
 import { redact } from '../control.mjs';
 import { displayWidth, stripAnsi, truncateToWidth } from './width.mjs';
 
@@ -87,7 +88,7 @@ function recordCwd(record) {
 }
 
 export function encodeProjectDirectory(cwd) {
-  return path.resolve(String(cwd || path.parse(process.cwd()).root)).split(path.sep).join('-');
+  return encodeClaudeProjectDirectory(cwd);
 }
 
 function existingDecodedDirectory(encoded, fsImpl) {

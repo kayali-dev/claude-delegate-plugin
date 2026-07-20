@@ -997,6 +997,8 @@ function detailContent(job, store, ui, tab, activity) {
   const emptyHistory = hydration?.loading
     ? { kind: 'log', lines: [], follow: false }
     : hydration?.error ? { kind: 'empty', message: 'journal history unavailable', action: formatDisplayValue(hydration.error), messageStyle: palette.failed }
+      : job.transport === 'claude-agent' && hydration?.transcriptMissing
+        ? { kind: 'empty', message: 'subagent transcript not found (yet) \u2014 background agents link once the file appears; reopen to retry' }
       : { kind: 'empty', message: 'no transcript entries', action: 'Live output will appear here when the worker writes it' };
   if (tab === 0) {
     const entries = transcriptProjector(job.id).project(events, {

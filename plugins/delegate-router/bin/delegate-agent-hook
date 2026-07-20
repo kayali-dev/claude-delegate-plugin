@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import {
   agentResultStatus,
   completeClaudeAgentStub,
+  coordinatorSidecarDirectory,
   createClaudeAgentStub,
+  deriveAgentId,
   deriveAgentTranscriptPath
 } from './lib/agent-stubs.mjs';
 
@@ -36,7 +38,12 @@ function handle(payload) {
   if (!['Agent', 'Task'].includes(payload?.tool_name)) return;
   const toolUseId = payload.tool_use_id || payload.toolUseId;
   if (!toolUseId) throw new Error('hook payload is missing correlatable tool_use_id');
-  const common = { sessionId: payload.session_id, toolUseId, cwd: payload.cwd };
+  const common = {
+    sessionId: payload.session_id,
+    toolUseId,
+    cwd: payload.cwd,
+    coordinatorSidecarDir: coordinatorSidecarDirectory(payload.transcript_path)
+  };
   if (payload.hook_event_name === 'PreToolUse') {
     const input = payload.tool_input || {};
     createClaudeAgentStub({
@@ -54,6 +61,7 @@ function handle(payload) {
     completeClaudeAgentStub({
       ...common,
       ...outcome,
+      agentId: deriveAgentId(result),
       transcriptPath: deriveAgentTranscriptPath(payload.transcript_path, result)
     });
   }
