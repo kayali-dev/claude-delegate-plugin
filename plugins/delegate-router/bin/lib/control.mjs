@@ -26,6 +26,7 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WRITE_MODES = new Set(['implement', 'verify']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
 export const DIRECT_TRANSPORTS = Object.freeze(new Set(['direct-mcp', 'direct-cli', 'direct-acp']));
+export const READ_ONLY_TRANSPORTS = Object.freeze(new Set([...DIRECT_TRANSPORTS, 'claude-agent']));
 const INGEST_MAX_FILES = 20;
 const INGEST_MAX_BYTES = 10 * 1024 * 1024;
 const SENSITIVE_PATH = /(?:^|\/)(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]*(?:secret|credential|private.?key|token)[^/]*|[^/]+\.(?:pem|key|p12|pfx|crt|cer))$/i;
@@ -362,7 +363,8 @@ function readRawEvents(id) {
 }
 
 function resumabilityFor(job) {
-  if (isDirectTransport(job)) {
+  if (isReadOnlyTransport(job)) {
+    if (!isDirectTransport(job)) return { ok: false, reason: 'hook-observed jobs are read-only in the control plane', code: 'READ_ONLY_TRANSPORT' };
     return { ok: false, reason: 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', code: 'DIRECT_TRANSPORT' };
   }
   if (job.managedBy !== 'delegate-control') {
@@ -691,6 +693,7 @@ export function readJobEventPage(id, options = {}) {
 export const QUEUED_STALE_SECONDS = 600;
 
 export function jobNeedsReconciliation(job, options = {}) {
+  if (job?.transport === 'claude-agent' || job?.managedBy === 'delegate-agent-hook') return false;
   const now = Number(options.nowSeconds ?? Math.floor(Date.now() / 1000));
   const pid = job?.workerPid || job?.pid;
   const workerAlive = Object.hasOwn(options, 'workerAlive') ? options.workerAlive === true : isProcessAlive(pid);
@@ -748,10 +751,10 @@ export function inspectJob(id) {
     driftReport: driftReportFor(job),
     promptPath: undefined,
     verifyCommandPath: undefined,
-    managed: job.managedBy === 'delegate-control' || shadow,
+    managed: job.managedBy === 'delegate-control' || job.managedBy === 'delegate-agent-hook' || shadow,
     shadow,
     direct: isDirectTransport(job),
-    legacy: job.managedBy !== 'delegate-control' && !shadow
+    legacy: job.managedBy !== 'delegate-control' && job.managedBy !== 'delegate-agent-hook' && !shadow
   };
 }
 
@@ -813,7 +816,8 @@ export function listManagedJobs(options = {}) {
       revision: job.revision ?? null,
       cwd: job.cwd || null,
       transport: job.transport || null,
-      managed: job.managedBy === 'delegate-control' || job.managedBy === 'delegate-shadow' || isDirectTransport(job),
+      managed: job.managedBy === 'delegate-control' || job.managedBy === 'delegate-shadow' || job.managedBy === 'delegate-agent-hook' || isDirectTransport(job),
+      readOnly: isReadOnlyTransport(job) ? true : undefined,
       shadow: job.managedBy === 'delegate-shadow' || isDirectTransport(job) ? true : undefined,
       direct: isDirectTransport(job) ? true : undefined,
       overlapsManagedWriter: job.overlapsManagedWriter === true ? true : undefined,
@@ -824,6 +828,10 @@ export function listManagedJobs(options = {}) {
       rootJobId: rootJobIdOf(job),
       parentJobId: job.parentJobId || null,
       groupId: job.groupId || null,
+      coordinatorSessionId: job.coordinatorSessionId || null,
+      agentType: job.agentType || null,
+      promptSummary: job.promptSummary || null,
+      transcriptAvailable: typeof job.transcriptPath === 'string' ? true : undefined,
       providerSessionId: job.providerSessionId || job.session || null,
       createdAt: job.createdAt || null,
       updatedAt: job.updatedAt || null,
@@ -1668,6 +1676,11 @@ export function isDirectTransport(value) {
   return DIRECT_TRANSPORTS.has(transport);
 }
 
+export function isReadOnlyTransport(value) {
+  const transport = typeof value === 'string' ? value : value?.transport;
+  return READ_ONLY_TRANSPORTS.has(transport);
+}
+
 function boundedDirectParams(value) {
   const safe = redact(value || {});
   let serialized;
@@ -1916,7 +1929,8 @@ export function submitControl(id, command, expectedRevision) {
   return withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
-    if (isDirectTransport(job)) {
+    if (isReadOnlyTransport(job)) {
+      if (!isDirectTransport(job)) throw brokerError('READ_ONLY_TRANSPORT', 'hook-observed jobs are read-only in the control plane', { provider: job.provider });
       throw brokerError('DIRECT_TRANSPORT', 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', { provider: job.provider });
     }
     if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'live control is unavailable for this legacy job', { provider: job.provider });
@@ -2146,7 +2160,8 @@ function trackedInIndex(cwd, file) {
 
 export function revertManagedJob(id, options = {}) {
   const job = inspectJob(id);
-  if (isDirectTransport(job)) {
+  if (isReadOnlyTransport(job)) {
+    if (!isDirectTransport(job)) throw brokerError('READ_ONLY_TRANSPORT', 'hook-observed jobs are read-only in the control plane', { provider: job.provider });
     throw brokerError('DIRECT_TRANSPORT', 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', { provider: job.provider });
   }
   if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'revert is unavailable for legacy jobs', { provider: job.provider });
@@ -2284,7 +2299,9 @@ export function pruneJobs(options = {}) {
     if (!TERMINAL_STATUSES.has(job.status) && jobNeedsReconciliation(job)) {
       try { job = reconcileJob(job.id) || job; } catch {}
     }
-    if (!TERMINAL_STATUSES.has(job.status)) continue;
+    const staleAgentStub = job.transport === 'claude-agent'
+      && (job.updatedAt || job.createdAt || 0) <= cutoff;
+    if (!TERMINAL_STATUSES.has(job.status) && !staleAgentStub) continue;
     const finishedAt = job.completedAt || job.updatedAt || job.createdAt || 0;
     if (finishedAt > cutoff) continue;
     const p = paths(job.id);

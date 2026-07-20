@@ -114,8 +114,9 @@ function aggregateSelectedStats(selected, options, now) {
     const provider = record.provider || 'unknown';
     const model = normalizeStatsModel(record.model);
     const mode = record.mode || 'unknown';
-    const key = JSON.stringify([provider, model, mode]);
-    if (!cells.has(key)) cells.set(key, { provider, model, mode, records: [] });
+    const transport = record.transport || 'unknown';
+    const key = JSON.stringify([provider, model, mode, transport]);
+    if (!cells.has(key)) cells.set(key, { provider, model, mode, transport, records: [] });
     cells.get(key).records.push(entry);
   }
   const groups = [...cells.values()].map((cell) => {
@@ -136,6 +137,7 @@ function aggregateSelectedStats(selected, options, now) {
       provider: cell.provider,
       model: cell.model,
       mode: cell.mode,
+      transport: cell.transport,
       jobs: records.length,
       successes,
       successRate: records.length ? successes / records.length : 0,
@@ -151,7 +153,8 @@ function aggregateSelectedStats(selected, options, now) {
       violationJobs,
       violationCount
     };
-  }).sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model) || a.mode.localeCompare(b.mode));
+  }).sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model)
+    || a.mode.localeCompare(b.mode) || a.transport.localeCompare(b.transport));
   return { since: options.since || null, generatedAt: now, jobs: selected.length, groups };
 }
 
@@ -211,4 +214,106 @@ export function auditUsageBands(records, options = {}) {
 
 export function usageBandKey(provider, model, effort) {
   return `${provider}\0${normalizeStatsModel(model)}\0${effort}`;
+}
+
+function snapshotWindows(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.windows)) return [];
+  return snapshot.windows.flatMap((window) => {
+    const usedPercent = Number(window?.usedPercent);
+    if (!window?.name || !Number.isFinite(usedPercent)) return [];
+    return [{ name: String(window.name), usedPercent, resetsAt: window.resetsAt == null ? null : Number(window.resetsAt) }];
+  });
+}
+
+function trackedAuditInWindow(records, attributed, startAt, endAt) {
+  let outputTokens = 0;
+  let jobs = 0;
+  records.forEach((record, index) => {
+    const at = Number(record?.at || 0);
+    if (record?.provider !== 'codex' || at <= startAt || at > endAt) return;
+    const tracked = ['delegate-control', 'delegate-shadow'].includes(record.who)
+      || ['app-server', 'direct-mcp', 'direct-cli', 'direct-acp'].includes(record.transport);
+    if (!tracked) return;
+    jobs += 1;
+    if (Number.isFinite(attributed[index])) outputTokens += Math.max(0, attributed[index]);
+  });
+  return { jobs, outputTokens };
+}
+
+function activeTrackedJobInWindow(jobs, startAt, endAt) {
+  return (jobs || []).some((job) => {
+    if (job?.provider !== 'codex' || !['delegate-control', 'delegate-shadow'].includes(job.managedBy)) return false;
+    const started = Number(job.createdAtMs || Number(job.createdAt || 0) * 1000 || 0);
+    const ended = Number(job.completedAt ? job.completedAt * 1000 : job.updatedAt ? job.updatedAt * 1000 : endAt);
+    return started <= endAt && ended > startAt;
+  });
+}
+
+// Allowance percentages and provider token counters are different units, so
+// the only defensible automatic attribution is conservative: emit a marker
+// when an allowance window moved and there was no chain-attributed tracked
+// Codex output (nor an overlapping active tracked job) in the capture window.
+// Mixed tracked/untracked windows are intentionally left unclassified.
+export function computeUnattributedBurnMarkers(snapshots = [], auditRecords = [], options = {}) {
+  const ordered = [...snapshots].filter((snapshot) => Number.isFinite(Number(snapshot?.at)))
+    .sort((left, right) => Number(left.at) - Number(right.at));
+  const attributed = attributeAuditOutputTokens(auditRecords);
+  const minimumDelta = Math.max(0, Number(options.minimumDelta ?? 0.01));
+  const markers = [];
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1];
+    const current = ordered[index];
+    const startAt = Number(previous.at);
+    const endAt = Number(current.at);
+    if (endAt <= startAt) continue;
+    const tracked = trackedAuditInWindow(auditRecords, attributed, startAt, endAt);
+    if (tracked.outputTokens > 0 || tracked.jobs > 0 || activeTrackedJobInWindow(options.jobs, startAt, endAt)) continue;
+    const previousByName = new Map(snapshotWindows(previous).map((window) => [window.name, window]));
+    for (const window of snapshotWindows(current)) {
+      const before = previousByName.get(window.name);
+      if (!before) continue;
+      if (before.resetsAt != null && window.resetsAt != null && before.resetsAt !== window.resetsAt) continue;
+      const amountPercent = window.usedPercent - before.usedPercent;
+      if (!(amountPercent > minimumDelta)) continue;
+      markers.push({
+        kind: 'unattributed-burn',
+        provider: 'codex',
+        window: window.name,
+        amountPercent,
+        fromUsedPercent: before.usedPercent,
+        toUsedPercent: window.usedPercent,
+        windowStartAt: startAt,
+        windowEndAt: endAt,
+        at: endAt,
+        trackedOutputTokens: 0,
+        estimate: true,
+        note: 'allowance moved in a capture window with no tracked Codex output; percentage-point amount is capture-cadence bounded'
+      });
+    }
+  }
+  return markers;
+}
+
+export function unattributedBurnSummary(history = [], options = {}) {
+  const now = snapshotNow(options);
+  const windowMs = durationMs(options.since);
+  const markers = history.filter((entry) => entry?.kind === 'unattributed-burn'
+    && (windowMs == null || Number(entry.at || 0) >= now - windowMs));
+  const byWindow = {};
+  for (const marker of markers) {
+    const name = String(marker.window || 'unknown');
+    byWindow[name] ||= { markers: 0, amountPercent: 0, latestAt: null };
+    byWindow[name].markers += 1;
+    byWindow[name].amountPercent += Number(marker.amountPercent || 0);
+    byWindow[name].latestAt = Math.max(Number(byWindow[name].latestAt || 0), Number(marker.at || 0)) || null;
+  }
+  return { markerCount: markers.length, byWindow, latest: markers.at(-1) || null, approximate: true };
+}
+
+export function aggregateVisibilityStats(records, options = {}) {
+  return {
+    ...aggregateAudit(records, options),
+    external: options.external || { threadCount: 0, usageThreadCount: 0, tokenTotals: null },
+    unattributed: unattributedBurnSummary(options.history || [], options)
+  };
 }

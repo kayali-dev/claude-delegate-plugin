@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { aggregateJobGroups } from './datasource.mjs';
+import { redactedRemoteLabel } from './remote-config.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const WRITE_MODES = new Set(['implement', 'verify']);
@@ -19,11 +20,14 @@ function normalizeBaseUrl(value) {
   return url;
 }
 
-function remoteJob(job) {
+function remoteJob(job, host) {
   return {
     ...job,
-    workerAlive: TERMINAL.has(job.status) ? undefined : true,
-    managedBy: job.managed ? 'delegate-control' : job.managedBy
+    workerAlive: job.external || TERMINAL.has(job.status) ? undefined : true,
+    managedBy: job.managed ? (job.transport === 'claude-agent' ? 'delegate-agent-hook' : 'delegate-control') : job.managedBy,
+    readOnly: true,
+    remote: true,
+    host: job.host || host
   };
 }
 
@@ -77,7 +81,8 @@ export class RemoteDatasource extends EventEmitter {
   constructor(options = {}) {
     super();
     this.baseUrl = normalizeBaseUrl(options.baseUrl || options.connect);
-    this.host = this.baseUrl.host;
+    this.urlHost = this.baseUrl.host;
+    this.host = redactedRemoteLabel(options.label, this.urlHost);
     this.token = String(options.token || '').trim();
     if (!this.token) throw new Error('remote datasource token is required');
     this.fetch = options.fetch || globalThis.fetch;
@@ -88,6 +93,7 @@ export class RemoteDatasource extends EventEmitter {
     this.requestTimeoutMs = Math.max(100, Number(options.requestTimeoutMs || 10_000));
     this.maxEvents = Math.max(100, Number(options.maxEvents || DEFAULT_MAX_EVENTS));
     this.maxDiffChars = Math.max(200_000, Number(options.maxDiffChars || DEFAULT_MAX_DIFF_CHARS));
+    this.rowTtlMs = Math.max(this.pollMs, Number(options.rowTtlMs || Math.max(15_000, this.pollMs * 3)));
     this.readOnly = true;
     this.kind = 'remote';
     this.closed = false;
@@ -103,6 +109,7 @@ export class RemoteDatasource extends EventEmitter {
     this.streamController = null;
     this.requests = new Set();
     this.clockOffsetMs = 0;
+    this.lastSuccessAt = null;
     this.state = emptyState(this.host);
   }
 
@@ -189,10 +196,11 @@ export class RemoteDatasource extends EventEmitter {
       ]);
       if (this.closed) return this.getState();
       const previous = new Map(this.state.jobs.map((job) => [job.id, job]));
-      const jobs = (listed.jobs || []).map((job) => remoteJob(this.followJobId === job.id ? { ...previous.get(job.id), ...job } : job));
+      const jobs = (listed.jobs || []).map((job) => remoteJob(this.followJobId === job.id ? { ...previous.get(job.id), ...job } : job, this.host));
       const { sessions: sessionRows = [], ...sessionSummary } = sessions || {};
       this.fleetOnline = true;
       this.fleetAttempt = 0;
+      this.lastSuccessAt = Date.now();
       this.state = {
         ...this.state,
         jobs,
@@ -214,6 +222,10 @@ export class RemoteDatasource extends EventEmitter {
       this.fleetOnline = false;
       this.fleetAttempt += 1;
       const delay = backoff(this.fleetAttempt, this.retryBaseMs, this.retryMaxMs);
+      const expired = this.lastSuccessAt != null && Date.now() - this.lastSuccessAt >= this.rowTtlMs;
+      if (expired) {
+        this.state = { ...this.state, jobs: [], groups: [], writerLocks: [], updatedAt: Date.now() };
+      }
       this.connectionStatus(error, Date.now() + delay);
       this.publish();
       this.schedulePoll(delay);
@@ -273,6 +285,7 @@ export class RemoteDatasource extends EventEmitter {
     };
     this.connectionStatus();
     this.publish();
+    let streamable = false;
     try {
       const [job, history, diff] = await Promise.all([
         this.request(`/v1/jobs/${encodeURIComponent(id)}`),
@@ -280,10 +293,11 @@ export class RemoteDatasource extends EventEmitter {
         this.loadDiff(id)
       ]);
       if (this.closed || this.followJobId !== id) return this.getState();
+      streamable = !job.external && job.transport !== 'claude-agent';
       this.eventCursor = history.cursor;
       const jobs = this.state.jobs.some((entry) => entry.id === id)
-        ? this.state.jobs.map((entry) => entry.id === id ? remoteJob({ ...entry, ...job }) : entry)
-        : [remoteJob(job), ...this.state.jobs];
+        ? this.state.jobs.map((entry) => entry.id === id ? remoteJob({ ...entry, ...job }, this.host) : entry)
+        : [remoteJob(job, this.host), ...this.state.jobs];
       this.state = {
         ...this.state,
         jobs,
@@ -307,7 +321,12 @@ export class RemoteDatasource extends EventEmitter {
         this.publish();
       }
     }
-    if (!this.closed && this.followJobId === id) void this.openStream(id);
+    if (!this.closed && this.followJobId === id && streamable) void this.openStream(id);
+    else {
+      this.streamOnline = true;
+      this.connectionStatus();
+      this.publish();
+    }
     return this.getState();
   }
 

@@ -24,8 +24,9 @@ import {
   submitControl,
   waitForJob
 } from './lib/control.mjs';
-import { listJobs, saveJob } from './lib/state.mjs';
-import { aggregateAuditStats, readAuditLog } from './lib/stats.mjs';
+import { listJobs, loadState, saveJob } from './lib/state.mjs';
+import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
+import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessions.mjs';
 
 function usage() {
   console.log(`Usage:
@@ -197,16 +198,26 @@ try {
   } else if (command === 'group') {
     json(groupSummary(args[0]));
   } else if (command === 'stats') {
-    const stats = aggregateAuditStats(readAuditLog(), { since: value(args, '--since') });
+    const usageState = loadState();
+    const externalScan = scanExternalCodexThreads();
+    const stats = aggregateVisibilityStats(readAuditLog(), {
+      since: value(args, '--since'),
+      external: externalThreadStats(externalScan),
+      history: usageState.history || []
+    });
     if (args.includes('--json')) json(stats);
-    else if (!stats.groups.length) console.log('No audited delegation jobs in the selected window.');
     else {
-      console.log(`Delegation stats${stats.since ? ` (last ${stats.since})` : ''}: ${stats.jobs} jobs`);
-      console.log('Provider Model            Mode       Jobs Success Resume Nudge Mean ms Median ms Mean out Budget Timeout Violations');
+      if (!stats.groups.length) console.log('No audited delegation jobs in the selected window.');
+      else console.log(`Delegation stats${stats.since ? ` (last ${stats.since})` : ''}: ${stats.jobs} jobs`);
+      if (stats.groups.length) console.log('Provider Model            Mode       Transport      Jobs Success Resume Nudge Mean ms Median ms Mean out Budget Timeout Violations');
       for (const row of stats.groups) {
         const percent = `${Math.round(row.successRate * 100)}%`;
-        console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.jobs).padStart(4)} ${percent.padStart(7)} ${String(row.resumedJobs).padStart(6)} ${String(row.nudgeCount).padStart(5)} ${String(Math.round(row.meanDurationMs || 0)).padStart(7)} ${String(Math.round(row.medianDurationMs || 0)).padStart(9)} ${String(Math.round(row.meanOutputTokens || 0)).padStart(8)} ${String(row.budgetCount).padStart(6)} ${String(row.timeoutCount).padStart(7)} ${String(row.violationCount).padStart(10)}`);
+        console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.transport || 'unknown').padEnd(14)} ${String(row.jobs).padStart(4)} ${percent.padStart(7)} ${String(row.resumedJobs).padStart(6)} ${String(row.nudgeCount).padStart(5)} ${String(Math.round(row.meanDurationMs || 0)).padStart(7)} ${String(Math.round(row.medianDurationMs || 0)).padStart(9)} ${String(Math.round(row.meanOutputTokens || 0)).padStart(8)} ${String(row.budgetCount).padStart(6)} ${String(row.timeoutCount).padStart(7)} ${String(row.violationCount).padStart(10)}`);
       }
+      const external = stats.external || {};
+      const tokens = external.tokenTotals ? `; exact carried tokens ${external.tokenTotals.totalTokens}` : '; no carried usage counters';
+      console.log(`External tool-originated Codex threads: ${external.threadCount || 0} (${external.usageThreadCount || 0} with usage${tokens})`);
+      if (stats.unattributed?.markerCount) console.log(`Unattributed allowance movement: ${stats.unattributed.markerCount} capture-window marker(s), aggregate-only and approximate.`);
     }
   } else if (command === 'audit') {
     if (args[0] !== 'backfill') throw new Error("audit subcommand must be 'backfill'");

@@ -27,8 +27,14 @@ import {
   statePath,
   warningPercentFor
 } from '../state.mjs';
-import { aggregateAuditStats, readAuditLog } from '../stats.mjs';
-import { claudeProjectsDirectory, scanClaudeSessions } from './sessions.mjs';
+import { aggregateVisibilityStats, readAuditLog } from '../stats.mjs';
+import {
+  brokerOwnedCodexThreadIds,
+  externalThreadStats,
+  readCodexThreadTail,
+  scanExternalCodexThreads
+} from '../codex-sessions.mjs';
+import { claudeProjectsDirectory, readClaudeTranscriptTail, scanClaudeSessions } from './sessions.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DEFAULT_MAX_EVENTS = 5000;
@@ -109,7 +115,7 @@ function profileNames() {
   return [...names].sort();
 }
 
-function providerSnapshots(usageState) {
+function providerSnapshots(usageState, visibility = null) {
   const configured = new Set(enabledProviders());
   return providerNames().map((name) => ({
     name,
@@ -117,7 +123,8 @@ function providerSnapshots(usageState) {
     allowance: effectiveUsage(usageState, name),
     warningPercent: warningPercentFor(name),
     avoidPercent: avoidPercentFor(name),
-    lastVerified: usageState.lastVerified?.[name] || null
+    lastVerified: usageState.lastVerified?.[name] || null,
+    ...(name === 'codex' && visibility?.unattributed ? { unattributedBurn: visibility.unattributed } : {})
   }));
 }
 
@@ -151,11 +158,13 @@ function cloneState(state) {
     hydrationByJob: Object.fromEntries(Object.entries(state.hydrationByJob).map(([id, hydration]) => [id, { ...hydration }])),
     providers: state.providers.map((provider) => ({
       ...provider,
-      allowance: { ...provider.allowance, windows: [...provider.allowance.windows] }
+      allowance: { ...provider.allowance, windows: [...provider.allowance.windows] },
+      ...(provider.unattributedBurn ? { unattributedBurn: { ...provider.unattributedBurn, byWindow: { ...provider.unattributedBurn.byWindow } } } : {})
     })),
     writerLocks: state.writerLocks.map((lock) => ({ ...lock })),
     sessions: state.sessions.map((session) => ({ ...session })),
     sessionScan: { ...state.sessionScan },
+    externalScan: { ...state.externalScan },
     profiles: [...state.profiles],
     groups: state.groups.map((group) => ({ ...group, memberIds: [...group.memberIds] })),
     stats: { ...state.stats, groups: [...state.stats.groups] }
@@ -179,6 +188,15 @@ export class DelegateDataSource extends EventEmitter {
       ...(options.sessionTailBytes == null ? {} : { tailBytes: options.sessionTailBytes }),
       ...(options.sessionSnippetWidth == null ? {} : { snippetWidth: options.sessionSnippetWidth })
     };
+    this.externalScanOptions = {
+      env: options.env || process.env,
+      ...(options.codexSessionsDir == null ? {} : { sessionsDir: options.codexSessionsDir }),
+      ...(options.maxExternalThreads == null ? {} : { maxThreads: options.maxExternalThreads }),
+      ...(options.externalTailBytes == null ? {} : { tailBytes: options.externalTailBytes }),
+      ...(options.externalSnippetWidth == null ? {} : { snippetWidth: options.externalSnippetWidth })
+    };
+    this.externalJobs = new Map();
+    this.externalSources = new Map();
     this.journalCursors = new Map();
     this.hydratedJobs = new Set();
     this.hydrations = new Map();
@@ -206,6 +224,7 @@ export class DelegateDataSource extends EventEmitter {
       jobs: [], eventsByJob: {}, activityEventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
       usage: null, providers: [], writerLocks: [], profiles: [], groups: [], audit: [], metadataReady: false,
       sessions: [], sessionScan: { status: 'loading', available: null, projectsDir: this.sessionProjectsDir, scanned: 0, totalFiles: 0, capped: false, error: null },
+      externalScan: { status: 'loading', available: null, scanned: 0, totalFiles: 0, capped: false, ownedExcluded: 0, personalExcluded: 0, duplicatesExcluded: 0, error: null },
       stats: { since: '7d', jobs: 0, groups: [] }, updatedAt: null, error: null
     };
   }
@@ -239,6 +258,7 @@ export class DelegateDataSource extends EventEmitter {
       if (this.closed) return;
       this.hydrateMetadata({ force: true });
       this.refreshSessions({ force: true });
+      this.refreshExternalThreads({ force: true });
       this.refreshActivityTails({ force: true });
     });
     return this;
@@ -294,7 +314,10 @@ export class DelegateDataSource extends EventEmitter {
         this.refreshActivityTails();
       }
       if (kinds.has('all') || kinds.has('metadata')) this.hydrateMetadata();
-      if (kinds.has('sessions')) this.refreshSessions();
+      if (kinds.has('sessions')) {
+        this.refreshSessions();
+        this.refreshExternalThreads();
+      }
     }, this.debounceMs);
     this.debounceTimer.unref?.();
   }
@@ -317,13 +340,14 @@ export class DelegateDataSource extends EventEmitter {
     this.metrics.refreshes += 1;
     try {
       const rawJobs = listJobs();
-      const ids = new Set(rawJobs.map((job) => job.id));
-      const jobsById = new Map(rawJobs.map((job) => [job.id, job]));
+      const allRecords = [...rawJobs, ...this.externalJobs.values()];
+      const ids = new Set(allRecords.map((job) => job.id));
+      const jobsById = new Map(allRecords.map((job) => [job.id, job]));
       const cachedById = new Map(this.state.jobs.map((job) => [job.id, job]));
-      const jobs = rawJobs.map((job) => ({
+      const jobs = allRecords.map((job) => ({
         ...job,
         ...this.activityFields(job, cachedById.get(job.id)),
-        workerAlive: TERMINAL.has(job.status) ? undefined : isProcessAlive(job.workerPid || job.pid),
+        workerAlive: job.external || TERMINAL.has(job.status) ? undefined : isProcessAlive(job.workerPid || job.pid),
         tuiReconciledFrom: this.reconciledByTui.get(job.id) || null,
         rootJobId: rootJobId(job, jobsById)
       }));
@@ -342,7 +366,8 @@ export class DelegateDataSource extends EventEmitter {
       const digest = JSON.stringify(jobs.map((job) => [
         job.id, job.revision, job.status, job.phase, job.updatedAt, job.lastActivityAt, job.stalled, job.workerAlive,
         job.groupId || null, Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Number(job.scopeViolations || 0),
-        job.errorCode || null, job.stoppedReason || null
+        job.errorCode || null, job.stoppedReason || null,
+        job.external === true, job.approximateSize || null, job.activityLabel || null
       ]));
       const changed = options.force || digest !== this.recordsDigest;
       this.recordsDigest = digest;
@@ -355,8 +380,12 @@ export class DelegateDataSource extends EventEmitter {
         error: null
       };
       if (changed) this.emit('change', this.getState());
-      if (this.followJobId && ids.has(this.followJobId)
-        && this.journalStamps.get(this.followJobId) !== fileStamp(eventPath(this.followJobId))) {
+      const followed = this.followJobId ? jobsById.get(this.followJobId) : null;
+      if (followed?.external) {
+        void this.hydrateReadOnlyTranscript(this.followJobId, 'external');
+      } else if (followed?.transport === 'claude-agent' && followed.transcriptPath) {
+        void this.hydrateReadOnlyTranscript(this.followJobId, 'claude-agent');
+      } else if (followed && this.journalStamps.get(this.followJobId) !== fileStamp(eventPath(this.followJobId))) {
         void this.hydrateJob(this.followJobId);
       }
     } catch (error) {
@@ -378,14 +407,16 @@ export class DelegateDataSource extends EventEmitter {
     try {
       const usage = loadState();
       const audit = readAuditLog();
+      const external = externalThreadStats({ threads: [...this.externalJobs.values()] });
+      const visibility = aggregateVisibilityStats(audit, { since: '7d', external, history: usage.history || [] });
       this.metadataStamp = stamp;
       this.state = {
         ...this.state,
         usage,
-        providers: providerSnapshots(usage),
+        providers: providerSnapshots(usage, visibility),
         profiles: profileNames(),
         audit,
-        stats: aggregateAuditStats(audit, { since: '7d' }),
+        stats: visibility,
         metadataReady: true,
         updatedAt: Date.now(),
         error: null
@@ -403,7 +434,7 @@ export class DelegateDataSource extends EventEmitter {
     let changed = false;
     const active = new Set();
     for (const job of this.state.jobs) {
-      if (TERMINAL.has(job.status)) continue;
+      if (job.external || TERMINAL.has(job.status)) continue;
       active.add(job.id);
       const stamp = fileStamp(eventPath(job.id));
       if (!options.force && this.activityTailStamps.get(job.id) === stamp) continue;
@@ -445,6 +476,36 @@ export class DelegateDataSource extends EventEmitter {
     return this.getState();
   }
 
+  refreshExternalThreads(options = {}) {
+    if (this.closed) return this.getState();
+    const managed = listJobs();
+    const scan = scanExternalCodexThreads({
+      ...this.externalScanOptions,
+      jobs: managed,
+      ownedIds: brokerOwnedCodexThreadIds(managed)
+    });
+    const { threads, sources, ...summary } = scan;
+    const externalScan = { status: scan.available ? 'ready' : 'unavailable', ...summary };
+    const previous = this.state.externalScan;
+    const changed = options.force || JSON.stringify([
+      externalScan.status, externalScan.available, externalScan.scanned, externalScan.totalFiles,
+      externalScan.capped, externalScan.ownedExcluded, externalScan.personalExcluded, externalScan.duplicatesExcluded, externalScan.error,
+      ...threads.map((thread) => [thread.id, thread.updatedAt, thread.approximateSize, thread.activityLabel])
+    ]) !== JSON.stringify([
+      previous.status, previous.available, previous.scanned, previous.totalFiles,
+      previous.capped, previous.ownedExcluded, previous.personalExcluded, previous.duplicatesExcluded, previous.error,
+      ...this.externalJobs.values().map((thread) => [thread.id, thread.updatedAt, thread.approximateSize, thread.activityLabel])
+    ]);
+    this.externalJobs = new Map(threads.map((thread) => [thread.id, thread]));
+    this.externalSources = sources;
+    this.state = { ...this.state, externalScan, updatedAt: Date.now() };
+    if (changed) {
+      this.refreshRecords({ force: true });
+      this.hydrateMetadata({ force: true });
+    }
+    return this.getState();
+  }
+
   publishJournal(id, hydration) {
     const last = readLastCompleteEvent(eventPath(id));
     const jobs = this.state.jobs.map((job) => job.id === id ? { ...job, ...this.activityFields(job, { lastActivityAt: last?.at }) } : job);
@@ -463,9 +524,32 @@ export class DelegateDataSource extends EventEmitter {
   selectJob(id) {
     this.followJobId = id || null;
     if (!id) return Promise.resolve(this.getState());
+    const selected = this.state.jobs.find((job) => job.id === id);
+    if (selected?.external) return this.hydrateReadOnlyTranscript(id, 'external');
+    if (selected?.transport === 'claude-agent' && selected.transcriptPath) return this.hydrateReadOnlyTranscript(id, 'claude-agent');
     const loaded = this.state.hydrationByJob[id]?.loaded === true;
     if (loaded && this.journalStamps.get(id) === fileStamp(eventPath(id))) return Promise.resolve(this.getState());
     return this.hydrateJob(id);
+  }
+
+  hydrateReadOnlyTranscript(id, kind) {
+    const job = this.state.jobs.find((entry) => entry.id === id);
+    const file = kind === 'external' ? this.externalSources.get(id) : job?.transcriptPath;
+    const result = file
+      ? kind === 'external' ? readCodexThreadTail(file) : readClaudeTranscriptTail(file)
+      : { events: [] };
+    this.events.set(id, result.events || []);
+    this.diffs.set(id, '');
+    this.state = {
+      ...this.state,
+      eventsByJob: { ...this.state.eventsByJob, [id]: result.events || [] },
+      diffsByJob: { ...this.state.diffsByJob, [id]: '' },
+      diffStatsByJob: { ...this.state.diffStatsByJob, [id]: { files: [], totalAdditions: 0, totalDeletions: 0 } },
+      hydrationByJob: { ...this.state.hydrationByJob, [id]: { loading: false, loaded: true, error: null, bounded: true } },
+      updatedAt: Date.now()
+    };
+    this.emit('change', this.getState());
+    return Promise.resolve(this.getState());
   }
 
   reconcileVisibleJobs(ids, options = {}) {

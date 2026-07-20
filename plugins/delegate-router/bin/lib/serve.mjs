@@ -23,8 +23,15 @@ import {
   providerNames,
   warningPercentFor
 } from './state.mjs';
-import { aggregateAuditStats, readAuditLog } from './stats.mjs';
-import { scanClaudeSessions } from './tui/sessions.mjs';
+import { listJobs } from './state.mjs';
+import { aggregateVisibilityStats, readAuditLog, unattributedBurnSummary } from './stats.mjs';
+import {
+  brokerOwnedCodexThreadIds,
+  externalThreadStats,
+  readCodexThreadTail,
+  scanExternalCodexThreads
+} from './codex-sessions.mjs';
+import { readClaudeTranscriptTail, scanClaudeSessions } from './tui/sessions.mjs';
 
 export const SERVE_HOST = '127.0.0.1';
 export const DEFAULT_SERVE_PORT = 4263;
@@ -148,6 +155,7 @@ function diffSelectors(searchParams) {
 function providerUsage() {
   const usage = loadState();
   const configured = new Set(enabledProviders());
+  const unattributed = unattributedBurnSummary(usage.history || [], { since: '7d' });
   return {
     providers: providerNames().map((name) => ({
       name,
@@ -155,9 +163,45 @@ function providerUsage() {
       allowance: effectiveUsage(usage, name),
       warningPercent: warningPercentFor(name),
       avoidPercent: avoidPercentFor(name),
-      lastVerified: usage.lastVerified?.[name] || null
+      lastVerified: usage.lastVerified?.[name] || null,
+      ...(name === 'codex' ? { unattributedBurn: unattributed } : {})
     }))
   };
+}
+
+function scanExternal() {
+  const jobs = listJobs();
+  return scanExternalCodexThreads({ jobs, ownedIds: brokerOwnedCodexThreadIds(jobs) });
+}
+
+function observedJob(id, scan = null) {
+  if (String(id).startsWith('external-codex-')) {
+    const current = scan || scanExternal();
+    const job = current.threads.find((thread) => thread.id === id);
+    if (!job) throw Object.assign(new Error(`job not found: ${id}`), { code: 'NOT_FOUND' });
+    return { job, source: current.sources.get(id), observed: true };
+  }
+  const job = inspectJob(id);
+  return { job, source: job.transport === 'claude-agent' ? job.transcriptPath : null, observed: job.transport === 'claude-agent' };
+}
+
+function publicJob(job) {
+  return { ...job, transcriptPath: undefined };
+}
+
+function observedPage(resolved, searchParams) {
+  const afterSeq = integerParam(searchParams, 'afterSeq', { min: 0, defaultValue: 0 });
+  const limit = integerParam(searchParams, 'limit', { min: 1, max: 1000, defaultValue: 200 });
+  const tail = resolved.source
+    ? resolved.job.transport === 'claude-agent'
+      ? readClaudeTranscriptTail(resolved.source, { limit: 1000 })
+      : readCodexThreadTail(resolved.source, { limit: 1000 })
+    : { events: [] };
+  const all = tail.events || [];
+  const events = all.filter((event) => Number(event.seq || 0) > afterSeq).slice(0, limit);
+  const latestSeq = Number(all.at(-1)?.seq || afterSeq);
+  const nextSeq = Number(events.at(-1)?.seq || afterSeq);
+  return { events, nextSeq, latestSeq, hasMore: nextSeq < latestSeq, bounded: true };
 }
 
 function setResponseHeaders(response, contentType) {
@@ -364,13 +408,20 @@ export function createDelegateServeServer(options = {}) {
       }
       if (route.name === 'jobs') {
         const status = statusParams(url.searchParams);
+        const limit = integerParam(url.searchParams, 'limit', { min: 1, max: 100, defaultValue: 100 });
+        const activeOnly = booleanParam(url.searchParams, 'activeOnly', false);
         const result = listManagedJobs({
-          limit: integerParam(url.searchParams, 'limit', { min: 1, max: 100, defaultValue: 100 }),
-          activeOnly: booleanParam(url.searchParams, 'activeOnly', false),
+          limit,
+          activeOnly,
           ...(status.length ? { status } : {}),
           ...(url.searchParams.get('groupId') ? { groupId: url.searchParams.get('groupId') } : {})
         });
-        sendJson(response, result, writeTimeoutMs);
+        const external = !status.length && !url.searchParams.get('groupId') ? scanExternal().threads : [];
+        const jobs = [...result.jobs, ...external]
+          .sort((left, right) => Number(right.lastActivityAt || right.updatedAt * 1000 || 0) - Number(left.lastActivityAt || left.updatedAt * 1000 || 0))
+          .slice(0, limit)
+          .map(publicJob);
+        sendJson(response, { jobs }, writeTimeoutMs);
         return;
       }
       if (route.name === 'usage') {
@@ -382,15 +433,22 @@ export function createDelegateServeServer(options = {}) {
         return;
       }
       if (route.name === 'stats') {
-        sendJson(response, aggregateAuditStats(readAuditLog(), { since: url.searchParams.get('since') || '7d' }), writeTimeoutMs);
+        const scan = scanExternal();
+        const usage = loadState();
+        sendJson(response, aggregateVisibilityStats(readAuditLog(), {
+          since: url.searchParams.get('since') || '7d',
+          external: externalThreadStats(scan),
+          history: usage.history || []
+        }), writeTimeoutMs);
         return;
       }
       if (route.name === 'job') {
-        sendJson(response, inspectJob(route.id), writeTimeoutMs);
+        sendJson(response, publicJob(observedJob(route.id).job), writeTimeoutMs);
         return;
       }
       if (route.name === 'events') {
-        sendJson(response, eventPage(route.id, url.searchParams), writeTimeoutMs);
+        const resolved = observedJob(route.id);
+        sendJson(response, resolved.observed ? observedPage(resolved, url.searchParams) : eventPage(route.id, url.searchParams), writeTimeoutMs);
         return;
       }
       if (route.name === 'events/stream') {
@@ -398,17 +456,23 @@ export function createDelegateServeServer(options = {}) {
         return;
       }
       if (route.name === 'transcript') {
-        inspectJob(route.id);
-        sendJson(response, transcriptPage(route.id, url.searchParams), writeTimeoutMs);
+        const resolved = observedJob(route.id);
+        sendJson(response, resolved.observed ? observedPage(resolved, url.searchParams) : transcriptPage(route.id, url.searchParams), writeTimeoutMs);
         return;
       }
       if (route.name === 'job-usage') {
-        sendJson(response, jobUsage(route.id), writeTimeoutMs);
+        const resolved = observedJob(route.id);
+        sendJson(response, resolved.job.external ? {
+          observed: resolved.job.usage || null,
+          tokenUsage: resolved.job.usage || null,
+          observedAvailable: Boolean(resolved.job.usage),
+          note: resolved.job.usage ? 'exact counters carried by the bounded Codex thread tail' : 'the bounded thread tail carried no usage counter'
+        } : jobUsage(route.id), writeTimeoutMs);
         return;
       }
       if (route.name === 'diff') {
-        inspectJob(route.id);
-        const filtered = filterDiffPaths(jobDiff(route.id), diffSelectors(url.searchParams));
+        const resolved = observedJob(route.id);
+        const filtered = resolved.observed ? '' : filterDiffPaths(jobDiff(route.id), diffSelectors(url.searchParams));
         const result = booleanParam(url.searchParams, 'statOnly', false)
           ? diffStat(filtered)
           : sliceDiff(filtered, {

@@ -142,7 +142,7 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.
 - `completed` means the provider and optional verification command finished, not that the objective was met: check `changedFiles` against the worker's claims. `delegate-jobs wait` exits 5 for a write-mode job with zero observed changes and 6 when `verification.exitCode` is nonzero; verification failure leaves job status `completed` so the verdict remains explicit.
 - `lastActivityAt` comes from the journal tail. `stalled=true` means a running job has been quiet longer than `DELEGATE_STALL_SECONDS` (default 300); it is a diagnostic flag, never an automatic kill.
-- `delegate_stats` for read-only audit aggregates and terminal-status/output-token totals, optionally bounded with `since` such as `24h` or `7d`.
+- `delegate_stats` for read-only transport-tagged audit aggregates, terminal-status/output-token totals, proven tool-originated external Codex thread totals, and aggregate-only unattributed allowance movement, optionally bounded with `since` such as `24h` or `7d`.
 - `delegate_usage` for observed job usage, chain-cumulative token totals, and provider allowance as separate values.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
 - For long waits inside Claude Code, do not rely on a background `delegate-jobs wait` process — the harness can reap it (field-verified across a full multi-cluster run). Watch the job's `finishedPath` instead (on the job record from `delegate_inspect`/`delegate_list`): the broker writes that sentinel file on every terminal transition, so a Monitor until-loop on its existence is the durable wake signal; then read the outcome with `delegate_inspect`. `delegate-jobs wait` remains fine from a real terminal.
@@ -174,6 +174,8 @@ Use a built-in `Agent` only when a fresh context, an independent second opinion,
 When the router recommends the highest Claude tier, read that as "opus — or fable only with explicit per-task user authorization." If the parent session already runs the recommended tier, stay in the session. Do not route Claude models through Cursor to satisfy a tier choice: Cursor catalogs list Claude ids as first-class models, but that path spends the Cursor pool for a model the Claude subscription already covers, loses native harness behavior and continuation, and gains no Cursor-specialist ability.
 
 A Claude agent that writes files is an unmanaged writer, invisible to the managed `WRITER_ACTIVE` guard — never run one alongside a managed write job in the same cwd; give parallel Claude write work worktree isolation or coordinate it manually.
+
+The plugin's Agent/legacy Task hooks add a `claude-agent` visibility stub keyed by the hook `tool_use_id`; they do not supervise, authorize, or control the subagent. Stub prompts and transcript tails are bounded and redacted, every mutation stays disabled, and hook failure always yields to the original Agent call. `DELEGATE_AGENT_STUBS=0` disables this visibility layer.
 
 ## Verify And Recover
 

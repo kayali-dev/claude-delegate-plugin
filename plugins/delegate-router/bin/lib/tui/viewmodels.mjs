@@ -31,6 +31,7 @@ export const HELP_ITEMS = Object.freeze([
   { key: 'd / y', description: 'Build dry-run preview / launch that exact packet' },
   { key: 'y / T', description: 'Copy focused value / toggle absolute-relative timestamps' },
   { key: 'o / z / M', description: 'Cycle Fleet sort / density / status-message history' },
+  { key: 'x', description: 'Show or hide read-only external Codex threads in Fleet' },
   { key: 'Ctrl-G', description: 'Mark the current DELEGATE_TUI_DIAG frame' },
   { key: '? / q / Ctrl-C', description: 'Toggle help / quit immediately' }
 ]);
@@ -46,7 +47,7 @@ function nowOf(ui, store = null) {
 }
 
 function active(job) {
-  return !TERMINAL.has(job.status);
+  return job.external !== true && job.transport !== 'external' && !TERMINAL.has(job.status);
 }
 
 export function effectiveJobRecord(job, nowMs = Date.now()) {
@@ -150,6 +151,8 @@ function jobState(job) {
 function badges(job) {
   const values = [];
   if (job.direct === true || ['direct-mcp', 'direct-cli', 'direct-acp'].includes(job.transport)) values.push('direct');
+  if (job.external === true || job.transport === 'external') values.push('external');
+  if (job.transport === 'claude-agent') values.push('agent');
   if (job.overlapsManagedWriter === true) values.push('writer!');
   if (job.resultSuspect) values.push('?');
   const violations = Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Number(job.scopeViolations || 0);
@@ -169,11 +172,12 @@ function jobEffort(job) {
 }
 
 function fleetColumns(width, remote = null, density = 'wide') {
-  const hostWidth = remote?.enabled ? 16 : 0;
+  const hostWidth = remote?.enabled ? 14 : 0;
   const wide = density !== 'compact' && width >= 96 + hostWidth;
   const compactBaseWidth = 45;
-  const showEffort = wide || width >= compactBaseWidth + 7;
-  const showDirectory = wide || width >= compactBaseWidth + 7 + 12;
+  const showHost = remote?.enabled && (wide || width >= compactBaseWidth + hostWidth);
+  const showEffort = wide || width >= compactBaseWidth + (showHost ? hostWidth : 0) + 7;
+  const showDirectory = wide || width >= compactBaseWidth + (showHost ? hostWidth : 0) + 7 + 12;
   const columns = wide ? [
     { key: 'id', title: 'Job', width: 10, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
     ...(remote?.enabled ? [{ key: 'host', title: 'Host', width: hostWidth }] : []),
@@ -184,6 +188,7 @@ function fleetColumns(width, remote = null, density = 'wide') {
     { key: 'chain', title: 'Chain', width: 8 }, { key: 'badges', title: 'Badges', width: 15 }
   ] : [
     { key: 'id', title: 'Job', width: 9, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
+    ...(showHost ? [{ key: 'host', title: 'Host', width: hostWidth }] : []),
     ...(showDirectory ? [{ key: 'dir', title: 'Directory', width: 12 }] : []),
     { key: 'model', title: 'Model', width: 8, flexible: true },
     ...(showEffort ? [{ key: 'effort', title: 'Effort', width: 7 }] : []),
@@ -209,7 +214,7 @@ function footerHints(screen, remote = false) {
   const navigation = [{ key: 'Esc', label: 'back' }, { key: '?', label: 'help' }, { key: 'q', label: 'quit' }];
   const rows = {
     dashboard: [[{ key: 'F', label: 'fleet' }, { key: 'N', label: 'new job' }], [{ key: 'Up/Dn', label: 'select' }, { key: 'Tab', label: 'focus' }, { key: 'Enter', label: 'open' }], navigation],
-    fleet: [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'detail' }, { key: '/', label: 'filter' }], [{ key: 'a', label: 'active' }, { key: 'o', label: 'sort' }, { key: 'z', label: 'density' }], [{ key: 'N', label: 'new' }, { key: 'G', label: 'groups' }, { key: 'p', label: 'providers' }], navigation],
+    fleet: [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'detail' }, { key: '/', label: 'filter' }], [{ key: 'a', label: 'active' }, { key: 'x', label: 'externals' }, { key: 'o', label: 'sort' }, { key: 'z', label: 'density' }], [{ key: 'N', label: 'new' }, { key: 'G', label: 'groups' }, { key: 'p', label: 'providers' }], navigation],
     'group-members': [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'detail' }, { key: '/', label: 'filter' }], navigation],
     groups: [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'members' }], navigation],
     sessions: [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'fleet by cwd' }], navigation],
@@ -233,8 +238,8 @@ function commonOverlay(frame, ui, store = null) {
   const remote = ui.remote;
   if (remote?.enabled) {
     const connection = remote.connection || { status: 'connecting', attempt: 0 };
-    frame.title.text = `[remote] ${frame.title.text}`;
-    frame.title.right = joinDisplayParts([remote.host || 'unknown host', frame.title.right]);
+    frame.title.text = `[${remote.federation ? 'fleet' : 'remote'}] ${frame.title.text}`;
+    frame.title.right = joinDisplayParts([remote.federation ? `${remote.hosts?.length || 0} hosts` : remote.host || 'unknown host', frame.title.right]);
     const retry = connection.status === 'connected' ? '' : connection.attempt ? `#${connection.attempt}` : '';
     const connectionText = `remote:${connection.status}${retry}`;
     if (frame.status?.segments) {
@@ -244,21 +249,27 @@ function commonOverlay(frame, ui, store = null) {
     }
   }
   const notify = ui.notifyEnabled === false ? 'notify:off' : 'notify:on';
-  if (frame.status) frame.status.right = [remote?.enabled ? 'read-only remote' : '', notify, frame.status.right || '']
+  if (frame.status) frame.status.right = [remote?.enabled && !remote?.includeLocal ? 'read-only remote' : '', notify, frame.status.right || '']
     .filter(Boolean).join(CHROME_SEPARATOR);
   const suppliedVersion = formatDisplayValue(ui.version).trim().replace(/^v/i, '');
   const version = suppliedVersion ? `v${suppliedVersion}` : 'v?';
-  const hostCenter = `${ui.remote?.host || ui.hostLabel || 'local'}${CHROME_SEPARATOR}${version}`;
+  const hostCenter = `${ui.remote?.federation ? `${ui.remote.hosts?.length || 0} hosts` : ui.remote?.host || ui.hostLabel || 'local'}${CHROME_SEPARATOR}${version}`;
+  const hostChips = (store?.remote?.hosts || []).map((host) => ({
+    text: `${formatDisplayValue(host.label)} ${host.connection?.status || 'connecting'}`,
+    style: host.connection?.status === 'connected' ? palette.positive
+      : host.connection?.status === 'connecting' ? palette.badgeWarn : palette.failed
+  }));
   frame.appBar = {
     product: 'delegate',
     breadcrumb: breadcrumbs(frame, ui),
     center: frame.headerActivity?.text || hostCenter,
     centerSegments: frame.headerActivity?.segments || null,
     centerStyle: frame.headerActivity?.style || palette.dim,
-    chips: (store?.providers || []).filter((provider) => provider.name !== 'claude' || provider.allowance?.known).map((provider) => {
+    chips: [...(store?.providers || []).filter((provider) => provider.name !== 'claude' || provider.allowance?.known).map((provider) => {
       const band = providerBand(provider);
-      return { text: `${formatDisplayValue(provider.name)} ${band.label}`, style: band.style };
-    })
+      const burn = Number(provider.unattributedBurn?.latest?.amountPercent || 0);
+      return { text: `${formatDisplayValue(provider.name)} ${band.label}${burn > 0 ? ` ~${burn.toFixed(1)}pp outside tracked` : ''}`, style: band.style };
+    }), ...hostChips]
   };
   // Row zero is the app bar; row one is its composition-owned breathing
   // space. Shift every content rect once here so hit testing and painting see
@@ -288,7 +299,8 @@ function commonOverlay(frame, ui, store = null) {
     if (frame.tabs) frame.tabs = { ...frame.tabs, rect: { ...frame.tabs.rect, y: Number(frame.tabs.rect?.y || 0) + 1 } };
     frame.meta = { ...(frame.meta || {}), appBarSpaced: true };
   }
-  if (frame.status && !frame.status.segments && !ui.status) frame.status.hints = frame.status.hints || footerHints(frame.screen, ui.remote?.enabled);
+  if (frame.status && !frame.status.segments && !ui.status) frame.status.hints = frame.status.hints
+    || footerHints(frame.screen, ui.remote?.enabled && !ui.remote?.includeLocal);
   frame.focusedPane = Number(ui.focusedPane || 0);
   if (ui.help) frame.overlay = { kind: 'help', title: 'delegate-tui keys', items: HELP_ITEMS };
   else if (ui.statusHistoryOpen) frame.overlay = {
@@ -631,8 +643,9 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     return { raw, job, usage, activity };
   })
     .filter(({ job }) => (!ui.groupId || job.groupId === ui.groupId)
+      && (ui.showExternals !== false || !job.external)
       && (!ui.activeOnly || active(job))
-      && (!query || [job.id, job.resolvedModel || job.model, job.cwd].some((value) => formatDisplayValue(value).toLowerCase().includes(query))))
+      && (!query || [job.id, job.resolvedModel || job.model, job.cwd, job.host, job.activityLabel].some((value) => formatDisplayValue(value).toLowerCase().includes(query))))
     .sort((left, right) => Number(active(right.job)) - Number(active(left.job)) || (() => {
       if (sort === 'provider') return formatDisplayValue(left.job.provider).localeCompare(formatDisplayValue(right.job.provider));
       if (sort === 'tokens') return right.usage.output - left.usage.output;
@@ -651,7 +664,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     const values = {
       id: shortId(job),
       provider: displayOr(job.provider, '-'),
-      host: displayOr(ui.remote?.host, '-'),
+      host: displayOr(job.host || ui.remote?.host, '-'),
       dir: jobDirectory(job),
       model: displayOr(job.resolvedModel || job.model || job.requestedModel, 'auto'),
       effort: jobEffort(job),
@@ -662,7 +675,12 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
       chain: job.rootJobId ? `>${formatDisplayValue(job.rootJobId).slice(-6)}` : job.groupId ? `G:${formatDisplayValue(job.groupId).slice(0, 7)}` : '-',
       badges: badgeCell(job)
     };
-    return { id: job.id, reconciliationPending: job.reconciliationPending === true, cells: columns.map((column) => values[column.key]) };
+    return {
+      id: job.id,
+      reconciliationPending: job.reconciliationPending === true,
+      ...(job.external ? { style: palette.dim } : {}),
+      cells: columns.map((column) => values[column.key])
+    };
   });
   const visibleRows = Math.max(0, height - 5);
   const requestedScroll = Math.max(0, Number(ui.scroll || 0));
@@ -670,12 +688,15 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     Math.max(requestedScroll, selected >= requestedScroll + visibleRows ? selected - visibleRows + 1 : requestedScroll),
     Math.max(0, entries.length - visibleRows)
   ));
-  const reconcileJobIds = ui.remote?.enabled ? [] : rows.slice(scroll, scroll + visibleRows).filter((row) => row.reconciliationPending).map((row) => row.id);
+  const jobsById = new Map(entries.map(({ job }) => [job.id, job]));
+  const reconcileJobIds = rows.slice(scroll, scroll + visibleRows)
+    .filter((row) => row.reconciliationPending && !jobsById.get(row.id)?.readOnly)
+    .map((row) => row.id);
   const locks = store.writerLocks?.length ? `writers:${store.writerLocks.length}` : 'writers:0';
   const statusOverride = errorStatus(ui);
   const frame = {
     width, height, screen: ui.groupId ? 'group-members' : 'fleet',
-    title: { text: `${ui.groupId ? `Group ${formatDisplayValue(ui.groupId)}` : 'Delegate fleet'}${ui.activeOnly ? `${CHROME_SEPARATOR}active` : ''}${ui.filter ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.filter)}` : ''}`, right: `${entries.length} jobs` },
+    title: { text: `${ui.groupId ? `Group ${formatDisplayValue(ui.groupId)}` : 'Delegate fleet'}${ui.activeOnly ? `${CHROME_SEPARATOR}active` : ''}${ui.showExternals === false ? `${CHROME_SEPARATOR}externals:off` : ''}${ui.filter ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.filter)}` : ''}`, right: `${entries.length} jobs` },
     panes: [{
       rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) },
       title: store.error ? `Store warning: ${formatDisplayValue(store.error)}` : 'Delegation jobs',
@@ -807,6 +828,7 @@ function transcriptLineStyle(block, fragment) {
 
 function derivedResumable(job) {
   if (job.resumable) return job.resumable;
+  if (job.readOnly || ['external', 'claude-agent'].includes(job.transport)) return { ok: false, reason: 'read-only observed job' };
   if (['direct-mcp', 'direct-cli', 'direct-acp'].includes(job.transport)) return { ok: false, reason: 'direct-transport job' };
   if (job.managedBy !== 'delegate-control') return { ok: false, reason: 'legacy job' };
   if (!TERMINAL.has(job.status)) return { ok: false, reason: 'job is active' };
@@ -836,7 +858,13 @@ function recordLines(job) {
     objectiveMet: job.objectiveMet ?? '',
     scopeViolations: job.scopeViolations || [],
     error: job.error || '',
-    errorCode: job.errorCode || ''
+    errorCode: job.errorCode || '',
+    transport: job.transport || '',
+    coordinatorSessionId: job.coordinatorSessionId || '',
+    agentType: job.agentType || '',
+    promptSummary: job.promptSummary || '',
+    approximateSize: job.approximateSizeLabel || job.approximateSize || '',
+    activityLabel: job.activityLabel || ''
   };
   return formatDisplayValue(curated, { space: 2, maxLength: 64_000 }).split('\n');
 }
@@ -1092,8 +1120,8 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
     headerActivity,
     tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: tabs, active: tab },
     panes: [{ rect: { x: 0, y: 3, width, height: Math.max(3, height - 4) }, title: body.title, loading: body.loading, loadingGlyph: body.loadingGlyph, content: body.content }],
-    status: errorStatus(ui) || { text: ui.remote?.enabled
-      ? 'Esc fleet  [/] tabs  / search  f follow  read-only remote'
+    status: errorStatus(ui) || { text: job.readOnly || (ui.remote?.enabled && !ui.remote?.includeLocal)
+      ? 'Esc fleet  [/] tabs  / search  f follow  read-only observed job'
       : 'Esc fleet  [/] tabs  / search  f follow  Enter expand  d diff  E events  s/r/R  n/w/c/v' },
     meta: {
       jobId: job.id,
@@ -1135,7 +1163,9 @@ export function providersViewModel(store, ui = {}, viewport = {}) {
       windows: (provider.allowance?.windows || []).map((window) => {
         const used = Number(window.usedPercent);
         return joinDisplayParts([window.name, Number.isFinite(used) ? `${Math.round(used)}%` : ''], ':');
-      }).filter(Boolean).join(' ') || '-',
+      }).filter(Boolean).join(' ') + (provider.unattributedBurn?.latest
+        ? ` ~${Number(provider.unattributedBurn.latest.amountPercent || 0).toFixed(1)}pp outside tracked (${formatDisplayValue(provider.unattributedBurn.latest.window)})`
+        : '') || '-',
       verified: { text: verified, style: provider.lastVerified?.ok === false ? palette.failed : palette.dim }
     };
   });
@@ -1280,7 +1310,7 @@ function attributedOutputMeans(store, now, since) {
   for (const entry of attributeAuditUsage(store.audit || [], store.jobs || [])) {
     if (entry.at < cutoff || entry.at > now) continue;
     const record = entry.record || {};
-    const key = JSON.stringify([entry.provider || 'unknown', statsModelName(record.model), record.mode || 'unknown']);
+    const key = JSON.stringify([entry.provider || 'unknown', statsModelName(record.model), record.mode || 'unknown', record.transport || 'unknown']);
     if (!values.has(key)) values.set(key, []);
     values.get(key).push(entry.own.output);
   }
@@ -1293,10 +1323,10 @@ export function statsViewModel(store, ui = {}, viewport = {}) {
   const outputMeans = attributedOutputMeans(store, nowOf(ui, store), stats.since || '7d');
   const columns = [
     { key: 'provider', title: 'Provider', width: 9 }, { key: 'model', title: 'Model', width: 14 },
-    { key: 'mode', title: 'Mode', width: 10 }, { key: 'jobs', title: 'Jobs', width: 6, align: 'right' },
+    { key: 'mode', title: 'Mode', width: 10 }, { key: 'transport', title: 'Transport', width: 13 }, { key: 'jobs', title: 'Jobs', width: 6, align: 'right' },
     { key: 'success', title: 'Success', width: 9, align: 'right' }, { key: 'resumedJobs', title: 'Resume', width: 7, align: 'right' },
     { key: 'nudgeCount', title: 'Nudge', width: 7, align: 'right' }, { key: 'duration', title: 'Mean ms', width: 10, align: 'right' },
-    { key: 'tokens', title: 'Out tok', width: 9, align: 'right' }, { key: 'failures', title: 'B/T/V', width: Math.max(7, width - 83) }
+    { key: 'tokens', title: 'Out tok', width: 9, align: 'right' }, { key: 'failures', title: 'B/T/V', width: Math.max(7, width - 96) }
   ];
   const query = formatDisplayValue(ui.statsFilter).toLocaleLowerCase();
   const filtered = (stats.groups || []).filter((row) => !query || formatDisplayValue(row).toLocaleLowerCase().includes(query));
@@ -1304,7 +1334,7 @@ export function statsViewModel(store, ui = {}, viewport = {}) {
     ...row,
     success: `${Math.round((Number(row.successRate) || 0) * 100)}%`,
     duration: Math.round(Number(row.meanDurationMs) || 0),
-    tokens: Math.round(Number(outputMeans.get(JSON.stringify([row.provider || 'unknown', row.model || 'unknown', row.mode || 'unknown']))
+    tokens: Math.round(Number(outputMeans.get(JSON.stringify([row.provider || 'unknown', row.model || 'unknown', row.mode || 'unknown', row.transport || 'unknown']))
       ?? row.meanOutputTokens) || 0),
     failures: `${Math.round(Number(row.budgetCount) || 0)}/${Math.round(Number(row.timeoutCount) || 0)}/${Math.round(Number(row.violationCount) || 0)}`
   }));

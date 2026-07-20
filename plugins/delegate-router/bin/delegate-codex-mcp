@@ -173,7 +173,7 @@ if (providerEnabled('codex')) {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-codex-disabled', version: '0.25.0' }
+        serverInfo: { name: 'delegate-codex-disabled', version: '0.26.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: [] } });
     else if (request.method === 'resources/list') send({ jsonrpc: '2.0', id: request.id, result: { resources: [] } });

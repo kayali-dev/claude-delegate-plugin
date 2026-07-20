@@ -2,6 +2,12 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.26.0 — 2026-07-20
+
+- Fleet now discovers bounded, read-only external Codex session metadata under `~/.codex/sessions`, includes only threads whose persisted origin metadata proves a Claude-adjacent tool origin, excludes broker-owned and personal-by-default sessions, and exposes exact carried token counters when present. Allowance snapshots can also record aggregate-only, approximate `unattributed-burn` windows when allowance moved with no tracked Codex job capable of accounting for it.
+- Built-in Claude `Agent`/legacy `Task` calls create fail-open `claude-agent` visibility stubs through correlated PreToolUse/PostToolUse hooks. The stubs retain only bounded redacted summaries and an optional read-only subagent transcript pointer, reject every control action, obey ordinary retention, and can be disabled with `DELEGATE_AGENT_STUBS=0`.
+- `delegate-tui --connect` and `--token-file` are repeatable, `<state-dir>/remotes.json` supplies optional labeled hosts, and `--include-local` adds the local store. The composite fleet namespaces remote identities, adds width-aware Host cells and per-host status chips, isolates failures with per-host backoff and row aging, and keeps all remote controls disabled. The loopback-only bearer-authenticated export is unchanged.
+
 ## 0.25.0 — 2026-07-20
 
 - Direct Codex MCP calls and Cursor foreground/background CLI runs now create durable read-only shadow jobs in the ordinary store. Their redacted prompts and parameters, normalized live messages/plans/tools/file edits/usage, diffs, liveness, terminal sentinels, audits, and stats are visible in the CLI, MCP inspection surfaces, and TUI without changing provider results; journaling failure falls back to the prior unobserved behavior.

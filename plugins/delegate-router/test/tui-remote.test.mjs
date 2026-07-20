@@ -27,7 +27,7 @@ import {
   loadOrCreateServeToken,
   startDelegateServe
 } from '../bin/lib/serve.mjs';
-import { aggregateAuditStats, readAuditLog } from '../bin/lib/stats.mjs';
+import { aggregateVisibilityStats, readAuditLog } from '../bin/lib/stats.mjs';
 import { loadState, saveState } from '../bin/lib/state.mjs';
 import { remoteActionMessage } from '../bin/lib/tui/action-policy.mjs';
 import { DelegateDataSource } from '../bin/lib/tui/datasource.mjs';
@@ -40,12 +40,13 @@ const TOKEN = 'remote-test-token-0123456789abcdef';
 const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 function isolated(t) {
-  const names = ['DELEGATE_STATE_FILE', 'DELEGATE_ENABLED_PROVIDERS', 'DELEGATE_CLAUDE_PROJECTS_DIR'];
+  const names = ['DELEGATE_STATE_FILE', 'DELEGATE_ENABLED_PROVIDERS', 'DELEGATE_CLAUDE_PROJECTS_DIR', 'DELEGATE_CODEX_SESSIONS_DIR'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-remote-'));
   process.env.DELEGATE_STATE_FILE = path.join(root, 'state', 'usage.json');
   process.env.DELEGATE_ENABLED_PROVIDERS = 'codex,cursor';
   process.env.DELEGATE_CLAUDE_PROJECTS_DIR = path.join(root, 'claude-projects');
+  process.env.DELEGATE_CODEX_SESSIONS_DIR = path.join(root, 'codex-sessions');
   t.after(() => {
     for (const name of names) {
       if (previous[name] == null) delete process.env[name];
@@ -207,7 +208,11 @@ test('read-only endpoints match existing store readers and reject unsafe job ids
 
   const statsResponse = await authorized(`${running.baseUrl}/v1/stats?since=7d`);
   const stats = await statsResponse.json();
-  const expectedStats = aggregateAuditStats(readAuditLog(), { since: '7d' });
+  const expectedStats = aggregateVisibilityStats(readAuditLog(), {
+    since: '7d',
+    external: { threadCount: 0, usageThreadCount: 0, tokenTotals: null },
+    history: loadState().history || []
+  });
   assert.deepEqual({ ...stats, generatedAt: 0 }, { ...expectedStats, generatedAt: 0 });
 
   const unsafe = await authorized(`${running.baseUrl}/v1/jobs/..%2F..%2Fetc%2Fpasswd`);

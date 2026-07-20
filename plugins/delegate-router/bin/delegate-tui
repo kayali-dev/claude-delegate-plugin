@@ -28,9 +28,11 @@ import {
   virtualSearchPosition,
   virtualLogBottomPosition
 } from './lib/tui/components.mjs';
-import { tailAllJobs } from './lib/tui/datasource.mjs';
+import { DelegateDataSource } from './lib/tui/datasource.mjs';
 import { directTransportActionMessage, remoteActionMessage } from './lib/tui/action-policy.mjs';
-import { connectRemoteDatasource } from './lib/tui/remote-datasource.mjs';
+import { RemoteDatasource } from './lib/tui/remote-datasource.mjs';
+import { composeDatasources } from './lib/tui/composite-datasource.mjs';
+import { resolveRemoteTargets } from './lib/tui/remote-config.mjs';
 import { editTextInEditor, withEditorInputHandoff } from './lib/tui/editor.mjs';
 import { BufferedInput } from './lib/tui/input.mjs';
 import { NotificationDispatcher } from './lib/tui/notifications.mjs';
@@ -54,7 +56,7 @@ import { auditUsageBands } from './lib/stats.mjs';
 
 const USAGE = `Usage: delegate-tui [--job <id>]
        delegate-tui --serve [--port <number>]
-       delegate-tui --connect <url> [--token-file <path>] [--job <id>]
+       delegate-tui --connect <url> [--token-file <path>] [--connect <url> ...] [--include-local] [--job <id>]
        delegate-tui --analyze <diagnostic-directory>
 
 Live ANSI dashboard for Delegate Router's local or read-only remote managed-job store.
@@ -64,8 +66,9 @@ Options:
   --job <id>          Open directly in that managed job's detail
   --serve             Export the local store read-only on 127.0.0.1
   --port <number>     Serve port (default 4263)
-  --connect <url>     Connect to one read-only Delegate Router host
-  --token-file <path> Read the remote bearer token from this file
+  --connect <url>     Connect to a read-only host (repeatable)
+  --token-file <path> Pair a bearer-token file with --connect by order (repeatable)
+  --include-local     Merge the local store with connected remote hosts
   --analyze <path>    Replay DELEGATE_TUI_DIAG logs without requiring a TTY
 
 The TUI requires an interactive macOS or Linux terminal. It honors
@@ -86,7 +89,7 @@ function argumentError(message) {
   process.exit(2);
 }
 
-const cli = { initialJobId: null, serve: false, port: 4263, connect: null, tokenFile: null, analyze: null };
+const cli = { initialJobId: null, serve: false, port: 4263, connects: [], tokenFiles: [], includeLocal: false, analyze: null };
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index];
   if (arg === '--serve') cli.serve = true;
@@ -102,22 +105,24 @@ for (let index = 0; index < args.length; index += 1) {
   } else if (arg === '--connect') {
     const value = args[++index];
     if (!value) argumentError('--connect requires a URL');
-    cli.connect = value;
+    cli.connects.push(value);
   } else if (arg === '--token-file') {
     const value = args[++index];
     if (!value) argumentError('--token-file requires a path');
-    cli.tokenFile = value;
+    cli.tokenFiles.push(value);
+  } else if (arg === '--include-local') {
+    cli.includeLocal = true;
   } else if (arg === '--analyze') {
     const value = args[++index];
     if (!value) argumentError('--analyze requires a diagnostic directory');
     cli.analyze = value;
   } else argumentError(`unknown option: ${arg}`);
 }
-if (cli.serve && cli.connect) argumentError('--serve and --connect are mutually exclusive');
+if (cli.serve && cli.connects.length) argumentError('--serve and --connect are mutually exclusive');
 if (cli.serve && cli.initialJobId) argumentError('--job cannot be combined with --serve');
 if (!cli.serve && args.includes('--port')) argumentError('--port requires --serve');
-if (!cli.connect && cli.tokenFile) argumentError('--token-file requires --connect');
-if (cli.analyze && (cli.serve || cli.connect || cli.initialJobId || args.includes('--port') || cli.tokenFile)) argumentError('--analyze cannot be combined with interactive or server options');
+if (!cli.connects.length && cli.tokenFiles.length) argumentError('--token-file requires --connect');
+if (cli.analyze && (cli.serve || cli.connects.length || cli.includeLocal || cli.initialJobId || args.includes('--port') || cli.tokenFiles.length)) argumentError('--analyze cannot be combined with interactive or server options');
 
 if (cli.analyze) {
   try {
@@ -164,11 +169,19 @@ if (cli.serve) {
 }
 
 const initialJobId = cli.initialJobId;
+let remoteTargets = [];
+try {
+  remoteTargets = resolveRemoteTargets({ connects: cli.connects, tokenFiles: cli.tokenFiles, env: process.env });
+} catch (error) {
+  console.error(`delegate-tui: cannot load remote configuration: ${error.message}`);
+  process.exit(1);
+}
+if (cli.includeLocal && !remoteTargets.length) argumentError('--include-local requires at least one --connect or remotes.json entry');
 if (initialJobId && !/^[a-zA-Z0-9_-]+$/.test(initialJobId)) {
   console.error(`delegate-tui: invalid job id: ${initialJobId}`);
   process.exit(1);
 }
-if (initialJobId && !cli.connect) {
+if (initialJobId && !remoteTargets.length) {
   try {
     if (!loadJob(initialJobId)) {
       console.error(`delegate-tui: job not found: ${initialJobId}`);
@@ -190,19 +203,6 @@ if (!process.stdin.isTTY) {
 if (process.platform === 'win32') {
   console.error('delegate-tui: v1 supports macOS and Linux terminals only');
   process.exit(2);
-}
-
-let connectToken = null;
-if (cli.connect) {
-  try {
-    connectToken = cli.tokenFile ? fs.readFileSync(cli.tokenFile, 'utf8').trim() : String(process.env.DELEGATE_CONNECT_TOKEN || '').trim();
-    if (!connectToken || /\s/.test(connectToken)) throw new Error(cli.tokenFile
-      ? 'token file must contain one non-empty token without whitespace'
-      : 'DELEGATE_CONNECT_TOKEN is required when --token-file is omitted');
-  } catch (error) {
-    console.error(`delegate-tui: cannot load remote token: ${error.message}`);
-    process.exit(1);
-  }
 }
 
 const NUDGE_PROMPT = 'Your final message described the deliverable instead of containing it. Paste the complete findings inline now.';
@@ -244,9 +244,18 @@ const outputCapture = new TerminalOutputCapture({
   }
 });
 const screen = new Screen({ outputCapture, diagnostics: diagnosticRecorder });
-const source = cli.connect
-  ? connectRemoteDatasource({ baseUrl: cli.connect, token: connectToken })
-  : tailAllJobs();
+const source = !remoteTargets.length
+  ? new DelegateDataSource().start()
+  : remoteTargets.length === 1 && !cli.includeLocal
+    ? new RemoteDatasource({ baseUrl: remoteTargets[0].url, token: remoteTargets[0].token, label: remoteTargets[0].label }).start()
+    : composeDatasources([
+      ...(cli.includeLocal ? [{ source: new DelegateDataSource(), local: true }] : []),
+      ...remoteTargets.map((target) => ({
+        source: new RemoteDatasource({ baseUrl: target.url, token: target.token, label: target.label }),
+        label: target.label,
+        local: false
+      }))
+    ]);
 let store = source.getState();
 const notifier = new NotificationDispatcher();
 notifier.enabled = preferences.notifications;
@@ -257,7 +266,7 @@ let inputDrawPending = false;
 let widthProbeInputStage = null;
 const ui = {
   screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, version: TUI_PACKAGE_VERSION, now: Date.now(), selectedIndex: 0, scroll: 0,
-  activeOnly: false, filter: '', help: false, input: null, confirm: null,
+  activeOnly: false, showExternals: true, filter: '', help: false, input: null, confirm: null,
   status: '', statusKind: 'info', detailTab: 0, detailScroll: 0, transcriptSelection: null,
   diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', follow: true,
   expandedTools: new Set(), expandedEvents: new Set(), eventSelection: null,
@@ -1254,7 +1263,7 @@ function handleKey(key) {
   if (key === '?') { ui.help = true; draw(); return; }
   if (key === 'M') { ui.statusHistoryOpen = true; draw(); return; }
   if (key === 'escape') return goBack();
-  const blocked = remoteActionMessage(ui, key);
+  const blocked = remoteActionMessage(ui, key, selectedJob());
   if (blocked) {
     setStatus(blocked, 'error');
     draw();
@@ -1390,6 +1399,7 @@ function handleKey(key) {
   }
   if (ui.screen === 'fleet') {
     if (key === 'a') { ui.activeOnly = !ui.activeOnly; ui.selectedIndex = 0; draw(); return; }
+    if (key === 'x') { ui.showExternals = !ui.showExternals; ui.selectedIndex = 0; draw(); return; }
     if (key === 'o') {
       const sorts = ['activity', 'recency', 'provider', 'tokens'];
       ui.fleetSort = sorts[(sorts.indexOf(ui.fleetSort) + 1) % sorts.length];

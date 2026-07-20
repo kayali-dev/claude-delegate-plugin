@@ -13,6 +13,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "^(Agent|Task)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/delegate-agent-hook\"",
+            "timeout": 1
+          }
+        ]
+      },
+      {
         "matcher": "(^|_)delegate_codex__codex(-reply)?$|(^|_)delegate_control__delegate_(start|resume)$|^Skill$",
         "hooks": [
           {
@@ -20,6 +30,18 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/delegate-quota-hook\"",
             "timeout": 5,
             "statusMessage": "Checking delegation allowance"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Agent|Task)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/delegate-agent-hook\"",
+            "timeout": 1
           }
         ]
       }

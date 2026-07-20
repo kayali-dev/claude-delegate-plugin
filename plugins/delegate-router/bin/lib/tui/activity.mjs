@@ -7,11 +7,15 @@ const PHASES = new Set(['verifying', 'retrying', 'paused', 'starting']);
 
 export const ACTIVITY_CAPABILITIES = Object.freeze({
   'codex:app-server': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: true, needsInput: true, visibility: 'full' }),
+  'codex:external': Object.freeze({ thinking: false, streaming: false, tools: false, approvals: false, needsInput: false, visibility: 'bounded-tail' }),
+  'claude:agent-hook': Object.freeze({ thinking: false, streaming: false, tools: false, approvals: false, needsInput: false, visibility: 'hook-only' }),
   'cursor:acp': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: true, needsInput: true, visibility: 'near-full' }),
   'cursor:headless': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: false, needsInput: false, visibility: 'near-full' })
 });
 
 export function activityTransportKey(job = {}) {
+  if (job.external || job.transport === 'external') return 'codex:external';
+  if (job.transport === 'claude-agent') return 'claude:agent-hook';
   if (job.provider === 'cursor') return ['headless', 'direct-cli'].includes(job.transport) ? 'cursor:headless' : 'cursor:acp';
   return 'codex:app-server';
 }
@@ -99,6 +103,11 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   const signals = activitySignals(events);
   const lastEvent = signals.lastEvent;
   const lastAt = eventAt(lastEvent) || Number(job.lastActivityAt || job.updatedAt * 1000 || job.createdAt * 1000 || now);
+  if (job.external || job.transport === 'external') {
+    return result('external', formatDisplayValue(job.activityLabel) || 'external activity', '.', lastAt, now, 'dim', {
+      capabilities, transportKey: key, visibilityNote: 'bounded read-only tail'
+    });
+  }
   if (TERMINAL.has(job.status)) {
     const glyph = job.status === 'completed' ? CHROME_GLYPHS.success : job.status === 'failed' ? CHROME_GLYPHS.failure : '-';
     const tone = job.status === 'failed' ? 'failed' : job.status === 'cancelled' ? 'dim' : 'body';

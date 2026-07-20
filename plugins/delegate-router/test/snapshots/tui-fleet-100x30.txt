@@ -27,4 +27,4 @@
 |                                                                                                  #
 |                                                                                                  #
 +--------------------------------------------------------------------------------------------------+
- Up/Dn select Enter detail / filter  | a active o sort z density  | N new G . notify:on | writers:1
+ Up/Dn select Enter detail / filter  | a active x externals o sort z density  notify:on | writers:1

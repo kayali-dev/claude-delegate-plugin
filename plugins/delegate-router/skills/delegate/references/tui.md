@@ -1,6 +1,6 @@
 # Delegate TUI
 
-`delegate-tui` is a zero-dependency ANSI dashboard over Delegate Router's existing local job store or one read-only remote export. It does not start providers on launch and it does not write job or usage files directly. In local mode, its control actions call the same broker functions as `delegate-jobs`, including optimistic revisions, dry-run revert planning, provider-aware cancellation, and ordinary launch admission. Remote mode disables every control and launcher action.
+`delegate-tui` is a zero-dependency ANSI dashboard over Delegate Router's existing local job store, read-only remote exports, or a federated mix of both. It does not start providers on launch and it does not write job or usage files directly. In local mode, its control actions call the same broker functions as `delegate-jobs`, including optimistic revisions, dry-run revert planning, provider-aware cancellation, and ordinary launch admission. Remote rows disable every control; a remote-only fleet disables the launcher too.
 
 ## Launch
 
@@ -54,17 +54,37 @@ The header includes `[remote]` and the connected host, and Fleet adds a Host col
 
 The export is read-only by construction: it exposes authenticated GET health, jobs, event pages/streams, transcript, bounded diff, job/provider usage, coordinator-session, and aggregate-stat reads only. It accepts job ids and bounded repository-relative diff selectors, never server filesystem paths. Steer, resume, release, nudge, review round, cancel, revert, and launcher keys report `read-only remote` and do nothing.
 
-Remote federation is one host at a time in this version. A combined fleet spanning several `--connect` targets is future work.
+The one-remote form above is unchanged. For a federated view, open one SSH tunnel per host and repeat `--connect`; repeat `--token-file` in the same order. `DELEGATE_CONNECT_TOKEN` is the fallback for every target without a paired token file. Add `--include-local` when the machine running the TUI should appear beside the remotes:
+
+```bash
+ssh -L 4263:127.0.0.1:4263 build-a
+ssh -L 4264:127.0.0.1:4263 build-b
+delegate-tui \
+  --connect http://127.0.0.1:4263 --token-file /private/build-a.token \
+  --connect http://127.0.0.1:4264 --token-file /private/build-b.token \
+  --include-local
+```
+
+The optional private `<state-dir>/remotes.json` avoids repeating stable targets:
+
+```json
+[
+  { "url": "http://127.0.0.1:4263", "tokenFile": "/private/build-a.token", "label": "build-a" },
+  { "url": "http://127.0.0.1:4264", "tokenFile": "/private/build-b.token", "label": "build-b" }
+]
+```
+
+CLI targets merge with that file and win when URLs conflict. Labels are redacted and bounded; otherwise the Host cell uses URL `host:port`. Each host has its own app-bar connection chip and bounded retry state. One failed host turns only its chip red, keeps the other hosts live, and ages its last rows out after the configured stale interval. Every remote row remains read-only, including external Codex rows and Claude Agent stubs returned by that host. Federation changes neither the loopback bind nor bearer-authentication model.
 
 ## Screens
 
 - **Dashboard** is the default, attention-first home. The first pane contains jobs that need a person: approval or input waits, stalls, scope violations, suspect results, and budget stops. Enter opens the selected job. Four compact tiles summarize running/paused work, today's jobs and success rate, today's tokens, and mean cache hit; 14-day jobs/day and mean-duration sparklines sit beside the corresponding values. Provider meters and the last 15 notable cross-job audit/journal events complete the overview. `F` opens the complete Fleet and `Esc` walks back toward Dashboard.
-- **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider, cwd basename, model, routed effort, mode, transport-honest live activity, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, and current shared-worktree writer ownership. Shadow jobs carry a `direct` badge; a write-capable direct launch overlapping an active managed writer also carries `writer!`. The full cwd remains in the detail header; compact density drops the directory before effort when width is tight. Activity can identify approval/input waits, context compaction, an open tool, thinking, streaming, broker phases, quiet time, and stalls only when that transport exposes the corresponding signal. Remote mode also shows the connected host.
+- **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider, cwd basename, model, routed effort, mode, transport-honest live activity, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, current shared-worktree writer ownership, and a Host column for federation. Shadow jobs carry a `direct` badge; a write-capable direct launch overlapping an active managed writer also carries `writer!`. Proven tool-originated external Codex sessions are dimmed with an `external` badge; `x` hides or restores them and they are shown by default. Claude hook stubs carry an `agent` badge. The full cwd remains in the detail header; compact density drops Directory, Effort, and then Host by width priority. Activity can identify approval/input waits, context compaction, an open tool, thinking, streaming, broker phases, quiet time, and stalls only when that transport exposes the corresponding signal.
 - **Groups** aggregates jobs by `groupId`, with member/running/terminal/stalled counts, newest activity, and the all-terminal barrier state. Enter opens that group's members in the ordinary fleet row format.
 - **Sessions** is a read-only, best-effort overview of Claude Code coordinator sessions around the managed fleet. It reads only the newest 64 KiB of at most 200 recently modified `~/.claude/projects/<encoded-cwd>/*.jsonl` files, shows active/idle age, project cwd, approximate size, one redacted activity label, active managed-job count by exact cwd, and existing managed writer ownership. It never opens a transcript. Enter filters Fleet to the selected cwd; `Esc` clears the Fleet filter.
-- **Job detail** has Transcript, Diff, Record, Usage, and Events tabs. A sixth Chain tab appears for a root with children or a resumed child; it orders rounds and shows changed-file count, verification exit, objective/suspicion markers, and the first outcome line. Enter on a chain round jumps to that job. The detail header always shows the current transport-honest activity. Transcript is a coalesced conversation: message deltas form one live block, completed text replaces its deltas, the latest plan replaces older plans, provider noise is omitted, and tool start/status/output/completion events form one expandable line. Each Codex or Cursor file change is a separate compact cwd-relative edit line with green `+A`, red `−R`, and rename/delete labels; counts are absent when unknowable. ACP restored events collapse under one `restored history` row; replay never drives the live thinking/tool state. Network preflight/elevation, input waits, mode/model/session changes, subagent activity, and artifacts render as bounded typed notices. Events remains the raw normalized stream. Diff starts with per-file stats; Enter opens one file's windowed hunks. Record intentionally limits itself to curated broker fields. Usage labels provider tokens/output budget separately from ACP context occupancy and continuation-chain totals.
-- **Providers** shows enabled state, allowance windows, colored warning/avoid bands, deep-health `lastVerified` data when available, and active writer jobs grouped by cwd.
-- **Stats** renders the never-pruned audit-log aggregation for the last seven days. `/` incrementally filters the already-loaded audit rows without touching the store.
+- **Job detail** has Transcript, Diff, Record, Usage, and Events tabs. A sixth Chain tab appears for a root with children or a resumed child; it orders rounds and shows changed-file count, verification exit, objective/suspicion markers, and the first outcome line. Enter on a chain round jumps to that job. The detail header always shows the current transport-honest activity. Transcript is a coalesced conversation: message deltas form one live block, completed text replaces its deltas, the latest plan replaces older plans, provider noise is omitted, and tool start/status/output/completion events form one expandable line. External Codex detail reads only a 64 KiB redacted tail of its source file; Claude Agent detail applies the same bound to its derivable subagent transcript. Neither opens a complete external transcript and neither enables Diff or controls. Each managed Codex or Cursor file change is a separate compact cwd-relative edit line with green `+A`, red `−R`, and rename/delete labels; counts are absent when unknowable. ACP restored events collapse under one `restored history` row; replay never drives the live thinking/tool state. Network preflight/elevation, input waits, mode/model/session changes, subagent activity, and artifacts render as bounded typed notices. Events remains the raw normalized stream. Diff starts with per-file stats; Enter opens one file's windowed hunks. Record intentionally limits itself to curated broker fields. Usage labels provider tokens/output budget separately from ACP context occupancy and continuation-chain totals.
+- **Providers** shows enabled state, allowance windows, colored warning/avoid bands, deep-health `lastVerified` data when available, active writer jobs grouped by cwd, and a subtle aggregate `~Npp outside tracked` note when capture history contains an unattributed Codex allowance marker. That note never links to a thread and is explicitly approximate.
+- **Stats** renders the never-pruned audit-log aggregation for the last seven days, grouped by provider/model/mode/transport, plus external thread totals and aggregate-only unattributed allowance markers. `/` incrementally filters the already-loaded audit rows without touching the store.
 - **Launcher** selects a local/bundled profile and ordinary provider/model/mode/effort/scope fields, plus a verify command and comma-separated absolute ingest paths. The route-advisor pane recomputes after form changes and shows the primary route, top fallback, scores, and matching historical usage bands when available; it is advisory and never gates launch. Press `e` to edit the packet body in `$VISUAL` or `$EDITOR`, `d` for the mandatory side-effect-free packet preview, and `y` to launch only while that preview exactly matches the current form.
 
 `$VISUAL`/`$EDITOR` handoff writes only a private `0600` scratch file under the Delegate Router state directory. Before terminal ownership moves to the editor, an active background width probe is cancelled without applying partial measurements and releases its CPR check listener. The TUI then disables raw mode and mouse reporting and leaves the alternate screen before spawning the editor, reinitializes the terminal afterward, and fully repaints. A signalled or nonzero editor leaves the previous packet body unchanged; when neither variable is set, editing stays inline.
@@ -94,6 +114,8 @@ The activity derivation uses this capability table; a missing capability means �
 | Codex direct MCP | Context compaction, thinking, streaming, command/MCP/file tools, plan, usage, broker phase, quiet, stalled |
 | Cursor ACP | Thinking, streaming, titled/location-bearing tools, approval, required input, broker phase, quiet, stalled |
 | Cursor headless | Thinking markers, streaming assistant text, structured tool starts/completions, broker phase, quiet, stalled, terminal status; no approval/input callback signal |
+| Claude Agent stub | Hook-derived created/terminal state plus a bounded redacted subagent transcript tail when its path is derivable |
+| External Codex | Bounded redacted session tail only; metadata-proven tool origin, never live control |
 
 Cursor headless thinking/tool state comes only from actual stream-json events; the TUI never infers approval or input waits that transport cannot produce. Thought text is never persisted or displayed.
 
@@ -108,6 +130,7 @@ Direct-shadow detail views otherwise render like managed jobs, including Directo
 | `Enter` | Open a job/diff file, expand a focused Transcript tool, or edit a launcher field |
 | `Esc` | Close the current overlay/file view or walk Detail → Fleet → Dashboard |
 | `a` | Fleet active-only toggle |
+| `x` | Fleet external-Codex visibility toggle (shown by default) |
 | `G`, `S` | Open/close Groups or coordinator Sessions |
 | `/` | Fleet filter; detail-pane search; Stats loaded-row filter |
 | `n`, `N` | Next/previous active search match; `n` otherwise keeps its narration-nudge behavior |
@@ -144,10 +167,11 @@ While the TUI is running, terminal transitions, new stalls, recorded scope viola
 
 - The TUI supports macOS and Linux terminals, not Windows. SGR button press and wheel input are supported; drag/motion gestures are not.
 - Claude coordinator-session discovery is best-effort because the Claude Code JSONL format and encoded project-directory convention are not stable interfaces. Missing, unreadable, truncated, malformed, or oversized transcript content is skipped; a missing/unreadable projects directory produces one explanatory line and does not affect managed-job views. `DELEGATE_CLAUDE_PROJECTS_DIR` overrides the projects root and `DELEGATE_SESSION_ACTIVE_SECONDS` overrides the default 300-second active window. Files are rescanned every ten seconds and on project-directory watch events when available.
+- External Codex discovery is also best-effort. On the observed CLI layout it reads only the first metadata line and newest 64 KiB from at most 200 recent `~/.codex/sessions/YYYY/MM/DD/*.jsonl` files. Stable thread/session ids collapse repeated rollout files and exclude broker-owned records. Only persisted originator/source values that prove app-server, MCP, companion, delegate-router, or structured subagent origin are admitted; interactive CLI sessions and unknown provenance are personal-by-default and never appear. Missing, changed, malformed, or unreadable layouts degrade to no external rows without affecting broker jobs.
 - Inline launcher and review input remains single-line; use `$VISUAL`/`$EDITOR` for multi-line text.
 - Unicode width remains terminal-dependent, especially through tmux. Width-suspect content is confined with absolute cursor placement and guard repainting; a terminal may clip the suspect glyph itself, but it cannot leave following ordinary text displaced. The optional probe improves the glyph itself when CPR is supported.
 - The dashboard consumes already-redacted broker records, journals, audit rows, and diff artifacts. Coordinator ingestion extracts only bounded metadata and one shared-redactor-filtered tail label; it does not expose transcript viewing or ingest raw provider payloads.
 - Cursor still has no live shell stdout: headless and ACP tool output appears only when Cursor emits completion data. Headless exposes thinking markers and structured tool lifecycle, but not approval/input callbacks; hidden thought text is never retained.
-- Remote export is single-host and read-only. It is not a multi-tenant service and must remain behind the documented loopback listener and SSH tunnel.
+- Remote export and federation are read-only. They are not a multi-tenant service: every source must remain behind its own documented loopback listener, bearer token, and SSH tunnel.
 - Shared-worktree changed-file attribution remains best-effort, exactly as in the broker. Writer ownership shown by the TUI covers managed shared-worktree jobs, not unmanaged editors.
 - Dangerous launch overrides (`overrideWriter`, sandbox off, and forced approval) are intentionally absent. Use the explicit CLI/MCP paths with the required user authorization when those exceptional controls are necessary.

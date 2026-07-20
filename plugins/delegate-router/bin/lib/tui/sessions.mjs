@@ -190,6 +190,61 @@ export function parseSessionTail(file, options = {}) {
   }
 }
 
+function visibleClaudeMessage(record) {
+  const message = record?.message && typeof record.message === 'object' ? record.message : record;
+  const role = String(message?.role || record?.type || '').toLowerCase();
+  if (!['user', 'assistant'].includes(role)) return null;
+  const content = Array.isArray(message.content) ? message.content : [message.content];
+  const texts = content.flatMap((block) => {
+    if (typeof block === 'string') return [block];
+    if (!block || typeof block !== 'object' || block.type !== 'text' || typeof block.text !== 'string') return [];
+    return [block.text];
+  }).map((text) => safeText(text)).filter(Boolean);
+  if (!texts.length) return null;
+  return { role, text: texts.join('\n').slice(0, 16384) };
+}
+
+export function readClaudeTranscriptTail(file, options = {}) {
+  const tailBytes = Math.max(1024, Math.floor(finiteNonNegative(options.tailBytes, DEFAULT_SESSION_TAIL_BYTES)));
+  const limit = Math.max(1, Math.min(1000, Number(options.limit || 200)));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, 'r');
+    const stat = fs.fstatSync(descriptor);
+    const length = Math.min(stat.size, tailBytes);
+    if (!length) return { events: [], bytesRead: 0, totalBytes: stat.size, truncated: false };
+    const start = Math.max(0, stat.size - length);
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = fs.readSync(descriptor, buffer, 0, length, start);
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split(/\r?\n/);
+    if (start > 0) lines.shift();
+    const events = [];
+    for (const line of lines) {
+      if (!line || line.length > 256 * 1024) continue;
+      let record;
+      try { record = JSON.parse(line); } catch { continue; }
+      const visible = visibleClaudeMessage(record);
+      if (!visible) continue;
+      events.push({
+        schemaVersion: 1,
+        seq: events.length + 1,
+        at: Date.parse(record.timestamp || '') || stat.mtimeMs,
+        type: visible.role === 'user' ? 'message.user' : 'message.completed',
+        data: { role: visible.role, text: visible.text },
+        source: 'claude-agent-transcript'
+      });
+      if (events.length > limit) events.shift();
+    }
+    return { events, bytesRead, totalBytes: stat.size, truncated: start > 0 };
+  } catch {
+    return { events: [], bytesRead: 0, totalBytes: 0, truncated: false };
+  } finally {
+    if (descriptor != null) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+  }
+}
+
 export function classifySession(mtimeMs, options = {}) {
   const now = finiteNonNegative(options.now, Date.now());
   const activeSeconds = finiteNonNegative(options.activeSeconds, DEFAULT_SESSION_ACTIVE_SECONDS);

@@ -13,6 +13,7 @@ import {
   validateProvider,
   warningPercentFor
 } from './lib/state.mjs';
+import { captureCodexAllowanceSnapshot } from './lib/allowance.mjs';
 
 function option(args, name, fallback = null) {
   const index = args.indexOf(name);
@@ -111,6 +112,7 @@ try {
           setWindow(state, 'codex', name, value.usedPercent, { resetsAt: value.resetsAt, source: 'codex-app-server' });
         }
       }
+      captureCodexAllowanceSnapshot(state, limits, { source: 'delegate-usage-refresh' });
       saveState(state);
     } else {
       throw new Error('refresh supports codex only. Claude usage is captured from the official status line (run: delegate-config statusline enable); Anthropic prohibits third-party use of consumer OAuth tokens, so no direct endpoint query is offered. Enter Cursor usage manually from its dashboard.');

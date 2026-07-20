@@ -1,0 +1,64 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import {
+  agentResultStatus,
+  completeClaudeAgentStub,
+  createClaudeAgentStub,
+  deriveAgentTranscriptPath
+} from './lib/agent-stubs.mjs';
+
+const MAX_INPUT_BYTES = 256 * 1024;
+let warned = false;
+
+function warnOnce(error) {
+  if (warned) return;
+  warned = true;
+  const message = String(error?.message || error).replace(/[\r\n]+/g, ' ').slice(0, 500);
+  process.stderr.write(`delegate-agent-hook: stub journaling unavailable; Agent call continues: ${message}\n`);
+}
+
+function readInput() {
+  const chunks = [];
+  let used = 0;
+  for (;;) {
+    const buffer = Buffer.allocUnsafe(Math.min(8192, MAX_INPUT_BYTES + 1 - used));
+    const count = fs.readSync(0, buffer, 0, buffer.length, null);
+    if (!count) break;
+    used += count;
+    if (used > MAX_INPUT_BYTES) throw new Error('hook payload exceeds 256 KiB');
+    chunks.push(buffer.subarray(0, count));
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function handle(payload) {
+  if (String(process.env.DELEGATE_AGENT_STUBS ?? '1') === '0') return;
+  if (!['Agent', 'Task'].includes(payload?.tool_name)) return;
+  const toolUseId = payload.tool_use_id || payload.toolUseId;
+  if (!toolUseId) throw new Error('hook payload is missing correlatable tool_use_id');
+  const common = { sessionId: payload.session_id, toolUseId, cwd: payload.cwd };
+  if (payload.hook_event_name === 'PreToolUse') {
+    const input = payload.tool_input || {};
+    createClaudeAgentStub({
+      ...common,
+      prompt: input.prompt,
+      agentType: input.subagent_type || input.agent_type,
+      agentName: input.name || input.description,
+      model: input.model
+    });
+    return;
+  }
+  if (payload.hook_event_name === 'PostToolUse') {
+    const result = payload.tool_response ?? payload.tool_result;
+    const outcome = agentResultStatus(result);
+    completeClaudeAgentStub({
+      ...common,
+      ...outcome,
+      transcriptPath: deriveAgentTranscriptPath(payload.transcript_path, result)
+    });
+  }
+}
+
+try { handle(readInput()); }
+catch (error) { warnOnce(error); }
+process.exitCode = 0;
