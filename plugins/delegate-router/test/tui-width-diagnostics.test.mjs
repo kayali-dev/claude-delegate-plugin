@@ -353,12 +353,15 @@ test('probe budget scales with streamed reply cadence and distinguishes budget e
     }
   };
   t.after(() => clearInterval(serialTimer));
+  // Nominal streamed duration is 57×7ms ≈ 400ms; the budget must leave real
+  // headroom for event-loop delay under parallel suite load or this assertion
+  // races the wall clock (observed flaking at 502ms with 55/57 measured).
   const serialForeground = await probeTerminalWidths({
-    screen: serialScreen, input: serialInput, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 45, maxBudgetMs: 500
+    screen: serialScreen, input: serialInput, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 45, maxBudgetMs: 2000
   });
   const serial = serialForeground.background ? await serialForeground.background.done : serialForeground;
   assert.equal(Object.keys(serial.widths).length, 57, 'a render-cycle-paced terminal completes after the old 45ms cutoff');
-  assert.ok(serial.elapsedMs > 45 && serial.elapsedMs < 500, `scaled batch completed in ${serial.elapsedMs.toFixed(1)}ms`);
+  assert.ok(serial.elapsedMs > 45 && serial.elapsedMs < 2000, `scaled batch completed in ${serial.elapsedMs.toFixed(1)}ms`);
 
   const budgetInput = new ProbeInput();
   let budgetTimer;
