@@ -107,6 +107,9 @@ export function codexSessionsDirectory(env = process.env, home = os.homedir()) {
 }
 
 export function codexThreadIdentity(meta = {}) {
+  // readSessionMeta returns an explicit null for in-flight files whose first
+  // line is not yet fully written; a default parameter does not cover that.
+  if (!meta || typeof meta !== 'object') return null;
   for (const value of [meta.id, meta.session_id, meta.thread_id, meta.threadId]) {
     if (typeof value === 'string' && value.trim()) return value.trim();
   }
@@ -114,6 +117,7 @@ export function codexThreadIdentity(meta = {}) {
 }
 
 export function toolOriginEvidence(meta = {}) {
+  if (!meta || typeof meta !== 'object') return null;
   const originator = typeof meta.originator === 'string' ? meta.originator.trim() : '';
   const source = meta.source;
   if (originator === 'codex-tui' || source === 'cli') return null;
@@ -247,7 +251,7 @@ export function scanExternalCodexThreads(options = {}) {
     candidates = collectCandidates(sessionsDir);
   }
   catch (error) {
-    return { available: false, sessionsDir, threads: [], sources: new Map(), scanned: 0, totalFiles: 0, capped: false, ownedExcluded: 0, personalExcluded: 0, duplicatesExcluded: 0, error: safeText(error.message, 1024) };
+    return { available: false, sessionsDir, threads: [], sources: new Map(), scanned: 0, totalFiles: 0, capped: false, ownedExcluded: 0, personalExcluded: 0, duplicatesExcluded: 0, unreadableExcluded: 0, error: safeText(error.message, 1024) };
   }
   const selected = candidates.slice(0, maxThreads);
   const threads = [];
@@ -256,23 +260,33 @@ export function scanExternalCodexThreads(options = {}) {
   let ownedExcluded = 0;
   let personalExcluded = 0;
   let duplicatesExcluded = 0;
+  let unreadableExcluded = 0;
   for (const candidate of selected) {
+    // One in-flight or malformed rollout file must never abort the whole scan:
+    // this loop runs on the TUI refresh timer, where a throw kills the process.
+    try {
+      scanCandidate(candidate);
+    } catch {
+      unreadableExcluded += 1;
+    }
+  }
+  function scanCandidate(candidate) {
     const meta = readSessionMeta(candidate.file, options.metaBytes || DEFAULT_META_BYTES);
     const threadId = codexThreadIdentity(meta);
-    if (!threadId) continue;
+    if (!threadId) return;
     if (seenThreadIds.has(threadId)) {
       duplicatesExcluded += 1;
-      continue;
+      return;
     }
     seenThreadIds.add(threadId);
     if (ownedIds.has(threadId) || (meta?.session_id && ownedIds.has(meta.session_id))) {
       ownedExcluded += 1;
-      continue;
+      return;
     }
     const originEvidence = toolOriginEvidence(meta);
     if (!originEvidence) {
       personalExcluded += 1;
-      continue;
+      return;
     }
     const tail = tailRecords(candidate.file, { tailBytes: options.tailBytes });
     let activityLabel = '(unreadable)';
@@ -329,6 +343,7 @@ export function scanExternalCodexThreads(options = {}) {
     ownedExcluded,
     personalExcluded,
     duplicatesExcluded,
+    unreadableExcluded,
     error: null
   };
 }

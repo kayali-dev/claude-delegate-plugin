@@ -2,6 +2,10 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.26.2 — 2026-07-22
+
+- The external Codex thread scanner no longer crashes the TUI when a rollout file appears mid-refresh with its meta line still being written (explicit-null identity guard, per-file isolation with an `unreadableExcluded` count, and a timer-level catch that degrades the external scan to an error status instead of killing the process).
+
 ## 0.26.1 — 2026-07-20
 
 - Claude Agent stubs retain the agent id and coordinator sidecar needed to resolve transcripts after `PostToolUse`, retry bounded cwd-scoped linkage when detail is viewed, persist successful linkage without a revision bump, and explain transcripts that have not appeared yet. Selected Claude Agent and external Codex transcripts now refresh only after an mtime/size change and stop tailing on deselection.

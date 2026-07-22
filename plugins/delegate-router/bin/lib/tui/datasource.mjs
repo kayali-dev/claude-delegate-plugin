@@ -508,12 +508,23 @@ export class DelegateDataSource extends EventEmitter {
 
   refreshExternalThreads(options = {}) {
     if (this.closed) return this.getState();
-    const managed = listJobs();
-    const scan = scanExternalCodexThreads({
-      ...this.externalScanOptions,
-      jobs: managed,
-      ownedIds: brokerOwnedCodexThreadIds(managed)
-    });
+    // This runs on a refresh timer: an uncaught throw here kills the whole TUI
+    // (field crash: an in-flight ~/.codex rollout with an unwritten meta line).
+    let scan;
+    try {
+      const managed = listJobs();
+      scan = scanExternalCodexThreads({
+        ...this.externalScanOptions,
+        jobs: managed,
+        ownedIds: brokerOwnedCodexThreadIds(managed)
+      });
+    } catch (error) {
+      scan = {
+        available: false, threads: [], sources: new Map(), scanned: 0, totalFiles: 0,
+        capped: false, ownedExcluded: 0, personalExcluded: 0, duplicatesExcluded: 0,
+        unreadableExcluded: 0, error: String(error?.message || error).slice(0, 1024)
+      };
+    }
     const { threads, sources, ...summary } = scan;
     const externalScan = { status: scan.available ? 'ready' : 'unavailable', ...summary };
     const previous = this.state.externalScan;

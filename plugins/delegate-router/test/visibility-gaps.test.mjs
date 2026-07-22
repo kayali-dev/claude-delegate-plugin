@@ -469,3 +469,26 @@ test('Fleet renders external badge and Host column in wide and compact federatio
   assert.equal(activeOnly.meta.visibleJobIds.length, 0);
   assert.equal(directTransportActionMessage({ screen: 'detail' }, 's', external), 'read-only: external Codex thread');
 });
+
+test('scanner survives in-flight rollout files whose meta line is not yet written', async (t) => {
+  const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { scanExternalCodexThreads, codexThreadIdentity, toolOriginEvidence } = await import('../bin/lib/codex-sessions.mjs');
+  // The exact field crash: readSessionMeta yields explicit null; default params do not apply.
+  assert.equal(codexThreadIdentity(null), null);
+  assert.equal(toolOriginEvidence(null), null);
+  const root = mkdtempSync(path.join(os.tmpdir(), 'codex-scan-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const day = path.join(root, '2026', '07', '22');
+  mkdirSync(day, { recursive: true });
+  // In-flight file: first line truncated mid-JSON (writer has not finished).
+  writeFileSync(path.join(day, 'rollout-2026-07-22T10-00-00-aaaa.jsonl'), '{"type":"session_meta","payload":{"id":"in-fli');
+  // Valid tool-originated thread alongside it.
+  writeFileSync(path.join(day, 'rollout-2026-07-22T10-01-00-bbbb.jsonl'),
+    `${JSON.stringify({ type: 'session_meta', payload: { id: 'thread-ok-1', originator: 'codex_cli_rs', source: 'app-server', timestamp: '2026-07-22T10:01:00Z', cwd: '/tmp' } })}\n`);
+  const scan = scanExternalCodexThreads({ sessionsDir: root, ownedIds: new Set(), jobs: [] });
+  assert.equal(scan.available, true);
+  assert.equal(scan.threads.length, 1);
+  assert.equal(scan.threads[0].providerSessionId, 'thread-ok-1');
+});
