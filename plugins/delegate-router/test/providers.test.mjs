@@ -6,13 +6,20 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createManagedJob, inspectJob, readJobEvents, resumeManagedJob, submitControl } from '../bin/lib/control.mjs';
-import { runManagedProvider } from '../bin/lib/providers.mjs';
+import {
+  mapCodexItem,
+  mapCodexMcpEvent,
+  mapCursorAcpNotification,
+  runManagedProvider
+} from '../bin/lib/providers.mjs';
 import { effectiveUsage, loadState } from '../bin/lib/state.mjs';
+import { formatTranscriptBlock, TranscriptProjector } from '../bin/lib/tui/transcript.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
 const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
 const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
+const subagentFixture = JSON.parse(fs.readFileSync(path.join(testDir, 'fixtures', 'subagent-lifecycle.json'), 'utf8'));
 
 async function isolated(fn) {
   const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, crashOnce: process.env.FAKE_CODEX_CRASH_ONCE, collab: process.env.FAKE_CODEX_COLLAB, compaction: process.env.FAKE_CODEX_COMPACTION, fileChanges: process.env.FAKE_CODEX_FILE_CHANGES, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE, retryBase: process.env.DELEGATE_RETRY_BASE_MS, minCodex: process.env.DELEGATE_MIN_CODEX_VERSION, minCursor: process.env.DELEGATE_MIN_CURSOR_VERSION };
@@ -55,6 +62,7 @@ test('Codex app-server maps events and applies true same-turn steering', () => i
   assert.equal(record.changedFiles.count, 1);
   assert.deepEqual(record.changedFiles.files, ['a.js']);
   assert.equal(record.resolvedModel, 'fake');
+  assert.equal(typeof record.result, 'string', 'subagent support does not reshape ordinary Codex results');
 }));
 
 test('Codex context-compaction items retain provider passthroughs and add ordered first-class lifecycles', () => isolated(async (directory) => {
@@ -71,6 +79,115 @@ test('Codex context-compaction items retain provider passthroughs and add ordere
     ['compaction.completed', null, 'compaction-1']
   ]);
   assert.ok(compaction.every((event, index) => index === 0 || event.seq > compaction[index - 1].seq));
+}));
+
+test('managed Codex, direct Codex, and Cursor normalize identical first-class subagent lifecycles and rendered blocks', () => isolated(async (directory) => {
+  const managed = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'managed' });
+  for (const entry of subagentFixture.managedCodex) {
+    mapCodexItem(managed.id, entry.phase, { threadId: 'managed-thread', turnId: 'managed-turn', item: entry.item });
+  }
+
+  const direct = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'direct' });
+  for (const [index, msg] of subagentFixture.directCodex.entries()) {
+    mapCodexMcpEvent(direct, { id: `direct-${index}`, _meta: { threadId: 'direct-thread' }, msg }, {});
+  }
+
+  const cursor = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'review', cwd: directory, prompt: 'cursor' });
+  for (const params of subagentFixture.cursor) mapCursorAcpNotification(cursor, 'cursor/task', params, 'cursor-session');
+
+  const records = [managed, direct, cursor].map((job) => inspectJob(job.id));
+  const lifecycles = [managed, direct, cursor].map((job) => readJobEvents(job.id, { limit: 1000 })
+    .filter((event) => /^subagent\.(?:started|progress|completed|errored)$/.test(event.type)));
+  for (const events of lifecycles) {
+    assert.deepEqual(events.map((event) => event.type), ['subagent.started', 'subagent.progress', 'subagent.completed']);
+    assert.equal(events.at(-1).data.task, subagentFixture.task);
+    assert.equal(events.at(-1).data.type, 'reviewer');
+    assert.equal(events.at(-1).data.output, subagentFixture.output);
+  }
+  for (const record of records) {
+    assert.deepEqual(record.result.subagents.map(({ id, type, task, status, output }) => ({ id, type, task, status, output })), [{
+      id: 'agent-1',
+      type: 'reviewer',
+      task: subagentFixture.task,
+      status: 'completed',
+      output: subagentFixture.output
+    }]);
+  }
+
+  const rendered = lifecycles.map((events) => {
+    const projector = new TranscriptProjector();
+    const collapsed = projector.project(events, { now: Date.now() });
+    const block = collapsed.find((candidate) => candidate.kind === 'tool' && candidate.tool.category === 'subagent');
+    assert.ok(block);
+    const expanded = projector.project(events, { now: Date.now(), expandedTools: new Set([block.tool.key]) });
+    return formatTranscriptBlock(expanded.find((candidate) => candidate.id === block.id));
+  });
+  assert.match(rendered[0], /> Codex agent.*Inspect the parser.*[+✓]/);
+  assert.match(rendered[1], /> Codex agent.*Inspect the parser.*[+✓]/);
+  assert.match(rendered[2], /> Cursor agent.*Inspect the parser.*[+✓]/);
+  for (const text of rendered) {
+    assert.match(text, /subagent output:/);
+    assert.match(text, /Full subagent report/);
+    assert.doesNotMatch(text, /\[object Object\]|NaN/);
+  }
+}));
+
+test('unknown Codex items preserve bounded redacted payloads and render without type-specific code', () => isolated(async (directory) => {
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'unknowns' });
+  mapCodexItem(job.id, 'completed', {
+    threadId: 'thread', turnId: 'turn',
+    item: {
+      ...subagentFixture.unknownItem,
+      embedded: 'API_KEY=super-secret-value',
+      huge: 'x'.repeat(100_000)
+    }
+  });
+  mapCodexItem(job.id, 'completed', {
+    threadId: 'thread', turnId: 'turn',
+    item: subagentFixture.webSearchItem
+  });
+  const items = readJobEvents(job.id, { limit: 1000 }).filter((event) => event.type === 'provider.item');
+  assert.deepEqual(items.map((event) => event.data.itemType), ['futureWidget', 'webSearch']);
+  const serialized = JSON.stringify(items);
+  assert.doesNotMatch(serialized, /super-secret-value/);
+  assert.match(serialized, /\[REDACTED\]/);
+  assert.match(serialized, /\[TRUNCATED \d+ chars\]/);
+  assert.ok(serialized.length < 140_000, `bounded provider items serialized to ${serialized.length} chars`);
+
+  const projector = new TranscriptProjector();
+  const collapsed = projector.project(items, { now: Date.now() });
+  const blocks = collapsed.filter((block) => block.kind === 'tool' && block.tool.category === 'provider-item');
+  assert.equal(blocks.length, 2);
+  assert.match(formatTranscriptBlock(blocks[0]), /futureWidget.*Future provider payload/);
+  assert.match(formatTranscriptBlock(blocks[1]), /webSearch.*delegate router subagent lifecycle/);
+  const expanded = projector.project(items, {
+    now: Date.now(),
+    expandedTools: new Set(blocks.map((block) => block.tool.key))
+  }).map(formatTranscriptBlock).join('\n');
+  assert.match(expanded, /"answer": 42/);
+  assert.match(expanded, /"query": "delegate router subagent lifecycle"/);
+  assert.doesNotMatch(expanded, /\[object Object\]|NaN|super-secret-value/);
+}));
+
+test('subagent result output is redacted and capped independently of the parent final message', () => isolated(async (directory) => {
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'bounded result' });
+  const output = `API_KEY=super-secret-value\n${'large delegated output '.repeat(6000)}`;
+  mapCodexItem(job.id, 'completed', {
+    threadId: 'thread', turnId: 'turn',
+    item: {
+      type: 'collabAgentToolCall',
+      id: 'huge-call',
+      tool: 'wait',
+      receiverThreadIds: ['huge-agent'],
+      prompt: 'Produce the large report',
+      agentsStates: { 'huge-agent': { completed: output } }
+    }
+  });
+  const preserved = inspectJob(job.id).result.subagents[0].output;
+  assert.doesNotMatch(preserved, /super-secret-value/);
+  assert.match(preserved, /\[REDACTED\]/);
+  assert.match(preserved, /\[TRUNCATED \d+ chars\]/);
+  assert.ok(preserved.length < 66_000, `subagent output length ${preserved.length}`);
 }));
 
 test('Cursor ACP maps structured updates and reports correction as restart', () => isolated(async (directory) => {
@@ -181,6 +298,10 @@ test('review-flow threads are flagged and refuse resume fast; terminal jobs writ
   const completed = inspectJob(job.id);
   assert.equal(completed.status, 'completed');
   assert.equal(completed.reviewFlowEngaged, true);
+  assert.equal(completed.result.subagents.length, 1);
+  assert.equal(completed.result.subagents[0].status, 'completed');
+  assert.match(completed.result.subagents[0].output, /Detailed evidence from the delegated agent/);
+  assert.equal(completed.resultSuspect, 'subagent-output-dominates-final');
   assert.ok(completed.finishedPath);
   assert.equal(fs.readFileSync(completed.finishedPath, 'utf8').trim(), 'completed');
   assert.throws(() => resumeManagedJob(job.id, { prompt: 'continue' }), /RESUME_UNSUPPORTED/);

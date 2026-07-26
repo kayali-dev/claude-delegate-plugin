@@ -68,7 +68,27 @@ lines.on('line', (line) => {
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'fileChange', id: `file-${index}`, changes: [{ path: changedPath, kind: 'update' }], status: 'completed' }, completedAtMs: Date.now() } });
     }
     if (process.env.FAKE_CODEX_COLLAB === '1') {
-      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'collabAgentToolCall', id: 'collab-1', status: 'completed' }, completedAtMs: Date.now() } });
+      const prompt = 'Inspect the implementation and return the complete findings';
+      const output = `Subagent completed the delegated review. ${'Detailed evidence from the delegated agent. '.repeat(40)}`;
+      const agent = { threadId: 'agent-fake-1', agentNickname: 'reviewer', agentRole: 'reviewer' };
+      send({ jsonrpc: '2.0', method: 'item/started', params: { threadId: 'thread-fake', turnId: activeTurn, item: {
+        type: 'collabAgentToolCall', id: 'collab-1', tool: 'spawnAgent', status: 'inProgress',
+        receiverThreadIds: ['agent-fake-1'], receiverAgents: [agent], prompt,
+        agentsStates: { 'agent-fake-1': 'running' }
+      } } });
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: {
+        type: 'subAgentActivity', id: 'activity-1', kind: 'started',
+        agentThreadId: 'agent-fake-1', agentPath: 'root/reviewer'
+      }, completedAtMs: Date.now() } });
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: {
+        type: 'subAgentActivity', id: 'activity-2', kind: 'interacted',
+        agentThreadId: 'agent-fake-1', agentPath: 'root/reviewer'
+      }, completedAtMs: Date.now() } });
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: {
+        type: 'collabAgentToolCall', id: 'collab-1', tool: 'wait', status: 'completed',
+        receiverThreadIds: ['agent-fake-1'], receiverAgents: [agent], prompt,
+        agentsStates: { 'agent-fake-1': { completed: output } }
+      }, completedAtMs: Date.now() } });
     }
     if (process.env.FAKE_CODEX_COMPACTION === '1') {
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'contextCompaction', id: 'compaction-1' }, completedAtMs: Date.now() } });

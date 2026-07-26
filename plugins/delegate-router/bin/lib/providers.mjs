@@ -172,10 +172,407 @@ function prepareAutoNudge(jobId, result = undefined) {
 function storeProviderResult(jobId, result) {
   updateManagedJob(jobId, (job) => {
     const firstAttemptText = job.result?.firstAttemptText;
-    job.result = firstAttemptText == null
-      ? redact(result)
-      : { ...(result && typeof result === 'object' ? redact(result) : { text: redact(result) }), firstAttemptText };
+    const subagents = Array.isArray(job.result?.subagents) ? job.result.subagents : [];
+    const safe = redact(result);
+    if (!subagents.length && firstAttemptText == null) {
+      job.result = safe;
+      return;
+    }
+    const base = safe && typeof safe === 'object' && !Array.isArray(safe)
+      ? safe
+      : { text: safe == null ? '' : String(safe) };
+    job.result = {
+      ...base,
+      ...(subagents.length ? { subagents } : {}),
+      ...(firstAttemptText == null ? {} : { firstAttemptText })
+    };
   }, { incrementRevision: false });
+}
+
+const PRESERVED_PROVIDER_ITEM_MAX = Math.max(1024, Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536));
+const SUBAGENT_TASK_MAX = 4096;
+const SUBAGENT_OUTPUT_MAX = PRESERVED_PROVIDER_ITEM_MAX;
+
+function boundedText(value, maxLength) {
+  if (value == null) return '';
+  let text;
+  if (typeof value === 'string') text = value;
+  else {
+    try { text = JSON.stringify(redact(value)); }
+    catch { text = '[unserializable provider value]'; }
+  }
+  return redact(text, '', maxLength);
+}
+
+function boundedProviderItem(item) {
+  const safe = redact(item || {});
+  let serialized;
+  try { serialized = JSON.stringify(safe); }
+  catch {
+    return {
+      type: item?.type,
+      id: item?.id,
+      truncated: true,
+      serialized: '[unserializable provider item]'
+    };
+  }
+  if (serialized.length <= PRESERVED_PROVIDER_ITEM_MAX) return safe;
+  const compact = {};
+  let compactLength = 2;
+  let omittedFields = 0;
+  for (const [key, value] of Object.entries(safe || {})) {
+    let rendered;
+    try { rendered = JSON.stringify(value); }
+    catch { rendered = ''; }
+    const candidate = rendered && rendered.length <= 4096 ? value : boundedText(value, 240);
+    const candidateLength = key.length + JSON.stringify(candidate).length + 6;
+    if (compactLength + candidateLength > 8192) {
+      omittedFields += 1;
+      continue;
+    }
+    compact[key] = candidate;
+    compactLength += candidateLength;
+  }
+  if (omittedFields) compact.omittedFields = omittedFields;
+  const serializedLimit = Math.max(1024, PRESERVED_PROVIDER_ITEM_MAX - JSON.stringify(compact).length - 512);
+  return {
+    ...compact,
+    truncated: true,
+    serialized: redact(serialized, '', serializedLimit)
+  };
+}
+
+function providerItemSummary(item = {}) {
+  const action = item.action && typeof item.action === 'object' ? item.action : {};
+  const value = item.title ?? item.name ?? item.query ?? action.query ?? action.url
+    ?? item.status ?? item.kind ?? item.message ?? item.text;
+  return boundedText(value, 240).replace(/\s+/g, ' ').trim();
+}
+
+function appendProviderItem(jobId, phase, item, options = {}, providerEvent = `item/${phase}`) {
+  appendJobEvent(jobId, 'provider.event', {
+    providerEvent,
+    itemType: item?.type,
+    itemId: item?.id
+  }, options);
+  const summary = providerItemSummary(item);
+  appendJobEvent(jobId, 'provider.item', {
+    providerEvent,
+    itemType: item?.type || 'unknown',
+    itemId: item?.id,
+    phase,
+    payloadCaptured: true,
+    summary,
+    item: boundedProviderItem(item),
+    text: `${item?.type || 'unknown'} ${phase}${summary ? `: ${summary}` : ''}`
+  }, options);
+}
+
+function normalizedToken(value) {
+  return String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[-\s/]+/g, '_')
+    .toLowerCase();
+}
+
+function statusDetailsFromProvider(value) {
+  if (value == null) return { status: '' };
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.hasOwn(value, 'status')) {
+      const nested = statusDetailsFromProvider(value.status);
+      return {
+        ...nested,
+        output: nested.output || boundedText(value.output ?? value.result ?? value.message, SUBAGENT_OUTPUT_MAX),
+        usage: value.usage ?? value.tokenUsage ?? value.token_usage,
+        durationMs: value.durationMs ?? value.duration_ms
+      };
+    }
+    for (const key of ['completed', 'complete', 'succeeded', 'success']) {
+      if (Object.hasOwn(value, key)) {
+        return {
+          status: 'completed',
+          output: boundedText(value[key], SUBAGENT_OUTPUT_MAX),
+          usage: value.usage ?? value.tokenUsage ?? value.token_usage,
+          durationMs: value.durationMs ?? value.duration_ms
+        };
+      }
+    }
+    for (const key of ['errored', 'error', 'failed', 'failure']) {
+      if (Object.hasOwn(value, key)) {
+        const error = boundedText(value[key], SUBAGENT_OUTPUT_MAX);
+        return { status: 'errored', error, output: error };
+      }
+    }
+    const keys = Object.keys(value);
+    if (keys.length === 1) return statusDetailsFromProvider(keys[0]);
+    return {
+      status: normalizedToken(value.kind || value.state),
+      output: boundedText(value.output ?? value.result ?? value.message, SUBAGENT_OUTPUT_MAX),
+      usage: value.usage ?? value.tokenUsage ?? value.token_usage,
+      durationMs: value.durationMs ?? value.duration_ms
+    };
+  }
+  const status = normalizedToken(value);
+  if (['completed', 'complete', 'succeeded', 'success', 'done', 'closed', 'shutdown'].includes(status)) return { status: 'completed' };
+  if (['errored', 'error', 'failed', 'failure', 'not_found'].includes(status)) return { status: 'errored' };
+  if (['started', 'spawned', 'launched', 'pending_init'].includes(status)) return { status: 'started' };
+  if (['running', 'in_progress', 'interacted', 'interrupted', 'resumed', 'waiting'].includes(status)) return { status };
+  return { status };
+}
+
+function lifecycleForStatus(status, fallback = 'progress') {
+  const value = normalizedToken(status);
+  if (value === 'completed') return 'completed';
+  if (value === 'errored') return 'errored';
+  if (['started', 'spawned', 'launched', 'pending_init'].includes(value)) return 'started';
+  return fallback;
+}
+
+function receiverAgentRefs(item = {}) {
+  const ids = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds
+    : Array.isArray(item.receiver_thread_ids) ? item.receiver_thread_ids : [];
+  const refs = Array.isArray(item.receiverAgents) ? item.receiverAgents
+    : Array.isArray(item.receiver_agents) ? item.receiver_agents : [];
+  const byId = new Map();
+  refs.forEach((ref, index) => {
+    const id = ref?.threadId || ref?.thread_id || ref?.agentThreadId || ref?.agent_thread_id || ids[index];
+    if (id) byId.set(String(id), ref);
+  });
+  return { ids: ids.map(String), byId };
+}
+
+function subagentCandidate(value = {}) {
+  const id = value.id == null ? '' : String(value.id);
+  const correlationId = value.correlationId == null ? id : String(value.correlationId);
+  const output = boundedText(value.output, SUBAGENT_OUTPUT_MAX);
+  const error = boundedText(value.error, SUBAGENT_OUTPUT_MAX);
+  const duration = Number(value.durationMs);
+  return {
+    lifecycle: value.lifecycle || 'progress',
+    id: id || correlationId || 'subagent',
+    correlationId: correlationId || id || 'subagent',
+    sourceItemId: value.sourceItemId == null ? null : String(value.sourceItemId),
+    type: boundedText(value.type || 'subagent', 256),
+    agentName: boundedText(value.agentName, 256),
+    agentPath: boundedText(value.agentPath, 1024),
+    task: boundedText(value.task, SUBAGENT_TASK_MAX),
+    status: normalizedToken(value.status || value.lifecycle || 'running'),
+    ...(Number.isFinite(duration) && duration >= 0 ? { durationMs: duration } : {}),
+    ...(value.usage ? { usage: boundedProviderItem(value.usage) } : {}),
+    ...(output ? { output } : {}),
+    ...(error ? { error } : {}),
+    ...(Number.isFinite(Number(value.occurredAtMs)) && Number(value.occurredAtMs) > 0
+      ? { occurredAtMs: Number(value.occurredAtMs) } : {})
+  };
+}
+
+// Every provider and transport feeds raw provider shapes through this one
+// normalizer. The returned lifecycle vocabulary is intentionally independent
+// of app-server, legacy EventMsg, and ACP naming.
+export function normalizeSubagentLifecycle(input = {}) {
+  const source = input.source;
+  const payload = input.payload && typeof input.payload === 'object' ? input.payload : {};
+  const candidates = [];
+  if (source === 'codex-item') {
+    const itemType = normalizedToken(payload.type);
+    if (itemType === 'sub_agent_activity') {
+      const kind = normalizedToken(payload.kind);
+      const id = payload.agentThreadId || payload.agent_thread_id || payload.id;
+      candidates.push(subagentCandidate({
+        lifecycle: kind === 'started' ? 'started' : 'progress',
+        id,
+        correlationId: id,
+        sourceItemId: payload.id,
+        agentPath: payload.agentPath || payload.agent_path,
+        type: payload.agentType || payload.agent_type || 'subagent',
+        status: kind || 'running',
+        occurredAtMs: payload.occurredAtMs || payload.occurred_at_ms
+      }));
+    } else if (itemType === 'collab_agent_tool_call') {
+      const refs = receiverAgentRefs(payload);
+      const states = payload.agentsStates && typeof payload.agentsStates === 'object' ? payload.agentsStates
+        : payload.agents_states && typeof payload.agents_states === 'object' ? payload.agents_states : {};
+      const ids = [...new Set([...refs.ids, ...Object.keys(states)])];
+      const tool = normalizedToken(payload.tool);
+      for (const id of ids) {
+        const ref = refs.byId.get(String(id)) || {};
+        const state = statusDetailsFromProvider(states[id]);
+        const fallback = /spawn/.test(tool) ? 'started' : 'progress';
+        candidates.push(subagentCandidate({
+          lifecycle: state.status ? lifecycleForStatus(state.status, fallback) : fallback,
+          id,
+          correlationId: id,
+          sourceItemId: payload.id,
+          type: ref.agentRole || ref.agent_role || ref.role || ref.agentType || ref.agent_type || 'subagent',
+          agentName: ref.agentNickname || ref.agent_nickname || ref.nickname || ref.name,
+          task: payload.prompt,
+          status: state.status || (fallback === 'started' ? 'running' : 'in_progress'),
+          output: state.output,
+          error: state.error,
+          usage: state.usage || payload.usage,
+          durationMs: state.durationMs ?? payload.durationMs ?? payload.duration_ms
+        }));
+      }
+    }
+  } else if (source === 'codex-notification') {
+    const eventType = normalizedToken(input.eventType);
+    if (eventType === 'sub_agent_activity') {
+      return normalizeSubagentLifecycle({ source: 'codex-item', payload: {
+        type: 'subAgentActivity',
+        id: payload.event_id || payload.eventId || input.sourceItemId,
+        kind: payload.kind,
+        agentThreadId: payload.agent_thread_id || payload.agentThreadId,
+        agentPath: payload.agent_path || payload.agentPath,
+        occurredAtMs: payload.occurred_at_ms || payload.occurredAtMs
+      } });
+    }
+    const refs = receiverAgentRefs(payload);
+    const stateMap = payload.agent_statuses && typeof payload.agent_statuses === 'object' ? payload.agent_statuses
+      : payload.agents_states && typeof payload.agents_states === 'object' ? payload.agents_states : {};
+    const sourceItemId = payload.call_id || payload.callId || payload.item_id || payload.itemId
+      || payload.event_id || payload.eventId || input.sourceItemId;
+    const directIds = [
+      payload.agent_thread_id, payload.agentThreadId, payload.receiver_thread_id, payload.receiverThreadId,
+      payload.new_thread_id, payload.newThreadId, ...refs.ids, ...Object.keys(stateMap)
+    ].filter(Boolean).map(String);
+    if (!directIds.length && sourceItemId) directIds.push(String(sourceItemId));
+    for (const id of [...new Set(directIds)]) {
+      const ref = refs.byId.get(id) || {};
+      const state = statusDetailsFromProvider(stateMap[id] ?? payload.status);
+      const fallback = /spawn_(?:begin|end)$/.test(eventType) ? 'started' : 'progress';
+      candidates.push(subagentCandidate({
+        lifecycle: state.status ? lifecycleForStatus(state.status, fallback) : fallback,
+        id,
+        correlationId: sourceItemId && /spawn_/.test(eventType) ? sourceItemId : id,
+        sourceItemId,
+        type: payload.new_agent_role || payload.newAgentRole || payload.receiver_agent_role
+          || payload.receiverAgentRole || ref.agentRole || ref.agent_role || 'subagent',
+        agentName: payload.new_agent_nickname || payload.newAgentNickname || payload.receiver_agent_nickname
+          || payload.receiverAgentNickname || ref.agentNickname || ref.agent_nickname,
+        agentPath: payload.agent_path || payload.agentPath,
+        task: payload.prompt || payload.task || payload.instruction,
+        status: state.status || (fallback === 'started' ? 'running' : 'in_progress'),
+        output: state.output || payload.output || payload.result,
+        error: state.error || payload.error,
+        usage: state.usage || payload.usage || payload.token_usage,
+        durationMs: state.durationMs ?? payload.duration_ms ?? payload.durationMs,
+        occurredAtMs: payload.occurred_at_ms || payload.occurredAtMs
+      }));
+    }
+  } else if (source === 'cursor-task') {
+    const state = statusDetailsFromProvider(payload.status || payload.state || payload.phase);
+    const id = payload.agentId || payload.agent_id || payload.taskId || payload.task_id
+      || payload.id || payload.toolCallId || payload.tool_call_id
+      || `cursor-task:${input.sessionId || 'session'}:${boundedText(payload.title || payload.task || 'subagent', 128)}`;
+    candidates.push(subagentCandidate({
+      lifecycle: state.status ? lifecycleForStatus(state.status) : 'progress',
+      id,
+      correlationId: id,
+      sourceItemId: payload.toolCallId || payload.tool_call_id || payload.id,
+      type: payload.agentType || payload.agent_type || payload.type || 'subagent',
+      agentName: payload.agentName || payload.agent_name || payload.name,
+      task: payload.task || payload.instruction || payload.title || payload.description || payload.prompt,
+      status: state.status || 'running',
+      output: state.output || payload.output || payload.result || payload.message,
+      error: state.error || payload.error,
+      usage: state.usage || payload.usage || payload.tokenUsage || payload.token_usage,
+      durationMs: state.durationMs ?? payload.durationMs ?? payload.duration_ms
+    }));
+  }
+  return candidates.filter((candidate) => candidate.id);
+}
+
+function publicSubagentResults(states = {}) {
+  return Object.values(states)
+    .sort((left, right) => Number(left.startedAtMs || 0) - Number(right.startedAtMs || 0))
+    .map((state) => ({
+      id: state.id,
+      type: state.type || 'subagent',
+      task: state.task || '',
+      status: state.status || 'running',
+      durationMs: Number.isFinite(Number(state.durationMs)) && Number(state.durationMs) >= 0 ? Number(state.durationMs) : null,
+      output: state.output || '',
+      ...(state.agentName ? { agentName: state.agentName } : {}),
+      ...(state.usage ? { usage: state.usage } : {})
+    }));
+}
+
+function resultWithSubagents(result, subagents) {
+  const base = result && typeof result === 'object' && !Array.isArray(result)
+    ? { ...result }
+    : result == null ? {} : { text: String(result) };
+  return subagents.length ? { ...base, subagents } : base;
+}
+
+function recordSubagentLifecycle(jobId, candidate, options = {}) {
+  let eventType = `subagent.${candidate.lifecycle}`;
+  let eventData;
+  updateManagedJob(jobId, (job) => {
+    const states = job.subagentLifecycle && typeof job.subagentLifecycle === 'object'
+      ? { ...job.subagentLifecycle } : {};
+    const aliases = job.subagentAliases && typeof job.subagentAliases === 'object'
+      ? { ...job.subagentAliases } : {};
+    let key = aliases[candidate.id] || candidate.correlationId || candidate.id;
+    let previous = states[key];
+    if (!previous && candidate.sourceItemId && states[candidate.sourceItemId]) {
+      key = candidate.sourceItemId;
+      previous = states[key];
+    }
+    if (!previous && candidate.lifecycle === 'progress') {
+      candidate = { ...candidate, lifecycle: 'started', status: candidate.status || 'running' };
+      eventType = 'subagent.started';
+    }
+    const observedAt = candidate.occurredAtMs || Date.now();
+    const startedAtMs = previous?.startedAtMs || observedAt;
+    const durationMs = candidate.durationMs ?? (
+      ['completed', 'errored'].includes(candidate.lifecycle) && observedAt >= startedAtMs
+        ? observedAt - startedAtMs : previous?.durationMs
+    );
+    const merged = {
+      ...previous,
+      id: candidate.id || previous?.id || key,
+      sourceItemId: candidate.sourceItemId || previous?.sourceItemId || null,
+      type: candidate.type || previous?.type || 'subagent',
+      agentName: candidate.agentName || previous?.agentName || '',
+      agentPath: candidate.agentPath || previous?.agentPath || '',
+      task: candidate.task || previous?.task || '',
+      status: candidate.lifecycle === 'completed' ? 'completed'
+        : candidate.lifecycle === 'errored' ? 'errored'
+          : candidate.status || previous?.status || 'running',
+      startedAtMs,
+      updatedAtMs: observedAt,
+      ...(durationMs != null ? { durationMs } : {}),
+      ...(candidate.output ? { output: candidate.output } : {}),
+      ...(candidate.error ? { error: candidate.error } : {}),
+      ...(candidate.usage ? { usage: candidate.usage } : {})
+    };
+    states[key] = redact(merged);
+    aliases[merged.id] = key;
+    if (candidate.sourceItemId) aliases[candidate.sourceItemId] = key;
+    job.subagentLifecycle = states;
+    job.subagentAliases = aliases;
+    const subagents = publicSubagentResults(states);
+    job.result = resultWithSubagents(job.result, subagents);
+    eventData = {
+      id: merged.id,
+      correlationId: key,
+      sourceItemId: merged.sourceItemId,
+      type: merged.type,
+      agentName: merged.agentName,
+      agentPath: merged.agentPath,
+      task: merged.task,
+      status: merged.status,
+      durationMs: Number.isFinite(Number(merged.durationMs)) ? Number(merged.durationMs) : null,
+      output: candidate.output || '',
+      ...(candidate.error ? { error: candidate.error } : {}),
+      ...(candidate.usage ? { usage: candidate.usage } : {})
+    };
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, eventType, eventData, options);
+}
+
+function recordSubagentCandidates(jobId, candidates, options = {}) {
+  for (const candidate of candidates) recordSubagentLifecycle(jobId, candidate, options);
 }
 
 function largeWriteLimit() {
@@ -379,6 +776,7 @@ function terminal(job, status, phase, extra = {}) {
   }
   updateManagedJob(job.id, (current) => {
     const firstAttemptText = current.result?.firstAttemptText;
+    const subagents = Array.isArray(current.result?.subagents) ? current.result.subagents : [];
     current.status = deferVerification ? 'running' : status;
     current.phase = deferVerification ? 'verifying' : phase;
     if (!deferVerification) current.completedAt = Math.floor(Date.now() / 1000);
@@ -386,6 +784,7 @@ function terminal(job, status, phase, extra = {}) {
     if (finalHashes) current.finalHashes = finalHashes;
     if (scopeViolations) current.scopeViolations = scopeViolations;
     Object.assign(current, redact(extra));
+    if (subagents.length) current.result = resultWithSubagents(current.result, subagents);
     if (firstAttemptText != null) {
       current.result = current.result && typeof current.result === 'object'
         ? { ...current.result, firstAttemptText }
@@ -431,6 +830,13 @@ function terminal(job, status, phase, extra = {}) {
       && changedFiles && changedFiles.count === 0) {
       current.resultSuspect = 'no-changes-write-mode';
     }
+    const subagentOutputChars = (current.result?.subagents || [])
+      .reduce((total, subagent) => total + String(subagent?.output || '').trim().length, 0);
+    const finalMessageChars = String(text || '').trim().length;
+    if (!deferVerification && status === 'completed' && subagentOutputChars >= 1000
+      && subagentOutputChars > Math.max(finalMessageChars * 2, finalMessageChars + 500)) {
+      current.resultSuspect = 'subagent-output-dominates-final';
+    }
   });
   appendJobEvent(job.id, deferVerification
     ? 'job.state'
@@ -450,7 +856,7 @@ function recordSession(jobId, sessionId, turnId = undefined) {
   appendJobEvent(jobId, 'session.updated', { sessionId, turnId });
 }
 
-function mapCodexItem(jobId, phase, params, activity = null) {
+export function mapCodexItem(jobId, phase, params, activity = null) {
   const item = params.item || {};
   const options = { sessionId: params.threadId, turnId: params.turnId };
   activity?.mark(codexActivitySignal('', item));
@@ -466,14 +872,31 @@ function mapCodexItem(jobId, phase, params, activity = null) {
     // can fail fast with the recovery instead of a provider round-trip.
     if (item.type === 'collabAgentToolCall') {
       updateManagedJob(jobId, (job) => { job.reviewFlowEngaged = true; }, { incrementRevision: false });
+      recordSubagentCandidates(jobId, normalizeSubagentLifecycle({
+        source: 'codex-item',
+        provider: 'codex',
+        transport: 'app-server',
+        phase,
+        payload: item
+      }), options);
     }
     const type = phase === 'started' ? 'tool.started' : 'tool.completed';
     appendJobEvent(jobId, type, { item }, options);
   } else if (item.type === 'fileChange') {
     appendJobEvent(jobId, 'file.changed', { changes: item.changes || [], status: item.status, phase }, options);
   } else if (item.type !== 'reasoning' && item.type !== 'userMessage') {
-    appendJobEvent(jobId, 'provider.event', { providerEvent: `item/${phase}`, itemType: item.type, itemId: item.id }, options);
+    appendProviderItem(jobId, phase, item, options);
     if (item.type === 'contextCompaction') appendJobEvent(jobId, `compaction.${phase}`, { itemId: item.id }, options);
+    if (item.type === 'subAgentActivity') {
+      updateManagedJob(jobId, (job) => { job.reviewFlowEngaged = true; }, { incrementRevision: false });
+      recordSubagentCandidates(jobId, normalizeSubagentLifecycle({
+        source: 'codex-item',
+        provider: 'codex',
+        transport: 'app-server',
+        phase,
+        payload: item
+      }), options);
+    }
   }
 }
 
@@ -646,13 +1069,31 @@ export function mapCodexMcpEvent(job, params = {}, context = {}) {
       output();
       if (itemType === 'collab_agent_tool_call') {
         updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; }, { incrementRevision: false });
+        recordSubagentCandidates(job.id, normalizeSubagentLifecycle({
+          source: 'codex-item',
+          provider: 'codex',
+          transport: 'direct-mcp',
+          phase,
+          payload: item
+        }), options);
       }
       appendJobEvent(job.id, phase === 'started' ? 'tool.started' : 'tool.completed', {
         ...directCodexTool(item, params, itemType),
         item
       }, options);
     } else if (itemType) {
-      appendJobEvent(job.id, 'provider.event', { providerEvent: `codex:item_${phase}`, itemType, itemId: item.id }, options);
+      appendProviderItem(job.id, phase, item, options, `codex:item_${phase}`);
+      if (itemType === 'sub_agent_activity') {
+        output();
+        updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; }, { incrementRevision: false });
+        recordSubagentCandidates(job.id, normalizeSubagentLifecycle({
+          source: 'codex-item',
+          provider: 'codex',
+          transport: 'direct-mcp',
+          phase,
+          payload: item
+        }), options);
+      }
     }
   } else if (type === 'turn_diff') {
     output();
@@ -682,7 +1123,15 @@ export function mapCodexMcpEvent(job, params = {}, context = {}) {
   } else if (/^collab_|^sub_agent_/.test(type)) {
     output();
     updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; }, { incrementRevision: false });
-    appendJobEvent(job.id, 'subagent.activity', { providerEvent: `codex:${type}` }, options);
+    appendJobEvent(job.id, 'provider.event', { providerEvent: `codex:${type}` }, options);
+    recordSubagentCandidates(job.id, normalizeSubagentLifecycle({
+      source: 'codex-notification',
+      provider: 'codex',
+      transport: 'direct-mcp',
+      eventType: type,
+      sourceItemId: params.id,
+      payload: msg
+    }), options);
   } else if (!['user_message', 'thread_settings_applied', 'model_verification'].includes(type)) {
     appendJobEvent(job.id, 'provider.event', { providerEvent: `codex:${type}` }, options);
   }
@@ -831,7 +1280,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.26.2' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.27.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1292,7 +1741,13 @@ export function mapCursorAcpNotification(job, method, params = {}, sessionId = n
   if (method === 'cursor/update_todos') {
     appendJobEvent(job.id, 'plan.updated', { ...params, merge: params.merge === true }, { sessionId });
   } else if (method === 'cursor/task') {
-    appendJobEvent(job.id, 'subagent.activity', params, { sessionId });
+    recordSubagentCandidates(job.id, normalizeSubagentLifecycle({
+      source: 'cursor-task',
+      provider: 'cursor',
+      transport: 'acp',
+      sessionId,
+      payload: params
+    }), { sessionId });
   } else if (method === 'cursor/generate_image') {
     appendJobEvent(job.id, 'artifact.created', { kind: 'image', ...params }, { sessionId });
   } else {
@@ -1639,7 +2094,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.26.2' }
+      clientInfo: { name: 'delegate-router', version: '0.27.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

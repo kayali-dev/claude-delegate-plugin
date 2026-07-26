@@ -62,6 +62,34 @@ test('open first-class and legacy compactions are active until completion', () =
   assert.notEqual(completed.kind, 'quiet');
 });
 
+test('active subagents drive fleet activity until their terminal lifecycle event', () => {
+  const started = event(1, 'subagent.started', {
+    id: 'agent-1', correlationId: 'agent-1', type: 'reviewer',
+    task: 'Inspect parser', status: 'running'
+  }, 45_000);
+  const progress = event(2, 'subagent.progress', {
+    id: 'agent-1', correlationId: 'agent-1', type: 'reviewer',
+    task: 'Inspect parser', status: 'interacted'
+  }, 35_000);
+  const active = deriveJobActivity(baseJob, [started, progress], { now: NOW });
+  assert.equal(active.kind, 'subagent');
+  assert.equal(active.label, 'agent: Inspect parser');
+  assert.equal(active.sourceSeq, 2);
+  assert.equal(active.subagentId, 'agent-1');
+  assert.notEqual(active.kind, 'quiet');
+
+  const completed = deriveJobActivity(baseJob, [
+    started,
+    progress,
+    event(3, 'subagent.completed', {
+      id: 'agent-1', correlationId: 'agent-1', type: 'reviewer',
+      task: 'Inspect parser', status: 'completed', output: 'findings'
+    }, 1000)
+  ], { now: NOW });
+  assert.equal(completed.kind, 'working');
+  assert.notEqual(completed.kind, 'quiet');
+});
+
 test('transport capability truth table reflects streamed headless thinking and tools without inventing approvals', () => {
   assert.equal(ACTIVITY_CAPABILITIES['codex:app-server'].visibility, 'full');
   assert.equal(ACTIVITY_CAPABILITIES['cursor:acp'].visibility, 'near-full');

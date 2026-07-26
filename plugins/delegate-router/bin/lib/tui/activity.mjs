@@ -1,4 +1,4 @@
-import { deriveToolDescriptor, normalizeCompactionEvents, toolActivityLabel, toolEventKey } from './transcript.mjs';
+import { deriveToolDescriptor, normalizeTranscriptEvents, subagentEventKey, toolActivityLabel, toolEventKey } from './transcript.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR } from './glyphs.mjs';
 import { formatDisplayValue } from './display.mjs';
 import { classifySession, DEFAULT_SESSION_ACTIVE_SECONDS } from './sessions.mjs';
@@ -7,11 +7,11 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const PHASES = new Set(['verifying', 'retrying', 'paused', 'starting']);
 
 export const ACTIVITY_CAPABILITIES = Object.freeze({
-  'codex:app-server': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: true, needsInput: true, visibility: 'full' }),
+  'codex:app-server': Object.freeze({ thinking: true, streaming: true, tools: true, subagents: true, approvals: true, needsInput: true, visibility: 'full' }),
   'codex:external': Object.freeze({ thinking: false, streaming: false, tools: false, approvals: false, needsInput: false, visibility: 'bounded-tail' }),
   'claude:agent-hook': Object.freeze({ thinking: false, streaming: false, tools: false, approvals: false, needsInput: false, visibility: 'hook-only' }),
-  'cursor:acp': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: true, needsInput: true, visibility: 'near-full' }),
-  'cursor:headless': Object.freeze({ thinking: true, streaming: true, tools: true, approvals: false, needsInput: false, visibility: 'near-full' })
+  'cursor:acp': Object.freeze({ thinking: true, streaming: true, tools: true, subagents: true, approvals: true, needsInput: true, visibility: 'near-full' }),
+  'cursor:headless': Object.freeze({ thinking: true, streaming: true, tools: true, subagents: true, approvals: false, needsInput: false, visibility: 'near-full' })
 });
 
 export function activityTransportKey(job = {}) {
@@ -44,10 +44,11 @@ function result(kind, label, glyph, since, now, tone, extra = {}) {
 const signalCache = new WeakMap();
 
 function activitySignals(events) {
-  events = normalizeCompactionEvents(events);
+  events = normalizeTranscriptEvents(events);
   if (signalCache.has(events)) return signalCache.get(events);
   const open = new Map();
   const openCompactions = new Map();
+  const openSubagents = new Map();
   let approval = null;
   let needsInput = null;
   let delta = null;
@@ -81,17 +82,29 @@ function activitySignals(events) {
       if (itemId) openCompactions.delete(itemId);
       else openCompactions.delete([...openCompactions.keys()].at(-1));
     }
+    if (event.type === 'subagent.started' || event.type === 'subagent.progress') {
+      if (event.data?.legacyNotCaptured !== true) {
+        const key = subagentEventKey(event) || `subagent:${event.seq || 0}`;
+        const previous = openSubagents.get(key);
+        openSubagents.set(key, { key, start: previous?.start || event, latest: event });
+      }
+    } else if (event.type === 'subagent.completed' || event.type === 'subagent.errored') {
+      const key = subagentEventKey(event);
+      if (key) openSubagents.delete(key);
+    }
     if (event.type === 'message.delta') delta = event;
     if (event.type === 'activity' || event.type === 'message.delta' || event.type === 'message.completed'
       || event.type === 'tool.started' || event.type === 'tool.output' || event.type === 'tool.completed'
       || event.type === 'file.changed' || event.type === 'plan.updated' || event.type === 'approval.requested' || event.type === 'approval.resolved'
       || event.type === 'input.requested' || event.type === 'input.resolved'
       || event.type === 'compaction.started' || event.type === 'compaction.completed' || event.type === 'error') signal = event;
+    if (event.type?.startsWith('subagent.')) signal = event;
   }
   const value = {
     approval, needsInput, delta, signal, lastEvent: events.at(-1) || null,
     openTool: [...open.entries()].sort((left, right) => eventAt(right[1]) - eventAt(left[1]))[0] || null,
-    openCompaction: [...openCompactions.values()].sort((left, right) => eventAt(right) - eventAt(left))[0] || null
+    openCompaction: [...openCompactions.values()].sort((left, right) => eventAt(right) - eventAt(left))[0] || null,
+    openSubagent: [...openSubagents.values()].sort((left, right) => eventAt(right.latest) - eventAt(left.latest))[0] || null
   };
   signalCache.set(events, value);
   return value;
@@ -136,6 +149,15 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
     const compaction = signals.openCompaction;
     return result('compacting', 'compacting', CHROME_GLYPHS.spinner, eventAt(compaction), now, 'accent', {
       capabilities, transportKey: key, sourceSeq: compaction.seq
+    });
+  }
+
+  if (capabilities.subagents && signals.openSubagent) {
+    const subagent = signals.openSubagent;
+    const data = subagent.latest?.data || {};
+    const label = formatDisplayValue(data.task || data.agentName || data.type || data.id || 'subagent');
+    return result('subagent', `agent: ${label}`, CHROME_GLYPHS.spinner, eventAt(subagent.start), now, 'accent', {
+      capabilities, transportKey: key, sourceSeq: subagent.latest.seq, subagentId: data.id || null
     });
   }
 

@@ -234,6 +234,58 @@ test('open and nasty context-compaction tails remain animated and display-safe',
   assert.doesNotMatch(rendered, /\[object Object\]|NaN/);
 });
 
+test('subagent lifecycle renders as an expandable provider-derived tool block with distinct error state', () => {
+  const projector = new TranscriptProjector();
+  const events = [
+    { ...event(1, 'subagent.started', {
+      id: 'agent-1', correlationId: 'agent-1', type: 'reviewer',
+      task: 'Review the parser', status: 'running'
+    }), provider: 'codex' },
+    { ...event(2, 'subagent.progress', {
+      id: 'agent-1', correlationId: 'agent-1', type: 'reviewer',
+      task: 'Review the parser', status: 'interacted'
+    }), provider: 'codex' },
+    { ...event(4, 'subagent.errored', {
+      id: 'agent-1', correlationId: 'agent-1', type: 'reviewer',
+      task: 'Review the parser', status: 'errored', durationMs: 3000,
+      output: 'Subagent failed after preserving this diagnostic.'
+    }), provider: 'codex' }
+  ];
+  const [collapsed] = projector.project(events, { now: AT + 4000 });
+  assert.equal(collapsed.kind, 'tool');
+  assert.equal(collapsed.tool.category, 'subagent');
+  assert.equal(collapsed.tool.failed, true);
+  assert.match(formatTranscriptBlock(collapsed), /> Codex agent.*Review the parser.*[x✗].*3s/);
+  const [expanded] = projector.project(events, { now: AT + 4000, expandedTools: new Set(['agent-1']) });
+  const rendered = formatTranscriptBlock(expanded);
+  assert.match(rendered, /agent type: reviewer/);
+  assert.match(rendered, /status: errored/);
+  assert.match(rendered, /subagent output:/);
+  assert.match(rendered, /preserving this diagnostic/);
+  assert.doesNotMatch(rendered, /\[object Object\]|NaN/);
+});
+
+test('legacy subagent metadata stubs render an honest not-captured block instead of disappearing', () => {
+  const fixtures = [
+    { ...event(1, 'provider.event', {
+      providerEvent: 'item/completed', itemType: 'subAgentActivity', itemId: 'legacy-item'
+    }), provider: 'codex' },
+    { ...event(2, 'subagent.activity', { providerEvent: 'codex:sub_agent_activity' }), provider: 'codex' }
+  ];
+  const projector = new TranscriptProjector();
+  const collapsed = projector.project(fixtures, { now: AT + 2000 });
+  assert.equal(collapsed.length, 2);
+  assert.ok(collapsed.every((block) => block.kind === 'tool'));
+  const expanded = projector.project(fixtures, {
+    now: AT + 2000,
+    expandedTools: new Set(collapsed.map((block) => block.tool.key))
+  });
+  const rendered = expanded.map(formatTranscriptBlock).join('\n');
+  assert.match(rendered, /subAgentActivity.*payload was not captured by the recorder version/);
+  assert.match(rendered, /Codex agent.*payload was not captured by the recorder version/);
+  assert.doesNotMatch(rendered, /\[object Object\]|NaN/);
+});
+
 test('plan checklist glyph tiers and spinner phase snapshot in Unicode and ASCII modes', (t) => {
   t.after(() => configureGlyphs({ env: process.env, widths: {} }));
   const snapshotDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), 'snapshots');

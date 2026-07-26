@@ -213,7 +213,7 @@ test('ACP mapper covers every update variant, raw output, nested diffs, replay, 
   assert.ok(events.some((event) => event.type === 'mode.updated'));
   assert.ok(events.some((event) => event.type === 'commands.updated'));
   assert.ok(events.some((event) => event.type === 'plan.updated' && event.data.merge === true));
-  assert.ok(events.some((event) => event.type === 'subagent.activity'));
+  assert.ok(events.some((event) => event.type === 'subagent.started' && event.data.task === 'subtask'));
   assert.ok(events.some((event) => event.type === 'artifact.created'));
   assert.ok(!JSON.stringify(events).includes('hidden-acp-thought'));
   assert.equal(events.filter((event) => event.replay === true).length, 1);

@@ -143,6 +143,34 @@ test('open context compaction animates in both fleet row and detail header inste
   assert.match(detail.panes[0].content.entries.map(formatTranscriptBlock).join('\n'), /context compaction/);
 });
 
+test('an active provider subagent animates in Fleet and detail until its terminal lifecycle event', () => {
+  const store = syntheticStore();
+  const id = 'codex-active-1234567';
+  store.eventsByJob[id] = [
+    {
+      v: 1, seq: 10, at: NOW - 45_000, jobId: id, provider: 'codex',
+      type: 'subagent.started', redacted: true,
+      data: { id: 'agent-1', type: 'reviewer', task: 'Inspect the parser', status: 'running' }
+    },
+    {
+      v: 1, seq: 11, at: NOW - 5_000, jobId: id, provider: 'codex',
+      type: 'subagent.progress', redacted: true,
+      data: { id: 'agent-1', type: 'reviewer', task: 'Inspect the parser', status: 'running' }
+    }
+  ];
+  const fleet = fleetViewModel(store, { now: NOW }, { width: 100, height: 30 });
+  const activityIndex = fleet.panes[0].content.columns.findIndex((column) => column.key === 'activity');
+  assert.match(fleet.panes[0].content.rows[0].cells[activityIndex].text, /agent:/);
+  assert.doesNotMatch(fleet.panes[0].content.rows[0].cells[activityIndex].text, /quiet/);
+  assert.equal(fleet.panes[0].content.rows[0].cells[activityIndex].animated, true);
+
+  const detail = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW }, { width: 100, height: 30 });
+  assert.equal(detail.meta.activity.kind, 'subagent');
+  assert.match(detail.title.right, /agent:/);
+  assert.equal(detail.headerActivity.animated, true);
+  assert.match(detail.panes[0].content.entries.map(formatTranscriptBlock).join('\n'), /Codex agent.*Inspect the parser/);
+});
+
 test('fleet and Record derive failed state for stale queued records before durable reconciliation', () => {
   const store = syntheticStore();
   const stale = {

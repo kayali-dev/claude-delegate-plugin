@@ -1,0 +1,132 @@
+{
+  "task": "Inspect the parser and return the complete findings",
+  "output": "Full subagent report: parser fallback drops structured payloads.",
+  "managedCodex": [
+    {
+      "phase": "started",
+      "item": {
+        "type": "collabAgentToolCall",
+        "id": "managed-call-1",
+        "tool": "spawnAgent",
+        "status": "inProgress",
+        "receiverThreadIds": ["agent-1"],
+        "receiverAgents": [
+          {
+            "threadId": "agent-1",
+            "agentNickname": "reviewer",
+            "agentRole": "reviewer"
+          }
+        ],
+        "prompt": "Inspect the parser and return the complete findings",
+        "agentsStates": {
+          "agent-1": "running"
+        }
+      }
+    },
+    {
+      "phase": "completed",
+      "item": {
+        "type": "subAgentActivity",
+        "id": "activity-1",
+        "kind": "interacted",
+        "agentThreadId": "agent-1",
+        "agentPath": "root/reviewer"
+      }
+    },
+    {
+      "phase": "completed",
+      "item": {
+        "type": "collabAgentToolCall",
+        "id": "managed-call-1",
+        "tool": "wait",
+        "status": "completed",
+        "receiverThreadIds": ["agent-1"],
+        "receiverAgents": [
+          {
+            "threadId": "agent-1",
+            "agentNickname": "reviewer",
+            "agentRole": "reviewer"
+          }
+        ],
+        "prompt": "Inspect the parser and return the complete findings",
+        "agentsStates": {
+          "agent-1": {
+            "completed": "Full subagent report: parser fallback drops structured payloads."
+          }
+        }
+      }
+    }
+  ],
+  "directCodex": [
+    {
+      "type": "sub_agent_activity",
+      "event_id": "direct-activity-1",
+      "kind": "started",
+      "agent_thread_id": "agent-1",
+      "agent_path": "root/reviewer"
+    },
+    {
+      "type": "collab_agent_interaction_begin",
+      "call_id": "direct-call-1",
+      "receiver_thread_id": "agent-1",
+      "receiver_agent_role": "reviewer",
+      "receiver_agent_nickname": "reviewer",
+      "prompt": "Inspect the parser and return the complete findings",
+      "status": "running"
+    },
+    {
+      "type": "collab_agent_interaction_end",
+      "call_id": "direct-call-1",
+      "receiver_thread_id": "agent-1",
+      "receiver_agent_role": "reviewer",
+      "receiver_agent_nickname": "reviewer",
+      "prompt": "Inspect the parser and return the complete findings",
+      "status": {
+        "completed": "Full subagent report: parser fallback drops structured payloads."
+      }
+    }
+  ],
+  "cursor": [
+    {
+      "id": "agent-1",
+      "agentType": "reviewer",
+      "agentName": "reviewer",
+      "title": "Inspect the parser and return the complete findings",
+      "status": "running"
+    },
+    {
+      "id": "agent-1",
+      "agentType": "reviewer",
+      "agentName": "reviewer",
+      "title": "Inspect the parser and return the complete findings",
+      "status": "inProgress"
+    },
+    {
+      "id": "agent-1",
+      "agentType": "reviewer",
+      "agentName": "reviewer",
+      "title": "Inspect the parser and return the complete findings",
+      "status": "completed",
+      "output": "Full subagent report: parser fallback drops structured payloads."
+    }
+  ],
+  "unknownItem": {
+    "type": "futureWidget",
+    "id": "future-1",
+    "status": "completed",
+    "title": "Future provider payload",
+    "detail": {
+      "answer": 42
+    }
+  },
+  "webSearchItem": {
+    "type": "webSearch",
+    "id": "search-1",
+    "status": "completed",
+    "query": "delegate router subagent lifecycle",
+    "action": {
+      "type": "search",
+      "query": "delegate router subagent lifecycle"
+    }
+  }
+}

@@ -418,6 +418,32 @@ test('delegate transcript pages admit first-class context-compaction marker even
   assert.deepEqual(types, ['message.user', 'compaction.started', 'compaction.completed']);
 }));
 
+test('delegate transcript admits provider items and plain-text first-class subagent lifecycle lines', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
+  appendJobEvent(job.id, 'subagent.started', {
+    id: 'agent-1', correlationId: 'agent-1', type: 'reviewer', task: 'Inspect parser', status: 'running'
+  });
+  appendJobEvent(job.id, 'subagent.progress', {
+    id: 'agent-1', correlationId: 'agent-1', type: 'reviewer', task: 'Inspect parser', status: 'interacted'
+  });
+  appendJobEvent(job.id, 'subagent.completed', {
+    id: 'agent-1', correlationId: 'agent-1', type: 'reviewer', task: 'Inspect parser',
+    status: 'completed', durationMs: 1250, output: 'full findings'
+  });
+  appendJobEvent(job.id, 'provider.item', {
+    itemType: 'futureWidget', itemId: 'future-1', phase: 'completed', payloadCaptured: true,
+    item: { type: 'futureWidget', id: 'future-1', answer: 42 },
+    text: 'futureWidget completed: answer=42'
+  });
+  const events = jobTranscriptPage(job.id).events;
+  assert.deepEqual(events.map((event) => event.type), [
+    'message.user', 'subagent.started', 'subagent.progress', 'subagent.completed', 'provider.item'
+  ]);
+  assert.match(events.find((event) => event.type === 'subagent.started').data.text, /^Codex agent running: Inspect parser$/);
+  assert.match(events.find((event) => event.type === 'subagent.completed').data.text, /^Codex agent completed \(1250ms\): Inspect parser$/);
+  assert.equal(events.at(-1).data.text, 'futureWidget completed: answer=42');
+}));
+
 test('delegate transcript retroactively normalizes Codex and Cursor file changes into compact counted lines', () => isolated((directory) => {
   const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
   const journal = path.join(directory, 'jobs', `${job.id}.events.jsonl`);

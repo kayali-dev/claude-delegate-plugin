@@ -28,6 +28,8 @@ Advanced Cursor-only start/resume options are `addDirs[]` (`--add-dir`), `approv
 
 `delegate_transcript` includes compact `file.changed` entries: one cwd-relative `✎ path (+A −R)` line for each change, with rename/delete labels and counts only when the journal's unified hunk or old/new text can establish them. It never returns the full diff or old/new file bodies through that transcript surface; use `delegate_diff` for hunks.
 
+Provider-spawned agents are ordinary inspection data, not provider noise. `delegate_transcript` admits their start/progress/terminal lifecycle as provider-neutral plain-text lines. `delegate_inspect` and `delegate-jobs result` retain bounded child results under `result.subagents[]`; read those entries separately from `result.text`, because the latter remains the parent's own final message. A `subagent-output-dominates-final` suspicion means the child output is materially larger than that parent response and deserves direct review.
+
 ## Writer Ownership
 
 Allow only one writer for a path set. A read-only reviewer may inspect a stable diff, but do not ask it to review files while another agent is actively changing them. The coordinator owns final integration.

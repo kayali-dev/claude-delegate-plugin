@@ -568,6 +568,7 @@ export function completeShadowJob(id, outcome = {}) {
   const names = [...new Set(entries.map((entry) => entry.path).filter(Boolean))];
   const completedAt = Math.floor(Date.now() / 1000);
   const completed = updateManagedJob(id, (job) => {
+    const subagents = Array.isArray(job.result?.subagents) ? job.result.subagents : [];
     job.status = status;
     job.phase = status;
     job.completedAt = completedAt;
@@ -578,7 +579,14 @@ export function completeShadowJob(id, outcome = {}) {
       job.session = outcome.providerSessionId;
     }
     if (outcome.resolvedModel) job.resolvedModel = outcome.resolvedModel;
-    if (Object.hasOwn(outcome, 'result')) job.result = redact(outcome.result);
+    if (Object.hasOwn(outcome, 'result')) {
+      const safe = redact(outcome.result);
+      if (subagents.length) {
+        const base = safe && typeof safe === 'object' && !Array.isArray(safe)
+          ? safe : { text: safe == null ? '' : String(safe) };
+        job.result = { ...base, subagents };
+      } else job.result = safe;
+    }
     if (typeof outcome.resultText === 'string') job.resultText = redact(outcome.resultText);
     if (outcome.usage) job.usage = redact(outcome.usage);
     if (outcome.error) job.error = redact(outcome.error);
@@ -899,7 +907,9 @@ const TRANSCRIPT_TYPES = new Set([
   'message.user', 'message.delta', 'message.completed', 'plan.updated',
   'tool.started', 'tool.status', 'tool.output', 'tool.completed',
   'file.changed',
-  'session.updated', 'mode.updated', 'model.updated', 'commands.updated', 'subagent.activity', 'artifact.created',
+  'session.updated', 'mode.updated', 'model.updated', 'commands.updated',
+  'subagent.activity', 'subagent.started', 'subagent.progress', 'subagent.completed', 'subagent.errored',
+  'provider.item', 'artifact.created',
   'network.preflight', 'network.mode-elevated', 'network.policy.materialized', 'network.policy.restored',
   'input.requested', 'input.response.requested', 'input.resolved',
   'compaction.started', 'compaction.completed',
@@ -907,6 +917,28 @@ const TRANSCRIPT_TYPES = new Set([
   'error'
 ]);
 const TRANSCRIPT_VERBOSE_TYPES = new Set(['message.delta', 'tool.output']);
+
+function transcriptProviderLabel(provider) {
+  const value = String(provider || 'provider').trim();
+  return value ? `${value[0].toUpperCase()}${value.slice(1)} agent` : 'Provider agent';
+}
+
+function compactTranscriptEvent(event, cwd) {
+  const normalized = normalizeFileChangedEvent(event, cwd, { compact: true });
+  if (!normalized.type?.startsWith('subagent.')) return normalized;
+  const data = normalized.data || {};
+  const status = data.status || normalized.type.slice('subagent.'.length);
+  const duration = Number(data.durationMs);
+  const durationText = Number.isFinite(duration) && duration >= 0 ? ` (${Math.round(duration)}ms)` : '';
+  const task = typeof data.task === 'string' && data.task.trim() ? `: ${data.task.trim()}` : '';
+  return {
+    ...normalized,
+    data: {
+      ...data,
+      text: `${transcriptProviderLabel(normalized.provider)} ${status}${durationText}${task}`
+    }
+  };
+}
 
 export function jobTranscriptPage(id, options = {}) {
   assertJobId(id);
@@ -921,7 +953,7 @@ export function jobTranscriptPage(id, options = {}) {
     if (event.seq <= afterSeq) continue;
     nextSeq = event.seq;
     if (TRANSCRIPT_TYPES.has(event.type) && (verbose || !TRANSCRIPT_VERBOSE_TYPES.has(event.type))) {
-      events.push(normalizeFileChangedEvent(event, cwd, { compact: true }));
+      events.push(compactTranscriptEvent(event, cwd));
     }
     if (events.length >= limit) break;
   }

@@ -24,7 +24,7 @@ export const HELP_ITEMS = Object.freeze([
   { key: 'G / S / p / t / N', description: 'Groups / coordinator sessions / providers / seven-day stats / launcher' },
   { key: '[/], 1-6', description: 'Cycle detail tabs / open a specific tab' },
   { key: 'f', description: 'Toggle follow mode in Transcript or Events' },
-  { key: 'Enter / d / E', description: 'Expand a Transcript tool / open its Diff / jump to raw Events' },
+  { key: 'Enter / d / E', description: 'Expand a Transcript tool, agent, or provider item / open its Diff / jump to raw Events' },
   { key: 's / r / R', description: 'Steer / resume / release a paused start' },
   { key: 'n/N / c / v / w', description: 'Search next/previous, nudge / cancel / revert / review round' },
   { key: 'Left/Right', description: 'Cycle launcher choices or page a file diff' },
@@ -331,7 +331,7 @@ function activityStyle(activity) {
           : activity.tone === 'dim' ? palette.dim : palette.body;
 }
 
-export const ANIMATED_ACTIVITY_KINDS = Object.freeze(new Set(['working', 'tool', 'thinking', 'streaming', 'compacting', 'verifying', 'retrying', 'starting']));
+export const ANIMATED_ACTIVITY_KINDS = Object.freeze(new Set(['working', 'tool', 'subagent', 'thinking', 'streaming', 'compacting', 'verifying', 'retrying', 'starting']));
 
 export function activityIndicator(activity, now, options = {}) {
   const animated = ANIMATED_ACTIVITY_KINDS.has(activity?.kind);

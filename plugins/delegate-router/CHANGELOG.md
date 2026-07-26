@@ -2,6 +2,12 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.27.0 — 2026-07-26
+
+- Provider-spawned Codex and Cursor subagents now share one durable `started` → `progress` → `completed`/`errored` lifecycle across managed app-server, direct MCP, ACP, and headless transports. Their identity, task, status, duration, usage, and bounded redacted output remain inspectable in `result.subagents[]`, plain-text transcripts, and expandable provider-neutral TUI blocks; active subagents also drive Fleet/detail activity.
+- Unrecognized Codex app-server items now retain a bounded, recursively redacted payload in `provider.item` instead of losing everything except type/id metadata. Unknown and web-search items render without type-specific UI code, while legacy metadata-only journals show an explicit payload-not-captured block.
+- Completed jobs whose preserved subagent output substantially outweighs a thin parent response are marked `resultSuspect: 'subagent-output-dominates-final'`.
+
 ## 0.26.2 — 2026-07-22
 
 - The external Codex thread scanner no longer crashes the TUI when a rollout file appears mid-refresh with its meta line still being written (explicit-null identity guard, per-file isolation with an `unreadableExcluded` count, and a timer-level catch that degrades the external scan to an error status instead of killing the process).

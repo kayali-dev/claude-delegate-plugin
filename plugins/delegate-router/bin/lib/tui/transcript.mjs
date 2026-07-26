@@ -9,6 +9,8 @@ const TRANSCRIPT_NOTICE = /^(?:approval\.(?:requested|resolved)|correction\.|sco
 const SUCCESS = /^(?:completed|complete|success|succeeded|ok|approved|accepted)$/i;
 const FAILURE = /^(?:failed|failure|error|cancelled|canceled|rejected|denied)$/i;
 const compactionNormalizationCache = new WeakMap();
+const providerItemNormalizationCache = new WeakMap();
+const subagentNormalizationCache = new WeakMap();
 
 function compactionPhase(event) {
   if (event?.type === 'compaction.started') return 'started';
@@ -46,6 +48,97 @@ export function normalizeCompactionEvents(events = []) {
   });
   compactionNormalizationCache.set(events, normalized);
   return normalized;
+}
+
+function providerItemPhase(event) {
+  if (event?.type === 'provider.item') return stringValue(event.data?.phase);
+  if (event?.type !== 'provider.event' || !event.data?.itemType) return null;
+  const providerEvent = String(event.data.providerEvent || '');
+  const match = providerEvent.match(/(?:item\/|item_)(started|completed)$/);
+  return match?.[1] || null;
+}
+
+function providerItemIdentity(event, phase = providerItemPhase(event)) {
+  return `${phase}:${formatDisplayValue(event?.data?.itemType)}:${formatDisplayValue(event?.data?.itemId)}`;
+}
+
+// Pre-upgrade journals retained only providerEvent/itemType/itemId. Promote
+// those stubs to the same typed block without inventing the missing payload.
+export function normalizeProviderItemEvents(events = []) {
+  if (!Array.isArray(events)) return [];
+  const cached = providerItemNormalizationCache.get(events);
+  if (cached) return cached;
+  const firstClass = new Set(events
+    .filter((event) => event?.type === 'provider.item')
+    .map((event) => providerItemIdentity(event)));
+  const normalized = events.flatMap((event) => {
+    if (event?.type !== 'provider.event') return [event];
+    const phase = providerItemPhase(event);
+    if (!phase) return [event];
+    if (firstClass.has(providerItemIdentity(event, phase))) return [];
+    return [Object.freeze({
+      ...event,
+      type: 'provider.item',
+      data: Object.freeze({
+        providerEvent: event.data?.providerEvent,
+        itemType: event.data?.itemType || 'unknown',
+        itemId: event.data?.itemId,
+        phase,
+        payloadCaptured: false,
+        legacyNotCaptured: true,
+        item: null,
+        text: `${event.data?.itemType || 'unknown'} ${phase}: payload was not captured by the recorder version`
+      })
+    })];
+  });
+  providerItemNormalizationCache.set(events, normalized);
+  return normalized;
+}
+
+function legacySubagentType(status) {
+  if (SUCCESS.test(status)) return 'subagent.completed';
+  if (FAILURE.test(status)) return 'subagent.errored';
+  if (/start|spawn|launch|run/i.test(status)) return 'subagent.started';
+  return 'subagent.progress';
+}
+
+// `subagent.activity` is the legacy cross-provider shape. Content-bearing
+// Cursor records stay useful; content-free direct-Codex records become honest
+// unknown-state blocks with an explicit not-captured notice.
+export function normalizeSubagentEvents(events = []) {
+  if (!Array.isArray(events)) return [];
+  const cached = subagentNormalizationCache.get(events);
+  if (cached) return cached;
+  const normalized = events.map((event) => {
+    if (event?.type !== 'subagent.activity') return event;
+    const data = event.data || {};
+    const captured = Boolean(data.id || data.agentId || data.taskId || data.title || data.task
+      || data.instruction || data.status || data.output || data.result || data.error);
+    const status = stringValue(data.status, data.state, captured ? 'running' : 'unknown');
+    return Object.freeze({
+      ...event,
+      type: captured ? legacySubagentType(status) : 'subagent.progress',
+      data: Object.freeze({
+        id: stringValue(data.agentId, data.taskId, data.id, `legacy-${event.seq || 0}`),
+        correlationId: stringValue(data.agentId, data.taskId, data.id, `legacy-${event.seq || 0}`),
+        type: stringValue(data.agentType, data.type, 'subagent'),
+        agentName: stringValue(data.agentName, data.name),
+        task: stringValue(data.task, data.instruction, data.title),
+        status,
+        durationMs: numberValue(data.durationMs, data.duration_ms),
+        output: rawStringValue(data.output, data.result),
+        error: rawStringValue(data.error),
+        legacyNotCaptured: !captured,
+        payloadCaptured: captured
+      })
+    });
+  });
+  subagentNormalizationCache.set(events, normalized);
+  return normalized;
+}
+
+export function normalizeTranscriptEvents(events = []) {
+  return normalizeSubagentEvents(normalizeProviderItemEvents(normalizeCompactionEvents(events)));
 }
 
 function stringValue(...values) {
@@ -97,6 +190,13 @@ function normalizedKind(value) {
   if (/rename|move/.test(kind)) return 'rename';
   if (/edit|update|modify|change/.test(kind)) return 'edit';
   return kind || 'edit';
+}
+
+function normalizedTokenForDisplay(value) {
+  return formatDisplayValue(value)
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[-\s/]+/g, '_')
+    .toLowerCase();
 }
 
 function basename(value) {
@@ -252,6 +352,147 @@ export function deriveToolDescriptor(startEvent, completedEvent = null, output =
   });
 }
 
+export function subagentEventKey(event) {
+  const data = event?.data || {};
+  return stringValue(data.correlationId, data.id, data.agentId, data.taskId) || null;
+}
+
+function providerLabel(provider) {
+  const value = stringValue(provider, 'provider');
+  return `${value.slice(0, 1).toUpperCase()}${value.slice(1)} agent`;
+}
+
+function detailLines(value, maxLength = 65536) {
+  const text = formatMultilineDisplayValue(value, { maxLength, space: typeof value === 'object' ? 2 : 0 });
+  return text ? text.split('\n') : [];
+}
+
+function subagentStatus(event) {
+  if (event?.type === 'subagent.completed') return 'completed';
+  if (event?.type === 'subagent.errored') return 'errored';
+  return stringValue(event?.data?.status, event?.type?.split('.')[1], 'running');
+}
+
+export function deriveSubagentDescriptor(startEvent, terminalEvent = null, latestEvent = null, options = {}) {
+  const start = startEvent || latestEvent || terminalEvent || {};
+  const latest = latestEvent || terminalEvent || start;
+  const terminal = terminalEvent || null;
+  const startData = start.data || {};
+  const data = { ...startData, ...(latest.data || {}), ...(terminal?.data || {}) };
+  const legacyNotCaptured = data.legacyNotCaptured === true;
+  const status = legacyNotCaptured ? 'unknown' : subagentStatus(terminal || latest);
+  const failed = !legacyNotCaptured && (terminal?.type === 'subagent.errored' || FAILURE.test(status));
+  const running = !legacyNotCaptured && !terminal;
+  const startedAt = eventTime(start);
+  const endedAt = eventTime(terminal);
+  const explicitDuration = numberValue(data.durationMs);
+  const durationMs = explicitDuration != null && explicitDuration >= 0 ? explicitDuration
+    : terminal && startedAt && endedAt && endedAt >= startedAt ? endedAt - startedAt : null;
+  const output = rawStringValue(data.output, data.error);
+  const lines = detailLines(output);
+  const usage = data.usage && typeof data.usage === 'object' ? formatDisplayValue(data.usage, { maxLength: 4096, space: 2 }) : '';
+  return Object.freeze({
+    key: subagentEventKey(start) || subagentEventKey(latest) || `subagent-${latest.seq || 0}`,
+    category: 'subagent',
+    itemType: 'subagent',
+    title: providerLabel(terminal?.provider || latest.provider || start.provider),
+    name: providerLabel(terminal?.provider || latest.provider || start.provider),
+    agentType: stringValue(data.type, 'subagent'),
+    agentName: stringValue(data.agentName),
+    agentId: stringValue(data.id),
+    task: legacyNotCaptured
+      ? 'payload was not captured by the recorder version'
+      : stringValue(data.task),
+    status,
+    running,
+    failed,
+    glyph: running ? spinnerGlyph(options.now) : legacyNotCaptured ? '?'
+      : failed ? CHROME_GLYPHS.failure : CHROME_GLYPHS.success,
+    durationMs,
+    startedAt,
+    endedAt: terminal ? endedAt : null,
+    command: '',
+    files: [],
+    paths: [],
+    cwd: '',
+    showCwd: false,
+    outputLineCount: lines.length,
+    outputTail: lines,
+    detailLines: legacyNotCaptured
+      ? ['payload was not captured by the recorder version; no task, status, or output can be recovered']
+      : lines.length ? lines : ['no subagent output was exposed by this lifecycle event'],
+    detailLabel: output ? 'subagent output' : 'subagent details',
+    legacyNotCaptured,
+    usage
+  });
+}
+
+function providerItemEventKey(event) {
+  const data = event?.data || {};
+  return stringValue(data.itemId, data.item?.id, `${data.itemType || 'item'}:${event?.seq || 0}`);
+}
+
+function compactProviderItemSummary(data = {}) {
+  if (data.legacyNotCaptured || data.payloadCaptured === false) return 'payload was not captured by the recorder version';
+  const item = data.item && typeof data.item === 'object' ? data.item : {};
+  const action = item.action && typeof item.action === 'object' ? item.action : {};
+  const summary = stringValue(
+    data.summary, item.title, item.name, item.query, action.query, action.url, action.pattern,
+    item.status, item.kind, item.message, item.text
+  );
+  if (summary) return summary.replace(/\s+/g, ' ').trim();
+  const fields = Object.entries(item)
+    .filter(([key, value]) => !['type', 'id'].includes(key) && ['string', 'number', 'boolean'].includes(typeof value))
+    .slice(0, 3)
+    .map(([key, value]) => `${key}=${formatDisplayValue(value)}`);
+  return fields.join(', ') || stringValue(data.phase, 'item');
+}
+
+export function deriveProviderItemDescriptor(startEvent, completedEvent = null, options = {}) {
+  const source = completedEvent || startEvent || {};
+  const startData = startEvent?.data || {};
+  const endData = completedEvent?.data || {};
+  const data = { ...startData, ...endData, item: endData.item || startData.item };
+  const legacyNotCaptured = data.legacyNotCaptured === true || data.payloadCaptured === false;
+  const status = stringValue(data.item?.status, data.phase, completedEvent ? 'completed' : 'running');
+  const failed = FAILURE.test(status);
+  const running = !legacyNotCaptured && !completedEvent && data.phase !== 'completed' && !SUCCESS.test(status) && !failed;
+  const startedAt = eventTime(startEvent || source);
+  const endedAt = eventTime(completedEvent);
+  const explicitDuration = numberValue(data.item?.durationMs, data.item?.duration_ms, data.durationMs);
+  const durationMs = explicitDuration != null && explicitDuration >= 0 ? explicitDuration
+    : completedEvent && startedAt && endedAt && endedAt >= startedAt ? endedAt - startedAt : null;
+  const lines = legacyNotCaptured
+    ? ['payload was not captured by the recorder version; only item type, id, and phase survived']
+    : detailLines(data.item);
+  return Object.freeze({
+    key: providerItemEventKey(startEvent || completedEvent),
+    category: 'provider-item',
+    itemType: stringValue(data.itemType, data.item?.type, 'unknown'),
+    title: stringValue(data.itemType, data.item?.type, 'unknown provider item'),
+    name: stringValue(data.itemType, data.item?.type, 'unknown provider item'),
+    summary: compactProviderItemSummary(data),
+    status: legacyNotCaptured ? 'unknown' : status,
+    running,
+    failed,
+    glyph: running ? spinnerGlyph(options.now) : legacyNotCaptured ? '?'
+      : failed ? CHROME_GLYPHS.failure : CHROME_GLYPHS.success,
+    durationMs,
+    startedAt,
+    endedAt: completedEvent ? endedAt : null,
+    command: '',
+    files: [],
+    paths: [],
+    cwd: '',
+    showCwd: false,
+    outputLineCount: lines.length,
+    outputTail: lines,
+    detailLines: lines,
+    detailLabel: 'provider item detail',
+    legacyNotCaptured
+  });
+}
+
 function fileSummary(files) {
   if (!files.length) return 'file';
   return `${files[0].basename}${files.length > 1 ? ` (+${files.length - 1} more)` : ''}`;
@@ -267,6 +508,11 @@ function toolSummaryParts(tool) {
   const duration = compactDuration(tool.durationMs);
   const output = tool.outputLineCount ? `${CHROME_GLYPHS.truncation} output (${tool.outputLineCount} lines)` : '';
   let parts;
+  if (tool.category === 'subagent') {
+    const identity = tool.agentName || (tool.agentType && tool.agentType !== 'subagent' ? tool.agentType : '');
+    parts = [`> ${tool.title}`, identity, tool.task, tool.glyph];
+  }
+  if (tool.category === 'provider-item') parts = [`$ ${tool.title}`, tool.summary, tool.glyph];
   if (tool.category === 'command') parts = [`${CHROME_GLYPHS.toolCommand} ${tool.command || tool.title}`, tool.glyph];
   if (tool.category === 'file') {
     const kinds = [...new Set(tool.files.map((file) => file.kind))].join('/');
@@ -288,6 +534,8 @@ function toolSummary(tool) {
 
 export function toolActivityLabel(tool) {
   if (!tool) return 'tool';
+  if (tool.category === 'subagent') return tool.task || tool.agentName || tool.agentType || 'subagent';
+  if (tool.category === 'provider-item') return `${tool.itemType || 'provider item'} ${tool.summary || ''}`.trim();
   if (tool.category === 'command') return tool.command || tool.title || 'command';
   if (tool.category === 'file') return `${fileSummary(tool.files)} ${[...new Set(tool.files.map((file) => file.kind))].join('/')}`.trim();
   return tool.name || tool.title || tool.itemType || 'tool';
@@ -338,7 +586,7 @@ function noticeText(event) {
   if (event.type === 'mode.updated') return joinDisplayParts(['~ Cursor mode', data.mode]);
   if (event.type === 'model.updated') return joinDisplayParts(['~ Cursor model', data.model]);
   if (event.type === 'commands.updated') return joinDisplayParts(['~ Cursor commands updated', `${Array.isArray(data.commands) ? data.commands.length : 0} available`]);
-  if (event.type === 'subagent.activity') return joinDisplayParts(['> Cursor subagent', data.title, data.status, data.task]);
+  if (event.type === 'subagent.activity') return joinDisplayParts([`> ${providerLabel(event.provider)}`, data.title, data.status, data.task]);
   if (event.type === 'artifact.created') return joinDisplayParts(['+ artifact', data.kind, data.path, data.uri]);
   return `! ${stringValue(data.code, 'error')}${CHROME_SEPARATOR}${stringValue(data.message, data.error, 'provider error')}`;
 }
@@ -349,6 +597,8 @@ function buildDescriptions(events, options) {
   const tools = new Map();
   const fileGroups = new Map();
   const compactions = new Map();
+  const subagents = new Map();
+  const providerItems = new Map();
   let openAnonymousMessage = null;
   let openAnonymousCompaction = null;
   let plan = null;
@@ -371,14 +621,28 @@ function buildDescriptions(events, options) {
     compactions.set(key, state);
     return state;
   };
+  const addSubagent = (event, key) => {
+    const state = { slot: slots.length, key, start: null, latest: null, terminal: null, seqStart: event.seq || 0, seqEnd: event.seq || 0 };
+    slots.push({ kind: 'subagent', state });
+    subagents.set(key, state);
+    return state;
+  };
+  const addProviderItem = (event, key) => {
+    const state = { slot: slots.length, key, start: null, completed: null, seqStart: event.seq || 0, seqEnd: event.seq || 0 };
+    slots.push({ kind: 'provider-item', state });
+    providerItems.set(key, state);
+    return state;
+  };
   const addFileGroup = (event, key) => {
     const state = { key, start: null, completed: null, seqStart: event.seq || 0, seqEnd: event.seq || 0 };
     slots.push({ kind: 'files', state });
     fileGroups.set(key, state);
     return state;
   };
-
-  const normalizedEvents = normalizeCompactionEvents(events);
+  const normalizedEvents = normalizeTranscriptEvents(events);
+  const normalizedSubagentSourceItems = new Set(normalizedEvents
+    .filter((event) => event?.type?.startsWith('subagent.') && event.data?.sourceItemId)
+    .map((event) => formatDisplayValue(event.data.sourceItemId)));
   const replayEvents = normalizedEvents.filter((event) => event.replay === true);
   if (replayEvents.length) {
     slots.push({
@@ -455,7 +719,33 @@ function buildDescriptions(events, options) {
       state.seqEnd = Math.max(state.seqEnd || 0, event.seq || 0);
       continue;
     }
+    if (event.type?.startsWith('subagent.')) {
+      const key = subagentEventKey(event) || `subagent:${event.seq || slots.length}`;
+      const state = subagents.get(key) || addSubagent(event, key);
+      state.latest = event;
+      if (!state.start || event.type === 'subagent.started') state.start ||= event;
+      if (event.type === 'subagent.completed' || event.type === 'subagent.errored') state.terminal = event;
+      state.seqStart = Math.min(state.seqStart || event.seq || 0, event.seq || state.seqStart || 0);
+      state.seqEnd = Math.max(state.seqEnd || 0, event.seq || 0);
+      continue;
+    }
+    if (event.type === 'provider.item') {
+      const itemType = stringValue(data.itemType, data.item?.type);
+      if (itemType.toLowerCase() === 'contextcompaction'
+        || (itemType.toLowerCase() === 'subagentactivity' && normalizedSubagentSourceItems.has(formatDisplayValue(data.itemId)))) continue;
+      const key = providerItemEventKey(event);
+      const state = providerItems.get(key) || addProviderItem(event, key);
+      if (data.phase === 'started') state.start = event;
+      else state.completed = event;
+      state.start ||= event;
+      state.seqStart = Math.min(state.seqStart || event.seq || 0, event.seq || state.seqStart || 0);
+      state.seqEnd = Math.max(state.seqEnd || 0, event.seq || 0);
+      continue;
+    }
     if (event.type === 'tool.started' || event.type === 'tool.completed' || event.type === 'tool.output' || event.type === 'tool.status') {
+      const item = data.item && typeof data.item === 'object' ? data.item : {};
+      if (normalizedTokenForDisplay(item.type) === 'collab_agent_tool_call'
+        && normalizedSubagentSourceItems.has(formatDisplayValue(item.id))) continue;
       const key = toolEventKey(event) || `seq-${event.seq || slots.length}`;
       const state = tools.get(key) || addTool(event, key);
       if (event.type === 'tool.started') state.start = event;
@@ -525,6 +815,22 @@ function buildDescriptions(events, options) {
       return {
         id: state.key, kind: 'compaction', at: startedAt, seqStart: state.seqStart, seqEnd: state.seqEnd,
         inProgress: !state.completed, durationMs
+      };
+    }
+    if (slot.kind === 'subagent') {
+      const state = slot.state;
+      return {
+        id: `subagent:${state.key}`, kind: 'tool', at: eventTime(state.start || state.latest),
+        seqStart: state.seqStart, seqEnd: state.seqEnd,
+        tool: deriveSubagentDescriptor(state.start || state.latest, state.terminal, state.latest, options)
+      };
+    }
+    if (slot.kind === 'provider-item') {
+      const state = slot.state;
+      return {
+        id: `provider-item:${state.key}`, kind: 'tool', at: eventTime(state.start || state.completed),
+        seqStart: state.seqStart, seqEnd: state.seqEnd,
+        tool: deriveProviderItemDescriptor(state.start || state.completed, state.completed, options)
       };
     }
     if (slot.kind === 'restored') {
@@ -626,15 +932,32 @@ export function transcriptLogicalLines(block) {
     const summary = toolSummaryParts(block.tool);
     const lines = [{ ...summary, kind: block.tool.failed ? 'tool-failed' : block.tool.running ? 'tool-running' : 'tool', nowrap: true, spinner: block.tool.running ? block.tool.glyph : null }];
     if (block.expanded) {
-      if (block.tool.command) {
+      if (block.tool.category === 'subagent') {
+        if (block.tool.agentId) lines.push({ text: `agent id: ${formatDisplayValue(block.tool.agentId)}`, kind: 'meta', indent: '  ' });
+        if (block.tool.agentType) lines.push({ text: `agent type: ${formatDisplayValue(block.tool.agentType)}`, kind: 'meta', indent: '  ' });
+        if (block.tool.status) lines.push({ text: `status: ${formatDisplayValue(block.tool.status)}`, kind: block.tool.failed ? 'tool-failed' : 'meta', indent: '  ' });
+        if (block.tool.usage) lines.push({ text: `usage: ${formatDisplayValue(block.tool.usage)}`, kind: 'meta', indent: '  ' });
+        lines.push({ text: `${block.tool.detailLabel}:`, kind: 'meta', indent: '  ' });
+        for (const line of block.tool.detailLines || []) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+      } else if (block.tool.category === 'provider-item') {
+        lines.push({ text: `${block.tool.detailLabel}:`, kind: 'meta', indent: '  ' });
+        for (const line of block.tool.detailLines || []) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+      } else if (block.tool.command) {
         const commandLines = formatMultilineDisplayValue(block.tool.command).split('\n');
         commandLines.forEach((text, index) => lines.push({ text: `${index === 0 ? 'command: ' : ''}${text}`, kind: 'body', indent: index === 0 ? '  ' : '           ' }));
-      }
-      if (block.tool.showCwd) lines.push({ text: `cwd: ${formatDisplayValue(block.tool.cwd)}`, kind: 'meta', indent: '  ' });
-      for (const file of block.tool.files) lines.push({ text: `${formatDisplayValue(file.kind)}: ${formatDisplayValue(file.path)}`, kind: 'meta', indent: '  ' });
-      if (block.tool.outputTail.length) {
-        lines.push({ text: `output tail (${block.tool.outputTail.length}/${block.tool.outputLineCount} lines):`, kind: 'meta', indent: '  ' });
-        for (const line of block.tool.outputTail) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+        if (block.tool.showCwd) lines.push({ text: `cwd: ${formatDisplayValue(block.tool.cwd)}`, kind: 'meta', indent: '  ' });
+        for (const file of block.tool.files) lines.push({ text: `${formatDisplayValue(file.kind)}: ${formatDisplayValue(file.path)}`, kind: 'meta', indent: '  ' });
+        if (block.tool.outputTail.length) {
+          lines.push({ text: `output tail (${block.tool.outputTail.length}/${block.tool.outputLineCount} lines):`, kind: 'meta', indent: '  ' });
+          for (const line of block.tool.outputTail) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+        }
+      } else {
+        if (block.tool.showCwd) lines.push({ text: `cwd: ${formatDisplayValue(block.tool.cwd)}`, kind: 'meta', indent: '  ' });
+        for (const file of block.tool.files) lines.push({ text: `${formatDisplayValue(file.kind)}: ${formatDisplayValue(file.path)}`, kind: 'meta', indent: '  ' });
+        if (block.tool.outputTail.length) {
+          lines.push({ text: `output tail (${block.tool.outputTail.length}/${block.tool.outputLineCount} lines):`, kind: 'meta', indent: '  ' });
+          for (const line of block.tool.outputTail) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+        }
       }
     }
     if (block.gapAfter) lines.push({ text: '', kind: 'gap' });
