@@ -127,6 +127,50 @@ Nagware boundary is a hard requirement, not a preference: edge-triggered only,
 per-item deduplication, cooldowns, snooze; priority order policy breach → human
 input → acceptance ready → failure; everything else stays in the status line.
 
+### P4.5 — Conversational delegation (bidirectional real-time)
+
+Delegation today is a one-shot handoff: the worker guesses when under-specified
+(the documented failure mode — underspecified agents guess plausibly rather than
+fail) and the coordinator discovers it only at the end. Make the channel run
+both ways, live, for **both providers**.
+
+Already in place: Cursor `cursor/ask_question` / `cursor/create_plan` block as
+real JSON-RPC requests and resolve through the durable control inbox
+(`input.requested` → `delegate_respond` with `expectedRevision` + idempotent
+`commandId`); Codex approval requests use the same inbox; `delegate_steer
+strategy=same-turn` injects into a live Codex turn; and P2a pushes the
+`needs-input` edge the moment it happens.
+
+What this phase adds:
+
+- **A broker-owned back-channel MCP server injected into every delegated
+  session**, exposing `ask_coordinator(question, options?, urgency)` (blocking)
+  and `report_progress(milestone)` (non-blocking). Injection points already
+  exist and are currently unused: Cursor ACP `session/new { mcpServers: [] }`,
+  Cursor headless `--approve-mcps`, and Codex `thread/start { config }`.
+  This gives Codex the free-form ask primitive it lacks, and gives Cursor
+  headless the ability its ACP path already has — one normalized question
+  shape across providers and transports.
+- **Cursor parity in both directions.** Cursor ACP v1 has no same-turn
+  correction, so coordinator→worker stays honest restart-only there; the
+  back-channel closes the gap from the other side by letting the worker ask
+  *before* it guesses. `cursor/update_todos` and `cursor/task` feed progress
+  without a round trip. Never describe Cursor restarts as same-turn steering.
+- **Reach the human, not just the coordinator session**: PushNotification on
+  `needs-input`, inline answering in the TUI, and an actionable monitor line —
+  so a blocked worker never waits on the coordinator being at the keyboard.
+- **Context with the question**: what it is stuck on, the diff so far, the
+  options considered. An answer may carry a steer.
+- **Timeouts and defaults**: per-question timeout, declared default action on
+  expiry, blocked time excluded from stall detection and attributed against the
+  work item's wall-clock budget (uses P2b leases).
+
+Security boundary, non-negotiable: the back-channel carries **questions only,
+never authority**. No scope widening, no permission grants, no budget raises,
+no self-approval, no control-plane access. `request_scope_expansion`, if it
+ever exists, is an owner-gated question — not a capability. Redaction applies
+in both directions.
+
 ### P5 — Intent→spec compiler
 Accept a sentence, a diff, a failing test, a TODO, or a task record; derive a
 structured WorkSpec draft from repo profile and current evidence; surface every
