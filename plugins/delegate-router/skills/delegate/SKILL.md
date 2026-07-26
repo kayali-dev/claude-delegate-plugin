@@ -133,6 +133,13 @@ An unsandboxed worker has your user's host privileges: state `sandbox=off` in th
 
 ## Supervise Managed Work
 
+In an interactive Claude Code session where the experimental plugin Monitor
+surface is available, you will be told when a delegated job crosses an
+actionable edge: policy breach, required human input, ready for review,
+terminal failure, or the ten-minute stall policy. Treat that notification as a
+wake-up signal and inspect the named job; it never replaces acceptance review.
+Progress, deltas, tools, usage ticks, and intermediate successes remain silent.
+
 After `delegate_start`, retain the job ID and revision. Use:
 
 - `delegate_list` to rediscover jobs when an ID is no longer in context (after compaction or in a new session). It reconciles orphans and returns compact summaries, newest first; filter by `groupId` or request a group summary for fan-out completion.
@@ -145,7 +152,13 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `delegate_stats` for read-only transport-tagged audit aggregates, terminal-status/output-token totals, proven tool-originated external Codex thread totals, and aggregate-only unattributed allowance movement, optionally bounded with `since` such as `24h` or `7d`.
 - `delegate_usage` for observed job usage, chain-cumulative token totals, and provider allowance as separate values.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
-- For long waits inside Claude Code, do not rely on a background `delegate-jobs wait` process — the harness can reap it (field-verified across a full multi-cluster run). Watch the job's `finishedPath` instead (on the job record from `delegate_inspect`/`delegate_list`): the broker writes that sentinel file on every terminal transition, so a Monitor until-loop on its existence is the durable wake signal; then read the outcome with `delegate_inspect`. `delegate-jobs wait` remains fine from a real terminal.
+- When the plugin Monitor is unavailable, disabled, or unsupported, fall back
+  to the job's `finishedPath` from `delegate_inspect`/`delegate_list`: the
+  broker writes that sentinel on every terminal transition, so a manual
+  Monitor-tool until-loop on its existence remains the durable wake signal.
+  Do not rely on a background `delegate-jobs wait` process inside Claude Code;
+  the harness can reap it. `delegate-jobs wait` remains fine from a real
+  terminal.
 - A Codex job whose transcript shows collab-agent activity has engaged the multi-agent review flow: the record carries `reviewFlowEngaged: true`, and `delegate_resume` will refuse it immediately with `RESUME_UNSUPPORTED` — plan the follow-up as a fresh job whose packet folds in the prior findings instead of attempting resume. The analysis such a turn produced is often accurate; append it to the fresh packet as verified context.
 - `idempotencyKey` replay returns the existing job even when that job completed without meeting its objective (analysis-only turn, zero changed files, failed verification). A deliberate retry-with-changes is a new request: mint a new key rather than reusing the old one.
 

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { normalizeFileChangedEvent } from '../control.mjs';
+import { isCodexFirstClassItemType } from '../codex-item-types.mjs';
 import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimestamp, joinDisplayParts } from './display.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR, spinnerGlyph } from './glyphs.mjs';
 import { uiPalette as palette } from './palette.mjs';
@@ -75,6 +76,7 @@ export function normalizeProviderItemEvents(events = []) {
     if (event?.type !== 'provider.event') return [event];
     const phase = providerItemPhase(event);
     if (!phase) return [event];
+    if (isCodexFirstClassItemType(event.data?.itemType)) return [];
     if (firstClass.has(providerItemIdentity(event, phase))) return [];
     return [Object.freeze({
       ...event,
@@ -380,9 +382,10 @@ export function deriveSubagentDescriptor(startEvent, terminalEvent = null, lates
   const startData = start.data || {};
   const data = { ...startData, ...(latest.data || {}), ...(terminal?.data || {}) };
   const legacyNotCaptured = data.legacyNotCaptured === true;
-  const status = legacyNotCaptured ? 'unknown' : subagentStatus(terminal || latest);
+  const endedUnknown = !legacyNotCaptured && !terminal && options.jobTerminal === true;
+  const status = legacyNotCaptured ? 'unknown' : endedUnknown ? 'ended (unknown outcome)' : subagentStatus(terminal || latest);
   const failed = !legacyNotCaptured && (terminal?.type === 'subagent.errored' || FAILURE.test(status));
-  const running = !legacyNotCaptured && !terminal;
+  const running = !legacyNotCaptured && !terminal && !endedUnknown;
   const startedAt = eventTime(start);
   const endedAt = eventTime(terminal);
   const explicitDuration = numberValue(data.durationMs);
@@ -420,9 +423,11 @@ export function deriveSubagentDescriptor(startEvent, terminalEvent = null, lates
     outputTail: lines,
     detailLines: legacyNotCaptured
       ? ['payload was not captured by the recorder version; no task, status, or output can be recovered']
+      : endedUnknown ? ['job ended before a terminal subagent outcome was observed']
       : lines.length ? lines : ['no subagent output was exposed by this lifecycle event'],
     detailLabel: output ? 'subagent output' : 'subagent details',
     legacyNotCaptured,
+    endedUnknown,
     usage
   });
 }
@@ -454,9 +459,13 @@ export function deriveProviderItemDescriptor(startEvent, completedEvent = null, 
   const endData = completedEvent?.data || {};
   const data = { ...startData, ...endData, item: endData.item || startData.item };
   const legacyNotCaptured = data.legacyNotCaptured === true || data.payloadCaptured === false;
-  const status = stringValue(data.item?.status, data.phase, completedEvent ? 'completed' : 'running');
+  const endedUnknown = !legacyNotCaptured && !completedEvent && options.jobTerminal === true;
+  const status = endedUnknown
+    ? 'ended (unknown outcome)'
+    : stringValue(data.item?.status, data.phase, completedEvent ? 'completed' : 'running');
   const failed = FAILURE.test(status);
-  const running = !legacyNotCaptured && !completedEvent && data.phase !== 'completed' && !SUCCESS.test(status) && !failed;
+  const running = !legacyNotCaptured && !endedUnknown && !completedEvent
+    && data.phase !== 'completed' && !SUCCESS.test(status) && !failed;
   const startedAt = eventTime(startEvent || source);
   const endedAt = eventTime(completedEvent);
   const explicitDuration = numberValue(data.item?.durationMs, data.item?.duration_ms, data.durationMs);
@@ -464,6 +473,7 @@ export function deriveProviderItemDescriptor(startEvent, completedEvent = null, 
     : completedEvent && startedAt && endedAt && endedAt >= startedAt ? endedAt - startedAt : null;
   const lines = legacyNotCaptured
     ? ['payload was not captured by the recorder version; only item type, id, and phase survived']
+    : endedUnknown ? ['job ended before a terminal provider-item outcome was observed']
     : detailLines(data.item);
   return Object.freeze({
     key: providerItemEventKey(startEvent || completedEvent),
@@ -489,7 +499,8 @@ export function deriveProviderItemDescriptor(startEvent, completedEvent = null, 
     outputTail: lines,
     detailLines: lines,
     detailLabel: 'provider item detail',
-    legacyNotCaptured
+    legacyNotCaptured,
+    endedUnknown
   });
 }
 
@@ -510,9 +521,11 @@ function toolSummaryParts(tool) {
   let parts;
   if (tool.category === 'subagent') {
     const identity = tool.agentName || (tool.agentType && tool.agentType !== 'subagent' ? tool.agentType : '');
-    parts = [`> ${tool.title}`, identity, tool.task, tool.glyph];
+    parts = [`> ${tool.title}`, identity, tool.task, tool.endedUnknown ? 'ended: outcome unknown' : '', tool.glyph];
   }
-  if (tool.category === 'provider-item') parts = [`$ ${tool.title}`, tool.summary, tool.glyph];
+  if (tool.category === 'provider-item') {
+    parts = [`$ ${tool.title}`, tool.summary, tool.endedUnknown ? 'ended: outcome unknown' : '', tool.glyph];
+  }
   if (tool.category === 'command') parts = [`${CHROME_GLYPHS.toolCommand} ${tool.command || tool.title}`, tool.glyph];
   if (tool.category === 'file') {
     const kinds = [...new Set(tool.files.map((file) => file.kind))].join('/');
@@ -868,15 +881,18 @@ function internBlocks(descriptions, previous) {
 export class TranscriptProjector {
   constructor() {
     this.events = null;
+    this.jobTerminal = null;
     this.base = [];
     this.interned = new Map();
     this.rendered = new Map();
   }
 
   project(events = [], options = {}) {
-    if (events !== this.events) {
+    const jobTerminal = options.jobTerminal === true;
+    if (events !== this.events || jobTerminal !== this.jobTerminal) {
       const result = internBlocks(buildDescriptions(events, options), this.interned);
       this.events = events;
+      this.jobTerminal = jobTerminal;
       this.base = result.blocks;
       this.interned = result.interned;
     }

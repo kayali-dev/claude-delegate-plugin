@@ -194,6 +194,51 @@ test('latest plan replaces earlier plans and provider noise never enters Transcr
   assert.match(rendered, /scope violation/);
 });
 
+test('agentMessage lifecycle renders one first-class message and no provider-item duplicate', () => {
+  const blocks = new TranscriptProjector().project([
+    event(1, 'message.delta', { id: 'agent-message-1', delta: 'complete result' }),
+    event(2, 'provider.event', {
+      providerEvent: 'item/started', itemType: 'agentMessage', itemId: 'agent-message-1'
+    }),
+    event(3, 'message.completed', { id: 'agent-message-1', text: 'complete result' }),
+    event(4, 'provider.event', {
+      providerEvent: 'item/completed', itemType: 'agentMessage', itemId: 'agent-message-1'
+    })
+  ], { now: AT, jobTerminal: true });
+  assert.equal(blocks.filter((block) => block.kind === 'message').length, 1);
+  assert.equal(blocks.filter((block) => block.tool?.category === 'provider-item').length, 0);
+  assert.equal(blocks.find((block) => block.kind === 'message')?.text, 'complete result');
+});
+
+test('legacy first-class item starts do not become phantom provider-item blocks', () => {
+  const blocks = new TranscriptProjector().project([
+    event(1, 'provider.event', {
+      providerEvent: 'item/started', itemType: 'agentMessage', itemId: 'legacy-message'
+    })
+  ], { now: AT, jobTerminal: true });
+  assert.equal(blocks.length, 0);
+});
+
+test('terminal jobs end unmatched provider-item and subagent starts with an explicit unknown outcome', () => {
+  const blocks = new TranscriptProjector().project([
+    event(1, 'provider.item', {
+      providerEvent: 'item/started', itemType: 'futureWidget', itemId: 'widget-1',
+      phase: 'started', payloadCaptured: true, item: { type: 'futureWidget', id: 'widget-1', title: 'Future work' }
+    }),
+    event(2, 'subagent.started', {
+      id: 'agent-open', correlationId: 'agent-open', type: 'reviewer',
+      task: 'Inspect the parser', status: 'running'
+    })
+  ], { now: AT + 5000, jobTerminal: true });
+  assert.equal(blocks.length, 2);
+  for (const block of blocks) {
+    assert.equal(block.tool.running, false);
+    assert.equal(block.spinner, undefined);
+    assert.equal(block.tool.endedUnknown, true);
+    assert.match(formatTranscriptBlock(block), /ended: outcome unknown/);
+  }
+});
+
 test('context compaction renders one timed block for first-class and legacy journals', () => {
   const firstClass = [
     event(1, 'message.completed', { id: 'before', text: 'before' }),
@@ -274,14 +319,13 @@ test('legacy subagent metadata stubs render an honest not-captured block instead
   ];
   const projector = new TranscriptProjector();
   const collapsed = projector.project(fixtures, { now: AT + 2000 });
-  assert.equal(collapsed.length, 2);
+  assert.equal(collapsed.length, 1);
   assert.ok(collapsed.every((block) => block.kind === 'tool'));
   const expanded = projector.project(fixtures, {
     now: AT + 2000,
     expandedTools: new Set(collapsed.map((block) => block.tool.key))
   });
   const rendered = expanded.map(formatTranscriptBlock).join('\n');
-  assert.match(rendered, /subAgentActivity.*payload was not captured by the recorder version/);
   assert.match(rendered, /Codex agent.*payload was not captured by the recorder version/);
   assert.doesNotMatch(rendered, /\[object Object\]|NaN/);
 });

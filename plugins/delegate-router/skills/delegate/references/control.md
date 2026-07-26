@@ -71,6 +71,40 @@ For managed runs, store the job ID and use the `delegate_control` inspection and
 
 Built-in Claude `Agent` and legacy `Task` tool calls are observability-only too. Plugin PreToolUse/PostToolUse hooks correlate the same `tool_use_id`, create one `claude-agent` stub on pre, and append only its create and terminal events; model, agent type, cwd, and prompt summary are redacted and bounded. When the result exposes an agent id or transcript path, the stub retains a pointer to the coordinator session's `subagents/agent-*.jsonl` file for bounded read-only TUI tailing. Every hook exits zero, performs no network access, and swallows store errors after one stderr diagnostic so visibility can never block the Agent call. Set `DELEGATE_AGENT_STUBS=0` before starting Claude Code to disable the hooks. These stubs use coordinator session grouping when available, reject every control-plane mutation, and completed or abandoned records follow `DELEGATE_JOB_RETENTION_DAYS` pruning.
 
+## Ambient Push Bridge
+
+Interactive Claude Code sessions with the experimental Monitor surface
+automatically start `delegate-monitor`. It reads bounded job records and
+journal tails and pushes only actionable edge transitions, in this order:
+policy breach (scope or budget/allowance), human input or blocked permission,
+ready for review, terminal failure, and stalled running work. It never emits
+progress, deltas, tool activity, usage ticks, or successful intermediate steps.
+Every line is compact, redacted, and carries the job id; inspect that job
+before acting.
+
+The monitor is read-only by construction. It cannot start, steer, cancel,
+respond to, reconcile, or otherwise mutate a job, and it cannot invoke a
+provider or spend allowance. Per-job edge deduplication, a 30-second cooldown,
+and a six-lines-per-minute global ceiling enforce the nagware boundary. The
+stall threshold defaults to ten minutes; configure
+`DELEGATE_MONITOR_STALL_SECONDS`,
+`DELEGATE_MONITOR_COOLDOWN_SECONDS`, and
+`DELEGATE_MONITOR_MAX_LINES_PER_MINUTE` only when the local policy requires it.
+
+Set `DELEGATE_MONITOR=0` before starting Claude Code to disable the push bridge.
+To snooze non-breach edges, place a future ISO timestamp or epoch in
+`{"snoozeUntil":"2026-07-26T15:00:00Z"}` at
+`<state-dir>/monitor.json` (the directory containing `DELEGATE_STATE_FILE`, or
+the ordinary Delegate Router state directory). Policy breaches bypass snooze.
+
+Plugin monitors are experimental, interactive-session-only, and absent when
+Claude Code's Monitor tool is unavailable, including Bedrock, Vertex, Foundry,
+and configurations with `DISABLE_TELEMETRY` or
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. In every such case the ordinary
+pull path is identical: use `delegate_inspect`, the TUI, or a manual
+Monitor-tool until-loop over `finishedPath`. Ambient push is an accelerator,
+never a completion or acceptance dependency.
+
 ## Idempotency
 
 `idempotencyKey` guards against double-launching the same request (orchestrator restart, lost acknowledgement): a replayed start with the same key and cwd returns the existing job. It deliberately replays terminal jobs too, including ones whose objective failed — the caller must see the failed job, not silently relaunch it. When you intend a changed retry (new packet line, folded-in findings, different scope), that is a new request: use a new key.

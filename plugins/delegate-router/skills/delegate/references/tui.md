@@ -165,6 +165,15 @@ The default palette targets dark terminals. Set `DELEGATE_TUI_THEME=light` befor
 
 While the TUI is running, terminal transitions, new stalls, recorded scope violations, and budget stops can send a desktop notification through `osascript` on macOS or `notify-send` on Linux. Dispatch is non-blocking, missing platform commands are ignored, and each job is limited to one notification per five seconds. Notification text contains only the job id, status, provider, and event kind—never prompt, transcript, result, path, or diff content. Press `b` to toggle the session; `DELEGATE_TUI_NOTIFY=0` disables notifications entirely.
 
+Separately, interactive Claude Code sessions can receive the experimental
+plugin push bridge without opening the TUI. `delegate-monitor` emits only
+redacted actionable transitions (breach, input, review-ready, failure, stall)
+and observes the same existing store read-only. `DELEGATE_MONITOR=0` disables
+that bridge; `<state-dir>/monitor.json` with a future `snoozeUntil` suppresses
+non-breach edges. Deduplication, cooldown, and a global rate ceiling are the
+nagware boundary. Unsupported/non-interactive hosts continue to use
+`delegate_inspect`, this TUI, and `finishedPath` exactly as before.
+
 ## Limitations
 
 - The TUI supports macOS and Linux terminals, not Windows. SGR button press and wheel input are supported; drag/motion gestures are not.

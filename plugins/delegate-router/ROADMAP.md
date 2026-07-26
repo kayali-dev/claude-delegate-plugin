@@ -71,7 +71,7 @@ Waves 1-3 were implemented by delegated Codex Sol@xhigh jobs supervised through 
 
 ## Declined / deferred, with reasons
 
-- **Native harness notification from the broker** — a detached worker cannot re-invoke the Claude Code harness; that is what background tasks/Monitor are for. `finishedPath` + Monitor stays the canonical long-wait; a bounded `delegate_wait` MCP tool would cap at ~30s long-poll like `delegate_events` and add little.
+- **Native harness notification from the broker (superseded by native-substrate P2a)** — a detached worker still cannot re-invoke the Claude Code harness, but Claude Code's experimental plugin monitors can push stdout lines into interactive sessions. P2a ships a read-only, edge-only plugin monitor with dedupe, cooldown, snooze, and rate limiting; `finishedPath` + a manual Monitor-tool until-loop remains the canonical fallback wherever plugin monitors are disabled or unsupported. A bounded `delegate_wait` MCP tool would still add little beyond `delegate_events`.
 - **Auto-rollback on failure** — unsafe in shared dirty worktrees (can destroy concurrent work); replaced by explicit `delegate-jobs revert` (Wave 2).
 - **`maxCostUSD`** — no trustworthy cross-provider price table; token caps only.
 - **Worktree-per-writer auto-merge** — isolation exists (`isolation: 'worktree'`); automatic merge + conflict resolution is a large project with sharp failure modes; revisit after fan-out groups land.

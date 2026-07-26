@@ -2,6 +2,20 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.29.0 — 2026-07-26
+
+- Added the experimental Claude Code push bridge in `monitors/monitors.json`.
+  Its read-only watcher emits only redacted policy-breach, needs-input,
+  ready-for-review, failure, and stalled edges, with boot baselining,
+  per-job deduplication/cooldown, snooze, kill switch, and a global rate
+  ceiling. The existing MCP/CLI/TUI/`finishedPath` pull paths are unchanged.
+- Fixed the v0.27.0 transcript regression where `agentMessage` starts and
+  legacy first-class Codex item events became unmatched generic provider-item
+  blocks and spun indefinitely. First-class item exclusions are now shared
+  across live and historical normalization, while any genuinely unmatched
+  provider-item or subagent start ends with an explicit unknown outcome once
+  its job is terminal.
+
 ## 0.28.0 — 2026-07-26
 
 - Added schema-versioned WorkSpec, WorkItem, Attempt, Finding, ChangeSet, and Decision models plus total, deterministic compatibility projections. Existing resume/review chains collapse into ordered Runs under one WorkItem; missing historical facts remain explicit instead of inferred.

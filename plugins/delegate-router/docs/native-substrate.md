@@ -5,6 +5,11 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P2a push bridge is implemented additively: the experimental Claude Code
+  plugin monitor watches bounded tails of the existing `jobs/` store and emits
+  only redacted actionable edge transitions. It is read-only, never replays
+  individual historical outcomes at startup, and leaves `delegate_inspect`,
+  `finishedPath`, and the TUI unchanged as the universal pull fallback.
 - P1 schema/projection groundwork is implemented additively: versioned
   WorkSpec, WorkItem, Attempt, Finding, ChangeSet, and Decision models; total
   compatibility projections over historical jobs; read-only CLI/MCP views; and

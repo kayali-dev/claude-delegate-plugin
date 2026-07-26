@@ -12,6 +12,7 @@ import {
   mapCursorAcpNotification,
   runManagedProvider
 } from '../bin/lib/providers.mjs';
+import { CODEX_FIRST_CLASS_ITEM_TYPES } from '../bin/lib/codex-item-types.mjs';
 import { effectiveUsage, loadState } from '../bin/lib/state.mjs';
 import { formatTranscriptBlock, TranscriptProjector } from '../bin/lib/tui/transcript.mjs';
 
@@ -79,6 +80,43 @@ test('Codex context-compaction items retain provider passthroughs and add ordere
     ['compaction.completed', null, 'compaction-1']
   ]);
   assert.ok(compaction.every((event, index) => index === 0 || event.seq > compaction[index - 1].seq));
+}));
+
+test('every first-class Codex item type stays out of the generic provider-item fallback in every phase', () => isolated(async (directory) => {
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'first class' });
+  for (const itemType of CODEX_FIRST_CLASS_ITEM_TYPES) {
+    for (const phase of ['started', 'completed']) {
+      mapCodexItem(job.id, phase, {
+        threadId: 'thread',
+        turnId: 'turn',
+        item: {
+          type: itemType,
+          id: `${itemType}-${phase}`,
+          text: 'first-class message',
+          changes: [],
+          status: phase === 'completed' ? 'completed' : 'inProgress'
+        }
+      });
+    }
+  }
+  const events = readJobEvents(job.id, { limit: 1000 });
+  assert.equal(events.filter((event) => event.type === 'provider.item').length, 0);
+  assert.ok(events.some((event) => event.type === 'message.completed'));
+  assert.ok(events.some((event) => event.type === 'plan.updated'));
+  assert.ok(events.some((event) => event.type === 'compaction.completed'));
+}));
+
+test('agentMessage start and completion map to exactly one message block and no provider-item block', () => isolated(async (directory) => {
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'message lifecycle' });
+  const item = { type: 'agentMessage', id: 'message-1', text: 'Complete findings inline.' };
+  mapCodexItem(job.id, 'started', { threadId: 'thread', turnId: 'turn', item });
+  mapCodexItem(job.id, 'completed', { threadId: 'thread', turnId: 'turn', item });
+  const events = readJobEvents(job.id, { limit: 1000 });
+  const blocks = new TranscriptProjector().project(events, { jobTerminal: true });
+  assert.equal(events.filter((event) => event.type === 'provider.item').length, 0);
+  assert.equal(blocks.filter((block) => block.kind === 'message' && block.role === 'assistant').length, 1);
+  assert.equal(blocks.filter((block) => block.tool?.category === 'provider-item').length, 0);
+  assert.equal(blocks.find((block) => block.kind === 'message' && block.role === 'assistant')?.text, item.text);
 }));
 
 test('managed Codex, direct Codex, and Cursor normalize identical first-class subagent lifecycles and rendered blocks', () => isolated(async (directory) => {

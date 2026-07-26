@@ -1005,6 +1005,7 @@ function detailContent(job, store, ui, tab, activity) {
       expandedTools: ui.expandedTools,
       jobCwd: job.cwd,
       now: nowOf(ui, store),
+      jobTerminal: TERMINAL.has(job.status),
       timestampMode: ui.timestampMode,
       thinking: activity.kind === 'thinking',
       thinkingSince: activity.since,

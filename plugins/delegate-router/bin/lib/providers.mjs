@@ -22,6 +22,7 @@ import { assembleProviderPrompt, securityPreamble } from './packet.mjs';
 import { terminateProcessTree } from './process.mjs';
 import { loadJob, mutateState, setWindow } from './state.mjs';
 import { captureCodexAllowanceSnapshot } from './allowance.mjs';
+import { isCodexFirstClassItemType } from './codex-item-types.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
@@ -249,12 +250,16 @@ function providerItemSummary(item = {}) {
   return boundedText(value, 240).replace(/\s+/g, ' ').trim();
 }
 
-function appendProviderItem(jobId, phase, item, options = {}, providerEvent = `item/${phase}`) {
+function appendProviderItemPassthrough(jobId, phase, item, options = {}, providerEvent = `item/${phase}`) {
   appendJobEvent(jobId, 'provider.event', {
     providerEvent,
     itemType: item?.type,
     itemId: item?.id
   }, options);
+}
+
+function appendProviderItem(jobId, phase, item, options = {}, providerEvent = `item/${phase}`) {
+  appendProviderItemPassthrough(jobId, phase, item, options, providerEvent);
   const summary = providerItemSummary(item);
   appendJobEvent(jobId, 'provider.item', {
     providerEvent,
@@ -861,9 +866,13 @@ export function mapCodexItem(jobId, phase, params, activity = null) {
   const options = { sessionId: params.threadId, turnId: params.turnId };
   activity?.mark(codexActivitySignal('', item));
   if (item.type === 'reasoning') return;
-  if (item.type === 'agentMessage' && phase === 'completed') {
-    appendJobEvent(jobId, 'message.completed', { id: item.id, text: item.text, phase: item.phase }, options);
-    storeProviderResult(jobId, item.text);
+  if (item.type === 'userMessage') {
+    // The coordinator prompt already has a first-class message.user event.
+  } else if (item.type === 'agentMessage') {
+    if (phase === 'completed') {
+      appendJobEvent(jobId, 'message.completed', { id: item.id, text: item.text, phase: item.phase }, options);
+      storeProviderResult(jobId, item.text);
+    }
   } else if (item.type === 'plan') {
     appendJobEvent(jobId, 'plan.updated', { id: item.id, text: item.text, phase }, options);
   } else if (item.type === 'commandExecution' || item.type === 'mcpToolCall' || item.type === 'dynamicToolCall' || item.type === 'collabAgentToolCall') {
@@ -884,19 +893,21 @@ export function mapCodexItem(jobId, phase, params, activity = null) {
     appendJobEvent(jobId, type, { item }, options);
   } else if (item.type === 'fileChange') {
     appendJobEvent(jobId, 'file.changed', { changes: item.changes || [], status: item.status, phase }, options);
-  } else if (item.type !== 'reasoning' && item.type !== 'userMessage') {
+  } else if (item.type === 'contextCompaction') {
+    appendProviderItemPassthrough(jobId, phase, item, options);
+    appendJobEvent(jobId, `compaction.${phase}`, { itemId: item.id }, options);
+  } else if (item.type === 'subAgentActivity') {
+    appendProviderItemPassthrough(jobId, phase, item, options);
+    updateManagedJob(jobId, (job) => { job.reviewFlowEngaged = true; }, { incrementRevision: false });
+    recordSubagentCandidates(jobId, normalizeSubagentLifecycle({
+      source: 'codex-item',
+      provider: 'codex',
+      transport: 'app-server',
+      phase,
+      payload: item
+    }), options);
+  } else if (item.type && !isCodexFirstClassItemType(item.type)) {
     appendProviderItem(jobId, phase, item, options);
-    if (item.type === 'contextCompaction') appendJobEvent(jobId, `compaction.${phase}`, { itemId: item.id }, options);
-    if (item.type === 'subAgentActivity') {
-      updateManagedJob(jobId, (job) => { job.reviewFlowEngaged = true; }, { incrementRevision: false });
-      recordSubagentCandidates(jobId, normalizeSubagentLifecycle({
-        source: 'codex-item',
-        provider: 'codex',
-        transport: 'app-server',
-        phase,
-        payload: item
-      }), options);
-    }
   }
 }
 
@@ -1081,19 +1092,19 @@ export function mapCodexMcpEvent(job, params = {}, context = {}) {
         ...directCodexTool(item, params, itemType),
         item
       }, options);
-    } else if (itemType) {
+    } else if (itemType === 'sub_agent_activity') {
+      output();
+      appendProviderItemPassthrough(job.id, phase, item, options, `codex:item_${phase}`);
+      updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; }, { incrementRevision: false });
+      recordSubagentCandidates(job.id, normalizeSubagentLifecycle({
+        source: 'codex-item',
+        provider: 'codex',
+        transport: 'direct-mcp',
+        phase,
+        payload: item
+      }), options);
+    } else if (itemType && !isCodexFirstClassItemType(itemType)) {
       appendProviderItem(job.id, phase, item, options, `codex:item_${phase}`);
-      if (itemType === 'sub_agent_activity') {
-        output();
-        updateManagedJob(job.id, (current) => { current.reviewFlowEngaged = true; }, { incrementRevision: false });
-        recordSubagentCandidates(job.id, normalizeSubagentLifecycle({
-          source: 'codex-item',
-          provider: 'codex',
-          transport: 'direct-mcp',
-          phase,
-          payload: item
-        }), options);
-      }
     }
   } else if (type === 'turn_diff') {
     output();
@@ -1280,7 +1291,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.28.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.29.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2094,7 +2105,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.28.0' }
+      clientInfo: { name: 'delegate-router', version: '0.29.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

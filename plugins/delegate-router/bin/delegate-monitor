@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+import { DelegateMonitor, monitorEnabled } from './lib/monitor-runtime.mjs';
+
+if (monitorEnabled(process.env)) {
+  const monitor = new DelegateMonitor();
+  const stop = () => {
+    monitor.stop();
+    process.exitCode = 0;
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  process.once('SIGHUP', stop);
+  try {
+    monitor.start();
+  } catch (error) {
+    process.stderr.write(`delegate-monitor: startup failed (${String(error?.code || error?.name || 'error')}); disabled\n`);
+    process.exitCode = 0;
+  }
+}
