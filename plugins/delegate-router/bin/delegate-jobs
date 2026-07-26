@@ -27,11 +27,13 @@ import {
 import { listJobs, loadState, saveJob } from './lib/state.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
 import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessions.mjs';
+import { readProjectedWorkItems } from './lib/work-read.mjs';
 
 function usage() {
   console.log(`Usage:
   delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
+  delegate-jobs work [--json] [--id <job-or-work-id>]
   delegate-jobs group <id> [--json]
   delegate-jobs stats [--since 7d|24h] [--json]
   delegate-jobs audit backfill [--json]
@@ -195,6 +197,20 @@ try {
       for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${displayModel(job)}`);
     }
     for (const job of jobs) renderVerificationOrigin(job);
+  } else if (command === 'work') {
+    const result = readProjectedWorkItems({ id: value(args, '--id') });
+    if (args.includes('--json')) json(result);
+    else if (!result.workItems.length) console.log('No projected work items.');
+    else {
+      console.log('Work ID                          Runs Scope       Status');
+      for (const workItem of result.workItems) {
+        const latest = workItem.runs.at(-1)?.attempt?.lifecycle?.status || '';
+        const scope = workItem.spec.scopeClaim === 'unfenced'
+          ? 'unfenced'
+          : workItem.spec.scopeClaim === 'repo-wide' ? 'repo-wide' : `${workItem.spec.scopeClaim.length} path(s)`;
+        console.log(`${workItem.id.padEnd(32)} ${String(workItem.runs.length).padStart(4)} ${scope.padEnd(11)} ${latest}`);
+      }
+    }
   } else if (command === 'group') {
     json(groupSummary(args[0]));
   } else if (command === 'stats') {

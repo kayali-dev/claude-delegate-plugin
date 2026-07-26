@@ -2,6 +2,12 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.28.0 — 2026-07-26
+
+- Added schema-versioned WorkSpec, WorkItem, Attempt, Finding, ChangeSet, and Decision models plus total, deterministic compatibility projections. Existing resume/review chains collapse into ordered Runs under one WorkItem; missing historical facts remain explicit instead of inferred.
+- Added read-only `delegate-jobs work` and `delegate_work` projection surfaces without changing any existing CLI flag or MCP schema. Existing job records remain untouched.
+- Reserved the lazy `work/` state-directory sibling and added forward-compatible persistence helpers for later phases. No production path writes WorkItems in this phase, and unknown fields survive read-modify-write.
+
 ## 0.27.0 — 2026-07-26
 
 - Provider-spawned Codex and Cursor subagents now share one durable `started` → `progress` → `completed`/`errored` lifecycle across managed app-server, direct MCP, ACP, and headless transports. Their identity, task, status, duration, usage, and bounded redacted output remain inspectable in `result.subagents[]`, plain-text transcripts, and expandable provider-neutral TUI blocks; active subagents also drive Fleet/detail activity.

@@ -3,6 +3,18 @@
 Status: active. Owner-approved 2026-07-26 as a single program.
 Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
+## Progress
+
+- P1 schema/projection groundwork is implemented additively: versioned
+  WorkSpec, WorkItem, Attempt, Finding, ChangeSet, and Decision models; total
+  compatibility projections over historical jobs; read-only CLI/MCP views; and
+  unused, test-only persistence helpers for the future `work/` store.
+- Existing `jobs/` records are neither migrated nor extended. Resume branches
+  sharing an observed root project as one WorkItem with ordered Runs, while job
+  IDs remain the Attempt identifiers accepted by all existing surfaces.
+- Production paths do not write WorkItems in P1. Unknown fields and future
+  schema versions are preserved by the persistence helpers for later phases.
+
 ## Why
 
 delegate-router is a strong supervised-run broker. It is not yet a native part of

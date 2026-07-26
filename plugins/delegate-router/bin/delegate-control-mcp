@@ -4,6 +4,7 @@ import { brokerError, normalizeBrokerError } from './lib/errors.mjs';
 import { enabledProviders, loadState } from './lib/state.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
 import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessions.mjs';
+import { readProjectedWorkItems } from './lib/work-read.mjs';
 import {
   capEventsBySize,
   diffStat,
@@ -77,7 +78,8 @@ const TOOLS = [
   { name: 'delegate_respond', description: 'Answer a pending Cursor question or accept/reject a proposed plan using optimistic revision control. Retry with the same commandId for idempotency.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, requestId: { type: 'string' }, answer: { type: 'string' }, accept: { type: 'boolean' }, response: { type: 'object' }, commandId: { type: 'string' } } } },
   { name: 'delegate_resume', description: 'Start a new supervised job on the same provider session or thread.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, cwd: { type: 'string' }, effort: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, maxOutputTokens: { type: 'integer', minimum: 1 }, retryPolicy: { type: 'object', required: ['maxAttempts', 'retryOn'], additionalProperties: false, properties: { maxAttempts: { type: 'integer', minimum: 1, maximum: 5 }, retryOn: { type: 'array', uniqueItems: true, items: { enum: ['transport', 'rate-limit'] } } } }, verify: { type: 'object', required: ['command'], additionalProperties: false, properties: { command: { type: 'string', minLength: 1 }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400, default: 600 } } }, network: { type: 'boolean' }, networkAllow: { type: 'array', items: { type: 'string' } }, addDirs: { type: 'array', items: { type: 'string' } }, approveMcps: { type: 'boolean' }, cursorWorktree: { type: 'boolean' }, cursorWorktreeBase: { type: 'string' }, sandbox: { enum: ['auto', 'off'] }, allowedPaths: { type: 'array', items: { type: 'string' } }, allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' } } } },
   { name: 'delegate_review_round', description: 'Resume a terminal job with findings plus its recorded diff stat, changed files, and allowed scope.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string', minLength: 1 } } } },
-  { name: 'delegate_usage', description: 'Return per-job observed usage, chain-cumulative token totals, and provider allowance headroom.', inputSchema: jobOnly() }
+  { name: 'delegate_usage', description: 'Return per-job observed usage, chain-cumulative token totals, and provider allowance headroom.', inputSchema: jobOnly() },
+  { name: 'delegate_work', description: 'Return read-only WorkItem compatibility projections derived from existing job records. Accepts either a job id or projected work id; unfiltered reads default to the 20 most recent WorkItems.', inputSchema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 } } } }
 ];
 
 function jobOnly() {
@@ -130,6 +132,14 @@ async function dispatch(name, args) {
   if (name === 'delegate_resume') return resumeManagedJob(args.jobId, args);
   if (name === 'delegate_review_round') return reviewRoundManagedJob(args.jobId, args);
   if (name === 'delegate_usage') return jobUsage(args.jobId);
+  if (name === 'delegate_work') {
+    const unknown = Object.keys(args).filter((key) => !['id', 'limit'].includes(key));
+    if (unknown.length) throw brokerError('INVALID_REQUEST', `delegate_work unknown parameter${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
+    return readProjectedWorkItems({
+      ...args,
+      ...(args.id == null && args.limit == null ? { limit: 20 } : {})
+    });
+  }
   throw brokerError('INVALID_REQUEST', `Unknown tool: ${name}`);
 }
 
@@ -147,7 +157,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.27.0' }
+        serverInfo: { name: 'delegate-control', version: '0.28.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

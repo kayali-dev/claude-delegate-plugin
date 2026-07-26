@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -23,13 +24,23 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.equal(responses[0].result.serverInfo.name, 'delegate-control');
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
-    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage'
+    'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage',
+    'delegate_work'
   ]);
+  const legacySchemas = responses[1].result.tools
+    .filter((tool) => tool.name !== 'delegate_work')
+    .map(({ name, inputSchema }) => ({ name, inputSchema }));
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(legacySchemas)).digest('hex'),
+    '3e94db27a2c90ded374b1909a16ea9cff9c9df7cfd09737579b8d4fae6e42dc6',
+    'existing MCP tool names/order/input schemas changed'
+  );
   const start = responses[1].result.tools.find((tool) => tool.name === 'delegate_start');
   const inspect = responses[1].result.tools.find((tool) => tool.name === 'delegate_inspect');
   const respond = responses[1].result.tools.find((tool) => tool.name === 'delegate_respond');
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
   const stats = responses[1].result.tools.find((tool) => tool.name === 'delegate_stats');
+  const work = responses[1].result.tools.find((tool) => tool.name === 'delegate_work');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
   assert.ok(start.inputSchema.properties.retryPolicy);
@@ -54,6 +65,8 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
   assert.ok(resume.inputSchema.properties.retryPolicy);
   assert.ok(resume.inputSchema.properties.verify);
+  assert.equal(work.inputSchema.additionalProperties, false);
+  assert.deepEqual(Object.keys(work.inputSchema.properties), ['id', 'limit']);
 });
 
 test('delegate_stats returns filtered audit aggregates and totals and rejects job parameters', async () => {
@@ -171,6 +184,7 @@ test('delegate-jobs help has CLI parity for caller options', () => {
   assert.match(result.stdout, /--wait-for session\|turn\|first-output/);
   assert.match(result.stdout, /--wait-for-session/);
   assert.match(result.stdout, /--dry-run/);
+  assert.match(result.stdout, /work \[--json\] \[--id <job-or-work-id>\]/);
   assert.match(result.stdout, /review-round <job-id> --prompt/);
   assert.match(result.stdout, /result <job-id> \[--find text\] \[--offset N\] \[--max-chars N\]/);
 });

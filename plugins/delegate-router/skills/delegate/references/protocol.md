@@ -11,6 +11,26 @@
 
 Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.events.jsonl`. Prompts, logs, commands, and state files are created with user-only permissions. Event values are recursively redacted and size-bounded.
 
+Schema version 1 of the native work model is available as a compatibility
+layer. `delegate-jobs work [--json] [--id <job-or-work-id>]` and the read-only
+`delegate_work` MCP tool project the existing job store without reconciling,
+repairing, or rewriting it; an unfiltered MCP read defaults to 20 WorkItems and
+accepts a limit up to 100. A standalone job projects as one WorkItem, one Run,
+and one Attempt. Records connected by observed `parentJobId`/`rootJobId`
+project as one WorkItem with ordered Runs, including branches whose review
+rounds share a root. Projection IDs are deterministic from that root job ID;
+the original job IDs remain the Attempt IDs and remain addressable everywhere.
+Facts absent from historical records remain explicit `null`/empty values (with
+`scopeClaim: "unfenced"` for a missing scope) rather than being inferred.
+
+Future native WorkItems have a reserved sibling layout at `work/<id>.json`
+under the same state directory. That directory is created lazily only by a
+WorkItem write. Phase 1 production paths never call those write helpers.
+Readers accept positive future schema versions, and read-modify-write must
+retain the complete stored object so unknown fields survive older binaries.
+Existing `jobs/` records are never migrated into this directory or augmented
+with work-model fields.
+
 Terminal jobs older than `DELEGATE_JOB_RETENTION_DAYS` (default 14) are pruned opportunistically at broker start and job launch, at most once per six hours; `delegate-jobs prune` runs it on demand. Active jobs are never pruned.
 
 Every first transition into a terminal status appends one redacted, private JSON line to the separate `audit.jsonl` beside the state file. It records actor, provider/model/mode/effort, resume/group provenance, access policy, cwd, observed change/violation counts, verification, nudges, outcome, usage, and duration. Job pruning never removes this log; `delegate-jobs stats` aggregates it and `delegate-health` reports its path. `delegate-jobs audit backfill` uses the same record builder to append missing retained terminal jobs with `backfilled: true`, once per job ID.
