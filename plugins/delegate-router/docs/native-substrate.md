@@ -105,6 +105,21 @@ failure. `finishedPath` stays as the external sentinel.
 
 Fixes: work no longer dies with the session; babysitting loops disappear.
 
+### P2.5 — Live collision alerts
+
+Scope violations are found *after* files change, and the writer guard is blind
+to the coordinator's own edits (documented in CLAUDE.md). Turn a running work
+item's owned paths into watched paths via `SessionStart.watchPaths` +
+`FileChanged` (both verified available, both unused today), plus
+`PostToolUse(Edit|Write)` / `PostToolBatch` for in-session edits. When the
+coordinator or another session touches a path a live attempt owns, alert at the
+moment of collision instead of at acceptance, and mark any verification
+evidence covering that path stale.
+
+Containment stays post-hoc until P6 gives writers isolated workspaces; this is
+early *detection*, and must not be described as enforcement. Alerts obey the
+P2a nagware policy (edge-triggered, deduplicated per path+item).
+
 ### P3 — Acceptance by default
 Write dispatch requires scope, acceptance criteria, a real verify recipe (or a
 recorded "no reliable check exists" exception), and a budget. Provider
@@ -170,6 +185,54 @@ never authority**. No scope widening, no permission grants, no budget raises,
 no self-approval, no control-plane access. `request_scope_expansion`, if it
 ever exists, is an owner-gated question — not a capability. Redaction applies
 in both directions.
+
+### P4.6 — Plan-first dispatch and ambiguity detection
+
+Two cheap passes that attack the documented failure mode — underspecified
+agents guess plausibly rather than fail — before any code is written.
+
+**Plan-first dispatch.** `dryRun` today previews the resolved *packet*, not the
+*work*. Both providers have a plan mode currently used only for read-only jobs.
+Run a plan pass first, present the approach with its predicted blast radius
+(files, components, estimated tokens/duration from the P8 ledger bands), and on
+confirmation continue **the same provider session** into implement — no context
+re-establishment, no second spend. Declining costs one cheap pass instead of a
+full implementation. For write work this becomes the default path, with an
+explicit opt-out for trivial changes.
+
+**Ambiguity detection by plan divergence.** Ambiguity is invisible when
+watching a single agent, because a single agent simply picks one reading. Run
+the same WorkSpec through two independent cheap plan passes (different provider
+or model) and compare structurally — target files/components, approach shape,
+declared assumptions. Convergent plans mean the spec is understood; materially
+divergent plans mean the spec is ambiguous, and that is the moment to ask the
+owner, before implementation. Report the divergence itself as the question.
+This turns provider diversity into a specification test rather than redundant
+cost. Comparison must be structural, not prose similarity; when the comparison
+is inconclusive, say so rather than inventing a verdict — never gate work on a
+confident-sounding guess about ambiguity.
+
+Both are budget-bounded and skippable; neither may auto-launch write work.
+
+### P4.7 — Worker interrogation (read-only, mid-flight)
+
+Ask a *running* worker a question without steering it: "why this approach?",
+"what does this hunk do?", "what did the failing check actually say?" — answers
+come from the worker's live context, which is far richer than the journal, and
+the turn's objective is unchanged.
+
+Distinct from `delegate_steer`, which alters the task. Interrogation is
+read-only by contract: it may not modify the objective, scope, privileges or
+budget, and a worker's answer is evidence, never authorization. Implemented on
+the P4.5 back-channel in reverse — coordinator→worker query, worker→coordinator
+answer — using Codex `turn/steer` framing for a question that requests no
+action, and for Cursor a queued question honoring its restart-only limitation
+(never described as same-turn). Most valuable during review, while the
+implementation is still in the worker's context; answers attach to the work
+item as findings evidence.
+
+Cost note: an interrogation consumes provider turn tokens. It is bounded by the
+work item's budget and counted against it like any other turn.
 
 ### P5 — Intent→spec compiler
 Accept a sentence, a diff, a failing test, a TODO, or a task record; derive a
