@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { WORK_SCHEMA_VERSION } from './work-model.mjs';
+import { normalizeWorkSpec, WORK_SCHEMA_VERSION } from './work-model.mjs';
 
 function isRecord(value) {
   return value != null && typeof value === 'object' && !Array.isArray(value);
@@ -225,7 +225,7 @@ export function projectChainAsWorkItem(jobs = []) {
   const rootJobId = rootIdFor(ordered[0], byId);
   const workId = projectedWorkId(rootJobId);
   const root = byId.get(rootJobId) || ordered[0];
-  const spec = {
+  const projectedSpec = {
     schemaVersion: WORK_SCHEMA_VERSION,
     objective: stringOrNull(root?.objective) || stringOrNull(root?.promptSummary),
     scopeClaim: scopeClaimFor(root),
@@ -234,6 +234,7 @@ export function projectChainAsWorkItem(jobs = []) {
     budget: budgetFor(root),
     base: baseFor(root)
   };
+  const spec = isRecord(root?.workSpec) ? normalizeWorkSpec(root.workSpec) : projectedSpec;
   const stepId = `${workId}-step-1`;
   const runIdByJobId = new Map(ordered.map((job, index) => [observedId(job), `${workId}-run-${index + 1}`]).filter(([id]) => id));
   const runs = ordered.map((job, index) => ({

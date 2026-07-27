@@ -65,7 +65,7 @@ test('delegate-tui --job validates the id before TTY startup and unknown jobs ex
 
 test('every TUI launch and continuation path suppresses direct packet-lint console output', () => {
   const source = fs.readFileSync(tui, 'utf8');
-  assert.match(source, /function launchOptions\(\)[\s\S]*?reportLint: false,[\s\S]*?\n\s*};/);
+  assert.match(source, /function launchOptions\([^)]*\)[\s\S]*?reportLint: false,[\s\S]*?\n\s*};/);
   assert.match(source, /reviewRoundManagedJob\([^\n]+reportLint: false/);
   const resumes = [...source.matchAll(/resumeManagedJob\([^\n]+/g)].map((match) => match[0]);
   assert.ok(resumes.length >= 2);

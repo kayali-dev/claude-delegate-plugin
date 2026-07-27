@@ -80,6 +80,12 @@ export function applyProfile(options) {
 }
 
 const REQUIRED_SECTIONS = ['Objective', 'Allowed scope', 'Acceptance criteria', 'Return'];
+const SECTION_WORKSPEC_FIELDS = Object.freeze({
+  Objective: 'objective',
+  'Allowed scope': 'scopeClaim',
+  'Acceptance criteria': 'acceptanceCriteria',
+  Return: 'returnContract'
+});
 
 export function lintPacket(packet) {
   const text = String(packet || '');
@@ -87,4 +93,14 @@ export function lintPacket(packet) {
     const escaped = section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return !new RegExp(`^(?:#{1,6}\\s*)?${escaped}(?:\\s*:|\\s*$)`, 'im').test(text);
   });
+}
+
+export function lintPacketDetails(packet) {
+  return lintPacket(packet).map((section) => ({
+    section,
+    inferredField: SECTION_WORKSPEC_FIELDS[section] || null,
+    hint: SECTION_WORKSPEC_FIELDS[section]
+      ? `intent compiler field '${SECTION_WORKSPEC_FIELDS[section]}' would fill this section`
+      : 'this section requires an explicit packet value'
+  }));
 }

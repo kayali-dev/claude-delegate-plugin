@@ -309,12 +309,22 @@ test('stats and launcher frames use seven days and show the exact dry-run packet
   const launcher = launcherViewModel(store, {
     launcher: {
       fieldIndex: 5, provider: 'codex', model: 'sol', mode: 'review', effort: 'xhigh', prompt: 'Review it', allowedPaths: ['src'],
-      preview: { provider: 'codex', model: 'sol', mode: 'review', effort: 'xhigh', cwd: '/work/alpha', packetWarnings: ['missing section: Return'], packet: '# Objective\nReview it\n\n# Return\nFindings' }
+      preview: {
+        provider: 'codex', model: 'sol', mode: 'review', effort: 'xhigh', cwd: '/work/alpha',
+        packetWarnings: ['missing section: Return'],
+        confirmationCard: 'WorkSpec confirmation\nObjective [HIGH · INFERRED]\nWRITE DISPATCH: READY FOR EXPLICIT CONFIRMATION',
+        packet: '# Objective\nReview it\n\n# Return\nFindings'
+      }
     }
   }, { width: 100, height: 30 });
   assert.equal(launcher.meta.previewReady, true);
   assert.ok(launcher.meta.fields.includes('verifyCommand'));
   assert.ok(launcher.meta.fields.includes('ingestFiles'));
+  assert.ok(launcher.meta.fields.includes('intentSource'));
+  assert.ok(launcher.meta.fields.includes('acceptanceCriteria'));
+  assert.ok(launcher.meta.fields.includes('maxRounds'));
+  assert.match(launcher.panes[1].content.lines.join('\n'), /WorkSpec confirmation/);
+  assert.match(launcher.panes[1].title, /WorkSpec confirmation card/);
   assert.match(launcher.panes[1].content.lines.join('\n'), /# Objective\nReview it/);
   assert.match(launcher.panes[1].content.lines.join('\n'), /WARNING: missing section: Return/);
 });

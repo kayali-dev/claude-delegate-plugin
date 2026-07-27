@@ -95,7 +95,19 @@ coordinates with an enclosing-symbol hint, tint the full changed row, and
 emphasize only the changed portion of paired removal/addition lines.
 - **Providers** shows enabled state, allowance windows, colored warning/avoid bands, deep-health `lastVerified` data when available, active writer jobs grouped by cwd, and a subtle aggregate `~Npp outside tracked` note when capture history contains an unattributed Codex allowance marker. That note never links to a thread and is explicitly approximate.
 - **Stats** renders the never-pruned audit-log aggregation for the last seven days, grouped by provider/model/mode/transport, plus external thread totals and aggregate-only unattributed allowance markers. `/` incrementally filters the already-loaded audit rows without touching the store.
-- **Launcher** selects a local/bundled profile and ordinary provider/model/mode/effort/scope fields, plus a verify command and comma-separated absolute ingest paths. The route-advisor pane recomputes after form changes and shows the primary route, top fallback, scores, and matching historical usage bands when available; it is advisory and never gates launch. Press `e` to edit the packet body in `$VISUAL` or `$EDITOR`; `d` builds the mandatory side-effect-free packet preview and opens its typed launch confirmation. `y` always yanks the focused value, including on this screen.
+- **Launcher** starts in the existing hand-written packet mode and also offers
+  sentence, current diff, failing output, TODO, JSON task-record, and
+  repository-conventions intent sources. Intent mode adds acceptance,
+  wall-time, round, and output-token fields beside the explicit allowed-path
+  fence and verification command. Press `d` to compile and render the same
+  provenance/confidence WorkSpec card as the CLI above the exact provider
+  packet. Unresolved or low-confidence fields keep launch disabled; a complete
+  card still requires the launch confirmation overlay. The compiler never
+  turns inferred scope into allowed paths or infers network, sandbox-off,
+  privilege, or budget increases. Profiles remain for hand-written packet mode
+  only. The route-advisor pane recomputes after form changes and remains
+  advisory. Press `e` to edit the packet/intent body in `$VISUAL` or `$EDITOR`;
+  `y` always yanks the focused value.
 
 `$VISUAL`/`$EDITOR` handoff writes only a private `0600` scratch file under the Delegate Router state directory. Before terminal ownership moves to the editor, an active background width probe is cancelled without applying partial measurements and releases its CPR check listener. The TUI then disables raw mode and mouse reporting and leaves the alternate screen before spawning the editor, reinitializes the terminal afterward, and fully repaints. A signalled or nonzero editor leaves the previous packet body unchanged; when neither variable is set, editing stays inline.
 

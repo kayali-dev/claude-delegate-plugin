@@ -9,7 +9,7 @@ import { auditLogPath, avoidPercentFor, dataDir, effectiveUsage, jobsDir, listJo
 import { isProcessAlive } from './process.mjs';
 import { withFileLock } from './lock.mjs';
 import { assembleProviderPrompt } from './packet.mjs';
-import { applyProfile, lintPacket } from './profiles.mjs';
+import { applyProfile, lintPacket, lintPacketDetails } from './profiles.mjs';
 import { ensureSupervisorReady, submitJobToSupervisor } from './supervisor-client.mjs';
 import { supervisorBrokerVersion } from './supervisor-common.mjs';
 import { acceptanceEvidenceDigest, buildAcceptance } from './acceptance.mjs';
@@ -25,6 +25,7 @@ import {
   planOutputTokenLimit,
   planPrompt
 } from './planning.mjs';
+import { createWorkSpec } from './work-model.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -2130,6 +2131,7 @@ function prepareManagedOptions(options, settings = {}) {
       console.error(`delegate-router packet lint: missing ${missing.join(', ')}\n\n${skeleton}`);
     }
     prepared.packetWarnings = missing.map((section) => `missing section: ${section}`);
+    prepared.packetWarningDetails = lintPacketDetails(prepared.prompt);
   }
   return prepared;
 }
@@ -2269,6 +2271,7 @@ function resolveManagedJobOptions(options, id) {
   const reportSchema = validatedReportSchema(options.reportSchema);
   const cwd = path.resolve(options.cwd || process.cwd());
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw brokerError('INVALID_REQUEST', `cwd does not exist or is not a directory: ${cwd}`, { provider });
+  const workSpec = options.workSpec == null ? null : createWorkSpec(options.workSpec);
   const { verify, verification, verificationProfile } = resolvedVerification(options.verify, mode, cwd);
   const autoFix = validatedAutoFix(options.autoFix, mode);
   if (provider === 'cursor' && options.transport === 'headless' && options.startPaused === true) {
@@ -2311,6 +2314,7 @@ function resolveManagedJobOptions(options, id) {
     verificationProfile,
     autoFix,
     reportSchema,
+    workSpec,
     cwd,
     transport,
     originalAllowedPaths,
@@ -2378,18 +2382,24 @@ export function previewManagedJob(options) {
       files: resolved.ingestPlan.ingested
     },
     packetWarnings: prepared.packetWarnings || [],
+    packetWarningDetails: prepared.packetWarningDetails || [],
+    workSpec: resolved.workSpec,
+    specCompilation: prepared.specCompilation || null,
     packet: assembleProviderPrompt(packetJob, prepared.prompt)
   };
 }
 
 export function createManagedJob(options) {
   options = options._profilePrepared ? options : prepareManagedOptions(options);
+  if (options.workSpec && options.specCompilation?.confirmed !== true) {
+    throw brokerError('INVALID_REQUEST', 'compiled WorkSpec requires explicit confirmation before launch');
+  }
   const provider = validateProvider(options.provider);
   const id = jobId(provider);
   const resolved = resolveManagedJobOptions(options, id);
   const {
     sensitivePromptDetected, timeoutSeconds, maxOutputTokens, idempotencyKey, groupId, retryPolicy,
-    mode, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
+    mode, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, workSpec, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
@@ -2458,6 +2468,9 @@ export function createManagedJob(options) {
     allowSensitive: options.allowSensitive === true,
     profile: options.profile || null,
     packetWarnings: options.packetWarnings || [],
+    packetWarningDetails: options.packetWarningDetails || [],
+    ...(workSpec ? { workSpec } : {}),
+    ...(options.specCompilation ? { specCompilation: redact(options.specCompilation) } : {}),
     startPaused: options.startPaused === true,
     autoNudge: options.autoNudge === true,
     nudgeCount: 0,

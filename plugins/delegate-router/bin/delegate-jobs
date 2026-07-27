@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import readline from 'node:readline/promises';
 import { normalizeBrokerError } from './lib/errors.mjs';
 import { terminatePid } from './lib/process.mjs';
 import {
@@ -29,10 +30,18 @@ import { listJobs, loadState, saveJob } from './lib/state.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
 import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessions.mjs';
 import { readProjectedWorkItems } from './lib/work-read.mjs';
+import {
+  compileIntentSpec,
+  confirmCompiledSpec,
+  launchOptionsFromCompilation,
+  previewOptionsFromCompilation
+} from './lib/intent-spec.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--no-plan-first] [--no-ambiguity-check] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <hand-written-packet> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--no-plan-first] [--no-ambiguity-check] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
+  delegate-jobs start --provider codex|cursor [--intent sentence] [--from-diff] [--failure-output text] [--todo path[:line]] [--task-record path] [--from-conventions] --allowed-paths a,b --acceptance criterion [--acceptance criterion ...] --timeout-seconds N --max-rounds N --max-output-tokens N [existing start options] [--accept-spec]
+  delegate-jobs spec [--intent sentence] [--from-diff] [--failure-output text] [--todo path[:line]] [--task-record path] [--from-conventions] [--mode mode] [--cwd path] [--allowed-paths a,b] [--acceptance criterion ...] [--verify-command command|--verify-exception reason] [--timeout-seconds N --max-rounds N --max-output-tokens N] [--json]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
   delegate-jobs work [--json] [--id <job-or-work-id>]
   delegate-jobs group <id> [--json]
@@ -57,6 +66,8 @@ function usage() {
   delegate-jobs result <job-id> [--find text] [--offset N] [--max-chars N] [--json]
   delegate-jobs logs <job-id> [--stderr]
   delegate-jobs prune [--max-age-days N]`);
+  console.log(`
+Intent compilation never launches by itself. Write starts render one provenance/confidence card and require interactive confirmation; --accept-spec is the explicit non-interactive automation confirmation flag. It never resolves an unresolved field or grants allowedPaths, network, sandbox-off, privilege, or a budget increase.`);
 }
 
 function value(args, flag, fallback = undefined) {
@@ -110,6 +121,117 @@ function reportSchemaOption(args) {
   return JSON.parse(raw);
 }
 
+function intentSources(args) {
+  const sources = [];
+  const sentence = value(args, '--intent');
+  if (sentence != null) sources.push({ kind: 'sentence', text: sentence });
+  if (args.includes('--from-diff')) sources.push({ kind: 'diff' });
+  const failure = value(args, '--failure-output');
+  if (failure != null) sources.push({ kind: 'failure', text: failure });
+  const todo = value(args, '--todo');
+  if (todo != null) sources.push({ kind: 'todo', path: todo });
+  const taskRecord = value(args, '--task-record');
+  if (taskRecord != null) sources.push({ kind: 'task-record', path: taskRecord });
+  if (args.includes('--from-conventions')) sources.push({ kind: 'conventions' });
+  return sources;
+}
+
+function allowedPathsOption(args) {
+  return value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function budgetOption(args) {
+  const wallTimeSeconds = value(args, '--timeout-seconds');
+  const maxRounds = value(args, '--max-rounds');
+  const maxOutputTokens = value(args, '--max-output-tokens');
+  if (wallTimeSeconds == null && maxRounds == null && maxOutputTokens == null) return undefined;
+  return {
+    wallTimeSeconds: wallTimeSeconds == null ? null : Number(wallTimeSeconds),
+    maxRounds: maxRounds == null ? null : Number(maxRounds),
+    maxOutputTokens: maxOutputTokens == null ? null : Number(maxOutputTokens)
+  };
+}
+
+function compileFromArgs(args, options = {}) {
+  const sources = intentSources(args);
+  if (!sources.length) sources.push({ kind: 'conventions' });
+  const allowedPaths = allowedPathsOption(args);
+  const acceptanceCriteria = values(args, '--acceptance');
+  const verifyRecipe = verifyOption(args);
+  return compileIntentSpec({
+    cwd: value(args, '--cwd', process.cwd()),
+    mode: value(args, '--mode', options.defaultMode || 'implement'),
+    sources,
+    explicit: {
+      ...(allowedPaths?.length ? { scopeClaim: allowedPaths } : {}),
+      ...(acceptanceCriteria.length ? { acceptanceCriteria } : {}),
+      ...(verifyRecipe ? { verifyRecipe } : {}),
+      ...(budgetOption(args) ? { budget: budgetOption(args) } : {})
+    },
+    authority: {
+      allowedPaths,
+      network: args.includes('--network'),
+      sandbox: value(args, '--sandbox'),
+      approval: value(args, '--approval', 'auto'),
+      allowSensitive: args.includes('--allow-sensitive'),
+      overrideLimit: args.includes('--override-limit'),
+      overrideWriter: args.includes('--override-writer'),
+      overrideLane: args.includes('--override-lane'),
+      approveMcps: args.includes('--approve-mcps'),
+      cursorWorktree: args.includes('--cursor-worktree'),
+      cursorWorktreeBase: value(args, '--cursor-worktree-base'),
+      networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),
+      addDirs: values(args, '--add-dir'),
+      ingestFiles: value(args, '--ingest-files')?.split(',').map((item) => item.trim()).filter(Boolean)
+    }
+  });
+}
+
+function startOptions(args) {
+  const rawTimeout = value(args, '--timeout-seconds');
+  const rawMaxOutputTokens = value(args, '--max-output-tokens');
+  return {
+    provider: value(args, '--provider'), model: value(args, '--model'), mode: value(args, '--mode'), profile: value(args, '--profile'),
+    cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
+    effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
+    maxOutputTokens: rawMaxOutputTokens == null ? null : Number(rawMaxOutputTokens),
+    idempotencyKey: value(args, '--idempotency-key'),
+    groupId: value(args, '--group'), startPaused: args.includes('--start-paused'),
+    ingestFiles: value(args, '--ingest-files')?.split(',').map((item) => item.trim()).filter(Boolean),
+    autoNudge: args.includes('--auto-nudge'), reportSchema: reportSchemaOption(args),
+    retryPolicy: retryPolicy(args), verify: verifyOption(args), autoFix: autoFixOption(args),
+    network: args.includes('--network'), sandbox: value(args, '--sandbox'),
+    networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),
+    addDirs: values(args, '--add-dir'), approveMcps: args.includes('--approve-mcps'),
+    cursorWorktree: args.includes('--cursor-worktree'), cursorWorktreeBase: value(args, '--cursor-worktree-base'),
+    allowedPaths: allowedPathsOption(args),
+    allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
+    overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane'),
+    planFirst: args.includes('--no-plan-first') ? false : undefined,
+    ambiguityCheck: args.includes('--no-ambiguity-check') ? false : undefined,
+    dryRun: args.includes('--dry-run')
+  };
+}
+
+async function confirmCompilation(compilation, args) {
+  console.error(compilation.card);
+  if (!compilation.ready) {
+    throw new Error(`WorkSpec has unresolved fields: ${compilation.unresolved.join(', ')}`);
+  }
+  if (args.includes('--accept-spec')) return confirmCompiledSpec(compilation, 'automation-flag');
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw new Error('compiled WorkSpec requires interactive confirmation; automation must pass --accept-spec explicitly');
+  }
+  const interface_ = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await interface_.question('Confirm this WorkSpec and launch? [y/N] ');
+    if (!/^(?:y|yes)$/i.test(answer.trim())) throw new Error('WorkSpec launch declined');
+  } finally {
+    interface_.close();
+  }
+  return confirmCompiledSpec(compilation, 'interactive');
+}
+
 function requireJob(id) {
   if (!id) throw new Error('job id is required');
   return reconcileJob(id);
@@ -151,30 +273,49 @@ const rawCommand = args.shift() || 'status';
 const command = rawCommand === 'list' ? 'status' : rawCommand;
 
 try {
-  if (command === 'start') {
-    const rawTimeout = value(args, '--timeout-seconds');
-    const rawMaxOutputTokens = value(args, '--max-output-tokens');
-    const started = launchManagedJob({
-      provider: value(args, '--provider'), model: value(args, '--model'), mode: value(args, '--mode'), profile: value(args, '--profile'),
-      cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
-      effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
-      maxOutputTokens: rawMaxOutputTokens == null ? null : Number(rawMaxOutputTokens),
-      idempotencyKey: value(args, '--idempotency-key'),
-      groupId: value(args, '--group'), startPaused: args.includes('--start-paused'),
-      ingestFiles: value(args, '--ingest-files')?.split(',').map((item) => item.trim()).filter(Boolean),
-      autoNudge: args.includes('--auto-nudge'), reportSchema: reportSchemaOption(args),
-      retryPolicy: retryPolicy(args), verify: verifyOption(args), autoFix: autoFixOption(args),
-      network: args.includes('--network'), sandbox: value(args, '--sandbox'),
-      networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),
-      addDirs: values(args, '--add-dir'), approveMcps: args.includes('--approve-mcps'),
-      cursorWorktree: args.includes('--cursor-worktree'), cursorWorktreeBase: value(args, '--cursor-worktree-base'),
-      allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
-      allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
-      overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane'),
-      planFirst: args.includes('--no-plan-first') ? false : undefined,
-      ambiguityCheck: args.includes('--no-ambiguity-check') ? false : undefined,
-      dryRun: args.includes('--dry-run')
-    });
+  if (command === 'spec') {
+    const compilation = compileFromArgs(args);
+    if (args.includes('--json')) json(compilation);
+    else console.log(compilation.card);
+  } else if (command === 'start') {
+    const sources = intentSources(args);
+    const options = startOptions(args);
+    if (sources.length && options.prompt != null) throw new Error('choose a hand-written --prompt or intent-source flags, not both');
+    if (!sources.length && args.includes('--accept-spec')) throw new Error('--accept-spec is valid only with intent-source compilation');
+    let started;
+    if (sources.length) {
+      if (options.profile) throw new Error('--profile cannot wrap a compiled WorkSpec packet');
+      const compilation = compileFromArgs(args, { defaultMode: 'implement' });
+      if (options.dryRun) {
+        if (!compilation.ready) {
+          json({ dryRun: true, compilation });
+          started = null;
+        } else {
+          started = launchManagedJob({
+            ...options,
+            ...previewOptionsFromCompilation(compilation),
+            mode: compilation.mode,
+            dryRun: true
+          });
+          started.confirmationCard = compilation.card;
+          started.specDigest = compilation.digest;
+        }
+      } else {
+        const confirmed = await confirmCompilation(compilation, args);
+        started = launchManagedJob({
+          ...options,
+          ...launchOptionsFromCompilation(confirmed),
+          mode: confirmed.mode,
+          dryRun: false
+        });
+      }
+    } else {
+      started = launchManagedJob(options);
+    }
+    if (!started) {
+      // An incomplete compiled dry-run is a useful confirmation card, never a
+      // launch attempt. The JSON was emitted above.
+    } else {
     const waitFor = value(args, '--wait-for') ?? (args.includes('--wait-for-session') ? 'session' : null);
     if (started.dryRun) json(started);
     else if (waitFor) json(await waitForJob(started.id, waitFor));
@@ -188,6 +329,7 @@ try {
       if (job.status !== 'completed') process.exit(job.status === 'failed' ? 3 : 4);
       if (job.verification?.exitCode) process.exit(6);
       if (['implement', 'verify'].includes(job.mode) && !(job.changedFiles?.count > 0)) process.exit(5);
+    }
     }
   } else if (command === 'status') {
     // A bare positional is a job id — but flag values (--limit 3) must not be

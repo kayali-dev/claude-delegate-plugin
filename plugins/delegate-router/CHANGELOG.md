@@ -2,6 +2,29 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.41.0 — 2026-07-27
+
+- Added the P5 local intent-to-spec compiler. `delegate-jobs spec` and the TUI
+  launcher can derive a versioned WorkSpec draft from an owner sentence, the
+  current changed-path inventory, failing-check output, a TODO, a JSON task
+  record, and repository conventions. Objective, scope claim, acceptance
+  criteria, P3 verification recipe, budget, and immutable base each retain
+  field-level provenance and high/medium/low confidence in one confirmation
+  card; low-confidence or missing values remain visibly unresolved.
+- Compiled write starts are blocked until the draft is complete and the owner
+  confirms the card. Interactive CLI confirmation is the default;
+  `--accept-spec` is the explicit automation confirmation flag and cannot
+  resolve a missing field. The TUI keeps the card and exact provider packet in
+  its existing dry-run-gated launcher review pane. Confirmed packets enter the
+  unchanged managed-start and plan-first path, and the P1 WorkItem projection
+  uses their stored WorkSpec.
+- The compiler never derives `allowedPaths`, network, sandbox disablement,
+  privilege, scope widening, or a budget increase. Write compilation therefore
+  requires an explicit allowed-path fence even when evidence provides a strong
+  scope candidate. Existing hand-written packets, CLI flags, MCP tool schemas,
+  job IDs, and historical projections remain unchanged. Packet lint now also
+  exposes which compiler field can fill each missing section.
+
 ## 0.40.0 — 2026-07-27
 
 - Write-mode managed starts are now plan-first by default. The first provider

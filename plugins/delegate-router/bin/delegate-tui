@@ -56,6 +56,12 @@ import { formatWidthProbeResult, probeTerminalWidths, terminalWidthIdentity, wid
 import { createViewModel, nudgeEligible } from './lib/tui/viewmodels.mjs';
 import { routeTask } from './lib/router.mjs';
 import { auditUsageBands } from './lib/stats.mjs';
+import {
+  compileIntentSpec,
+  confirmCompiledSpec,
+  launchOptionsFromCompilation,
+  previewOptionsFromCompilation
+} from './lib/intent-spec.mjs';
 
 const USAGE = `Usage: delegate-tui [--job <id>]
        delegate-tui --serve [--port <number>]
@@ -212,7 +218,7 @@ if (process.platform === 'win32') {
 const NUDGE_PROMPT = 'Your final message described the deliverable instead of containing it. Paste the complete findings inline now.';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DIFF_WINDOW = 12000;
-const CHOICE_FIELDS = new Set(['profile', 'provider', 'mode', 'effort']);
+const CHOICE_FIELDS = new Set(['intentSource', 'profile', 'provider', 'mode', 'effort']);
 const TUI_PACKAGE_VERSION = (() => {
   try {
     const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -283,9 +289,10 @@ const ui = {
   statusHistory: [], statusHistoryOpen: false, statusHistoryPage: 0, terminalFocused: true, gPrefix: false, gPrefixHelp: false,
   remote: store.remote || null,
   launcher: {
-    fieldIndex: 0, profile: '<none>', provider: 'codex', model: 'auto',
+    fieldIndex: 0, intentSource: '<packet>', profile: '<none>', provider: 'codex', model: 'auto',
     mode: 'consult', effort: '<default>', prompt: '', allowedPaths: '',
-    verifyCommand: '', ingestFiles: '', routeAdvice: null,
+    acceptanceCriteria: '', verifyCommand: '', wallTimeSeconds: '',
+    maxRounds: '', maxOutputTokens: '', ingestFiles: '', routeAdvice: null,
     preview: null, previewSignature: null, previewScroll: 0
   }
 };
@@ -565,12 +572,56 @@ function beginReviewRound(job) {
   }
 }
 
-function launchOptions() {
+function launcherIntentSources(launcher) {
+  const source = launcher.intentSource || '<packet>';
+  if (source === '<packet>') return [];
+  if (source === 'sentence') return [{ kind: 'sentence', text: launcher.prompt }];
+  if (source === 'diff') {
+    return [
+      ...(String(launcher.prompt || '').trim() ? [{ kind: 'sentence', text: launcher.prompt }] : []),
+      { kind: 'diff' }
+    ];
+  }
+  if (source === 'failure') return [{ kind: 'failure', text: launcher.prompt }];
+  if (source === 'todo') return [{ kind: 'todo', path: launcher.prompt }];
+  if (source === 'task-record') return [{ kind: 'task-record', path: launcher.prompt }];
+  return [{ kind: 'conventions' }];
+}
+
+function compileLauncherSpec() {
+  const launcher = ui.launcher;
+  if (launcher.profile && launcher.profile !== '<none>') {
+    throw new Error('Profiles wrap hand-written packets only; choose <none> for intent compilation');
+  }
+  const allowedPaths = String(launcher.allowedPaths || '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  const ingestFiles = String(launcher.ingestFiles || '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  const acceptanceCriteria = String(launcher.acceptanceCriteria || '').split(/\r?\n|;/).map((entry) => entry.trim()).filter(Boolean);
+  const verifyCommand = String(launcher.verifyCommand || '').trim();
+  const budget = {
+    wallTimeSeconds: Number(launcher.wallTimeSeconds) || null,
+    maxRounds: Number(launcher.maxRounds) || null,
+    maxOutputTokens: Number(launcher.maxOutputTokens) || null
+  };
+  return compileIntentSpec({
+    cwd: process.cwd(),
+    mode: launcher.mode || 'implement',
+    sources: launcherIntentSources(launcher),
+    explicit: {
+      ...(allowedPaths.length ? { scopeClaim: allowedPaths } : {}),
+      ...(acceptanceCriteria.length ? { acceptanceCriteria } : {}),
+      ...(verifyCommand ? { verifyRecipe: { command: verifyCommand, timeoutSeconds: 600 } } : {}),
+      budget
+    },
+    authority: { allowedPaths, ingestFiles }
+  });
+}
+
+function launchOptions(settings = {}) {
   const launcher = ui.launcher;
   const allowedPaths = String(launcher.allowedPaths || '').split(',').map((entry) => entry.trim()).filter(Boolean);
   const ingestFiles = String(launcher.ingestFiles || '').split(',').map((entry) => entry.trim()).filter(Boolean);
   const verifyCommand = String(launcher.verifyCommand || '').trim();
-  return {
+  const base = {
     provider: launcher.provider,
     model: launcher.model || 'auto',
     mode: launcher.mode || 'consult',
@@ -583,6 +634,12 @@ function launchOptions() {
     ...(verifyCommand ? { verify: { command: verifyCommand } } : {}),
     ...(ingestFiles.length ? { ingestFiles } : {})
   };
+  if ((launcher.intentSource || '<packet>') === '<packet>') return base;
+  const compilation = settings.compilation || compileLauncherSpec();
+  const compiled = settings.confirmed
+    ? launchOptionsFromCompilation(confirmCompiledSpec(compilation, 'tui'))
+    : previewOptionsFromCompilation(compilation);
+  return { ...base, ...compiled, mode: compilation.mode };
 }
 
 function updateRouteAdvice() {
@@ -610,7 +667,8 @@ function scheduleRouteAdvice() {
 }
 
 function launcherSignature() {
-  return JSON.stringify(launchOptions());
+  const { preview, previewSignature, previewScroll, routeAdvice, ...form } = ui.launcher;
+  return JSON.stringify(form);
 }
 
 function invalidatePreview() {
@@ -620,14 +678,38 @@ function invalidatePreview() {
 
 function dryRunLaunch() {
   const preview = runMutation(() => {
-    const options = launchOptions();
-    const preview = launchManagedJob({ ...options, dryRun: true });
-    ui.launcher.preview = preview;
-    ui.launcher.previewSignature = JSON.stringify(options);
+    const compilation = (ui.launcher.intentSource || '<packet>') === '<packet>' ? null : compileLauncherSpec();
+    const result = compilation && !compilation.ready
+      ? {
+          dryRun: true,
+          compileOnly: true,
+          provider: ui.launcher.provider,
+          model: ui.launcher.model,
+          mode: ui.launcher.mode,
+          packetWarnings: [],
+          confirmationCard: compilation.card,
+          unresolved: compilation.unresolved,
+          packet: null
+        }
+      : launchManagedJob({ ...launchOptions({ compilation }), dryRun: true });
+    if (compilation) {
+      result.confirmationCard = compilation.card;
+      result.specDigest = compilation.digest;
+      result.unresolved = compilation.unresolved;
+    }
+    ui.launcher.preview = result;
+    ui.launcher.previewSignature = launcherSignature();
     ui.launcher.previewScroll = 0;
-    return preview;
-  }, (result) => `Dry run ready: ${result.provider}/${result.model}; confirm launch in the overlay`);
+    return result;
+  }, (result) => result.unresolved?.length
+    ? `WorkSpec blocked: resolve ${result.unresolved.join(', ')}`
+    : `Dry run ready: ${result.provider}/${result.model}; confirm launch in the overlay`);
   if (!preview) return;
+  if (preview.unresolved?.length) {
+    ui.confirm = null;
+    draw();
+    return;
+  }
   ui.confirm = {
     action: 'launch',
     expected: 'launch',
@@ -650,7 +732,7 @@ function launchPreviewed() {
     draw();
     return;
   }
-  const started = runMutation(() => launchManagedJob(launchOptions()), (job) => `Launched ${job.id}`);
+  const started = runMutation(() => launchManagedJob(launchOptions({ confirmed: true })), (job) => `Launched ${job.id}`);
   if (started) {
     ui.screen = 'fleet';
     ui.selectedIndex = 0;
@@ -783,6 +865,7 @@ function editValue(key) {
 }
 
 function choiceValues(field) {
+  if (field === 'intentSource') return ['<packet>', 'sentence', 'diff', 'failure', 'todo', 'task-record', 'conventions'];
   if (field === 'profile') return ['<none>', ...(store.profiles || [])];
   if (field === 'provider') {
     const enabled = (store.providers || []).filter((provider) => provider.enabled && ['codex', 'cursor'].includes(provider.name)).map((provider) => provider.name);
@@ -811,7 +894,16 @@ function editLauncherField() {
   const field = fields[ui.launcher.fieldIndex];
   if (CHOICE_FIELDS.has(field)) cycleLauncher(1);
   else {
-    const labels = { allowedPaths: 'Allowed paths (comma-separated)', ingestFiles: 'Ingest files (comma-separated absolute paths)', verifyCommand: 'Verify command', prompt: 'Packet body' };
+    const labels = {
+      allowedPaths: 'Allowed paths (comma-separated)',
+      acceptanceCriteria: 'Acceptance criteria (semicolon/newline-separated)',
+      ingestFiles: 'Ingest files (comma-separated absolute paths)',
+      verifyCommand: 'Verify command',
+      wallTimeSeconds: 'Wall time seconds',
+      maxRounds: 'Maximum rounds',
+      maxOutputTokens: 'Maximum output tokens',
+      prompt: ui.launcher.intentSource === '<packet>' ? 'Packet body' : 'Intent text or source path'
+    };
     beginInput('launcher-field', labels[field] || field[0].toUpperCase() + field.slice(1), ui.launcher[field], { field });
   }
 }

@@ -1685,9 +1685,11 @@ export function statsViewModel(store, ui = {}, viewport = {}) {
 }
 
 const LAUNCH_FIELDS = Object.freeze([
-  ['profile', 'Profile'], ['provider', 'Provider'], ['model', 'Model'], ['mode', 'Mode'],
+  ['intentSource', 'Intent source'], ['profile', 'Profile'], ['provider', 'Provider'], ['model', 'Model'], ['mode', 'Mode'],
   ['effort', 'Effort'], ['prompt', 'Packet body'], ['allowedPaths', 'Allowed paths'],
-  ['verifyCommand', 'Verify command'], ['ingestFiles', 'Ingest files']
+  ['acceptanceCriteria', 'Acceptance'], ['verifyCommand', 'Verify command'],
+  ['wallTimeSeconds', 'Wall time'], ['maxRounds', 'Max rounds'], ['maxOutputTokens', 'Max output'],
+  ['ingestFiles', 'Ingest files']
 ]);
 
 export function routeAdvisorLines(route) {
@@ -1745,9 +1747,9 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
   const warnings = preview?.packetWarnings || [];
   const previewLines = preview ? [
     `DRY RUN${CHROME_SEPARATOR}${displayOr(preview.provider, '-')}/${displayOr(preview.model, '-')}${CHROME_SEPARATOR}${displayOr(preview.mode, '-')}${CHROME_SEPARATOR}${displayOr(preview.effort, 'default')}${CHROME_SEPARATOR}${formatDisplayValue(preview.cwd)}`,
+    ...(preview.confirmationCard ? ['', ...formatDisplayValue(preview.confirmationCard).split('\n')] : []),
     ...(warnings.length ? warnings.map((warning) => `WARNING: ${formatDisplayValue(warning)}`) : ['Packet lint: clean']),
-    '',
-    ...formatDisplayValue(preview.packet).split('\n')
+    ...(preview.packet ? ['', 'EXACT PROVIDER PACKET', ...formatDisplayValue(preview.packet).split('\n')] : [])
   ] : ['No preview yet.', '', 'Edit fields, then press d. Launch is disabled until the exact current form has a successful dry run.'];
   const wide = width >= 70;
   const topHeight = wide ? Math.min(13, Math.max(10, Math.floor(height * 0.48))) : Math.min(10, Math.max(7, Math.floor(height * 0.4)));
@@ -1758,17 +1760,27 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
   const previewY = wide ? 2 + topHeight : advisorRect.y + advisorRect.height + 1;
   const frame = {
     width, height, screen: 'launcher',
-    title: { text: 'New managed job', right: preview ? 'preview ready | launch confirmation' : 'dry run required' },
+    title: {
+      text: 'New managed job',
+      right: preview?.unresolved?.length ? `${preview.unresolved.length} unresolved`
+        : preview ? 'preview ready | launch confirmation' : 'dry run required'
+    },
     panes: [
       { rect: { x: 0, y: 1, width: formWidth, height: topHeight }, title: `Launcher form${CHROME_SEPARATOR}profiles: ${(store.profiles || []).map(formatDisplayValue).filter(Boolean).join(', ') || 'none'}`, content: { kind: 'table', columns: [{ key: 'field', title: 'Field', width: 16 }, { key: 'value', title: 'Value', width: Math.max(10, formWidth - 18) }], rows, selected: launcher.fieldIndex || 0 } },
       {
         rect: { x: 0, y: previewY, width, height: Math.max(3, height - previewY - 1) },
-        title: 'Mandatory dry-run preview | exact provider packet',
+        title: 'WorkSpec confirmation card | exact provider packet',
         summary: {
           text: preview
-            ? joinDisplayParts([`${formatDisplayValue(preview.provider)}/${formatDisplayValue(preview.model)}`, `${warnings.length} warnings`, `${previewLines.length} packet lines`])
+            ? joinDisplayParts([
+                `${formatDisplayValue(preview.provider)}/${formatDisplayValue(preview.model)}`,
+                preview.unresolved?.length ? `${preview.unresolved.length} unresolved` : `${warnings.length} warnings`,
+                `${previewLines.length} preview lines`
+              ])
             : '0 packet lines | dry run required',
-          ...(warnings.length ? { badge: { text: `${warnings.length} WARNINGS`, style: palette.badgeWarn } } : {})
+          ...(preview?.unresolved?.length
+            ? { badge: { text: `${preview.unresolved.length} UNRESOLVED`, style: palette.badgeWarn } }
+            : warnings.length ? { badge: { text: `${warnings.length} WARNINGS`, style: palette.badgeWarn } } : {})
         },
         content: { kind: 'log', lines: previewLines, follow: false, scroll: launcher.previewScroll || 0 }
       },
@@ -1790,7 +1802,7 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
       }
     ],
     status: errorStatus(ui) || { text: '' },
-    meta: { fields: LAUNCH_FIELDS.map(([key]) => key), previewReady: Boolean(preview) }
+    meta: { fields: LAUNCH_FIELDS.map(([key]) => key), previewReady: Boolean(preview) && !preview?.unresolved?.length }
   };
   return commonOverlay(frame, ui, store);
 }

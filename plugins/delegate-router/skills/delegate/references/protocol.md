@@ -17,6 +17,14 @@ projections preserve that absence without migration. New write records retain
 the repository-sourced verification profile and an acceptance object beside
 the unchanged lifecycle `status`.
 
+P5 compiled starts add `workSpec` and `specCompilation` to the job snapshot.
+`workSpec` is the validated P1 schema consumed by the WorkItem projection.
+`specCompilation` retains the deterministic digest, evidence-source labels,
+field-level provenance/confidence, never-infer authority projection, and
+confirmation method. These fields exist only on the additional compiler path;
+historical and hand-written-packet records omit them. No existing event or MCP
+tool schema changes.
+
 New job/attempt records add an immutable launch identity:
 `origin: { projectDir, cwd, brokerVersion, launchedAtMs }`. `projectDir` is the
 launcher's `CLAUDE_PROJECT_DIR`, with launch cwd as the fallback; `origin.cwd`

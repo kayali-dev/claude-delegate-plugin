@@ -5,6 +5,17 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P5 intent-to-spec compilation is implemented additively. A deterministic,
+  network-free compiler accepts sentences, changed-path inventories,
+  failing-check output, TODOs, JSON task records, and repository conventions.
+  Every WorkSpec field retains provenance plus high/medium/low confidence in
+  one CLI/TUI confirmation card; low-confidence and missing values remain
+  unresolved and block write dispatch. The P3 repository verification profile
+  supplies the check recipe, while Git supplies a metadata-only immutable-base
+  fingerprint. `allowedPaths`, network, sandbox disablement, privileges, scope
+  widening, and budget increases are never inferred. Confirmed specs feed the
+  unchanged managed start, P4.6 plan-first packet, and P1 projection. Existing
+  hand-written packets and MCP schemas are unchanged.
 - P4.6 plan-first dispatch and structural ambiguity detection and P4.7
   read-only worker interrogation are implemented additively. Write launches
   now begin with a bounded plan turn and revisioned confirmation before the
@@ -472,6 +483,30 @@ structured WorkSpec draft from repo profile and current evidence; surface every
 inferred field with provenance and confidence in one confirmation card; block
 write dispatch until unresolved fields are resolved. Infer-then-confirm, never
 omit.
+
+Implementation progress (2026-07-27): complete in source. `delegate-jobs spec`
+compiles without creating broker state. `delegate-jobs start` selects the
+compiler only when an intent-source flag is present, renders the same card, and
+requires interactive confirmation or the documented `--accept-spec`
+automation flag; that flag confirms only a complete displayed draft. The TUI
+launcher adds the same source choices, structured resolution fields, and card
+to its existing dry-run confirmation pane.
+
+Sentence, Git changed-path, failure-output, TODO, task-record, and conventions
+evidence are bounded and local. Sensitive TODO/task-record paths are refused,
+diff inference reads path/status metadata rather than file bodies, and no model
+or network call is made. The P3 verification profile is derived read-only
+without writing its cache during compilation. Stored compilation metadata
+retains the source, confidence, provenance, confirmation method, and digest;
+the confirmed WorkSpec is projected by P1 and its structured packet is the
+input to P4.6.
+
+Authority stays separate from inference. A scope candidate never becomes
+`allowedPaths`; write dispatch requires that fence as an explicit owner input.
+Network, sandbox-off, approval/override/sensitive access, add-dir/MCP/worktree
+privileges, scope widening, and budget increases are likewise copied only from
+explicit launch options and shown on the card. Low-confidence fields remain
+unresolved rather than being promoted by a blanket confirmation.
 
 ### P6 — Transactional workspaces
 Broker-owned worktrees/overlays from an immutable base, path/resource claims for

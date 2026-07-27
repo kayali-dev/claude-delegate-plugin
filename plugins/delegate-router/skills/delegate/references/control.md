@@ -10,6 +10,33 @@
 
 Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar machine, or sensitive workspace makes the resolved command worth inspecting first.
 
+When only intent or repository evidence exists, compile before starting:
+
+```bash
+delegate-jobs spec \
+  --intent 'Implement the bounded change' \
+  --from-diff \
+  --allowed-paths bin/lib/example.mjs,test/example.test.mjs \
+  --acceptance 'The requested behavior is covered by focused tests.' \
+  --timeout-seconds 900 \
+  --max-rounds 2 \
+  --max-output-tokens 4000
+```
+
+The compiler also accepts `--failure-output`, `--todo path[:line]`,
+`--task-record path`, and `--from-conventions`. It reads the P3 verification
+profile for a real repository recipe and renders one provenance/confidence
+card. Missing or low-confidence WorkSpec fields remain unresolved. A write
+start requires explicit `--allowed-paths`; inferred scope is a claim, not a
+grant.
+
+Using the same intent flags with `delegate-jobs start` enters the existing
+managed start and plan-first path only after card confirmation. Interactive
+confirmation is the default. Automation must pass `--accept-spec` explicitly;
+the flag cannot resolve an incomplete draft. No intent compilation path
+infers network, sandbox-off, privilege, scope widening, or a budget increase.
+Hand-written `--prompt` packets keep the previous behavior.
+
 ## Access Policies
 
 - Codex uses `approval_policy=on-request` with `approvals_reviewer=auto_review`. This is Approve-for-me: Auto-review evaluates escalations rather than bypassing the sandbox.

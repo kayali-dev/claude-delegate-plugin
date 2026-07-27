@@ -51,6 +51,31 @@ trivial write, use MCP `delegate_start_trivial` or CLI
 primary confirmation while skipping the second pass. These are explicit
 escape hatches, not routing defaults.
 
+When the owner has intent rather than a complete packet, use the local P5
+compiler instead of guessing missing sections. Run
+`delegate-jobs spec --intent '...'` or select one or more of `--from-diff`,
+`--failure-output`, `--todo path[:line]`, `--task-record path`, and
+`--from-conventions`. Resolve acceptance with repeatable `--acceptance`, the
+write fence with `--allowed-paths`, and all three budget dimensions with
+`--timeout-seconds`, `--max-rounds`, and `--max-output-tokens`. P3 repository
+instructions/manifests supply verification unless an explicit
+`--verify-command` or `--verify-exception` wins.
+
+The compiler renders one WorkSpec confirmation card with provenance and
+high/medium/low confidence per field. Missing and low-confidence fields remain
+unresolved and block writes. `delegate-jobs start` with intent-source flags
+asks for interactive confirmation; `--accept-spec` is the explicit
+non-interactive automation confirmation and cannot accept an incomplete draft.
+The TUI launcher exposes the same sources, fields, card, and dry-run gate.
+Compilation makes no model/network call and does not create broker state.
+
+Inference is not authority: never convert a scope candidate into
+`allowedPaths`. The compiler never grants network, sandbox-off, approval,
+sensitive access, overrides, add-dir/MCP/worktree privilege, scope widening,
+or a budget increase. Confirmed compilation feeds the ordinary
+`delegate_start`/plan-first path; callers that already pass a hand-written
+packet continue unchanged.
+
 Use `profile` for a reusable packet skeleton, `groupId` for fan-out tracking, and `startPaused=true` plus `delegate_release` when the first prompt must wait behind an external gate. `ingestFiles` stages declared absolute out-of-tree inputs and copies changed content back only after completion; if the source changed meanwhile, the provider version lands at `<source>.delegate-new` and emits `ingest.diverged`. `autoNudge` is read-only and opt-in. `reportSchema` is best-effort: inspect `structuredMissing` and never treat worker JSON as stronger evidence than the mechanical diff and verification fields.
 
 Retries are opt-in: use `retryPolicy: { maxAttempts, retryOn: ['transport', 'rate-limit'] }` only for provider transport/startup failures, never to repeat task-level outcomes. Write modes derive a cached repository verification profile by default: nearest `CLAUDE.md`, then `AGENTS.md`, quality-section commands before `package.json` `check`/`checks`/`test`/`lint`/`typecheck` scripts. Explicit `verify: { command, timeoutSeconds }` always wins. When no reliable non-mutating check exists, use `verify: { exception: '<reason>' }`; `DELEGATE_VERIFY=off` is the broker-wide emergency escape hatch. Every exception is persisted and inspectable. Verification runs on the real checkout only after observed changes, never changes `status`, and records broker origin, state, exit, duration, stable-input evidence, and a redacted tail. Never accept a worker's self-reported sandbox green as the verification of record.
