@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import {
+  buildCollisionWatchPlan,
+  collisionHookPaths,
+  ensureCollisionWatchSignal
+} from './lib/collision.mjs';
+import {
+  recordCollisionWatchDegradation,
+  recordPathCollisions
+} from './lib/control.mjs';
+
+const MAX_INPUT_BYTES = 2 * 1024 * 1024;
+
+function readPayload() {
+  const chunks = [];
+  let used = 0;
+  for (;;) {
+    const buffer = Buffer.allocUnsafe(Math.min(16 * 1024, MAX_INPUT_BYTES + 1 - used));
+    const count = fs.readSync(0, buffer, 0, buffer.length, null);
+    if (!count) break;
+    used += count;
+    if (used > MAX_INPUT_BYTES) throw new Error('hook payload exceeds 2 MiB');
+    chunks.push(buffer.subarray(0, count));
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function outputWatchPlan(payload) {
+  const plan = buildCollisionWatchPlan({
+    env: process.env,
+    sessionId: String(payload.session_id || '').trim(),
+    workspaceId: process.env.CLAUDE_PROJECT_DIR || payload.cwd,
+    projectDir: process.env.CLAUDE_PROJECT_DIR || payload.cwd
+  });
+  try {
+    ensureCollisionWatchSignal();
+  } catch {
+    recordCollisionWatchDegradation(plan.jobIds, {
+      reason: 'watch-refresh-signal-unavailable',
+      cap: plan.cap,
+      totalPathCount: plan.totalPathCount,
+      watchedPathCount: plan.watchedPathCount
+    });
+  }
+  if (plan.degraded) {
+    recordCollisionWatchDegradation(plan.omittedJobIds, {
+      reason: plan.reason,
+      cap: plan.cap,
+      totalPathCount: plan.totalPathCount,
+      watchedPathCount: plan.watchedPathCount
+    });
+  }
+  process.stdout.write(`${JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'FileChanged',
+      watchPaths: plan.watchPaths
+    }
+  })}\n`);
+}
+
+try {
+  const payload = readPayload();
+  const event = String(payload?.hook_event_name || '');
+  if (!['FileChanged', 'PostToolUse', 'PostToolBatch'].includes(event)) throw new Error('unsupported hook event');
+  const paths = collisionHookPaths(payload);
+  if (paths.length) {
+    recordPathCollisions(paths, {
+      source: event === 'FileChanged' ? 'file-watcher' : 'coordinator-tool',
+      event: event === 'FileChanged' ? payload.event : event,
+      sessionId: payload.session_id
+    });
+  }
+  if (event === 'FileChanged') outputWatchPlan(payload);
+} catch {}
+
+process.exitCode = 0;

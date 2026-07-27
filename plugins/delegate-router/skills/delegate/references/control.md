@@ -20,7 +20,7 @@ Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar
 - Consult, plan, and review modes are read-only. Cursor ask/plan modes categorically reject network tools, so a read-only Cursor job with `network=true` is launched in agent mode with a strict injected no-write/no-destructive-command preamble and a loud `network.mode-elevated` event. This changes the provider mode, never the job's read-only contract.
 - Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. Outbound task packets are scanned for credential-shaped values and fail with `SECRET_IN_PROMPT`; `allowSensitive=true` explicitly overrides both checks and emits `security.warning`. It never removes scope control or the preserve-existing-changes rule. Project tooling may consume secrets internally, but workers must never echo or relocate their contents.
 
-- `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. Prefer it over prose-only fencing for every bounded write job.
+- `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. In interactive Claude Code, those roots and already-observed attempt changes also feed the bounded live collision watch described under Writer Ownership. Prefer `allowedPaths` over prose-only fencing for every bounded write job.
 - `ingestFiles` accepts up to 20 absolute regular files outside cwd, each smaller than 10 MB. The broker copies them into `.delegate-staging/<jobId>`, records the source-content hash, and adds that directory when `allowedPaths` is set. Byte-changed staged content copies back only after `completed`; a concurrently changed source is preserved and the staged version is written to `<source>.delegate-new` with `ingest.diverged`. Failures leave staging referenced by the checkpoint. Sensitive names still require `allowSensitive=true`.
 - Cursor headless consult/plan/review runs use streaming NDJSON under `--mode ask|plan`; thinking, assistant, and structured tool events remain visible. Networked read-only work is the explicit agent-mode elevation above. With sandboxing enabled, `networkAllow` materializes a merged temporary `.cursor/sandbox.json` (`default: deny` plus the supplied domains; omitted means `default: allow`) and restores the exact prior file on every exit path. Existing denies win and conflicting requests fail before launch. Project `.cursor/cli.json` supports only `permissions.allow/deny`; malformed or wrong-schema files fail as `CURSOR_PROJECT_CONFIG_INVALID` health detail and an actionable preflight error naming the file.
 
@@ -36,7 +36,34 @@ Allow only one writer for a path set. A read-only reviewer may inspect a stable 
 
 The broker enforces this for managed jobs: a write-mode start (`implement` or `verify`) in a cwd that already has an active write-mode job fails with `WRITER_ACTIVE` and the blocking job's ID. Orphaned writers (dead worker process) are reconciled to `failed` automatically and stop blocking. Worktree-isolated jobs are exempt. `overrideWriter=true` bypasses the guard; use it only with explicit user acceptance of concurrent writers.
 
-This guard cannot see unmanaged editors, including the current coordinator or a built-in subagent. Direct Codex MCP and Cursor CLI launches remain behavior-compatible and are never blocked by the managed writer guard. Their shadow record instead sets `overlapsManagedWriter: true` and emits `DIRECT_WRITER_OVERLAP` as a warning when a write-capable direct call shares a cwd with an active managed writer. A write job launched from a non-empty Git baseline emits `baseline.dirty` with a bounded path list; treat either signal as a coordination warning, not proof that no other editor is active.
+This guard still cannot contain unmanaged editors, including the current
+coordinator or a built-in subagent. Interactive sessions add early detection:
+SessionStart watches live attempts' owned roots, FileChanged observes external
+touches, and fail-open PostToolUse(Edit|Write)/PostToolBatch hooks observe
+coordinator edits. A collision records one edge per attempt/path through the
+ordinary monitor pipeline and marks covering verification evidence
+`state: "stale"`, `inputChanged: true`, with `base-drift` blocking undecided
+acceptance. Attempt metadata fingerprints suppress its own watcher events.
+Because FileChanged carries no writer identity, a first event without provider
+attribution does not guess; Claude-session writes are still observed by the
+Edit/Write hooks, with post-hoc checks as the fallback.
+
+The dynamic set is capped at 256 absolute paths including one private refresh
+signal. The first 255 deterministic owned roots are armed. Roots past that cap
+record `collisionWatch.reason: "watch-path-cap-exceeded"` on affected attempts;
+watcher failures record their reason. Both cases retain coordinator Edit/Write
+observation and the existing post-hoc scope/drift checks. Hooks always exit zero
+and run only after a tool/file change; they never gate or block that change.
+
+This is detection, not containment: it does not prevent, isolate, or roll back
+a write. P6 transactional workspaces are the containment phase. Direct Codex
+MCP and Cursor CLI launches remain behavior-compatible and are never blocked by
+the managed writer guard. Their shadow record instead sets
+`overlapsManagedWriter: true` and emits `DIRECT_WRITER_OVERLAP` as a warning
+when a write-capable direct call shares a cwd with an active managed writer. A
+write job launched from a non-empty Git baseline emits `baseline.dirty` with a
+bounded path list; treat either signal as a coordination warning, not proof that
+no other editor is active.
 
 Give any start that may be retried a stable `idempotencyKey`. Lookup and job creation are atomic under the per-cwd launch lock, so a replay returns the existing job instead of launching a second worker.
 
@@ -117,12 +144,15 @@ MCP process and is `null` for a CLI launch outside Claude. Origin remains
 distinct from delegated `job.cwd` and is inherited unchanged by resume,
 review-round, and automatic continuation children.
 
-The monitor is read-only with respect to jobs and control. It cannot start,
+The monitor is read-only with respect to jobs and control. The separate
+collision hook may add `collision.detected`/staleness evidence, after which the
+monitor only reads that edge. The monitor cannot start,
 steer, cancel, respond to, reconcile, or otherwise mutate a job, and it cannot
 invoke a provider or spend allowance. Its only write is private
 `0600` session-correlation metadata under `<state-dir>/monitor-correlation/`.
-Per-job edge deduplication, a 30-second cooldown, and a six-lines-per-minute
-global ceiling enforce the nagware boundary. The stall threshold defaults to
+Per-job edge deduplication (including exact collision paths), a 30-second
+cooldown, and a six-lines-per-minute global ceiling enforce the nagware
+boundary. The stall threshold defaults to
 ten minutes; configure
 `DELEGATE_MONITOR_STALL_SECONDS`,
 `DELEGATE_MONITOR_COOLDOWN_SECONDS`, and
@@ -231,7 +261,9 @@ provider-lifecycle meaning. Write-mode completion adds
 `acceptance: { state, blockedBy, evidence, decidedBy, decidedAt }`:
 `ready-for-review` when the mechanical evidence is clean, or `blocked` for
 verification failure/timeout, zero changes, scope violation, unresolved
-structured findings, or base/input drift. No broker path auto-accepts.
+structured findings, or base/input drift. A live collision adds its path to
+`baseDriftPaths`; verification evidence that predates the touch is marked
+`stale` with `inputChanged: true`. No broker path auto-accepts.
 
 After reviewing the diff and evidence, record the owner decision with
 `delegate-jobs accept|reject <id> [--reason ...]` or additive MCP

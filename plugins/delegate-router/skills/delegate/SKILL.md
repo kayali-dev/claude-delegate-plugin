@@ -137,8 +137,9 @@ An unsandboxed worker has your user's host privileges: state `sandbox=off` in th
 
 In an interactive Claude Code session where the experimental plugin Monitor
 surface is available, you will be told when a delegated job crosses an
-actionable edge: policy breach, required human input, acceptance blocked, ready for review,
-terminal failure, or the ten-minute stall policy. Treat that notification as a
+actionable edge: live collision detected, policy breach, required human input,
+acceptance blocked, ready for review, terminal failure, or the ten-minute stall
+policy. Treat that notification as a
 wake-up signal and inspect the named job; it never replaces acceptance review.
 Progress, deltas, tools, usage ticks, and intermediate successes remain silent.
 Push defaults to this Claude session's own launches. New records retain
@@ -152,6 +153,16 @@ worktree/project, `all` only for an explicit fleet overview, or `off` to disable
 push. Origin-less historical jobs stay silent except under `all`. Scope changes
 push only: `delegate_list`, `delegate_inspect`, the TUI, and control operations
 continue to cover the complete store.
+
+For live write attempts, SessionStart arms a dynamic set containing a private
+refresh signal plus `allowedPaths` roots and files the attempt has already
+reported changing. FileChanged and fail-open Edit/Write/batch hooks add one
+collision edge per attempt/path and mark applicable verification
+`state: "stale"` with `inputChanged: true`/`base-drift`. The set is capped at
+256 absolute paths including the signal; omitted roots and watcher failures
+record a degradation reason while coordinator-hook and post-hoc detection
+continue. These alerts are early detection only. They do not prevent, contain,
+or isolate writes; use worktree isolation when containment is required.
 
 After `delegate_start`, retain the job ID and revision. Use:
 
@@ -179,7 +190,7 @@ After `delegate_start`, retain the job ID and revision. Use:
 
 For long jobs, do not chain polling turns: run `delegate-jobs wait <job-id>` with the Bash tool's `run_in_background: true` and continue other work — the harness notifies on exit (0 completed, 3 failed, 4 cancelled, 5 no observed changes, 6 verification failed, 75 wait-timeout). Bound the whole job with `timeoutSeconds` on `delegate_start` (60–86400; default 3600, deliberately long because LLM jobs legitimately run long). `maxOutputTokens` stops through the provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and the continuation ID.
 
-Write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another write-mode job is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent writers. Worktree-isolated jobs are exempt. Terminal job records are pruned automatically after `DELEGATE_JOB_RETENTION_DAYS` (default 14).
+Write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another write-mode job is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent writers. Worktree-isolated jobs are exempt. A live collision alert means a write already happened: inspect the named path and rerun stale verification before any acceptance decision. Terminal job records are pruned automatically after `DELEGATE_JOB_RETENTION_DAYS` (default 14).
 
 When steering, remember a correction that shrinks the task can complete before a follow-up command lands; do not plan a steer-then-cancel sequence around a shrinking task.
 
@@ -199,7 +210,11 @@ Use a built-in `Agent` only when a fresh context, an independent second opinion,
 
 When the router recommends the highest Claude tier, read that as "opus — or fable only with explicit per-task user authorization." If the parent session already runs the recommended tier, stay in the session. Do not route Claude models through Cursor to satisfy a tier choice: Cursor catalogs list Claude ids as first-class models, but that path spends the Cursor pool for a model the Claude subscription already covers, loses native harness behavior and continuation, and gains no Cursor-specialist ability.
 
-A Claude agent that writes files is an unmanaged writer, invisible to the managed `WRITER_ACTIVE` guard — never run one alongside a managed write job in the same cwd; give parallel Claude write work worktree isolation or coordinate it manually.
+A Claude agent that writes files is an unmanaged writer and is not contained by
+the managed `WRITER_ACTIVE` guard. Live collision hooks can report its
+Edit/Write overlap after the write, but that is not isolation. Never run one
+alongside a managed write job in the same cwd; give parallel Claude write work
+worktree isolation or coordinate it manually.
 
 The plugin's Agent/legacy Task hooks add a `claude-agent` visibility stub keyed
 by the hook `tool_use_id`; they do not supervise, authorize, or control the

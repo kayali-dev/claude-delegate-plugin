@@ -2,6 +2,33 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.37.0 — 2026-07-27
+
+- Added P2.5 live collision detection for managed write attempts. SessionStart
+  returns a dynamic `watchPaths` set containing a private refresh signal plus
+  the running attempt's `allowedPaths` roots and already-observed changed
+  files. `FileChanged`, fail-open `PostToolUse(Edit|Write)`, and
+  `PostToolBatch` hooks record a deduplicated `collision.detected` edge when
+  another writer touches an owned path. A private refresh signal re-arms the
+  dynamic set when an attempt starts or reports another changed file.
+- Collision edges use the existing monitor policy and therefore inherit
+  session/workspace/all scope, per-attempt cooldown, per-attempt/path
+  deduplication, snooze priority, and the global rate ceiling. Attempt-owned
+  file fingerprints suppress watcher self-alerts; a first watcher event with
+  no provider attribution is left to the coordinator hooks and post-hoc checks
+  instead of guessing that the attempt was an external writer. A collided path
+  records `baseDrift`, sets applicable verification evidence to
+  `state: "stale"` with `inputChanged: true`, and blocks undecided acceptance
+  on `base-drift`.
+- The dynamic watch set is capped at 256 absolute paths, including its private
+  refresh signal. The first 255 deterministic owned roots are armed; attempts
+  with omitted roots record `collisionWatch.status: "degraded"` and
+  `reason: "watch-path-cap-exceeded"`. Watcher/refresh failure records its
+  reason and falls back to coordinator Edit/Write observation plus the
+  existing post-hoc completion checks.
+- This is early detection only. It does not prevent, contain, or isolate a
+  collision; transactional workspace containment remains P6 work.
+
 ## 0.36.1 — 2026-07-27
 
 - Fixed P2.4 session correlation by replacing the short-lived

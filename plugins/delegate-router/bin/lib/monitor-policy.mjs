@@ -161,6 +161,15 @@ export function detectActionableEdges(snapshot, options = {}) {
   const configuredStall = Number(options.stallMs ?? DEFAULT_MONITOR_STALL_MS);
   const stallMs = Number.isFinite(configuredStall) && configuredStall >= 0 ? configuredStall : DEFAULT_MONITOR_STALL_MS;
   const edges = [];
+  for (const collision of Array.isArray(job.collisions) ? job.collisions : []) {
+    const collisionPath = typeof collision?.path === 'string' ? collision.path : '';
+    const collisionLabel = field(collisionPath, '', 180);
+    if (!collisionLabel) continue;
+    edges.push(candidate(job, `collision:${collisionPath}`, 'collision', 1, {
+      path: collisionLabel,
+      verificationStale: collision?.verificationStale === true
+    }));
+  }
   const violations = scopeViolationCount(job);
   if (violations > 0) edges.push(candidate(job, 'policy-breach:scope', 'policy-breach', 1, { breach: 'scope', count: violations }));
   if (budgetExceeded(job, events)) edges.push(candidate(job, 'policy-breach:budget', 'policy-breach', 1, { breach: 'budget' }));
@@ -221,6 +230,9 @@ function errorCodeLabel(job) {
 export function formatEdgeLine(edge) {
   const id = edge.jobId || safeJobId(edge.job);
   const prefix = `delegate[${monitorProjectLabel(edge.job)}]:`;
+  if (edge.category === 'collision') {
+    return `${prefix} ${id} collision detected (${field(edge.path, 'owned path', 180)}; base-drift recorded${edge.verificationStale ? ', checks stale' : ''})`;
+  }
   if (edge.category === 'policy-breach') {
     const detail = edge.breach === 'scope'
       ? `scope violation, ${edge.count} path${edge.count === 1 ? '' : 's'}`
@@ -252,6 +264,7 @@ export function formatStartupSummary(edges) {
   const counts = new Map();
   for (const edge of edges) counts.set(edge.category, (counts.get(edge.category) || 0) + 1);
   const labels = [
+    ['collision', 'collision'],
     ['policy-breach', 'policy breach'],
     ['needs-input', 'input'],
     ['blocked', 'blocked'],

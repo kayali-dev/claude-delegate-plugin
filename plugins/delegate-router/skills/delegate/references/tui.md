@@ -221,7 +221,8 @@ While the TUI is running, terminal transitions, new stalls, recorded scope viola
 
 Separately, interactive Claude Code sessions can receive the experimental
 plugin push bridge without opening the TUI. `delegate-monitor` emits only
-redacted actionable transitions (breach, input, acceptance-blocked, review-ready, failure, stall)
+redacted actionable transitions (live collision detected, breach, input,
+acceptance-blocked, review-ready, failure, stall)
 and observes the same existing store without mutating jobs. Push defaults to
 the launching Claude session via a private SessionStart correlation marker.
 Set `DELEGATE_MONITOR_SCOPE=workspace` to widen to the current
@@ -233,6 +234,16 @@ push only—Fleet and every detail/control view remain complete.
 edges. Deduplication, cooldown, and a global rate ceiling are the nagware
 boundary. Unsupported/non-interactive hosts continue to use `delegate_inspect`,
 this TUI, and `finishedPath` exactly as before.
+
+Live collision edges come from separate fail-open hooks: SessionStart arms the
+attempt's owned paths, FileChanged observes watched touches, and
+PostToolUse(Edit|Write)/PostToolBatch cover successful coordinator edits. A
+collision follows the same session/workspace/all scope as other push edges and
+marks applicable verification stale. The dynamic set is capped at 256 paths
+including its private refresh signal; cap overflow or watcher failure is
+recorded as degraded and retains coordinator-hook plus post-hoc detection.
+This is early detection only. It does not prevent or isolate the write; P6
+transactional workspaces are the containment boundary.
 
 ## Limitations
 

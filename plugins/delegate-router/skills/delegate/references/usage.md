@@ -52,6 +52,16 @@ scope state, not prompts, results, diffs, credentials, or usage. Markers expire
 after 72 hours and are pruned earlier when the recorded coordinator identity is
 gone. The monitor never waits for or spawns a correlation responder.
 
+SessionStart also returns a live collision `watchPaths` set for active scoped
+write attempts. It is capped at 256 absolute paths including a private
+state-directory refresh signal, leaving up to 255 deterministic owned roots.
+Paths beyond the cap and known watcher failures record
+`collisionWatch.status: "degraded"` with a reason and
+`fallback: "post-hoc-detection"`; they are never silently omitted. The
+Edit/Write and batch hooks remain active, and none of these hooks can block a
+tool or filesystem change. Collision alerts follow the same ambient monitor
+scope as every other edge.
+
 `unattributed-burn` is deliberately aggregate-only. Between consecutive snapshots of the same named Codex allowance window, an increase in `usedPercent` is marked only when no managed or shadow Codex audit usage and no overlapping active tracked Codex job can account for the interval. The amount is allowance percentage-point movement, labelled approximate; token counts and allowance percentages are never converted into one another. The marker never names, links, or enumerates a thread because the movement may be the owner's personal use. It is best-effort and capture-cadence limited: work that starts and finishes between snapshots, reset-boundary changes, mixed window identities, history pruning, or missing provider pushes can hide a window, and a running tracked job suppresses rather than guesses.
 
 Stats attribute Codex resume-chain output as chronological deltas because each continuation can carry a thread-cumulative total. This includes `codex-reply` shadow children linked to the originating direct call; standalone jobs and Cursor samples remain unchanged, and a lower Codex counter is treated as a fresh thread and counted in full.

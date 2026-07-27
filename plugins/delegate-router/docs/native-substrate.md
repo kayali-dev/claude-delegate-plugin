@@ -5,6 +5,17 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P2.5 live collision detection is implemented additively. SessionStart arms a
+  bounded dynamic watch set for live write attempts and a private refresh
+  signal; FileChanged plus coordinator Edit/Write and batch hooks record one
+  collision edge per attempt/path. The ordinary P2a monitor supplies scope,
+  priority, deduplication, cooldown, snooze behavior, and rate limiting.
+  Applicable verification becomes `stale` with `inputChanged`, while
+  `baseDrift` blocks undecided acceptance. The 256-path cap includes the
+  refresh signal; omitted roots and watcher failures record an explicit
+  degraded reason and retain coordinator-hook plus post-hoc detection.
+- P2.5 is early detection, not containment. It does not prevent or isolate
+  writes; P6 transactional workspaces remain the containment boundary.
 - P2.4 notification identity is implemented additively. New launch origins add
   the coordinator `sessionId` and realpath-normalized `workspaceId`, with exact
   inheritance across every continuation. Session push is the stricter default;
@@ -208,6 +219,43 @@ evidence covering that path stale.
 Containment stays post-hoc until P6 gives writers isolated workspaces; this is
 early *detection*, and must not be described as enforcement. Alerts obey the
 P2a nagware policy (edge-triggered, deduplicated per path+item).
+
+Implemented behavior:
+
+- SessionStart returns absolute `watchPaths` for a private state-directory
+  refresh signal plus live scoped attempts' `allowedPaths` roots and
+  already-observed changed files. Starting an attempt or observing another
+  attempt-owned file touches the private signal, causing FileChanged to refresh
+  the dynamic set without polling.
+- The set is deterministic and capped at 256 paths including the signal, so at
+  most 255 owned roots are armed at once. Roots past the cap are not silently
+  dropped: affected attempts record `collision.watch.degraded` and
+  `collisionWatch.reason: "watch-path-cap-exceeded"`. Edit/Write hooks and the
+  existing post-hoc completion inventory remain active for every root.
+- FileChanged is asynchronous and never blocks a file change.
+  PostToolUse(Edit|Write) and PostToolBatch observe successful coordinator
+  writes and always exit zero. Malformed payloads and watcher failures also
+  exit zero; a known watch failure records its reason and degrades to the
+  coordinator hooks plus the prior post-hoc checks.
+- Provider file-change observations retain only bounded path/metadata
+  fingerprints, never file contents. A matching attempt fingerprint suppresses
+  watcher self-alerts. A watcher event with no prior provider attribution does
+  not guess: Claude-session writes still flow through the Edit/Write hooks and
+  the existing post-hoc checks remain the fallback. Once an attempt fingerprint
+  exists, a later different touch records one `collision.detected` event per
+  attempt/path.
+- The P2a monitor detects that additive record as a priority collision edge.
+  Its existing session/workspace/all filtering determines which session sees
+  the alert, and its existing dedupe, cooldown, snooze priority, and rate
+  ceiling determine when it emits.
+- Verification evidence covering the collided repository path changes to
+  `state: "stale"` with `inputChanged: true` and
+  `staleReason: "base-drift"`. The path is also added to `baseDriftPaths`, so
+  undecided acceptance cannot rely on evidence from before the touch.
+
+Honesty boundary: this phase detects a collision earlier. It does not prevent,
+contain, roll back, or isolate the write. Those properties require P6
+transactional workspaces.
 
 ### P3 — Acceptance by default
 Write dispatch requires scope, acceptance criteria, a real verify recipe (or a

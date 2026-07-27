@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import { buildCollisionWatchPlan, ensureCollisionWatchSignal } from './lib/collision.mjs';
 import { writeSessionCorrelationMarker } from './lib/monitor-correlation.mjs';
 import { dataDir } from './lib/state.mjs';
 
@@ -51,6 +52,38 @@ try {
     workspaceId: projectDir
   });
   if (!marker.ok) warn(marker.reason);
+  const plan = buildCollisionWatchPlan({
+    env: process.env,
+    sessionId: payloadSessionId,
+    workspaceId: projectDir,
+    projectDir
+  });
+  try {
+    ensureCollisionWatchSignal();
+  } catch {
+    const { recordCollisionWatchDegradation } = await import('./lib/control.mjs');
+    recordCollisionWatchDegradation(plan.jobIds, {
+      reason: 'watch-refresh-signal-unavailable',
+      cap: plan.cap,
+      totalPathCount: plan.totalPathCount,
+      watchedPathCount: plan.watchedPathCount
+    });
+  }
+  if (plan.degraded) {
+    const { recordCollisionWatchDegradation } = await import('./lib/control.mjs');
+    recordCollisionWatchDegradation(plan.omittedJobIds, {
+      reason: plan.reason,
+      cap: plan.cap,
+      totalPathCount: plan.totalPathCount,
+      watchedPathCount: plan.watchedPathCount
+    });
+  }
+  process.stdout.write(`${JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'SessionStart',
+      watchPaths: plan.watchPaths
+    }
+  })}\n`);
 } catch (error) {
   warn(error?.code || error?.message || error?.name);
 }

@@ -36,6 +36,10 @@ export const DIRECT_TRANSPORTS = Object.freeze(new Set(['direct-mcp', 'direct-cl
 export const READ_ONLY_TRANSPORTS = Object.freeze(new Set([...DIRECT_TRANSPORTS, 'claude-agent']));
 const INGEST_MAX_FILES = 20;
 const INGEST_MAX_BYTES = 10 * 1024 * 1024;
+const COLLISION_RECORD_CAP = 256;
+const COLLISION_OWN_WRITE_CAP = 512;
+const COLLISION_SELF_WRITE_WINDOW_MS = 2000;
+const COLLISION_EVENTS = new Set(['change', 'add', 'unlink', 'PostToolUse', 'PostToolBatch']);
 const SENSITIVE_PATH = /(?:^|\/)(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]*(?:secret|credential|private.?key|token)[^/]*|[^/]+\.(?:pem|key|p12|pfx|crt|cer))$/i;
 const PACKET_SECTION_ORDER = [
   'Objective',
@@ -109,6 +113,18 @@ function writePrivate(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, value, { mode: 0o600 });
   try { fs.chmodSync(file, 0o600); } catch {}
+}
+
+function signalCollisionWatchRefresh() {
+  const file = path.join(dataDir(), 'collision-watch.signal');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, `${Date.now()}\n`, { mode: 0o600 });
+    try { fs.chmodSync(file, 0o600); } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function canonicalOriginDirectory(value, fallback = process.cwd()) {
@@ -424,6 +440,54 @@ export function normalizeFileChangedEvent(event, cwd = '', options = {}) {
   };
 }
 
+function fileChangePaths(data) {
+  const changes = Array.isArray(data?.changes) ? data.changes : [data];
+  const paths = [];
+  for (const change of changes) {
+    for (const candidate of [change?.path, change?.oldPath, change?.newPath]) {
+      if (typeof candidate !== 'string' || !candidate || path.isAbsolute(candidate)) continue;
+      const normalized = candidate.replaceAll('\\', '/').replace(/^\.\//, '');
+      if (!normalized || normalized === '.' || normalized.split('/').includes('..')) continue;
+      paths.push(normalized);
+    }
+  }
+  return [...new Set(paths)];
+}
+
+export function fileMetadataFingerprint(cwd, file) {
+  const absolute = path.resolve(cwd, file);
+  const relative = path.relative(path.resolve(cwd), absolute);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  try {
+    const stat = fs.lstatSync(absolute);
+    return {
+      state: stat.isSymbolicLink() ? 'symlink' : stat.isFile() ? 'file' : stat.isDirectory() ? 'directory' : 'other',
+      size: stat.size,
+      mode: stat.mode,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs
+    };
+  } catch (error) {
+    return error.code === 'ENOENT' ? { state: 'absent' } : null;
+  }
+}
+
+function rememberCollisionOwnWrites(job, data, at) {
+  const paths = fileChangePaths(data);
+  if (!paths.length) return;
+  const prior = new Map((job.collisionOwnWrites || []).map((entry) => [entry?.path, entry]));
+  for (const file of paths) {
+    prior.delete(file);
+    prior.set(file, {
+      path: file,
+      observedAtMs: at,
+      phase: typeof data?.phase === 'string' ? data.phase : null,
+      fingerprint: fileMetadataFingerprint(job.cwd, file)
+    });
+  }
+  job.collisionOwnWrites = [...prior.values()].slice(-COLLISION_OWN_WRITE_CAP);
+}
+
 function readRawEvents(id) {
   try {
     return fs.readFileSync(eventPath(id), 'utf8').split('\n').filter(Boolean).flatMap((line) => {
@@ -575,10 +639,12 @@ function appendUnlocked(job, type, data = {}, options = {}) {
       sha256: crypto.createHash('sha256').update(diff).digest('hex')
     };
   }
+  const at = Date.now();
+  if (type === 'file.changed') rememberCollisionOwnWrites(job, normalizedData, at);
   const event = {
     v: EVENT_VERSION,
     seq,
-    at: Date.now(),
+    at,
     jobId: job.id,
     provider: job.provider,
     sessionId: options.sessionId ?? job.providerSessionId ?? job.session ?? null,
@@ -597,7 +663,7 @@ function appendUnlocked(job, type, data = {}, options = {}) {
 }
 
 export function appendJobEvent(id, type, data = {}, options = {}) {
-  return withLock(id, () => {
+  const event = withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
     const event = appendUnlocked(job, type, data, options);
@@ -605,6 +671,10 @@ export function appendJobEvent(id, type, data = {}, options = {}) {
     saveJob(job);
     return event;
   });
+  if (type === 'file.changed' && !signalCollisionWatchRefresh()) {
+    recordCollisionWatchDegradation([id], { reason: 'watch-refresh-signal-unavailable' });
+  }
+  return event;
 }
 
 export function updateManagedJob(id, mutate, options = {}) {
@@ -1589,6 +1659,204 @@ export function pathMatchesScope(file, entries) {
   });
 }
 
+function collisionRelativePath(job, absolute) {
+  if (!job?.cwd || typeof absolute !== 'string' || !path.isAbsolute(absolute)) return null;
+  const relative = path.relative(path.resolve(job.cwd), path.resolve(absolute)).replaceAll('\\', '/');
+  if (!relative || relative === '.' || relative.startsWith('../') || path.isAbsolute(relative)) return null;
+  return relative;
+}
+
+function collisionOwnedPaths(job) {
+  return new Set([
+    ...(Array.isArray(job.collisionOwnWrites) ? job.collisionOwnWrites.map((entry) => entry?.path) : []),
+    ...(Array.isArray(job.changedFiles?.files) ? job.changedFiles.files : []),
+    ...(Array.isArray(job.changedFiles?.entries) ? job.changedFiles.entries.map((entry) => entry?.path) : [])
+  ].filter((entry) => typeof entry === 'string' && entry));
+}
+
+function jobOwnsCollisionPath(job, relative) {
+  return pathMatchesScope(relative, job.allowedPaths)
+    || collisionOwnedPaths(job).has(relative);
+}
+
+function sameFingerprint(left, right) {
+  return Boolean(left && right && JSON.stringify(left) === JSON.stringify(right));
+}
+
+function watcherCollisionDisposition(job, relative, observedAtMs) {
+  const own = [...(job.collisionOwnWrites || [])].reverse().find((entry) => entry?.path === relative);
+  if (!own) return 'unattributed';
+  const current = fileMetadataFingerprint(job.cwd, relative);
+  if (sameFingerprint(own.fingerprint, current)) return 'self';
+  const recentAttemptWrite = Number.isFinite(own.observedAtMs)
+    && observedAtMs - own.observedAtMs >= 0
+    && observedAtMs - own.observedAtMs <= COLLISION_SELF_WRITE_WINDOW_MS;
+  return recentAttemptWrite ? 'self' : 'collision';
+}
+
+function pathInsideDirectory(absolute, directory) {
+  if (typeof directory !== 'string' || !directory) return false;
+  const relative = path.relative(path.resolve(directory), path.resolve(absolute));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function verificationCoversCollision(job, relative) {
+  const verification = job.verification;
+  if (!verification || ['pending', 'no-recipe', 'skipped', 'exception'].includes(verification.state)) return false;
+  const absolute = path.resolve(job.cwd, relative);
+  const roots = [
+    verification.input?.repoRoot,
+    verification.completedInput?.repoRoot,
+    job.verificationProfile?.repoRoot,
+    job.cwd
+  ].filter((entry) => typeof entry === 'string' && entry);
+  return roots.some((root) => pathInsideDirectory(absolute, root));
+}
+
+function staleVerificationForCollision(job, relative, observedAtMs) {
+  if (!verificationCoversCollision(job, relative)) return false;
+  const verification = job.verification;
+  const priorState = verification.state === 'stale'
+    ? verification.stateBeforeStale || verification.priorState || null
+    : verification.state || null;
+  job.verification = {
+    ...verification,
+    state: 'stale',
+    stateBeforeStale: priorState,
+    inputChanged: true,
+    staleReason: 'base-drift',
+    stalePaths: [...new Set([...(verification.stalePaths || []), relative])].slice(-COLLISION_RECORD_CAP),
+    staleAtMs: observedAtMs
+  };
+  return true;
+}
+
+function invalidateAcceptanceForCollision(job, relative) {
+  if (!job.acceptance || ['accepted', 'rejected', 'superseded'].includes(job.acceptance.state)) return;
+  const evidence = job.acceptance.evidence || {};
+  job.acceptance = {
+    ...job.acceptance,
+    state: 'blocked',
+    blockedBy: [...new Set([...(job.acceptance.blockedBy || []), 'base-drift'])],
+    evidence: {
+      ...evidence,
+      verification: job.verification || evidence.verification || null,
+      base: {
+        ...(evidence.base || {}),
+        drifted: true,
+        driftPaths: [...new Set([...(evidence.base?.driftPaths || []), relative])].slice(-COLLISION_RECORD_CAP)
+      }
+    }
+  };
+}
+
+function recordCollisionForJob(id, absolute, options) {
+  return withLock(id, () => {
+    const job = loadJob(id);
+    if (!job || !['queued', 'running'].includes(job.status) || !WRITE_MODES.has(job.mode)) return { matched: false };
+    const relative = collisionRelativePath(job, absolute);
+    if (!relative || !jobOwnsCollisionPath(job, relative)) return { matched: false };
+    if (options.source === 'file-watcher') {
+      const disposition = watcherCollisionDisposition(job, relative, options.observedAtMs);
+      if (disposition !== 'collision') {
+        return {
+          matched: true,
+          selfWrite: disposition === 'self',
+          unattributed: disposition === 'unattributed',
+          jobId: id,
+          path: relative
+        };
+      }
+    }
+    if ((job.collisions || []).some((entry) => entry?.path === relative)) {
+      return { matched: true, duplicate: true, jobId: id, path: relative };
+    }
+    const verificationStale = staleVerificationForCollision(job, relative, options.observedAtMs);
+    job.baseDrift = true;
+    job.baseDriftPaths = [...new Set([...(job.baseDriftPaths || []), relative])].slice(-COLLISION_RECORD_CAP);
+    const collision = {
+      path: relative,
+      detectedAtMs: options.observedAtMs,
+      source: options.source,
+      event: options.event || null,
+      sessionId: coordinatorSessionIdentity(options.sessionId),
+      inputChanged: true,
+      verificationStale
+    };
+    job.collisions = [...(job.collisions || []), collision].slice(-COLLISION_RECORD_CAP);
+    invalidateAcceptanceForCollision(job, relative);
+    appendUnlocked(job, 'collision.detected', {
+      path: relative,
+      source: collision.source,
+      event: collision.event,
+      inputChanged: true,
+      verificationStale
+    });
+    saveJob(job);
+    return { matched: true, collision: true, jobId: id, path: relative, verificationStale };
+  });
+}
+
+export function recordPathCollisions(absolutePaths, options = {}) {
+  const requestedObservedAtMs = Number(options.observedAtMs ?? Date.now());
+  const observedAtMs = Number.isFinite(requestedObservedAtMs) ? requestedObservedAtMs : Date.now();
+  const source = options.source === 'coordinator-tool' ? 'coordinator-tool' : 'file-watcher';
+  const event = COLLISION_EVENTS.has(String(options.event || '')) ? String(options.event) : null;
+  const jobs = listJobs().filter((job) => ['queued', 'running'].includes(job.status) && WRITE_MODES.has(job.mode));
+  const results = [];
+  for (const absolute of [...new Set(absolutePaths || [])]) {
+    if (typeof absolute !== 'string' || !path.isAbsolute(absolute)) continue;
+    for (const job of jobs) {
+      const relative = collisionRelativePath(job, absolute);
+      if (!relative || !jobOwnsCollisionPath(job, relative)) continue;
+      results.push(recordCollisionForJob(job.id, absolute, {
+        observedAtMs,
+        source,
+        event,
+        sessionId: options.sessionId
+      }));
+    }
+  }
+  return {
+    collisions: results.filter((entry) => entry.collision).length,
+    duplicates: results.filter((entry) => entry.duplicate).length,
+    selfWrites: results.filter((entry) => entry.selfWrite).length,
+    unattributed: results.filter((entry) => entry.unattributed).length,
+    matched: results.filter((entry) => entry.matched).length,
+    results
+  };
+}
+
+export function recordCollisionWatchDegradation(jobIds, details = {}) {
+  const reason = String(details.reason || 'watcher-unavailable')
+    .replace(/[^A-Za-z0-9_.:-]/g, '-').slice(0, 80) || 'watcher-unavailable';
+  const results = [];
+  for (const id of [...new Set(jobIds || [])]) {
+    if (!SAFE_JOB_ID.test(id)) continue;
+    results.push(withLock(id, () => {
+      const job = loadJob(id);
+      if (!job || !['queued', 'running'].includes(job.status) || !WRITE_MODES.has(job.mode)) return false;
+      const next = {
+        status: 'degraded',
+        reason,
+        fallback: 'post-hoc-detection',
+        cap: Number.isSafeInteger(details.cap) ? details.cap : undefined,
+        totalPathCount: Number.isSafeInteger(details.totalPathCount) ? details.totalPathCount : undefined,
+        watchedPathCount: Number.isSafeInteger(details.watchedPathCount) ? details.watchedPathCount : undefined,
+        recordedAtMs: Number(details.recordedAtMs ?? Date.now())
+      };
+      const signature = JSON.stringify({ ...next, recordedAtMs: undefined });
+      const prior = JSON.stringify({ ...(job.collisionWatch || {}), recordedAtMs: undefined });
+      if (signature === prior) return false;
+      job.collisionWatch = next;
+      appendUnlocked(job, 'collision.watch.degraded', next);
+      saveJob(job);
+      return true;
+    }));
+  }
+  return results.filter(Boolean).length;
+}
+
 export function validatedAllowedPaths(value) {
   if (value == null) return null;
   if (!Array.isArray(value) || !value.length || !value.every((item) => typeof item === 'string' && item.trim())) {
@@ -2114,6 +2382,9 @@ export function createManagedJob(options) {
     appendJobEvent(id, 'baseline.dirty', { count: baseline.files.length, paths: baseline.files.slice(0, 20) });
   }
   appendJobEvent(id, 'message.user', { text: options.prompt });
+  if (!signalCollisionWatchRefresh()) {
+    recordCollisionWatchDegradation([id], { reason: 'watch-refresh-signal-unavailable' });
+  }
   return inspectJob(id);
 }
 

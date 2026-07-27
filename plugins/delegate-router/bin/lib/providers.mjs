@@ -883,8 +883,9 @@ function terminal(job, status, phase, extra = {}) {
         .some((moved) => moved === candidate || moved.startsWith(`${candidate}/`) || candidate.startsWith(`${moved}/`)));
       current.revisionMoved = Boolean(current.baseRevision && current.completedRevision
         && current.baseRevision !== current.completedRevision);
-      current.baseDriftPaths = overlap;
-      current.baseDrift = overlap.length > 0;
+      const collisionPaths = (current.collisions || []).map((collision) => collision?.path).filter(Boolean);
+      current.baseDriftPaths = [...new Set([...overlap, ...collisionPaths])].slice(-256);
+      current.baseDrift = current.baseDriftPaths.length > 0;
       current.acceptance = buildAcceptance(current);
     }
   });
@@ -1339,7 +1340,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.36.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.37.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2153,7 +2154,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.36.1' }
+      clientInfo: { name: 'delegate-router', version: '0.37.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -2751,6 +2752,7 @@ async function executeVerification(job) {
     if (exitCode !== 0) break;
   }
   const after = captureVerificationInput(job.cwd);
+  const completedAtMs = Date.now();
   const inputChanged = before.digest !== after.digest;
   const state = timedOut ? 'timeout'
     : exitCode !== 0 ? 'failed'
@@ -2761,7 +2763,9 @@ async function executeVerification(job) {
     state,
     exitCode,
     timedOut,
-    durationMs: Date.now() - started,
+    startedAtMs: started,
+    completedAtMs,
+    durationMs: completedAtMs - started,
     outputTail: redact(output.slice(-2000), '', 2000),
     input: before,
     completedInput: after,
@@ -2772,8 +2776,23 @@ async function executeVerification(job) {
 
 async function finishVerification(job) {
   const verification = await executeVerification(job);
-  updateManagedJob(job.id, (current) => { current.verification = verification; }, { incrementRevision: false });
-  appendJobEvent(job.id, 'verification.finished', verification);
+  updateManagedJob(job.id, (current) => {
+    current.verification = verification;
+    const collidedDuringVerification = (current.collisions || [])
+      .some((collision) => Number(collision?.detectedAtMs || 0) >= Number(verification.startedAtMs || 0));
+    if (collidedDuringVerification) {
+      current.verification = {
+        ...current.verification,
+        state: 'stale',
+        stateBeforeStale: current.verification.state,
+        inputChanged: true,
+        staleReason: 'base-drift',
+        stalePaths: [...new Set((current.collisions || []).map((collision) => collision?.path).filter(Boolean))].slice(-256),
+        staleAtMs: Math.max(...(current.collisions || []).map((collision) => Number(collision?.detectedAtMs || 0)))
+      };
+    }
+  }, { incrementRevision: false });
+  appendJobEvent(job.id, 'verification.finished', loadJob(job.id)?.verification || verification);
   terminal(loadJob(job.id), 'completed', 'completed');
 }
 
