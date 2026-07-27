@@ -45,6 +45,10 @@ async function isolated(fn) {
   }
 }
 
+function brokerPackageVersion() {
+  return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+}
+
 test('managed jobs persist ordered redacted events and derived views', () => isolated((directory) => {
   const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review public code' });
   appendJobEvent(job.id, 'file.changed', { changes: [{ path: 'src/a.js', token: 'secret-value' }] });
@@ -663,9 +667,11 @@ test('terminal audit log is one-line-per-transition, redacted, private, and neve
   assert.equal(record.outcome.status, 'failed');
   assert.equal(record.recordType, 'terminal');
   assert.equal(record.outcomeLedgerSchemaVersion, 1);
-  assert.equal(record.brokerVersion, '0.42.0');
+  // Read the live version: pinning a literal turns every release into a failure
+  // (fourth occurrence of this class today — see v0.30.0 and v0.36.0).
+  assert.equal(record.brokerVersion, brokerPackageVersion());
   assert.equal(record.adapterId, 'app-server');
-  assert.equal(record.adapterVersion, '0.42.0');
+  assert.equal(record.adapterVersion, brokerPackageVersion());
   assert.equal(record.providerCliVersion, null);
   assert.equal(record.providerCliVersionSource, 'pending');
   assert.equal(record.policyVersion, 1);
