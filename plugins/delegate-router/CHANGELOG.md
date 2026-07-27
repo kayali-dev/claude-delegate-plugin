@@ -2,6 +2,19 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.32.0 — 2026-07-27
+
+- Re-authored the TUI palette as 41 perceptual OKLCH tokens with tinted
+  neutrals, constant-lightness dark/light surface ramps, contrast-solved text,
+  border, and semantic tiers, truecolor output, and mechanically derived
+  256-colour indices.
+- Added dark/light daltonized and colour-inheriting ANSI presets, validated
+  custom theme overrides, and self-verifying contrast plus headless render
+  coverage for every preset and `NO_COLOR`.
+- Reserved the accent for focus, live state, active tabs, and selection.
+  Default transcript content, tool events, and diff file headers now use body
+  or semantic colour without changing layout, content, glyphs, or keys.
+
 ## 0.31.0 — 2026-07-27
 
 - **Stricter default, with recorded escape hatches:** write-mode jobs now derive

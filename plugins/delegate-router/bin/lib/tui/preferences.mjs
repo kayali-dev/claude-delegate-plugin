@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from '../state.mjs';
+import { normalizeThemeSelection } from './palette.mjs';
 
 export const DEFAULT_TUI_PREFERENCES = Object.freeze({
   theme: 'dark',
@@ -25,7 +26,7 @@ function validated(value = {}) {
     if (Object.keys(widths).length) widthProbeCache[String(identity).slice(0, 320)] = { widths, measuredAt: Number(entry.measuredAt) || 0 };
   }
   return {
-    theme: value.theme === 'light' ? 'light' : 'dark',
+    theme: normalizeThemeSelection(value.theme),
     notifications: value.notifications !== false,
     timestampMode: value.timestampMode === 'relative' ? 'relative' : 'absolute',
     fleetDensity: value.fleetDensity === 'compact' ? 'compact' : 'wide',
@@ -39,7 +40,7 @@ export function loadTuiPreferences(options = {}) {
   try { stored = JSON.parse(fs.readFileSync(tuiPreferencesPath(options), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') stored = {}; }
   const preferences = validated({ ...DEFAULT_TUI_PREFERENCES, ...stored });
-  if (env.DELEGATE_TUI_THEME) preferences.theme = String(env.DELEGATE_TUI_THEME).toLowerCase() === 'light' ? 'light' : 'dark';
+  if (env.DELEGATE_TUI_THEME) preferences.theme = normalizeThemeSelection(String(env.DELEGATE_TUI_THEME));
   if (Object.hasOwn(env, 'DELEGATE_TUI_NOTIFY')) preferences.notifications = String(env.DELEGATE_TUI_NOTIFY) !== '0';
   if (env.DELEGATE_TUI_TIMESTAMP_MODE) preferences.timestampMode = String(env.DELEGATE_TUI_TIMESTAMP_MODE).toLowerCase() === 'relative' ? 'relative' : 'absolute';
   if (env.DELEGATE_TUI_DENSITY) preferences.fleetDensity = String(env.DELEGATE_TUI_DENSITY).toLowerCase() === 'compact' ? 'compact' : 'wide';

@@ -11,7 +11,7 @@ import { paintFrame, renderFrameToString, scrollbarGeometry, virtualLogLayout, W
 import { CHROME_GLYPHS } from '../bin/lib/tui/glyphs.mjs';
 import { uiPalette } from '../bin/lib/tui/palette.mjs';
 import { loadTuiPreferences, saveTuiPreferences, tuiPreferencesPath } from '../bin/lib/tui/preferences.mjs';
-import { diffLineStyle } from '../bin/lib/tui/viewmodels.mjs';
+import { diffLineStyle, lineStyleForEvent, transcriptLineStyle } from '../bin/lib/tui/viewmodels.mjs';
 
 function mulberry32(seed) {
   return () => {
@@ -35,6 +35,30 @@ test('TUI preferences persist privately and environment values remain authoritat
     directory,
     env: { DELEGATE_TUI_THEME: 'dark', DELEGATE_TUI_NOTIFY: '1', DELEGATE_TUI_TIMESTAMP_MODE: 'absolute', DELEGATE_TUI_DENSITY: 'wide' }
   }), { theme: 'dark', notifications: true, timestampMode: 'absolute', fleetDensity: 'wide', widthProbeCache });
+});
+
+test('TUI preferences accept all six presets and sanitized custom base overrides', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-theme-prefs-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const theme of ['dark', 'light', 'dark-daltonized', 'light-daltonized', 'dark-ansi', 'light-ansi']) {
+    saveTuiPreferences({ theme }, { directory });
+    assert.equal(loadTuiPreferences({ directory, env: {} }).theme, theme);
+  }
+  saveTuiPreferences({
+    theme: {
+      base: 'light-daltonized',
+      overrides: {
+        accent: [0.62, 0.08, 200],
+        typo: [0.5, 0.1, 10],
+        text: [4, 9, 10]
+      }
+    }
+  }, { directory });
+  assert.deepEqual(loadTuiPreferences({ directory, env: {} }).theme, {
+    base: 'light-daltonized',
+    overrides: { accent: [0.62, 0.08, 200] }
+  });
+  assert.equal(loadTuiPreferences({ directory, env: { DELEGATE_TUI_THEME: 'dark-ansi' } }).theme, 'dark-ansi');
 });
 
 test('width-probe cache saves merge concurrent session snapshots by newest measurement', (t) => {
@@ -172,5 +196,19 @@ test('diff line semantics color additions, deletions, and hunk headers through t
   assert.equal(diffLineStyle('+added'), uiPalette.positive);
   assert.equal(diffLineStyle('-removed'), uiPalette.negative);
   assert.equal(diffLineStyle('@@ -1 +1 @@'), uiPalette.hunk);
+  assert.equal(diffLineStyle('diff --git a/a b/a'), uiPalette.diffHeader);
+  assert.notEqual(diffLineStyle('diff --git a/a b/a'), uiPalette.accent);
   assert.equal(diffLineStyle(' context'), uiPalette.body);
+});
+
+test('accent is reserved for live focus rather than default transcript, tool, or diff content', () => {
+  assert.equal(transcriptLineStyle({}, { lineKind: 'unknown-provider-fragment' }), uiPalette.body);
+  assert.equal(lineStyleForEvent({ type: 'tool.started' }), uiPalette.eventTagTool);
+  assert.equal(lineStyleForEvent({ type: 'tool.completed' }), uiPalette.positive);
+  assert.equal(lineStyleForEvent({ type: 'tool.failed' }), uiPalette.failed);
+  for (const style of [
+    transcriptLineStyle({}, { lineKind: 'unknown-provider-fragment' }),
+    lineStyleForEvent({ type: 'tool.started' }),
+    diffLineStyle('diff --git a/a b/a')
+  ]) assert.notEqual(style, uiPalette.accent);
 });

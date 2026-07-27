@@ -161,7 +161,22 @@ Revision conflicts and all other typed broker errors stay in the status line; th
 
 ## Themes and notifications
 
-The default palette targets dark terminals. Set `DELEGATE_TUI_THEME=light` before launch for the light-terminal palette. `NO_COLOR` still removes color from either theme while retaining structural bold/dim styling; all component colors come from the selected semantic palette.
+The default perceptual palette targets dark terminals. Set
+`DELEGATE_TUI_THEME` to `dark`, `light`, `dark-daltonized`,
+`light-daltonized`, `dark-ansi`, or `light-ansi` before launch. The existing
+`dark` and `light` values remain compatible. Daltonized presets replace
+red/green semantic pairs with blue/yellow; the `-ansi` presets emit no
+foreground or background colour and inherit the terminal theme. `NO_COLOR`
+also removes colour from any preset while retaining structural bold, dim, and
+underline styling. Truecolor terminals receive the authored OKLCH-derived
+sRGB values; other coloured terminals receive mechanically derived 256-colour
+indices.
+
+The persisted `theme` preference also accepts a custom object with a preset
+`base` and OKLCH `overrides`, for example
+`{"base":"dark","overrides":{"accent":[0.68,0.09,195]}}`. Overrides are keyed
+by semantic token name. Unknown tokens and invalid OKLCH values are ignored, so
+a typo cannot break rendering.
 
 While the TUI is running, terminal transitions, new stalls, recorded scope violations, and budget stops can send a desktop notification through `osascript` on macOS or `notify-send` on Linux. Dispatch is non-blocking, missing platform commands are ignored, and each job is limited to one notification per five seconds. Notification text contains only the job id, status, provider, and event kind—never prompt, transcript, result, path, or diff content. Press `b` to toggle the session; `DELEGATE_TUI_NOTIFY=0` disables notifications entirely.
 

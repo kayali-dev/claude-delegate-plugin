@@ -1319,7 +1319,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.31.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.32.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2133,7 +2133,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.31.0' }
+      clientInfo: { name: 'delegate-router', version: '0.32.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -2642,11 +2642,19 @@ async function executeVerificationCommand(job, entry, deadline, append, reposito
   catch (error) { return { exitCode: 127, error: error.message, timedOut: false }; }
   return new Promise((resolve) => {
     let child;
+    // A repository's own check command legitimately writes under its root:
+    // temp fixtures, chmod, coverage output, build caches, unix sockets. Denying
+    // those writes made verification report failure for a passing suite (real
+    // case: EPERM chmod in this plugin's own tests). The honest guarantee is
+    // DETECTION — the before/after tree digest below reports mutation as
+    // `inputChanged` — not prevention. Sandboxing stays available for a recipe
+    // the caller does not trust, but it is never the default.
+    const sandboxRequested = job.verify?.sandboxWrites === true;
     let writeProtection = 'change-detection';
     try {
       const escapedRoot = repositoryRoot.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
       const sandboxProfile = `(version 1)(allow default)(deny file-write* (subpath "${escapedRoot}"))`;
-      const sandboxProbe = process.platform === 'darwin' && fs.existsSync('/usr/bin/sandbox-exec')
+      const sandboxProbe = sandboxRequested && process.platform === 'darwin' && fs.existsSync('/usr/bin/sandbox-exec')
         ? spawnSync('/usr/bin/sandbox-exec', ['-p', '(version 1)(allow default)', '/usr/bin/true'], {
           encoding: 'utf8',
           timeout: 2000,
@@ -2654,7 +2662,8 @@ async function executeVerificationCommand(job, entry, deadline, append, reposito
         })
         : null;
       const executable = sandboxProbe?.status === 0 ? '/usr/bin/sandbox-exec' : '/bin/sh';
-      writeProtection = sandboxProbe?.status === 0 ? 'sandbox-exec' : 'change-detection';
+      writeProtection = sandboxProbe?.status === 0 ? 'sandbox-exec'
+        : sandboxRequested ? 'sandbox-unavailable' : 'change-detection';
       const args = sandboxProbe?.status === 0
         ? ['-p', sandboxProfile, '/bin/sh', '-e', '-c', entry.command]
         : ['-e', '-c', entry.command];

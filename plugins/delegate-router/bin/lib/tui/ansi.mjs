@@ -59,6 +59,28 @@ export function rgbTo256(red, green, blue) {
   return 16 + (36 * cube(r)) + (6 * cube(g)) + cube(b);
 }
 
+export function xterm256ToRgb(index) {
+  const value = Math.max(0, Math.min(255, Math.round(Number(index) || 0)));
+  const system = [
+    [0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
+    [0, 0, 128], [128, 0, 128], [0, 128, 128], [192, 192, 192],
+    [128, 128, 128], [255, 0, 0], [0, 255, 0], [255, 255, 0],
+    [0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255]
+  ];
+  if (value < 16) return [...system[value]];
+  if (value >= 232) {
+    const level = 8 + ((value - 232) * 10);
+    return [level, level, level];
+  }
+  const offset = value - 16;
+  const levels = [0, 95, 135, 175, 215, 255];
+  return [
+    levels[Math.floor(offset / 36)],
+    levels[Math.floor((offset % 36) / 6)],
+    levels[offset % 6]
+  ];
+}
+
 function colorCode(layer, value, mode) {
   if (value == null || value === 'default') return layer === 'fg' ? '39' : '49';
   if (value && typeof value === 'object' && Number.isInteger(value.index)) {

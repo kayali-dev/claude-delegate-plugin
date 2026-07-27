@@ -235,5 +235,5 @@ test('light theme changes semantic palette values without component-specific ove
   assert.deepEqual(palette.bar, { fg: lightBarFg, bg: lightBarBg });
   assert.deepEqual(palette.selection, { bg: lightSelectionBg });
   assert.deepEqual(palette.searchMatch, { bg: lightSearchMatchBg });
-  assert.deepEqual(palette.body, {});
+  assert.deepEqual(palette.body, { fg: palette.tokens.text });
 });

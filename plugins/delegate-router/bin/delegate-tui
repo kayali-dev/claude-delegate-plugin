@@ -74,6 +74,7 @@ Options:
 The TUI requires an interactive macOS or Linux terminal. It honors
 DELEGATE_STATE_FILE and the ordinary delegate-router provider configuration.
 DELEGATE_CONNECT_TOKEN supplies the client token when --token-file is omitted.
+DELEGATE_TUI_THEME=dark|light|dark-daltonized|light-daltonized|dark-ansi|light-ansi selects the palette.
 DELEGATE_TUI_WIDTH_PROBE=off|verbose controls terminal width probing.
 DELEGATE_TUI_ASCII=1 forces the conservative ASCII glyph tier.
 DELEGATE_TUI_DIAG=<path> records replayable terminal bytes and intended frames.`;

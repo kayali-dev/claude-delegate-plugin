@@ -318,7 +318,7 @@ function commonOverlay(frame, ui, store = null) {
 function errorStatus(ui) {
   if (!ui.status) return null;
   return {
-    segments: [{ text: formatDisplayValue(ui.status), style: ui.statusKind === 'error' ? palette.failed : palette.accent }],
+    segments: [{ text: formatDisplayValue(ui.status), style: ui.statusKind === 'error' ? palette.failed : palette.info }],
     style: palette.bar
   };
 }
@@ -497,7 +497,7 @@ function dashboardFeed(store, now) {
     let style = status === 'failed' ? palette.failed : status === 'cancelled' ? palette.dim : palette.positive;
     if (Number(record.scopeViolationsCount || 0)) { label = `scope violation (${record.scopeViolationsCount})`; style = palette.failed; }
     else if (record.outcome?.errorCode === 'BUDGET_EXCEEDED' || record.outcome?.stoppedReason === 'budget') { label = 'budget stopped'; style = palette.badgeWarn; }
-    else if (Number(record.nudgeCount || 0)) { label = `nudged x${Number(record.nudgeCount)}`; style = palette.accent; }
+    else if (Number(record.nudgeCount || 0)) { label = `nudged x${Number(record.nudgeCount)}`; style = palette.info; }
     rows.push({ jobId: record.jobId, at: Number(record.at || 0), label, style, provider: record.provider || '-' });
   }
   const seenEvents = new Set();
@@ -507,7 +507,7 @@ function dashboardFeed(store, now) {
       const key = `${event.jobId}:${event.seq}:${event.type}`;
       if (seenEvents.has(key)) continue;
       seenEvents.add(key);
-      rows.push({ jobId: event.jobId, at: Number(event.at || 0), label: formatDisplayValue(event.type).replaceAll('.', ' '), style: /violation|budget/.test(event.type) ? palette.badgeWarn : palette.accent, provider: '' });
+      rows.push({ jobId: event.jobId, at: Number(event.at || 0), label: formatDisplayValue(event.type).replaceAll('.', ' '), style: /violation|budget/.test(event.type) ? palette.badgeWarn : palette.metadata, provider: '' });
     }
   }
   return rows.filter((row) => row.jobId).sort((left, right) => right.at - left.at).slice(0, 15).map((row) => ({
@@ -768,10 +768,14 @@ function eventText(event) {
   return `${formatDisplayValue(event.seq).padStart(5)} ${displayOr(event.type, 'event')}${rendered ? `  ${rendered}` : ''}`;
 }
 
-function lineStyleForEvent(event) {
+export function lineStyleForEvent(event) {
   if (event.type === 'error' || event.type === 'scope.violation') return palette.failed;
   if (event.type?.startsWith('message.')) return palette.body;
-  if (event.type?.startsWith('tool.')) return palette.accent;
+  if (event.type?.startsWith('tool.')) {
+    if (/(?:failed|error|denied)$/.test(event.type)) return palette.failed;
+    if (/(?:completed|succeeded)$/.test(event.type)) return palette.positive;
+    return palette.eventTagTool;
+  }
   if (event.type === 'usage.updated') return palette.positive;
   return palette.dim;
 }
@@ -779,7 +783,7 @@ function lineStyleForEvent(event) {
 export function diffLineStyle(value) {
   const line = formatDisplayValue(value);
   if (line.startsWith('@@')) return palette.hunk;
-  if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git') || line.startsWith('index ')) return palette.accent;
+  if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git') || line.startsWith('index ')) return palette.diffHeader;
   if (line.startsWith('+')) return palette.positive;
   if (line.startsWith('-')) return palette.negative;
   return palette.body;
@@ -810,11 +814,11 @@ function transcriptProjector(jobId) {
   return transcriptProjectors.get(jobId);
 }
 
-function transcriptLineStyle(block, fragment) {
+export function transcriptLineStyle(block, fragment) {
   const kind = fragment?.lineKind || '';
   if (kind === 'body' || kind === 'gap') return palette.body;
   if (kind === 'file-change') return palette.body;
-  if (kind === 'message-header') return block.role === 'user' ? palette.header : palette.accent;
+  if (kind === 'message-header') return block.role === 'user' ? palette.header : palette.metadata;
   if (kind === 'tool-failed' || kind === 'notice-error' || kind === 'plan-failed') return palette.failed;
   if (kind === 'tool-running' || kind === 'notice-warning') return palette.badgeWarn;
   if (kind === 'compaction-active') return palette.accent;
@@ -823,7 +827,7 @@ function transcriptLineStyle(block, fragment) {
   if (kind === 'plan-active') return palette.planActive;
   if (kind === 'plan-pending') return palette.planPending;
   if (kind === 'meta' || kind === 'notice') return palette.dim;
-  return palette.accent;
+  return palette.body;
 }
 
 function derivedResumable(job) {
