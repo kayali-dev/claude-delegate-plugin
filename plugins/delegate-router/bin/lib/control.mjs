@@ -15,6 +15,7 @@ import { supervisorBrokerVersion } from './supervisor-common.mjs';
 import { acceptanceEvidenceDigest, buildAcceptance } from './acceptance.mjs';
 import {
   deriveVerificationProfile,
+  verificationRepositoryRoot,
   verificationRepositoryRevision
 } from './verification-profile.mjs';
 import {
@@ -26,6 +27,14 @@ import {
   planPrompt
 } from './planning.mjs';
 import { createWorkSpec } from './work-model.mjs';
+import {
+  allocateWorkspace,
+  composeWorkspaceChangeSets,
+  createWorkspaceChangeSet,
+  discardWorkspace,
+  inspectWorkspaceRepository,
+  preflightWorkspaceChangeSets
+} from './workspace.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -221,6 +230,10 @@ export function terminalAuditRecord(job, options = {}) {
     network: job.network === true,
     approval: job.approval || 'auto',
     cwd: job.cwd || null,
+    ownerCwd: job.ownerCwd || null,
+    isolation: job.isolation || 'shared',
+    containment: job.containment || (job.isolation === 'worktree' ? 'broker-workspace' : 'detection-only'),
+    changeSetId: job.changeSet?.id || null,
     changedFilesCount: job.changedFiles?.count || 0,
     scopeViolationsCount: job.scopeViolations?.length || 0,
     outcome: {
@@ -519,6 +532,9 @@ function resumabilityFor(job) {
   if (!TERMINAL_STATUSES.has(job.status)) {
     return { ok: false, reason: `job is ${job.status}; only terminal jobs can be resumed`, code: 'PARENT_ACTIVE' };
   }
+  if (job.isolation === 'worktree') {
+    return { ok: false, reason: 'workspace-isolated attempts are immutable single-attempt change sets in this phase; start a fresh workspace attempt', code: 'RESUME_UNSUPPORTED' };
+  }
   if (!job.providerSessionId && !job.session) {
     return { ok: false, reason: 'the job has no provider continuation id', code: 'SESSION_UNAVAILABLE' };
   }
@@ -708,7 +724,7 @@ export function updateManagedJob(id, mutate, options = {}) {
 }
 
 export function finalizeSupervisorAttempt(id, outcome = {}) {
-  return withLock(id, () => {
+  const finalized = withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
     const wasTerminal = TERMINAL_STATUSES.has(job.status);
@@ -763,6 +779,10 @@ export function finalizeSupervisorAttempt(id, outcome = {}) {
     }
     return job;
   });
+  if (finalized?.isolation === 'worktree' && TERMINAL_STATUSES.has(finalized.status)) {
+    discardTerminalWorkspaceBestEffort(id);
+  }
+  return loadJob(id) || finalized;
 }
 
 export function completeShadowJob(id, outcome = {}) {
@@ -1018,7 +1038,7 @@ export function reconcileJob(id) {
   if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
   if (job.transport === 'claude-agent' || job.managedBy === 'delegate-agent-hook') return reconcileAgentStub(id, job);
   if (!isOrphaned(job)) return job;
-  return withLock(id, () => {
+  const reconciled = withLock(id, () => {
     const current = loadJob(id);
     if (!current || !isOrphaned(current)) return current;
     current.status = 'failed';
@@ -1035,6 +1055,8 @@ export function reconcileJob(id) {
     writeTerminalArtifacts(current, false);
     return current;
   });
+  if (reconciled?.isolation === 'worktree') discardTerminalWorkspaceBestEffort(id);
+  return loadJob(id) || reconciled;
 }
 
 function activityFields(job) {
@@ -1078,6 +1100,171 @@ export function inspectJob(id) {
   };
 }
 
+function workspaceChangedFiles(changeSet) {
+  const entries = (changeSet?.files || []).map((file) => ({
+    path: file.path,
+    status: file.status,
+    baseOid: file.baseOid,
+    resultOid: file.resultOid
+  }));
+  return {
+    count: entries.length,
+    files: entries.map((entry) => entry.path).slice(0, 50),
+    entries: entries.slice(0, 1000)
+  };
+}
+
+export function captureManagedWorkspace(id, options = {}) {
+  assertJobId(id);
+  return withLock(id, () => {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    if (job.isolation !== 'worktree' || job.workspace?.ownedBy !== 'delegate-router') {
+      throw brokerError('INVALID_REQUEST', 'job does not own an isolated broker workspace', { provider: job.provider });
+    }
+    let capture = null;
+    if (options.capture !== false && job.workspace.state !== 'discarded') {
+      capture = createWorkspaceChangeSet(job, paths(id).artifacts);
+      job.changeSet = redact(capture.changeSet);
+      job.changedFiles = workspaceChangedFiles(job.changeSet);
+      job.finalHashes = Object.fromEntries(
+        job.changeSet.files.filter((file) => file.resultOid).map((file) => [file.path, file.resultOid])
+      );
+      job.workspace = {
+        ...job.workspace,
+        state: 'captured',
+        capturedAt: new Date().toISOString()
+      };
+      appendUnlocked(job, 'changeset.created', {
+        id: job.changeSet.id,
+        base: job.changeSet.base,
+        files: job.changeSet.files,
+        patch: job.changeSet.patch,
+        containment: job.changeSet.containment
+      });
+      if (capture.patch) {
+        appendUnlocked(job, 'diff.updated', {
+          diff: capture.patch,
+          immutableBase: job.changeSet.base.revision,
+          containment: 'broker-workspace'
+        });
+      }
+    }
+    let discarded = null;
+    if (options.discard === true && job.workspace.state !== 'discarded') {
+      discarded = discardWorkspace(job.workspace);
+      job.workspace = {
+        ...job.workspace,
+        state: 'discarded',
+        discardedAt: discarded.discardedAt,
+        discard: redact(discarded)
+      };
+      if (job.changeSet) job.changeSet.workspaceDiscarded = true;
+      appendUnlocked(job, 'workspace.discarded', {
+        path: discarded.path,
+        removed: discarded.removed,
+        gitRemoved: discarded.gitRemoved,
+        ...(discarded.warning ? { warning: discarded.warning } : {})
+      });
+    }
+    job.updatedAt = Math.floor(Date.now() / 1000);
+    saveJob(job);
+    return {
+      id: job.id,
+      workspace: job.workspace,
+      changeSet: job.changeSet || null,
+      changedFiles: job.changedFiles || null,
+      discarded
+    };
+  });
+}
+
+function discardTerminalWorkspaceBestEffort(id) {
+  try {
+    captureManagedWorkspace(id, { discard: true });
+    return;
+  } catch (error) {
+    try {
+      updateManagedJob(id, (job) => {
+        job.changeSetError = redact(error.message);
+        job.workspace = { ...job.workspace, captureError: redact(error.message) };
+      }, { incrementRevision: false });
+    } catch {}
+  }
+  try {
+    captureManagedWorkspace(id, { capture: false, discard: true });
+  } catch (error) {
+    try {
+      updateManagedJob(id, (job) => {
+        job.workspace = { ...job.workspace, discardError: redact(error.message) };
+      }, { incrementRevision: false });
+    } catch {}
+  }
+}
+
+export function discardManagedWorkspace(id) {
+  const job = inspectJob(id);
+  if (job.isolation !== 'worktree' || job.workspace?.ownedBy !== 'delegate-router') {
+    throw brokerError('INVALID_REQUEST', 'workspace discard is available only for broker-owned isolated attempts', { provider: job.provider });
+  }
+  if (!TERMINAL_STATUSES.has(job.status)) {
+    throw brokerError('INVALID_REQUEST', `job must be terminal before workspace discard; current status is ${job.status}`, { provider: job.provider });
+  }
+  if (job.workspace.state === 'discarded') {
+    return { id: job.id, workspace: job.workspace, changeSet: job.changeSet || null, discarded: job.workspace.discard || null };
+  }
+  return captureManagedWorkspace(id, { discard: true });
+}
+
+export function preflightManagedIntegration(ids) {
+  const unique = [...new Set(ids || [])];
+  if (!unique.length) throw brokerError('INVALID_REQUEST', 'at least one job id is required');
+  const jobs = unique.map((id) => {
+    const job = inspectJob(id);
+    if (!TERMINAL_STATUSES.has(job.status)) {
+      throw brokerError('INVALID_REQUEST', `job ${id} must be terminal before integration`, { provider: job.provider });
+    }
+    return job;
+  });
+  return preflightWorkspaceChangeSets(jobs);
+}
+
+export function prepareManagedIntegration(ids) {
+  const unique = [...new Set(ids || [])];
+  if (!unique.length) throw brokerError('INVALID_REQUEST', 'at least one job id is required');
+  const jobs = unique.map((id) => {
+    const job = inspectJob(id);
+    if (!TERMINAL_STATUSES.has(job.status)) {
+      throw brokerError('INVALID_REQUEST', `job ${id} must be terminal before integration`, { provider: job.provider });
+    }
+    return job;
+  });
+  const result = composeWorkspaceChangeSets(jobs);
+  if (!result.applied) return result;
+  for (const job of jobs) {
+    withLock(job.id, () => {
+      const current = loadJob(job.id);
+      current.integrations ||= [];
+      current.integrations.push({
+        id: result.integration.id,
+        state: result.integration.state,
+        path: result.integration.path,
+        patch: result.integration.patch,
+        ownerApplied: false
+      });
+      appendUnlocked(current, 'integration.prepared', {
+        id: result.integration.id,
+        jobIds: result.integration.jobIds,
+        files: result.integration.files,
+        patch: result.integration.patch,
+        ownerApplied: false
+      });
+      saveJob(current);
+    });
+  }
+  return result;
+}
+
 export function decideAcceptance(id, decision, options = {}) {
   assertJobId(id);
   if (!['accepted', 'rejected'].includes(decision)) {
@@ -1094,6 +1281,37 @@ export function decideAcceptance(id, decision, options = {}) {
     if (decision === 'accepted' && current.state !== 'ready-for-review') {
       throw brokerError('ACCEPTANCE_BLOCKED', `job is ${current.state}; resolve ${current.blockedBy?.join(', ') || 'the recorded blockers'} before accepting`, {
         provider: job.provider
+      });
+    }
+    if (decision === 'accepted' && job.isolation === 'worktree') {
+      const cas = preflightWorkspaceChangeSets([job]);
+      if (!cas.ok) {
+        throw brokerError('CAS_CONFLICT', `owner content moved since the immutable base: ${cas.conflicts.map((item) => item.path).filter(Boolean).join(', ') || 'unknown path'}`, {
+          provider: job.provider,
+          conflictingPaths: cas.conflicts.map((item) => item.path).filter(Boolean),
+          conflicts: cas.conflicts
+        });
+      }
+      throw brokerError('WORKSPACE_APPLY_DEFERRED', 'CAS preflight passed, but direct multi-file owner-tree apply is deliberately deferred; prepare an integration worktree instead', {
+        provider: job.provider,
+        retryable: false,
+        currentRevision: cas.currentRevision
+      });
+    }
+    if (decision === 'rejected' && job.isolation === 'worktree' && job.workspace?.state !== 'discarded') {
+      const discarded = discardWorkspace(job.workspace);
+      job.workspace = {
+        ...job.workspace,
+        state: 'discarded',
+        discardedAt: discarded.discardedAt,
+        discard: redact(discarded)
+      };
+      if (job.changeSet) job.changeSet.workspaceDiscarded = true;
+      appendUnlocked(job, 'workspace.discarded', {
+        path: discarded.path,
+        removed: discarded.removed,
+        gitRemoved: discarded.gitRemoved,
+        reason: 'rejected'
       });
     }
     const decidedBy = redact(String(options.decidedBy || 'owner'), '', 160);
@@ -1187,6 +1405,10 @@ export function listManagedJobs(options = {}) {
       phase: job.phase || null,
       revision: job.revision ?? null,
       cwd: job.cwd || null,
+      ownerCwd: job.ownerCwd || null,
+      isolation: job.isolation || 'shared',
+      containment: job.containment || (job.isolation === 'worktree' ? 'broker-workspace' : 'detection-only'),
+      workspaceState: job.workspace?.state || null,
       transport: job.transport || null,
       managed: job.managedBy === 'delegate-control' || job.managedBy === 'delegate-shadow' || job.managedBy === 'delegate-agent-hook' || isDirectTransport(job),
       readOnly: isReadOnlyTransport(job) ? true : undefined,
@@ -1347,7 +1569,11 @@ export function jobFiles(id) {
   // absolute, the git inventory is repo-relative); normalize to repo-relative
   // and dedupe so one file is one entry.
   let cwd = null;
-  try { cwd = loadJob(id)?.cwd || null; } catch {}
+  let storedJob = null;
+  try {
+    storedJob = loadJob(id);
+    cwd = storedJob?.cwd || null;
+  } catch {}
   const resolvedCwd = cwd ? path.resolve(cwd) : null;
   const normalize = (file) => {
     if (resolvedCwd && path.isAbsolute(file)) {
@@ -1366,6 +1592,16 @@ export function jobFiles(id) {
       const normalized = normalize(file);
       files.set(normalized, { ...files.get(normalized), ...change, path: normalized, lastSeq: event.seq });
     }
+  }
+  for (const change of storedJob?.changeSet?.files || []) {
+    if (!change?.path || files.has(change.path)) continue;
+    files.set(change.path, {
+      path: change.path,
+      status: change.status,
+      baseOid: change.baseOid,
+      resultOid: change.resultOid,
+      contained: true
+    });
   }
   return [...files.values()];
 }
@@ -1979,6 +2215,43 @@ export function validatedAllowedPaths(value) {
   return entries;
 }
 
+function validatedIsolation(value, mode) {
+  const isolation = value == null ? 'shared' : String(value);
+  if (!['shared', 'worktree'].includes(isolation)) {
+    throw brokerError('INVALID_REQUEST', "isolation must be 'shared' or 'worktree'");
+  }
+  if (isolation === 'worktree' && !WRITE_MODES.has(mode)) {
+    throw brokerError('INVALID_REQUEST', 'worktree isolation is available only for write modes (implement and verify)');
+  }
+  return isolation;
+}
+
+function validatedPathClaims(value) {
+  if (value == null) return null;
+  const claims = validatedAllowedPaths(value);
+  if (claims.some((claim) => claim.includes('*'))) {
+    throw brokerError('INVALID_REQUEST', 'pathClaims must be concrete repository-relative paths or prefixes; wildcards are not supported');
+  }
+  return [...new Set(claims)];
+}
+
+function validatedResourceClaims(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || !value.length || value.length > 64
+    || !value.every((item) => typeof item === 'string' && /^[A-Za-z0-9_.:/-]{1,128}$/.test(item.trim()))) {
+    throw brokerError('INVALID_REQUEST', 'resourceClaims must be 1-64 non-empty identifiers using letters, numbers, _, ., :, /, or -');
+  }
+  return [...new Set(value.map((item) => item.trim()))];
+}
+
+function claimContains(claim, candidate) {
+  return claim === '.' || claim === candidate || candidate.startsWith(`${claim}/`);
+}
+
+function claimsCoverScope(pathClaims, allowedPaths) {
+  return allowedPaths.every((allowed) => pathClaims.some((claim) => claimContains(claim, allowed)));
+}
+
 // 'off' disables provider sandboxing for the job (Codex danger-full-access,
 // Cursor --sandbox disabled) so the worker can use git, host CLIs, and live
 // web tools. It is a deliberate, per-job caller decision — never a default.
@@ -2265,6 +2538,7 @@ function resolveManagedJobOptions(options, id) {
   const groupId = validatedGroupId(options.groupId);
   const retryPolicy = validatedRetryPolicy(options.retryPolicy);
   const mode = options.mode || 'consult';
+  const isolation = validatedIsolation(options.isolation, mode);
   const planFirst = options.planFirst === true && WRITE_MODES.has(mode);
   const ambiguityCheck = planFirst && ambiguityDefault(options);
   if (options.autoNudge === true && !READ_MODES.has(mode)) throw brokerError('INVALID_REQUEST', 'autoNudge is available only for read modes');
@@ -2274,6 +2548,7 @@ function resolveManagedJobOptions(options, id) {
   const workSpec = options.workSpec == null ? null : createWorkSpec(options.workSpec);
   const { verify, verification, verificationProfile } = resolvedVerification(options.verify, mode, cwd);
   const autoFix = validatedAutoFix(options.autoFix, mode);
+  const sandbox = validatedSandbox(options.sandbox);
   if (provider === 'cursor' && options.transport === 'headless' && options.startPaused === true) {
     throw brokerError('INVALID_REQUEST', 'startPaused requires Cursor ACP; headless cannot establish a session before its first prompt', { provider });
   }
@@ -2296,6 +2571,38 @@ function resolveManagedJobOptions(options, id) {
   const allowedPaths = validatedAllowedPaths(originalAllowedPaths == null
     ? null
     : [...originalAllowedPaths, ...(ingestPlan.stagingDir ? [ingestPlan.stagingDir] : [])]);
+  const pathClaims = validatedPathClaims(options.pathClaims);
+  const resourceClaims = validatedResourceClaims(options.resourceClaims);
+  let workspacePlan = null;
+  if (isolation === 'worktree') {
+    if (!originalAllowedPaths?.length) {
+      throw brokerError('INVALID_REQUEST', 'worktree isolation requires explicit allowedPaths');
+    }
+    if (!pathClaims?.length) {
+      throw brokerError('INVALID_REQUEST', 'worktree isolation requires explicit pathClaims for scheduling');
+    }
+    if (!claimsCoverScope(pathClaims, originalAllowedPaths)) {
+      throw brokerError('INVALID_REQUEST', 'pathClaims must cover every allowedPaths entry; claims schedule while allowedPaths fences writes');
+    }
+    if (options.overrideWriter === true) {
+      throw brokerError('INVALID_REQUEST', 'overrideWriter is incompatible with path-claimed workspace scheduling');
+    }
+    if (sandbox === 'off') {
+      throw brokerError('INVALID_REQUEST', 'worktree containment requires sandbox=auto; sandbox=off can write outside the broker workspace');
+    }
+    if (addDirs.length || ingestFiles.length) {
+      throw brokerError('INVALID_REQUEST', 'worktree containment refuses addDirs and ingestFiles because they authorize writes outside the broker workspace');
+    }
+    if (cursorWorktree || cursorWorktreeBase) {
+      throw brokerError('INVALID_REQUEST', 'broker worktree isolation cannot be combined with Cursor native worktree flags');
+    }
+    if (autoFix) {
+      throw brokerError('INVALID_REQUEST', 'automatic continuation rounds are not yet supported for workspace-isolated attempts');
+    }
+    workspacePlan = inspectWorkspaceRepository(cwd, id);
+  } else if (pathClaims != null || resourceClaims.length) {
+    throw brokerError('INVALID_REQUEST', 'pathClaims and resourceClaims require isolation=worktree in this phase');
+  }
   return {
     options,
     id,
@@ -2307,6 +2614,7 @@ function resolveManagedJobOptions(options, id) {
     groupId,
     retryPolicy,
     mode,
+    isolation,
     planFirst,
     ambiguityCheck,
     verify,
@@ -2319,9 +2627,12 @@ function resolveManagedJobOptions(options, id) {
     transport,
     originalAllowedPaths,
     allowedPaths,
+    pathClaims,
+    resourceClaims,
+    workspacePlan,
     ingestPlan,
     effort: validatedEffort(options.effort || null),
-    sandbox: validatedSandbox(options.sandbox),
+    sandbox,
     networkAllow,
     addDirs,
     approveMcps,
@@ -2339,6 +2650,8 @@ export function previewManagedJob(options) {
   const packetJob = {
     allowSensitive: prepared.allowSensitive === true,
     allowedPaths: resolved.allowedPaths,
+    isolation: resolved.isolation,
+    workspace: resolved.workspacePlan,
     stagingDir: resolved.ingestPlan.stagingDir,
     reportSchema: resolved.reportSchema
   };
@@ -2356,6 +2669,8 @@ export function previewManagedJob(options) {
     cwd: resolved.cwd,
     originalAllowedPaths: resolved.originalAllowedPaths,
     allowedPaths: resolved.allowedPaths,
+    pathClaims: resolved.pathClaims,
+    resourceClaims: resolved.resourceClaims,
     sandbox: resolved.sandbox || 'auto',
     network: prepared.network === true,
     networkAllow: resolved.networkAllow,
@@ -2373,7 +2688,8 @@ export function previewManagedJob(options) {
     verificationProfile: resolved.verificationProfile,
     autoFix: resolved.autoFix,
     startPaused: prepared.startPaused === true,
-    isolation: prepared.isolation || 'shared',
+    isolation: resolved.isolation,
+    workspace: resolved.workspacePlan,
     autoNudge: prepared.autoNudge === true,
     allowSensitive: prepared.allowSensitive === true,
     reportSchema: resolved.reportSchema,
@@ -2399,7 +2715,7 @@ export function createManagedJob(options) {
   const resolved = resolveManagedJobOptions(options, id);
   const {
     sensitivePromptDetected, timeoutSeconds, maxOutputTokens, idempotencyKey, groupId, retryPolicy,
-    mode, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, workSpec, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
+    mode, isolation, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, workSpec, cwd: ownerCwd, transport, originalAllowedPaths, allowedPaths, pathClaims, resourceClaims, effort, sandbox,
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
@@ -2412,6 +2728,10 @@ export function createManagedJob(options) {
     launchedAtMs: options.originLaunchedAtMs
   });
   const p = paths(id);
+  let workspace = null;
+  try {
+  if (isolation === 'worktree') workspace = allocateWorkspace(ownerCwd, id);
+  const cwd = workspace?.cwd || ownerCwd;
   const staged = stageIngestFiles(cwd, resolved.ingestPlan);
   const baseline = gitBaseline(cwd);
   for (const item of staged.ingested) {
@@ -2465,6 +2785,8 @@ export function createManagedJob(options) {
     sandbox,
     originalAllowedPaths,
     allowedPaths,
+    pathClaims,
+    resourceClaims,
     allowSensitive: options.allowSensitive === true,
     profile: options.profile || null,
     packetWarnings: options.packetWarnings || [],
@@ -2482,6 +2804,8 @@ export function createManagedJob(options) {
     revision: 0,
     lastSeq: 0,
     cwd,
+    ownerCwd,
+    ...(workspace ? { workspace } : {}),
     origin,
     transport,
     managedBy: 'delegate-control',
@@ -2496,15 +2820,17 @@ export function createManagedJob(options) {
     planningFor: options.planningFor || null,
     createdAt: now,
     updatedAt: now,
-    isolation: options.isolation || 'shared',
-    attributionConfidence: options.isolation === 'worktree' ? 'high' : 'best-effort',
-    baseRevision: verificationRepositoryRevision(cwd),
+    isolation,
+    attributionConfidence: isolation === 'worktree' ? 'high' : 'best-effort',
+    containment: isolation === 'worktree' ? 'broker-workspace' : 'detection-only',
+    baseRevision: workspace?.baseRevision || verificationRepositoryRevision(cwd),
     baselineFiles: baseline.files,
     baselineHashes: baseline.hashes
   };
   saveJob(job);
   appendJobEvent(id, 'job.created', {
-    provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, groupId, startPaused: job.startPaused,
+    provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, containment: job.containment, groupId, startPaused: job.startPaused,
+    pathClaims: job.pathClaims, resourceClaims: job.resourceClaims,
     planFirst: job.planFirst, ambiguityCheck: job.ambiguityCheck,
     network: job.network, networkAllow: job.networkAllow, addDirs: job.addDirs, approveMcps: job.approveMcps,
     cursorWorktree: job.cursorWorktree, cursorWorktreeBase: job.cursorWorktreeBase,
@@ -2515,6 +2841,24 @@ export function createManagedJob(options) {
     autoFix: job.autoFix,
     ...(job.sandbox === 'off' ? { sandbox: 'off' } : {})
   });
+  if (workspace) {
+    appendJobEvent(id, 'workspace.allocated', {
+      kind: workspace.kind,
+      path: workspace.path,
+      baseRevision: workspace.baseRevision,
+      baseTree: workspace.baseTree,
+      ownerRoot: workspace.ownerRoot,
+      detachedBase: workspace.detachedBase,
+      containment: 'broker-workspace'
+    });
+    if (workspace.ownerDirtyPaths.length) {
+      appendJobEvent(id, 'workspace.owner-dirty', {
+        count: workspace.ownerDirtyPaths.length,
+        paths: workspace.ownerDirtyPaths.slice(0, 20),
+        policy: 'immutable-base-plus-cas'
+      });
+    }
+  }
   if (staged.ingested.length) appendJobEvent(id, 'files.ingested', { stagingDir: staged.stagingDir, files: staged.ingested });
   if (sensitivePromptDetected) {
     appendJobEvent(id, 'security.warning', {
@@ -2530,6 +2874,12 @@ export function createManagedJob(options) {
     recordCollisionWatchDegradation([id], { reason: 'watch-refresh-signal-unavailable' });
   }
   return inspectJob(id);
+  } catch (error) {
+    if (workspace?.state === 'allocated') {
+      try { discardWorkspace(workspace); } catch {}
+    }
+    throw error;
+  }
 }
 
 function ambiguityCandidate(parent) {
@@ -2842,13 +3192,42 @@ export function latestShadowJobForSession(provider, providerSessionId) {
 }
 
 function assertNoActiveWriter(options) {
-  if (!WRITE_MODES.has(options.mode) || options.isolation === 'worktree' || options.overrideWriter === true) return;
+  if (!WRITE_MODES.has(options.mode) || options.overrideWriter === true) return;
   const cwd = path.resolve(options.cwd || process.cwd());
+  const isolation = options.isolation || 'shared';
+  const ownerRoot = verificationRepositoryRoot(cwd);
+  const pathClaims = isolation === 'worktree' ? validatedPathClaims(options.pathClaims) : null;
+  const resourceClaims = isolation === 'worktree' ? validatedResourceClaims(options.resourceClaims) : [];
+  const overlapsPaths = (left, right) => left.some((leftClaim) => right.some((rightClaim) =>
+    claimContains(leftClaim, rightClaim) || claimContains(rightClaim, leftClaim)));
   for (const other of listJobs()) {
-    if (other.managedBy !== 'delegate-control' || !WRITE_MODES.has(other.mode) || other.isolation === 'worktree') continue;
-    if (path.resolve(other.cwd || '') !== cwd) continue;
+    if (other.managedBy !== 'delegate-control' || !WRITE_MODES.has(other.mode)) continue;
     const current = ['running', 'queued'].includes(other.status) ? reconcileJob(other.id) : other;
     if (TERMINAL_STATUSES.has(current.status)) continue;
+    const otherIsolation = current.isolation || 'shared';
+    const otherRoot = canonicalOriginDirectory(current.workspace?.ownerRoot || verificationRepositoryRoot(current.cwd || cwd));
+    if (isolation === 'worktree') {
+      if (otherIsolation !== 'worktree') {
+        if (otherRoot !== canonicalOriginDirectory(ownerRoot)) continue;
+        throw brokerError('WRITER_ACTIVE', `shared-tree job ${current.id} (${current.mode}) is already ${current.status} in ${otherRoot}; workspace claims cannot schedule around an uncontained writer`, {
+          provider: options.provider,
+          activeJobId: current.id
+        });
+      }
+      const resourceOverlap = resourceClaims.filter((claim) => (current.resourceClaims || []).includes(claim));
+      const pathOverlap = otherRoot === canonicalOriginDirectory(ownerRoot)
+        && overlapsPaths(pathClaims || [], current.pathClaims || []);
+      if (!pathOverlap && !resourceOverlap.length) continue;
+      throw brokerError('CLAIM_CONFLICT', `job ${current.id} already owns an overlapping workspace claim`, {
+        provider: options.provider,
+        activeJobId: current.id,
+        conflictingPathClaims: pathOverlap ? (current.pathClaims || []) : [],
+        conflictingResourceClaims: resourceOverlap
+      });
+    }
+    if (otherIsolation === 'worktree') {
+      if (otherRoot !== canonicalOriginDirectory(ownerRoot)) continue;
+    } else if (path.resolve(current.cwd || '') !== cwd) continue;
     throw brokerError('WRITER_ACTIVE', `job ${current.id} (${current.mode}) is already ${current.status} in ${cwd}; wait for it, cancel it, or pass overrideWriter=true`, {
       provider: options.provider,
       activeJobId: current.id
@@ -2884,7 +3263,8 @@ export function launchManagedJob(options) {
   const create = () => {
     if (launchOptions.idempotencyKey) {
       const cwd = path.resolve(launchOptions.cwd || process.cwd());
-      const existing = listJobs().find((job) => job.idempotencyKey === launchOptions.idempotencyKey && path.resolve(job.cwd || '') === cwd);
+      const existing = listJobs().find((job) => job.idempotencyKey === launchOptions.idempotencyKey
+        && path.resolve(job.ownerCwd || job.workspace?.ownerCwd || job.cwd || '') === cwd);
       if (existing) return { job: inspectJob(existing.id), replayed: true };
     }
     if (!providerEnabled(provider)) throw brokerError('PROVIDER_DISABLED', `${provider} is disabled for this installation`, { provider });
@@ -2910,7 +3290,7 @@ export function launchManagedJob(options) {
   // Idempotency lookup and writer admission share one per-cwd launch lock, so
   // concurrent retries cannot create or launch a second record.
   const needsLock = Boolean(launchOptions.idempotencyKey)
-    || (WRITE_MODES.has(launchOptions.mode) && launchOptions.isolation !== 'worktree');
+    || WRITE_MODES.has(launchOptions.mode);
   const launched = needsLock ? withFileLock(writerLockPath(launchOptions), create) : create();
   if (launched.replayed) return launched.job;
   const job = launched.job;
@@ -3281,6 +3661,9 @@ export function revertManagedJob(id, options = {}) {
     throw brokerError('DIRECT_TRANSPORT', 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', { provider: job.provider });
   }
   if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'revert is unavailable for legacy jobs', { provider: job.provider });
+  if (job.isolation === 'worktree') {
+    throw brokerError('INVALID_REQUEST', 'workspace-isolated attempts roll back only by discarding their broker workspace; legacy shared-tree revert policy is unchanged', { provider: job.provider });
+  }
   if (!TERMINAL_STATUSES.has(job.status)) throw brokerError('INVALID_REQUEST', `job must be terminal before revert; current status is ${job.status}`, { provider: job.provider });
   const eventInventory = new Map(jobFiles(id).map((entry) => [entry.path, entry]));
   const entries = Array.isArray(job.changedFiles?.entries) && job.changedFiles.entries.length

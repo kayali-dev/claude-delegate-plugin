@@ -78,7 +78,7 @@ packet continue unchanged.
 
 Use `profile` for a reusable packet skeleton, `groupId` for fan-out tracking, and `startPaused=true` plus `delegate_release` when the first prompt must wait behind an external gate. `ingestFiles` stages declared absolute out-of-tree inputs and copies changed content back only after completion; if the source changed meanwhile, the provider version lands at `<source>.delegate-new` and emits `ingest.diverged`. `autoNudge` is read-only and opt-in. `reportSchema` is best-effort: inspect `structuredMissing` and never treat worker JSON as stronger evidence than the mechanical diff and verification fields.
 
-Retries are opt-in: use `retryPolicy: { maxAttempts, retryOn: ['transport', 'rate-limit'] }` only for provider transport/startup failures, never to repeat task-level outcomes. Write modes derive a cached repository verification profile by default: nearest `CLAUDE.md`, then `AGENTS.md`, quality-section commands before `package.json` `check`/`checks`/`test`/`lint`/`typecheck` scripts. Explicit `verify: { command, timeoutSeconds }` always wins. When no reliable non-mutating check exists, use `verify: { exception: '<reason>' }`; `DELEGATE_VERIFY=off` is the broker-wide emergency escape hatch. Every exception is persisted and inspectable. Verification runs on the real checkout only after observed changes, never changes `status`, and records broker origin, state, exit, duration, stable-input evidence, and a redacted tail. Never accept a worker's self-reported sandbox green as the verification of record.
+Retries are opt-in: use `retryPolicy: { maxAttempts, retryOn: ['transport', 'rate-limit'] }` only for provider transport/startup failures, never to repeat task-level outcomes. Write modes derive a cached repository verification profile by default: nearest `CLAUDE.md`, then `AGENTS.md`, quality-section commands before `package.json` `check`/`checks`/`test`/`lint`/`typecheck` scripts. Explicit `verify: { command, timeoutSeconds }` always wins. When no reliable non-mutating check exists, use `verify: { exception: '<reason>' }`; `DELEGATE_VERIFY=off` is the broker-wide emergency escape hatch. Every exception is persisted and inspectable. Verification runs on the shared owner checkout for shared jobs and inside the broker worktree for isolated jobs, only after observed changes; it never changes `status` and records broker origin, state, exit, duration, stable-input evidence, and a redacted tail. Never accept a worker's self-reported sandbox green as the verification of record.
 
 `autoFix: { maxRounds }` is opt-in and off by default. The broker hard-caps it at three and may continue only for deterministic verification/scope evidence, unchanged scope and privileges, remaining budget, and measurable progress. It never loops on structured review findings or other judgment calls.
 
@@ -230,6 +230,29 @@ record a degradation reason while coordinator-hook and post-hoc detection
 continue. These alerts are early detection only. They do not prevent, contain,
 or isolate writes; use worktree isolation when containment is required.
 
+Workspace isolation is additive and explicit. For a contained write attempt,
+set `isolation: "worktree"`, keep `sandbox=auto`, provide `allowedPaths`, and
+provide concrete `pathClaims` that cover that fence; add exact
+`resourceClaims` only for non-file resources that must serialize. CLI uses
+`--isolation worktree --path-claims a,b [--resource-claims port:3000]`.
+Claims schedule; they do not fence writes. `allowedPaths` fences and reports
+scope, while the broker-owned detached worktree contains provider source
+writes. Shared-tree attempts remain detection-only.
+
+This first cut requires the Git repository root and refuses bare/non-Git
+repositories, submodules, unsafe state placement, sandbox-off, `addDirs`,
+`ingestFiles`, Cursor's separate native-worktree flags, and automatic
+continuation rounds. Detached owners, existing linked worktrees, and dirty
+owner trees are supported from immutable committed `HEAD`; target paths still
+must pass exact CAS. A terminal attempt produces a private portable change set
+and discards its workspace. Use `delegate_integrate` or
+`delegate-jobs integrate <job...>` to CAS-preflight and compose change sets in
+a broker-owned integration worktree. Composition never uses a three-way merge
+and stops on conflict. Direct multi-file owner-tree landing is deliberately
+deferred: `delegate_decide accepted` returns `CAS_CONFLICT` for moved targets
+or `WORKSPACE_APPLY_DEFERRED` after a clean preflight. Do not describe a
+prepared integration worktree as owner-applied or accepted.
+
 SessionStart and PostCompact also inject the same small session-owned work
 projection: active attempt IDs, policy/human/acceptance blockers,
 ready-for-review attempts, and resumable chain leaves. Use those IDs directly
@@ -245,7 +268,7 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
 - `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.
-- `completed` remains only the provider outcome and does not mean accepted. For write modes inspect additive `acceptance`: `ready-for-review` means broker evidence is clean enough for owner review, while `blocked` lists deterministic blockers. Verification failure leaves status `completed`. Only an owner/coordinator decision through `delegate-jobs accept|reject` or `delegate_decide` can record `accepted` or `rejected`; neither surface applies, commits, or reverts code.
+- `completed` remains only the provider outcome and does not mean accepted. For write modes inspect additive `acceptance`: `ready-for-review` means broker evidence is clean enough for owner review, while `blocked` lists deterministic blockers. Verification failure leaves status `completed`. Shared-tree owner/coordinator decisions through `delegate-jobs accept|reject` or `delegate_decide` keep their record-only behavior. Workspace rejection discards only broker storage; workspace acceptance is not recorded until owner landing exists and currently stops at strict CAS preflight as described above.
 - `lastActivityAt` comes from the journal tail. `stalled=true` means a running job has been quiet longer than `DELEGATE_STALL_SECONDS` (default 300); it is a diagnostic flag, never an automatic kill.
 - `delegate_stats` for read-only transport-tagged audit aggregates, terminal-status/output-token totals, proven tool-originated external Codex thread totals, and aggregate-only unattributed allowance movement, optionally bounded with `since` such as `24h` or `7d`.
 - `delegate_usage` for observed job usage, chain-cumulative token totals, and provider allowance as separate values.
@@ -274,7 +297,7 @@ Everything else belongs in the status line or remains available through pull.
 
 For long jobs, do not chain polling turns: run `delegate-jobs wait <job-id>` with the Bash tool's `run_in_background: true` and continue other work — the harness notifies on exit (0 completed, 3 failed, 4 cancelled, 5 no observed changes, 6 verification failed, 75 wait-timeout). Bound the whole job with `timeoutSeconds` on `delegate_start` (60–86400; default 3600, deliberately long because LLM jobs legitimately run long). `maxOutputTokens` stops through the provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and the continuation ID.
 
-Write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another write-mode job is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent writers. Worktree-isolated jobs are exempt. A live collision alert means a write already happened: inspect the named path and rerun stale verification before any acceptance decision. Terminal job records are pruned automatically after `DELEGATE_JOB_RETENTION_DAYS` (default 14).
+Shared write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another shared writer is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent shared writers. Workspace-isolated jobs instead require claims: overlapping path prefixes or exact resource IDs fail with `CLAIM_CONFLICT`, and a shared writer owns the whole repository for scheduling. A live shared-tree collision alert means a write already happened: inspect the named path and rerun stale verification before any acceptance decision. Terminal job records are pruned automatically after `DELEGATE_JOB_RETENTION_DAYS` (default 14).
 
 When steering, remember a correction that shrinks the task can complete before a follow-up command lands; do not plan a steer-then-cancel sequence around a shrinking task.
 

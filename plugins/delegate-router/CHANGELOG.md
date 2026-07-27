@@ -2,6 +2,41 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.42.0 — 2026-07-27
+
+- Added opt-in P6 broker workspaces. Managed write starts now accept additive
+  `isolation: "worktree"`, `pathClaims`, and `resourceClaims` controls (CLI:
+  `--isolation worktree --path-claims ... [--resource-claims ...]`). Shared
+  remains the default. Workspace launches require an explicit allowed-path
+  fence plus covering path claims, retain sandboxing, and refuse external write
+  grants or unsupported Git shapes before provider launch.
+- Isolated attempts run in a detached Git worktree at an immutable base,
+  capture a private portable full-index binary change set, and discard only
+  their validated broker-owned workspace on terminal completion, failure, or
+  cancellation. Dirty owner trees, detached owners, and owners that are
+  existing linked worktrees are supported; bare/non-Git repositories,
+  subdirectory roots, submodules, unsafe state placement, bounded-inspection
+  overflow, repository-local clean/smudge filters, and worktree creation
+  failure are explicit refusals. Broker Git commands disable hooks, fsmonitor
+  hooks, and global/system Git configuration.
+- Workspace writers schedule on overlapping concrete path claims and exact
+  resource claims. Claims schedule; the worktree/sandbox contains. Shared-tree
+  jobs retain the existing conservative whole-cwd writer guard, P2.5 remains
+  detection-only, and legacy `delegate-jobs revert` behavior is unchanged.
+- Added `delegate_integrate` / `delegate-jobs integrate` and
+  `delegate_workspace_discard` / `delegate-jobs workspace discard`.
+  Integration performs strict target content-and-mode CAS preflight and applies
+  portable change sets only inside a broker-owned integration worktree. It
+  stops on same-path or Git apply conflicts and never uses a three-way merge.
+- Direct multi-file application to the owner's working tree is deliberately
+  deferred because it cannot be made atomic against unmanaged editors with the
+  available filesystem/Git primitives. Workspace acceptance therefore returns
+  `CAS_CONFLICT` for moved targets or `WORKSPACE_APPLY_DEFERRED` after a clean
+  preflight; it never overwrites the owner tree. Workspace continuation,
+  submodules, subdirectory roots, external ingest/add-dir grants, sandbox-off,
+  and auto-fix rounds are also deferred. No global `WorktreeCreate` hook is
+  registered, so ordinary worktree creation is untouched.
+
 ## 0.41.0 — 2026-07-27
 
 - Added the P5 local intent-to-spec compiler. `delegate-jobs spec` and the TUI

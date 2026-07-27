@@ -10,6 +10,7 @@ import { readProjectedWorkItems } from './lib/work-read.mjs';
 import {
   capEventsBySize,
   decideAcceptance,
+  discardManagedWorkspace,
   diffStat,
   filterDiffPaths,
   groupSummary,
@@ -23,6 +24,8 @@ import {
   maybePruneJobs,
   redact,
   readJobEventPage,
+  prepareManagedIntegration,
+  preflightManagedIntegration,
   reviewRoundManagedJob,
   resumeManagedJob,
   sliceDiff,
@@ -34,7 +37,7 @@ import {
 const TOOLS = [
   {
     name: 'delegate_start',
-    description: 'Start a supervised Codex or Cursor job and return immediately with a job ID. Write modes (implement, verify) are refused while another MANAGED writer is active in the same cwd unless overrideWriter is set; the guard cannot see unmanaged editors (this session, other agents), so coordinate those separately.',
+    description: 'Start a supervised Codex or Cursor job and return immediately with a job ID. Shared write modes retain the whole-cwd writer guard. Opt-in broker worktrees require explicit path/resource scheduling claims and contain provider source writes outside the owner tree; unmanaged editors remain outside broker scheduling.',
     inputSchema: { type: 'object', required: ['provider', 'prompt'], properties: {
       provider: { enum: enabledProviders() }, model: { type: 'string' }, mode: { enum: ['consult', 'plan', 'review', 'implement', 'verify'] },
       cwd: { type: 'string' }, prompt: { type: 'string' }, approval: { enum: ['auto', 'force'] }, effort: { enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
@@ -44,6 +47,9 @@ const TOOLS = [
       approveMcps: { type: 'boolean', description: 'Cursor only. Forward --approve-mcps.' },
       cursorWorktree: { type: 'boolean', description: 'Cursor only. Launch with the native --worktree flag.' },
       cursorWorktreeBase: { type: 'string', description: 'Cursor only. Base ref or path forwarded as --worktree-base; requires cursorWorktree.' },
+      isolation: { enum: ['shared', 'worktree'], description: 'Opt-in broker isolation. worktree requires write mode, allowedPaths, pathClaims, sandbox auto, and a supported Git repository root.' },
+      pathClaims: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Concrete repository-relative paths/prefixes used only for scheduling workspace writers. Claims must cover allowedPaths.' },
+      resourceClaims: { type: 'array', maxItems: 64, uniqueItems: true, items: { type: 'string' }, description: 'Optional exact resource identifiers scheduled across workspace writers.' },
       idempotencyKey: { type: 'string', minLength: 1, maxLength: 128, description: 'Caller-stable key scoped to cwd. Replaying the same key returns the existing job without launching another worker.' },
       profile: { type: 'string', description: 'Named packet skeleton from ~/.delegate/profiles, with the bundled independent-review fallback.' },
       groupId: { type: 'string', minLength: 1, maxLength: 128 },
@@ -84,7 +90,9 @@ const TOOLS = [
   { name: 'delegate_review_round', description: 'Resume a terminal job with findings plus its recorded diff stat, changed files, and allowed scope.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string', minLength: 1 } } } },
   { name: 'delegate_usage', description: 'Return per-job observed usage, chain-cumulative token totals, and provider allowance headroom.', inputSchema: jobOnly() },
   { name: 'delegate_work', description: 'Return read-only WorkItem compatibility projections derived from existing job records. Accepts either a job id or projected work id; unfiltered reads default to the 20 most recent WorkItems.', inputSchema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 } } } },
-  { name: 'delegate_decide', description: 'Record an owner/coordinator acceptance decision against the current broker evidence. This never applies, commits, or reverts code.', inputSchema: { type: 'object', required: ['jobId', 'decision'], additionalProperties: false, properties: { jobId: { type: 'string' }, decision: { enum: ['accepted', 'rejected'] }, reason: { type: 'string', maxLength: 2000 } } } }
+  { name: 'delegate_decide', description: 'Record an owner/coordinator acceptance decision against current broker evidence. Shared-tree behavior is unchanged. Workspace rejection discards only broker storage; workspace acceptance performs strict CAS preflight and currently refuses direct owner-tree landing.', inputSchema: { type: 'object', required: ['jobId', 'decision'], additionalProperties: false, properties: { jobId: { type: 'string' }, decision: { enum: ['accepted', 'rejected'] }, reason: { type: 'string', maxLength: 2000 } } } },
+  { name: 'delegate_workspace_discard', description: 'Discard a terminal broker-owned workspace without touching the owner tree. Legacy shared-tree jobs remain on delegate-jobs revert.', inputSchema: jobOnly() },
+  { name: 'delegate_integrate', description: 'Strictly CAS-preflight one or more portable workspace change sets and compose them in a broker-owned integration worktree. Conflicts stop composition; this never writes the owner tree.', inputSchema: { type: 'object', required: ['jobIds'], additionalProperties: false, properties: { jobIds: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } }, preflight: { type: 'boolean' } } } }
 ];
 
 TOOLS.push(
@@ -315,6 +323,12 @@ async function dispatch(name, args) {
       ...(args.id == null && args.limit == null ? { limit: 20 } : {})
     });
   }
+  if (name === 'delegate_workspace_discard') return discardManagedWorkspace(args.jobId);
+  if (name === 'delegate_integrate') {
+    return args.preflight === true
+      ? preflightManagedIntegration(args.jobIds)
+      : prepareManagedIntegration(args.jobIds);
+  }
   if (name === 'delegate_decide') {
     return decideAcceptance(args.jobId, args.decision, {
       reason: args.reason,
@@ -345,7 +359,7 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.41.0' }
+        serverInfo: { name: 'delegate-control', version: '0.42.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

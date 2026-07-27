@@ -5,6 +5,20 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P6 transactional workspaces have shipped as a deliberately narrow,
+  additive first cut. An explicit `isolation: "worktree"` write launch now
+  requires separate `allowedPaths` and scheduling `pathClaims`, allocates a
+  detached broker-owned Git worktree at an immutable commit, captures a
+  private portable binary change set, and discards the attempt workspace on
+  every observed terminal path. Exact resource claims and overlapping path
+  claims schedule isolated writers; shared writers retain their conservative
+  whole-tree ownership. Strict content-and-mode CAS preflight and
+  conflict-stopping composition run only in broker-owned integration
+  worktrees. Direct multi-file landing into the owner's working tree is
+  intentionally deferred: ordinary filesystem writes cannot atomically
+  compare and replace several paths against unmanaged editors, so
+  `delegate_decide accepted` refuses after a clean preflight rather than
+  claiming a guarantee it cannot provide.
 - P5 intent-to-spec compilation is implemented additively. A deterministic,
   network-free compiler accepts sentences, changed-path inventories,
   failing-check output, TODOs, JSON task records, and repository conventions.
@@ -513,6 +527,49 @@ Broker-owned worktrees/overlays from an immutable base, path/resource claims for
 scheduling, change sets produced outside the owner's tree, integration worktree
 for composition, CAS apply at acceptance, rollback by discarding the workspace.
 Legacy shared-tree jobs keep today's conservative revert policy.
+
+Implementation progress (2026-07-27): the contained workspace/change-set half
+and integration boundary are complete. `delegate_start` /
+`delegate_start_trivial` accept the additive `isolation`, `pathClaims`, and
+`resourceClaims` fields; CLI uses `--isolation worktree --path-claims ...`
+and optional `--resource-claims ...`. The option is never inferred or
+defaulted. The broker refuses non-Git and bare repositories, subdirectory
+launches, repositories whose immutable tree contains submodules, state storage
+inside the owner repository, missing `HEAD`, incompatible external-write
+grants, occupied workspace paths, and any bounded Git inspection or creation
+failure. Detached owners and existing linked worktrees are supported. Dirty
+owner trees are supported because the attempt starts from committed `HEAD`;
+the owner dirty-path inventory is evidence only, and changed targets must
+still pass content-and-mode CAS.
+
+Claims schedule; isolation contains. `pathClaims` are concrete prefixes and
+must cover the `allowedPaths` write fence, but they do not enforce or contain
+writes. The broker schedules overlapping isolated claims and exact resource
+claims, while the detached worktree plus sandbox boundary keeps provider
+source writes outside the owner's tree. Shared-tree attempts remain
+`detection-only`; P2.5 has not been relabeled as containment.
+
+Terminal isolated attempts stage their workspace index only inside the broker
+worktree, emit a private full-index binary Git patch plus base/result object
+manifest, and then remove only the validated state-directory worktree. The
+legacy `delegate-jobs revert` implementation explicitly refuses these jobs and
+is otherwise unchanged. `delegate_integrate` / `delegate-jobs integrate`
+compare every target's current bytes and executable/symlink mode with its
+immutable-base object, report all conflicting paths, create an integration
+worktree from current `HEAD`, and apply change sets without `--3way` or any
+merge-resolution path. Same-path composition and any apply failure discard the
+integration worktree.
+
+Deferred deliberately: direct owner-tree application, workspace continuation
+rounds, subdirectory roots, submodules, `ingestFiles`, `addDirs`, sandbox-off,
+repository-local clean/smudge filters, and auto-fix rounds. Broker Git commands
+disable hooks, fsmonitor hooks, and global/system Git configuration. A clean
+owner CAS preflight currently returns
+`WORKSPACE_APPLY_DEFERRED`; moved targets return `CAS_CONFLICT`. This is the
+governing stop condition in action, not a claim that integration is complete.
+No `WorktreeCreate` hook is globally registered: explicit broker launch
+options are the owner-approval boundary, so ordinary Claude/Git worktree
+creation is never intercepted.
 
 ### P7 — Work-item cockpit
 TUI's primary object becomes the WorkItem: compose (structured spec card with

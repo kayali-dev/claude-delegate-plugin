@@ -105,6 +105,15 @@ lines.on('line', async (line) => {
     const fileChanges = activePrompt.includes('PLAN PASS ONLY')
       ? 0
       : Math.max(0, Number(process.env.FAKE_CODEX_FILE_CHANGES ?? 1));
+    if (!activePrompt.includes('PLAN PASS ONLY') && process.env.FAKE_CODEX_WRITE_PATH) {
+      const target = path.resolve(process.cwd(), process.env.FAKE_CODEX_WRITE_PATH);
+      const relative = path.relative(process.cwd(), target);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+        throw new Error('FAKE_CODEX_WRITE_PATH must stay inside the fake provider cwd');
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, process.env.FAKE_CODEX_WRITE_CONTENT || 'fake provider write\n');
+    }
     for (let index = 0; index < fileChanges; index += 1) {
       const changedPath = index === 0 ? 'a.js' : `file-${index}.js`;
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'fileChange', id: `file-${index}`, changes: [{ path: changedPath, kind: 'update' }], status: 'completed' }, completedAtMs: Date.now() } });

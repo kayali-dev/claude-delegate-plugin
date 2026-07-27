@@ -201,6 +201,7 @@ function changedFileEntries(job) {
 }
 
 function projectedChangeSet(job, workId, runIndex, base) {
+  if (isRecord(job?.changeSet)) return copy(job.changeSet);
   if (job?.changedFiles == null) return null;
   return {
     schemaVersion: WORK_SCHEMA_VERSION,

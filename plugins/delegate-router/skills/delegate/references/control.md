@@ -48,10 +48,29 @@ Hand-written `--prompt` packets keep the previous behavior.
 - Sensitive files are excluded by default. Do not read or transmit `.env*`, `*secret*`, `*credential*`, `*.pem`, or `*.key` without explicit path-level authorization. Outbound task packets are scanned for credential-shaped values and fail with `SECRET_IN_PROMPT`; `allowSensitive=true` explicitly overrides both checks and emits `security.warning`. It never removes scope control or the preserve-existing-changes rule. Project tooling may consume secrets internally, but workers must never echo or relocate their contents.
 
 - `allowedPaths` on write modes declares the job's file fence: injected into the worker prompt and enforced post-hoc as `scopeViolations` + a `scope.violation` event. In interactive Claude Code, those roots and already-observed attempt changes also feed the bounded live collision watch described under Writer Ownership. Prefer `allowedPaths` over prose-only fencing for every bounded write job.
+- Broker worktree isolation is explicit and never inferred. Set
+  `isolation: "worktree"` plus `pathClaims[]` on MCP, or
+  `--isolation worktree --path-claims a,b` on CLI. `allowedPaths` remains the
+  write fence; concrete `pathClaims` must cover it and exist only to schedule
+  writers. Optional `resourceClaims[]` / `--resource-claims id,id` serialize
+  exact non-file resources. Claims schedule; isolation contains. Neither is a
+  substitute for the other.
 - `ingestFiles` accepts up to 20 absolute regular files outside cwd, each smaller than 10 MB. The broker copies them into `.delegate-staging/<jobId>`, records the source-content hash, and adds that directory when `allowedPaths` is set. Byte-changed staged content copies back only after `completed`; a concurrently changed source is preserved and the staged version is written to `<source>.delegate-new` with `ingest.diverged`. Failures leave staging referenced by the checkpoint. Sensitive names still require `allowSensitive=true`.
 - Cursor headless consult/plan/review runs use streaming NDJSON under `--mode ask|plan`; thinking, assistant, and structured tool events remain visible. Networked read-only work is the explicit agent-mode elevation above. With sandboxing enabled, `networkAllow` materializes a merged temporary `.cursor/sandbox.json` (`default: deny` plus the supplied domains; omitted means `default: allow`) and restores the exact prior file on every exit path. Existing denies win and conflicting requests fail before launch. Project `.cursor/cli.json` supports only `permissions.allow/deny`; malformed or wrong-schema files fail as `CURSOR_PROJECT_CONFIG_INVALID` health detail and an actionable preflight error naming the file.
 
 Advanced Cursor-only start/resume options are `addDirs[]` (`--add-dir`), `approveMcps` (`--approve-mcps`), `cursorWorktree` (`--worktree`), and `cursorWorktreeBase` (`--worktree-base`). CLI spellings are `--add-dir` (repeatable), `--approve-mcps`, `--cursor-worktree`, and `--cursor-worktree-base`.
+
+Broker isolation is distinct from Cursor's native worktree flags and refuses
+that combination. The contained first cut also refuses sandbox-off,
+`addDirs`, `ingestFiles`, auto-fix/continuation rounds, subdirectory roots,
+submodules, bare/non-Git repositories, unsafe state placement, missing
+immutable `HEAD`, bounded Git-inspection overflow, and worktree creation
+failure. Repository-local clean/smudge filters are also refused; broker Git
+commands disable hooks, fsmonitor hooks, and global/system configuration. It
+supports dirty owners, detached owners, and owners that are
+existing linked worktrees. Dirty content is never copied into the attempt:
+the workspace starts at committed `HEAD`, records owner dirty paths as
+evidence, and later requires exact target CAS.
 
 `delegate_transcript` includes compact `file.changed` entries: one cwd-relative `✎ path (+A −R)` line for each change, with rename/delete labels and counts only when the journal's unified hunk or old/new text can establish them. It never returns the full diff or old/new file bodies through that transcript surface; use `delegate_diff` for hunks.
 
@@ -61,7 +80,13 @@ Provider-spawned agents are ordinary inspection data, not provider noise. `deleg
 
 Allow only one writer for a path set. A read-only reviewer may inspect a stable diff, but do not ask it to review files while another agent is actively changing them. The coordinator owns final integration.
 
-The broker enforces this for managed jobs: a write-mode start (`implement` or `verify`) in a cwd that already has an active write-mode job fails with `WRITER_ACTIVE` and the blocking job's ID. Orphaned writers (dead worker process) are reconciled to `failed` automatically and stop blocking. Worktree-isolated jobs are exempt. `overrideWriter=true` bypasses the guard; use it only with explicit user acceptance of concurrent writers.
+The broker enforces this for managed jobs. Shared write-mode starts retain the
+conservative whole-cwd `WRITER_ACTIVE` guard. Workspace-isolated starts
+schedule against concrete path-prefix overlap within one owner repository and
+exact resource IDs across repositories; conflicts return `CLAIM_CONFLICT`.
+An active shared writer owns the whole repository for this admission check.
+Orphaned writers are reconciled before scheduling. `overrideWriter=true`
+remains a shared-tree escape hatch and is rejected for workspace claims.
 
 This guard still cannot contain unmanaged editors, including the current
 coordinator or a built-in subagent. Interactive sessions add early detection:
@@ -82,8 +107,9 @@ watcher failures record their reason. Both cases retain coordinator Edit/Write
 observation and the existing post-hoc scope/drift checks. Hooks always exit zero
 and run only after a tool/file change; they never gate or block that change.
 
-This is detection, not containment: it does not prevent, isolate, or roll back
-a write. P6 transactional workspaces are the containment phase. Direct Codex
+For shared-tree attempts this is detection, not containment: it does not
+prevent, isolate, or roll back a write. Only an explicit broker-owned P6
+workspace records `containment: "broker-workspace"`. Direct Codex
 MCP and Cursor CLI launches remain behavior-compatible and are never blocked by
 the managed writer guard. Their shadow record instead sets
 `overlapsManagedWriter: true` and emits `DIRECT_WRITER_OVERLAP` as a warning
@@ -96,7 +122,40 @@ Give any start that may be retried a stable `idempotencyKey`. Lookup and job cre
 
 An opt-in `retryPolicy` may set `maxAttempts` from 1–5 and choose `transport` and/or `rate-limit`. Retries reuse the same job and provider session when one exists, are journaled as `job.retry`, and never apply to scope, quota, model, budget, user-input, or other task-level outcomes. The default is one attempt.
 
-Tag independent fan-out jobs with one `groupId`; `delegate_list` can filter or summarize the group. The ordinary same-cwd writer guard still applies to grouped write jobs, so use read-only fan-out or actual worktree isolation.
+Tag independent fan-out jobs with one `groupId`; `delegate_list` can filter or summarize the group. Shared grouped writers retain the same-cwd guard. Isolated grouped writers may run concurrently only when their path and resource claims do not overlap.
+
+## Workspace Change Sets And Integration
+
+An isolated terminal attempt stages only its broker-owned workspace index and
+emits a private full-index binary Git patch plus a manifest of immutable-base
+and result object IDs/modes. It then removes the validated state-directory
+worktree. Removal never targets a caller-supplied path and never invokes the
+legacy shared-tree revert machinery.
+
+Use `delegate_integrate { jobIds }` or
+`delegate-jobs integrate <job-id> [job-id ...]`. `preflight=true` /
+`--preflight` performs only the compare step. CAS compares current owner bytes
+and executable/symlink mode for every target with that change set's immutable
+base. Any moved, added, deleted, unreadable, or same-path-multi-change-set
+target is returned as a conflict before an integration worktree is created.
+Clean change sets are applied in order to a detached integration worktree from
+current `HEAD`, with no `--3way`; the first apply conflict discards that
+integration workspace and stops.
+
+The resulting integration record and patch are reviewable broker artifacts;
+`ownerApplied` remains false. This phase deliberately does not copy multiple
+paths into the owner's working tree because Git/filesystem operations cannot
+atomically compare and replace them against unmanaged editors. Consequently a
+workspace `delegate_decide accepted` returns `CAS_CONFLICT` when targets moved
+or `WORKSPACE_APPLY_DEFERRED` after clean preflight, without recording
+acceptance or touching owner bytes. Rejection and
+`delegate_workspace_discard` / `delegate-jobs workspace discard` remove only
+broker workspace storage. `delegate-jobs revert` continues unchanged for
+legacy shared-tree jobs and refuses workspace jobs.
+
+No `WorktreeCreate` hook is globally registered. The explicit broker launch
+option is the owner-approved workflow boundary, so ordinary Claude Code and
+Git worktree creation retain their default behavior.
 
 Every writer must:
 
@@ -109,6 +168,11 @@ Every writer must:
 ## Continuations
 
 Store the Codex `threadId` or Cursor chat ID with the task. Resume only for the same objective. A follow-up should include new information, a correction, or a verification request rather than repeating the original prompt. Codex threads that engaged the multi-agent review flow (typically write-mode jobs whose approvals escalated) may refuse direct resume with `RESUME_UNSUPPORTED`; recover by starting a fresh job whose task packet folds in the prior findings.
+
+Workspace-isolated attempts are also intentionally single-attempt in this
+phase. Resume, review-round, and auto-fix continuation return
+`RESUME_UNSUPPORTED`; start a fresh isolated attempt from a newly inspected
+immutable base.
 
 Managed control commands use optimistic concurrency. Read the current job revision immediately before steering or cancelling and send it as `expectedRevision`. A `REVISION_CONFLICT` includes `currentRevision`, so one retry with that value is enough when your command is still appropriate; never overwrite another controller's newer decision. Reuse the same `correctionId` when retrying the same request.
 

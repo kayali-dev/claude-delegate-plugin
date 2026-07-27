@@ -6,6 +6,7 @@ import {
   appendJobEvent,
   attributeInterrogationUsage,
   awaitAmbiguityProbe,
+  captureManagedWorkspace,
   claimCommands,
   completeCommand,
   completeIngestedFiles,
@@ -987,12 +988,39 @@ function terminal(job, status, phase, extra = {}) {
   let changedFiles = null;
   let finalHashes = null;
   let scopeViolations = null;
+  let workspaceCaptureError = null;
   if (['implement', 'verify'].includes(job.mode)) {
+    if (job.isolation === 'worktree') {
+      try {
+        captureManagedWorkspace(job.id);
+        job = loadJob(job.id) || job;
+      } catch (error) {
+        workspaceCaptureError = redact(error.message);
+        status = 'failed';
+        phase = 'failed';
+        extra = {
+          ...extra,
+          error: workspaceCaptureError,
+          errorCode: error.code || 'CHANGESET_CREATE_FAILED'
+        };
+        updateManagedJob(job.id, (current) => {
+          current.changeSetError = workspaceCaptureError;
+          current.error = workspaceCaptureError;
+          current.errorCode = error.code || 'CHANGESET_CREATE_FAILED';
+        }, { incrementRevision: false });
+      }
+    }
     try {
-      const files = jobFiles(job.id);
+      const files = job.isolation === 'worktree' && job.changeSet
+        ? job.changeSet.files.map((file) => ({
+          path: file.path,
+          status: file.status,
+          finalHash: file.resultOid || 'absent'
+        }))
+        : jobFiles(job.id);
       const baseline = new Set(job.baselineFiles || []);
       const entries = files.map((file) => {
-        const finalHash = hashWorkingFile(job.cwd, file.path);
+        const finalHash = file.finalHash || hashWorkingFile(job.cwd, file.path);
         return {
           path: file.path,
           ...(file.status ? { status: file.status } : {}),
@@ -1029,6 +1057,24 @@ function terminal(job, status, phase, extra = {}) {
   if (status === 'completed' && !deferVerification && job.stagingDir) {
     try { ingestOutcome = completeIngestedFiles(job); }
     catch (error) { ingestOutcome = { copiedBack: [], removed: false, error: redact(error.message) }; }
+  }
+  if (!deferVerification && job.isolation === 'worktree') {
+    try {
+      captureManagedWorkspace(job.id, {
+        capture: workspaceCaptureError == null,
+        discard: true
+      });
+      job = loadJob(job.id) || job;
+      changedFiles = job.changedFiles || changedFiles;
+      finalHashes = job.finalHashes || finalHashes;
+    } catch (error) {
+      updateManagedJob(job.id, (current) => {
+        current.workspace = {
+          ...current.workspace,
+          discardError: redact(error.message)
+        };
+      }, { incrementRevision: false });
+    }
   }
   updateManagedJob(job.id, (current) => {
     const firstAttemptText = current.result?.firstAttemptText;
@@ -1132,6 +1178,26 @@ function terminal(job, status, phase, extra = {}) {
     ? 'job.state'
     : status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error',
   deferVerification ? { status: 'running', phase: 'verifying' } : extra);
+  if (!deferVerification && job.isolation === 'worktree' && loadJob(job.id)?.workspace?.state !== 'discarded') {
+    try {
+      captureManagedWorkspace(job.id, {
+        capture: workspaceCaptureError == null,
+        discard: true
+      });
+    } catch (error) {
+      updateManagedJob(job.id, (current) => {
+        current.workspace = {
+          ...current.workspace,
+          discardError: redact(error.message)
+        };
+      }, { incrementRevision: false });
+      appendJobEvent(job.id, 'error', {
+        code: error.code || 'WORKSPACE_DISCARD_FAILED',
+        message: error.message,
+        stage: 'workspace-discard'
+      });
+    }
+  }
   if (!deferVerification && status === 'completed' && ['implement', 'verify'].includes(job.mode)) {
     maybeLaunchAutoFix(loadJob(job.id));
   }
@@ -1614,7 +1680,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.41.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.42.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2542,7 +2608,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.41.0' }
+      clientInfo: { name: 'delegate-router', version: '0.42.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -3391,7 +3457,7 @@ function verificationCommands(job) {
 }
 
 function verificationCommandCwd(job, entry) {
-  const root = job.verificationProfile?.repoRoot || job.cwd;
+  const root = job.workspace?.path || job.verificationProfile?.repoRoot || job.cwd;
   const resolved = path.resolve(root, entry.cwd || '.');
   const relative = path.relative(root, resolved);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {

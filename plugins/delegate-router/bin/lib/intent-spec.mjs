@@ -512,6 +512,9 @@ function authorityProjection(authority, mode) {
   if (authority.overrideLane === true) privilege.push('overrideLane=true');
   if (authority.approveMcps === true) privilege.push('approveMcps=true');
   if (authority.cursorWorktree === true) privilege.push('cursorWorktree=true');
+  if (authority.isolation === 'worktree') privilege.push('isolation=worktree');
+  for (const item of uniqueStrings(authority.pathClaims)) privilege.push(`pathClaim=${item}`);
+  for (const item of uniqueStrings(authority.resourceClaims)) privilege.push(`resourceClaim=${item}`);
   for (const item of uniqueStrings(authority.networkAllow)) privilege.push(`networkAllow=${item}`);
   for (const item of uniqueStrings(authority.addDirs)) privilege.push(`addDir=${item}`);
   for (const item of uniqueStrings(authority.ingestFiles)) privilege.push(`ingestFile=${item}`);

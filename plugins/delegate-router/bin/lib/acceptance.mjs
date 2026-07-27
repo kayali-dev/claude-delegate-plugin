@@ -59,6 +59,13 @@ export function acceptanceEvidence(job) {
       // paths counts as drift that blocks acceptance.
       revisionMoved: job?.revisionMoved === true,
       driftPaths: job?.baseDriftPaths || []
+    },
+    workspace: {
+      isolation: job?.isolation || 'shared',
+      containment: job?.containment || (job?.isolation === 'worktree' ? 'broker-workspace' : 'detection-only'),
+      changeSetId: job?.changeSet?.id || null,
+      discarded: job?.workspace?.state === 'discarded',
+      ownerApplied: job?.changeSet?.ownerApplied === true
     }
   };
 }
@@ -73,6 +80,7 @@ export function buildAcceptance(job, options = {}) {
   if (verification.state === 'stale' || verification.inputChanged === true || job.baseDrift === true) blockedBy.push('base-drift');
   if (scopeViolationCount(job) > 0) blockedBy.push('scope-violation');
   if (!(job.changedFiles?.count > 0)) blockedBy.push('zero-changed-files');
+  if (job.isolation === 'worktree' && !job.changeSet?.patch?.path) blockedBy.push('workspace-changeset-unavailable');
   if (unresolvedFindings(job).length > 0) blockedBy.push('structured-review-findings-unresolved');
   return {
     state: blockedBy.length ? 'blocked' : 'ready-for-review',
