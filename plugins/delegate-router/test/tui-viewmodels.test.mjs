@@ -401,11 +401,18 @@ test('dashboard trend frames snapshot sparse, single-day, flat, and normal histo
 
 test('help lists mouse, viewport, and edge navigation alongside every action group', () => {
   const keys = HELP_ITEMS.map((item) => item.key).join(' ');
-  for (const key of ['wheel', 'PgUp', 'PgDn', 'Home', 'End', 'G / S / p', 'j/k', '1-6', 's / r / R', 'c / v / w', 'q']) {
+  for (const key of ['Mouse wheel', 'Mouse click', 'PgUp', 'PgDn', 'Home', 'End', 'g f', 'g s', 'j k', '1 .. 6', 's', 'r', 'R', 'c', 'v', 'w', 'q']) {
     assert.match(keys, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   const frame = fleetViewModel(syntheticStore(), { now: NOW, help: true }, { width: 80, height: 24 });
-  assert.equal(frame.overlay.items.length, HELP_ITEMS.length);
+  assert.equal(frame.overlay.pages.flatMap((page) => page.rows).length, HELP_ITEMS.length);
+  const history = fleetViewModel(syntheticStore(), {
+    now: NOW,
+    statusHistoryOpen: true,
+    statusHistory: [{ at: NOW - 1000, stream: 'stderr', message: 'diagnostic line' }]
+  }, { width: 80, height: 24 });
+  assert.equal(history.overlay.title, 'STATUS HISTORY');
+  assert.ok(Array.isArray(history.overlay.pages[0].rows[0].keys));
 });
 
 test('fixed 100x30 fleet headless frame is deterministic', (t) => {
@@ -418,7 +425,7 @@ test('fixed 100x30 fleet headless frame is deterministic', (t) => {
   assert.equal(rendered.split('\n').length, 30);
   assert.match(rendered, /^ delegate \| fleet/m);
   assert.match(rendered, /S1 L RF/);
-  assert.match(rendered, /Enter detail/);
+  assert.match(rendered, /x  actions/);
 
   const grid = paintFrame(frame);
   assert.deepEqual(grid.get(0, 29).style, uiPalette.bar);
@@ -461,6 +468,7 @@ test('every screen paints at realistic resize breakpoints with filters, follow, 
       assert.equal(grid.columns, viewport.width);
       assert.equal(grid.rows, viewport.height);
       assert.equal(grid.get(0, viewport.height - 1).style.bg, uiPalette.bar.bg);
+      if (frame.overlay?.kind === 'help') assert.equal(grid.get(0, viewport.height - 1).style.dim, true);
     }
   }
 });

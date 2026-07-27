@@ -17,6 +17,7 @@ export const SPACE = Object.freeze({
   scrollbarMargin: spacing(1),
   overlayColumn: spacing(2),
   overlayRow: spacing(1),
+  dialogMargin: spacing(4),
   screenBoundary: spacing(2)
 });
 

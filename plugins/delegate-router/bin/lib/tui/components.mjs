@@ -75,6 +75,63 @@ function writeSegments(grid, x, y, segments, width, fallbackStyle, pad = true) {
   if (pad && used < width) grid.write(x + used, y, ' '.repeat(width - used), fallbackStyle, width - used);
 }
 
+function writeKeyParts(grid, x, y, parts, width, ownerStyle, options = {}) {
+  let used = 0;
+  for (const part of parts || []) {
+    if (used >= width) break;
+    const text = truncateToWidth(formatDisplayValue(part.text), width - used);
+    const partWidth = displayWidth(text);
+    const keyStyle = options.dim
+      ? mergeStyle(ownerStyle, palette.dim)
+      : mergeStyle(ownerStyle, part.kind === 'separator' ? palette.dim : palette.keyHint);
+    grid.write(x + used, y, text, keyStyle, partWidth);
+    used += partWidth;
+  }
+  if (used < width) grid.write(x + used, y, ' '.repeat(width - used), ownerStyle, width - used);
+  return used;
+}
+
+function writeHelpKeyCaps(grid, x, y, item, width, ownerStyle) {
+  const parts = item.keys || [];
+  const notation = formatDisplayValue(item.notation || parts.map((part) => part.text).join(''));
+  const capValues = item.relation === 'chord' || !parts.some((part) => part.kind === 'separator')
+    ? [notation]
+    : parts.filter((part) => part.kind === 'key').map((part) => formatDisplayValue(part.text));
+  const separator = item.relation === 'range' ? ` ${CHROME_GLYPHS.truncation} ` : ' ';
+  let used = 0;
+  for (let index = 0; index < capValues.length && used < width; index += 1) {
+    if (index) {
+      const between = truncateToWidth(separator, width - used);
+      grid.write(x + used, y, between, mergeStyle(ownerStyle, palette.dim), displayWidth(between));
+      used += displayWidth(between);
+    }
+    const cap = truncateToWidth(` ${capValues[index]} `, width - used);
+    const capWidth = displayWidth(cap);
+    grid.write(x + used, y, cap, mergeStyle(ownerStyle, palette.keyCap), capWidth);
+    used += capWidth;
+  }
+  if (used < width) grid.write(x + used, y, ' '.repeat(width - used), ownerStyle, width - used);
+}
+
+function paintOverlayScrim(grid, rect) {
+  for (let y = rect.y; y < rect.y + rect.height; y += 1) {
+    for (let x = rect.x; x < rect.x + rect.width;) {
+      const current = grid.get(x, y);
+      if (!current) break;
+      if (current.continuation) {
+        x += 1;
+        continue;
+      }
+      const width = Math.max(1, displayWidth(current.char));
+      const scrim = current.style?.bg
+        ? mergeStyle(palette.scrim, { bg: current.style.bg })
+        : palette.scrim;
+      grid.set(x, y, current.char || ' ', mergeStyle(current.style, scrim));
+      x += width;
+    }
+  }
+}
+
 export function paintBox(grid, rect, options = {}) {
   if (rect.width < 2 || rect.height < 2) return;
   const style = options.style || palette.border;
@@ -1094,29 +1151,130 @@ export function paintConfirmPrompt(grid, rect, prompt = {}) {
 }
 
 export function paintHelpOverlay(grid, rect, help = {}) {
-  const width = Math.min(rect.width - 2, help.width || 72);
-  const height = Math.min(rect.height - 2, Math.max(6, (help.items || []).length + 4));
-  const x = rect.x + Math.max(1, Math.floor((rect.width - width) / 2));
-  const y = rect.y + Math.max(1, Math.floor((rect.height - height) / 2));
+  paintOverlayScrim(grid, rect);
+  const pages = help.pages || [];
+  const pageIndex = Math.max(0, Math.min(pages.length - 1, Number(help.page || 0)));
+  const page = pages[pageIndex] || { label: 'keys', scope: 'CURRENT SCREEN', rows: help.items || [] };
+  const horizontalMargin = rect.width >= 84 ? SPACE.dialogMargin : SPACE.overlayRow;
+  const verticalMargin = rect.height >= 16 ? SPACE.overlayColumn : SPACE.overlayRow;
+  let width = Math.max(1, Math.min(rect.width - horizontalMargin * 2, help.width || 80));
+  if ((rect.width - width) % 2 !== 0 && width > 1) width -= 1;
+  const desiredHeight = Math.max(8, (page.rows || []).length + (page.divider ? 10 : 8));
+  const height = Math.max(1, Math.min(rect.height - verticalMargin * 2, help.height || desiredHeight, desiredHeight));
+  const x = rect.x + Math.floor((rect.width - width) / 2);
+  const y = rect.y + Math.floor((rect.height - height) / 2);
   grid.fill(x, y, width, height, ' ', palette.surfaceOverlay);
   paintBox(grid, { x, y, width, height }, {
-    title: help.title || 'Help',
     style: mergeStyle(palette.surfaceOverlay, palette.borderActive),
     titleStyle: mergeStyle(palette.surfaceOverlay, palette.paneTitle)
   });
-  let row = y + SPACE.overlayRow;
-  for (const item of help.items || []) {
-    if (row >= y + height - 1) break;
-    const keyWidth = Math.min(18, Math.max(8, Number(help.keyWidth || 14)));
-    writePadded(grid, x + SPACE.overlayColumn, row, item.key, keyWidth, mergeStyle(palette.surfaceOverlay, palette.header));
+  const bodyX = x + SPACE.overlayColumn;
+  const bodyWidth = width - SPACE.overlayColumn * 2;
+  const title = formatDisplayValue(help.title || 'DELEGATE KEYS');
+  const paging = `${pageIndex + 1}/${Math.max(1, pages.length)}`;
+  grid.write(bodyX, y + SPACE.overlayRow, title, mergeStyle(palette.surfaceOverlay, palette.paneTitle), Math.min(bodyWidth, displayWidth(title)));
+  grid.write(bodyX + bodyWidth - displayWidth(paging), y + SPACE.overlayRow, paging, mergeStyle(palette.surfaceOverlay, palette.dim), displayWidth(paging));
+  let row = y + SPACE.overlayRow + SPACE.overlayColumn;
+  if (page.divider) {
+    grid.write(bodyX, row, 'ALL KEYS', mergeStyle(palette.surfaceOverlay, palette.dim), Math.min(bodyWidth, 8));
+    row += SPACE.overlayColumn;
+  }
+  const section = String(page.label || 'keys').toUpperCase();
+  const marker = page.destructive ? `DESTRUCTIVE ${CHROME_GLYPHS.destructiveMarker}` : formatDisplayValue(page.scope);
+  const markerWidth = Math.min(displayWidth(marker), Math.max(0, Math.floor(bodyWidth / 2)));
+  grid.write(bodyX, row, section, mergeStyle(palette.surfaceOverlay, palette.dim), Math.min(displayWidth(section), bodyWidth));
+  if (markerWidth) grid.write(bodyX + bodyWidth - markerWidth, row, marker, mergeStyle(palette.surfaceOverlay, palette.dim), markerWidth);
+  row += SPACE.overlayColumn;
+  const keyWidth = Math.min(24, Math.max(16, Number(help.keyWidth || 22)));
+  for (const item of page.rows || []) {
+    if (row >= y + height - 2) break;
+    writeHelpKeyCaps(grid, bodyX, row, item, keyWidth, palette.surfaceOverlay);
+    grid.write(
+      bodyX + keyWidth + SPACE.railGap,
+      row,
+      truncateToWidth(formatDisplayValue(item.label || item.description), bodyWidth - keyWidth - SPACE.railGap, { ellipsis: true }),
+      mergeStyle(palette.surfaceOverlay, palette.body),
+      bodyWidth - keyWidth - SPACE.railGap
+    );
+    row += SPACE.overlayRow;
+  }
+  const footer = '[ ] section   ? / Esc close';
+  const footerText = truncateToWidth(footer, bodyWidth);
+  grid.write(bodyX + bodyWidth - displayWidth(footerText), y + height - 2, footerText, mergeStyle(palette.surfaceOverlay, palette.dim), displayWidth(footerText));
+}
+
+export function paintActionOverlay(grid, rect, menu = {}) {
+  paintOverlayScrim(grid, rect);
+  const items = menu.items || [];
+  const width = Math.min(rect.width - 2, menu.width || 82);
+  const height = Math.min(rect.height - 2, Math.max(9, Math.min(18, items.length + 7)));
+  const x = rect.x + Math.max(1, Math.floor((rect.width - width) / 2));
+  const y = rect.y + Math.max(1, Math.floor((rect.height - height) / 2));
+  const bodyX = x + SPACE.overlayColumn;
+  const bodyWidth = width - SPACE.overlayColumn * 2;
+  const selected = Math.max(0, Math.min(items.length - 1, Number(menu.selected || 0)));
+  const viewport = Math.max(1, height - 6);
+  const start = Math.max(0, Math.min(Math.max(0, items.length - viewport), selected - viewport + 1));
+  grid.fill(x, y, width, height, ' ', palette.surfaceOverlay);
+  paintBox(grid, { x, y, width, height }, {
+    title: menu.title || 'Actions',
+    style: mergeStyle(palette.surfaceOverlay, palette.borderActive),
+    titleStyle: mergeStyle(palette.surfaceOverlay, palette.paneTitle)
+  });
+  const filter = `/${menu.query || ''}${menu.filtering ? '_' : ''}`;
+  grid.write(bodyX, y + 1, truncateToWidth(filter, bodyWidth, { ellipsis: true }), mergeStyle(palette.surfaceOverlay, menu.filtering ? palette.inputLabel : palette.dim), bodyWidth);
+  if (menu.hint) {
+    grid.write(bodyX, y + 2, truncateToWidth(menu.hint, bodyWidth, { ellipsis: true }), mergeStyle(palette.surfaceOverlay, palette.dim), bodyWidth);
+  }
+  const keyWidth = 12;
+  for (let index = start; index < Math.min(items.length, start + viewport); index += 1) {
+    const item = items[index];
+    const row = y + 3 + index - start;
+    const rowStyle = index === selected ? mergeStyle(palette.surfaceOverlay, palette.selection) : palette.surfaceOverlay;
+    grid.fill(bodyX, row, bodyWidth, 1, ' ', rowStyle);
+    writeKeyParts(grid, bodyX, row, item.keys, keyWidth, rowStyle, { dim: Boolean(item.unavailable) });
+    const reason = item.unavailable ? ` -- ${formatDisplayValue(item.unavailable)}` : '';
+    grid.write(
+      bodyX + keyWidth + SPACE.railGap,
+      row,
+      truncateToWidth(`${formatDisplayValue(item.label)}${reason}`, bodyWidth - keyWidth - SPACE.railGap, { ellipsis: true }),
+      mergeStyle(rowStyle, item.unavailable ? palette.dim : palette.body),
+      bodyWidth - keyWidth - SPACE.railGap
+    );
+  }
+  const footer = '/ filter  Enter run  x/Esc close';
+  grid.write(bodyX, y + height - 2, truncateToWidth(footer, bodyWidth), mergeStyle(palette.surfaceOverlay, palette.dim), Math.min(bodyWidth, displayWidth(footer)));
+  if (items.length > viewport) {
+    const geometry = scrollbarGeometry({ track: Math.max(1, height - 4), viewport, total: items.length, offset: start });
+    const trackX = x + width - 2;
+    for (let offset = 0; offset < geometry.track; offset += 1) grid.set(trackX, y + 2 + offset, CHROME_GLYPHS.scrollTrack, mergeStyle(palette.surfaceOverlay, palette.borderSubtle));
+    for (let offset = 0; offset < geometry.thumbLen; offset += 1) grid.set(trackX, y + 2 + geometry.thumbStart + offset, CHROME_GLYPHS.scrollThumb, mergeStyle(palette.surfaceOverlay, palette.borderActive));
+  }
+}
+
+export function paintPrefixOverlay(grid, rect, popup = {}) {
+  const items = popup.items || [];
+  const width = Math.min(Math.max(28, ...items.map((item) => displayWidth(item.label || '') + 10)), Math.max(1, rect.width - 2));
+  const height = Math.min(rect.height - 2, Math.max(4, items.length + 2));
+  const x = rect.x + Math.max(1, rect.width - width - SPACE.screenBoundary);
+  const y = rect.y + Math.max(1, rect.height - height - SPACE.screenBoundary);
+  grid.fill(x, y, width, height, ' ', palette.surfaceOverlay);
+  paintBox(grid, { x, y, width, height }, {
+    title: popup.title || 'prefix',
+    style: mergeStyle(palette.surfaceOverlay, palette.borderActive),
+    titleStyle: mergeStyle(palette.surfaceOverlay, palette.paneTitle)
+  });
+  const keyWidth = 5;
+  for (let index = 0; index < items.length && index + 1 < height - 1; index += 1) {
+    const row = y + 1 + index;
+    writeKeyParts(grid, x + SPACE.overlayColumn, row, items[index].keys, keyWidth, palette.surfaceOverlay);
     grid.write(
       x + SPACE.overlayColumn + keyWidth + SPACE.railGap,
       row,
-      truncateToWidth(formatDisplayValue(item.description), width - keyWidth - SPACE.overlayColumn * 2 - SPACE.railGap, { ellipsis: true }),
-      palette.surfaceOverlay,
+      truncateToWidth(formatDisplayValue(items[index].label), width - keyWidth - SPACE.overlayColumn * 2 - SPACE.railGap, { ellipsis: true }),
+      mergeStyle(palette.surfaceOverlay, palette.body),
       width - keyWidth - SPACE.overlayColumn * 2 - SPACE.railGap
     );
-    row += SPACE.overlayRow;
   }
 }
 
@@ -1163,6 +1321,42 @@ function scrollReadout(metrics, width) {
 function finiteInteger(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.floor(number) : fallback;
+}
+
+function footerHintSegments(hint, ownerStyle) {
+  const dim = ['navigation', 'view'].includes(hint.class);
+  const keyStyle = dim ? mergeStyle(ownerStyle, palette.dim) : mergeStyle(ownerStyle, palette.metadata);
+  const labelStyle = dim ? mergeStyle(ownerStyle, palette.dim) : mergeStyle(ownerStyle, palette.body);
+  const segments = [];
+  for (const part of hint.keys || []) {
+    segments.push({
+      text: formatDisplayValue(part.text),
+      style: part.kind === 'separator' ? mergeStyle(ownerStyle, palette.dim) : keyStyle
+    });
+  }
+  segments.push({ text: '  ', style: ownerStyle });
+  segments.push({ text: formatDisplayValue(hint.label), style: labelStyle });
+  return segments;
+}
+
+function footerGroupSegments(groups, ownerStyle) {
+  const segments = [];
+  for (let groupIndex = 0; groupIndex < (groups || []).length; groupIndex += 1) {
+    const group = groups[groupIndex];
+    if (groupIndex) segments.push({ text: CHROME_GLYPHS.separator, style: mergeStyle(ownerStyle, palette.dim) });
+    if (group[0]?.class === 'destructive') {
+      segments.push({ text: `${CHROME_GLYPHS.destructiveMarker} `, style: mergeStyle(ownerStyle, palette.metadata) });
+    }
+    for (let hintIndex = 0; hintIndex < group.length; hintIndex += 1) {
+      if (hintIndex) segments.push({ text: '  ', style: ownerStyle });
+      segments.push(...footerHintSegments(group[hintIndex], ownerStyle));
+    }
+  }
+  return segments;
+}
+
+function segmentsWidth(segments) {
+  return (segments || []).reduce((total, segment) => total + displayWidth(textOf(segment)), 0);
 }
 
 // The tile band declares exact surface ownership for its footprint, including
@@ -1331,30 +1525,33 @@ export function paintFrame(frame, options = {}) {
   }
   if (frame.status) {
     const y = frame.height - 1;
-    grid.fill(0, y, frame.width, 1, ' ', frame.status.style || palette.bar);
+    const ownerStyle = frame.status.style || palette.bar;
+    grid.fill(0, y, frame.width, 1, ' ', ownerStyle);
     let statusWidth = frame.width - 2;
     let right = '';
     let rightX = frame.width - 1;
-    if (frame.status.right) {
+    const pinnedSegments = frame.status.rightHints?.length
+      ? footerGroupSegments([frame.status.rightHints], ownerStyle)
+      : [];
+    const pinnedWidth = segmentsWidth(pinnedSegments);
+    if (pinnedWidth) {
+      rightX = Math.max(1, frame.width - pinnedWidth - 1);
+      statusWidth = Math.max(0, rightX - 2);
+    } else if (frame.status.right) {
       right = truncateToWidth(formatDisplayValue(frame.status.right), Math.floor(frame.width / 2), { ellipsis: true });
       rightX = Math.max(1, frame.width - displayWidth(right) - 1);
       statusWidth = Math.max(0, rightX - 2);
     }
     if (frame.status.hints) {
-      const segments = [];
-      for (let groupIndex = 0; groupIndex < frame.status.hints.length; groupIndex += 1) {
-        if (groupIndex) segments.push({ text: CHROME_GLYPHS.separator, style: palette.dim });
-        for (const hint of frame.status.hints[groupIndex]) {
-          segments.push({ text: `${formatDisplayValue(hint.key)} `, style: palette.keyHint });
-          segments.push({ text: `${formatDisplayValue(hint.label)} `, style: palette.dim });
-        }
-      }
-      writeSegments(grid, 1, y, segments, statusWidth, frame.status.style || palette.bar);
-    } else if (frame.status.segments) writeSegments(grid, 1, y, frame.status.segments, statusWidth, frame.status.style || palette.bar);
-    else grid.write(1, y, truncateToWidth(formatDisplayValue(frame.status.text), statusWidth, { ellipsis: true }), frame.status.style || palette.bar, statusWidth);
-    if (right) grid.write(rightX, y, right, frame.status.style || palette.bar, displayWidth(right));
+      writeSegments(grid, 1, y, footerGroupSegments(frame.status.hints, ownerStyle), statusWidth, ownerStyle);
+    } else if (frame.status.segments) writeSegments(grid, 1, y, frame.status.segments, statusWidth, ownerStyle);
+    else grid.write(1, y, truncateToWidth(formatDisplayValue(frame.status.text), statusWidth, { ellipsis: true }), ownerStyle, statusWidth);
+    if (pinnedWidth) writeSegments(grid, rightX, y, pinnedSegments, pinnedWidth, ownerStyle, false);
+    else if (right) grid.write(rightX, y, right, ownerStyle, displayWidth(right));
   }
   if (frame.overlay?.kind === 'help') paintHelpOverlay(grid, { x: 0, y: 0, width: frame.width, height: frame.height }, frame.overlay);
+  if (frame.overlay?.kind === 'actions') paintActionOverlay(grid, { x: 0, y: 0, width: frame.width, height: frame.height }, frame.overlay);
+  if (frame.overlay?.kind === 'prefix') paintPrefixOverlay(grid, { x: 0, y: 0, width: frame.width, height: frame.height }, frame.overlay);
   if (frame.overlay?.kind === 'input') paintTextInput(grid, { x: 1, y: frame.height - 2, width: frame.width - 2, height: 1 }, frame.overlay);
   if (frame.overlay?.kind === 'confirm') paintConfirmPrompt(grid, { x: 0, y: 0, width: frame.width, height: frame.height }, frame.overlay);
   return grid;

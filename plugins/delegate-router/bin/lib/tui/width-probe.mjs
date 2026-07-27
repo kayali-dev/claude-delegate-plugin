@@ -16,7 +16,7 @@ export const WIDTH_PROBE_GRAPHEMES = Object.freeze([
   // Braille spinner frames are statically safe, but measuring them keeps the
   // cache a complete record of the actual tmux/terminal layer.
   '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧',
-  '⚙', '✎', '⇅', '›', '⏳', '🧠', '✍', '▶', '✓', '✗', '—', '−', '◈', '⧉',
+  '⚙', '✎', '⇅', '›', '⏳', '🧠', '✍', '▶', '✓', '✗', '—', '−', '◈', '⧉', '⚠',
   '🙂', '✈️', '👩‍💻', '👍🏽', 'Ω', `a\u0301\u0323`
 ]);
 
@@ -30,7 +30,7 @@ export const WIDTH_PROBE_FAMILIES = Object.freeze({
   tools: Object.freeze(['⚙', '✎', '⇅', '›']),
   statuses: Object.freeze(['⏳', '🧠', '✍', '▶', '✓', '✗', '—', '−']),
   rails: Object.freeze(['◈']),
-  affordances: Object.freeze(['⧉']),
+  affordances: Object.freeze(['⧉', '⚠']),
   content: Object.freeze(['🙂', '✈️', '👩‍💻', '👍🏽', 'Ω', `a\u0301\u0323`])
 });
 

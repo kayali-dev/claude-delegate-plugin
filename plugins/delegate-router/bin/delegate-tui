@@ -41,6 +41,7 @@ import { NotificationDispatcher } from './lib/tui/notifications.mjs';
 import { copyToClipboard } from './lib/tui/clipboard.mjs';
 import { formatDisplayValue } from './lib/tui/display.mjs';
 import { CHROME_SEPARATOR, configureGlyphs } from './lib/tui/glyphs.mjs';
+import { actionMenuForContext, keymapContext, resolveKeymapAction } from './lib/tui/keymap.mjs';
 import { analyzeTuiDiagnostics, TuiFlightRecorder } from './lib/tui/diagnostics.mjs';
 import { setUiTheme } from './lib/tui/palette.mjs';
 import { loadTuiPreferences, saveTuiPreferences } from './lib/tui/preferences.mjs';
@@ -269,7 +270,7 @@ let inputDrawPending = false;
 let widthProbeInputStage = null;
 const ui = {
   screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, version: TUI_PACKAGE_VERSION, now: Date.now(), selectedIndex: 0, scroll: 0,
-  activeOnly: false, showExternals: true, filter: '', help: false, input: null, confirm: null,
+  activeOnly: false, showExternals: true, filter: '', help: false, helpPage: 0, actionMenu: null, input: null, confirm: null,
   status: '', statusKind: 'info', detailTab: 0, detailScroll: 0, transcriptSelection: null,
   diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', follow: true,
   expandedTools: new Set(), expandedEvents: new Set(), eventSelection: null,
@@ -279,7 +280,7 @@ const ui = {
   sessionSelection: 0, sessionScroll: 0,
   providerScroll: 0, statsSelection: 0, statsScroll: 0, statsFilter: '', notifyEnabled: notifier.enabled,
   timestampMode: preferences.timestampMode, fleetDensity: preferences.fleetDensity, fleetSort: 'recency', theme: preferences.theme,
-  statusHistory: [], statusHistoryOpen: false,
+  statusHistory: [], statusHistoryOpen: false, statusHistoryPage: 0, terminalFocused: true, gPrefix: false, gPrefixHelp: false,
   remote: store.remote || null,
   launcher: {
     fieldIndex: 0, profile: '<none>', provider: 'codex', model: 'auto',
@@ -302,6 +303,7 @@ const spinnerAnimator = new SpinnerAnimator({
     screen.render(next);
   }
 });
+let gPrefixTimer = null;
 
 function viewport() {
   return { width: screen.columns, height: screen.rows };
@@ -320,7 +322,7 @@ function draw() {
   const frame = viewModel();
   renderedGrid = paintFrame(frame);
   screen.render(renderedGrid);
-  spinnerAnimator.setActive(renderedGrid.spinnerCells.size > 0);
+  spinnerAnimator.setActive(ui.terminalFocused && renderedGrid.spinnerCells.size > 0);
   if (!source.readOnly && frame.meta?.reconcileJobIds?.length) void source.reconcileVisibleJobs(frame.meta.reconcileJobIds, { limit: 5 });
 }
 
@@ -369,6 +371,7 @@ function quit(code = 0) {
   clearInterval(clock);
   spinnerAnimator.stop();
   if (routeAdviceTimer) clearTimeout(routeAdviceTimer);
+  if (gPrefixTimer) clearTimeout(gPrefixTimer);
   source.close();
   bufferedInput.close();
   detachTuiInput();
@@ -387,6 +390,10 @@ function selectedJob() {
   if (ui.screen === 'detail') return store.jobs.find((job) => job.id === ui.jobId) || null;
   const id = viewModel().meta?.selectedJobId;
   return store.jobs.find((job) => job.id === id) || null;
+}
+
+function currentKeymapContext(frame = viewModel()) {
+  return keymapContext(frame, ui, store);
 }
 
 function runMutation(action, success) {
@@ -612,14 +619,29 @@ function invalidatePreview() {
 }
 
 function dryRunLaunch() {
-  runMutation(() => {
+  const preview = runMutation(() => {
     const options = launchOptions();
     const preview = launchManagedJob({ ...options, dryRun: true });
     ui.launcher.preview = preview;
     ui.launcher.previewSignature = JSON.stringify(options);
     ui.launcher.previewScroll = 0;
     return preview;
-  }, (preview) => `Dry run ready: ${preview.provider}/${preview.model}; inspect the exact packet, then press y`);
+  }, (result) => `Dry run ready: ${result.provider}/${result.model}; confirm launch in the overlay`);
+  if (!preview) return;
+  ui.confirm = {
+    action: 'launch',
+    expected: 'launch',
+    value: '',
+    danger: false,
+    title: `Launch dry run${CHROME_SEPARATOR}${preview.provider}/${preview.model}`,
+    lines: [
+      'The exact dry-run packet remains visible in the launcher review pane.',
+      'Launching creates a managed job and may consume provider allowance.',
+      'Type launch to start this exact packet.'
+    ],
+    label: 'Confirm'
+  };
+  draw();
 }
 
 function launchPreviewed() {
@@ -693,6 +715,8 @@ function commitConfirm() {
     }, (result) => `Cancellation queued at revision ${result.revision}`);
   } else if (confirm.action === 'revert') {
     runMutation(() => revertManagedJob(confirm.jobId), (result) => `Revert finished: ${result.reverted.length} reverted, ${result.skipped.length} skipped, ${result.conflicts.length} conflicts`);
+  } else if (confirm.action === 'launch') {
+    launchPreviewed();
   }
   draw();
 }
@@ -700,6 +724,13 @@ function commitConfirm() {
 function editValue(key) {
   const target = ui.confirm || ui.input;
   if (!target) return false;
+  if (key && typeof key === 'object' && key.type === 'paste') {
+    target.value += String(key.text || '');
+    if (target.action === 'pane-search') setSearchQuery(target.value);
+    if (target.action === 'stats-filter') { ui.statsFilter = target.value; ui.statsSelection = 0; }
+    draw();
+    return true;
+  }
   if (key === 'escape') {
     if (ui.confirm) ui.confirm = null;
     else if (ui.input?.action === 'pane-search') clearSearch();
@@ -941,6 +972,10 @@ function focusedClipboardValue() {
   if (ui.screen === 'fleet' || ui.screen === 'group-members') {
     const id = model.meta?.selectedJobId;
     return id ? { value: formatDisplayValue(id), label: 'job id' } : null;
+  }
+  if (ui.screen === 'launcher') {
+    const field = model.meta?.fields?.[ui.launcher.fieldIndex];
+    return field ? { value: formatDisplayValue(ui.launcher[field]), label: `${field} value` } : null;
   }
   if (ui.screen !== 'detail') return null;
   if (ui.detailTab === 0) {
@@ -1269,31 +1304,284 @@ function handleClick(event) {
   draw();
 }
 
+function toggleNotifications() {
+  const enabled = notifier.toggle();
+  ui.notifyEnabled = notifier.enabled;
+  persistPreferences();
+  setStatus(String(process.env.DELEGATE_TUI_NOTIFY ?? '1') === '0'
+    ? 'Notifications are disabled by DELEGATE_TUI_NOTIFY=0'
+    : `Notifications ${enabled ? 'enabled' : 'disabled'} for this session`);
+  draw();
+}
+
+function toggleTimestamps(migration = false) {
+  ui.timestampMode = ui.timestampMode === 'relative' ? 'absolute' : 'relative';
+  invalidateWrapCache();
+  persistPreferences();
+  setStatus(`Timestamps: ${ui.timestampMode}${migration ? '; Stats moved to g t' : ''}`);
+  draw();
+}
+
+function toggleFollow() {
+  if (ui.screen !== 'detail' || ![0, 4].includes(ui.detailTab)) return false;
+  if (ui.follow) {
+    const model = viewModel();
+    const { content, height, width } = detailViewport(model);
+    ui.detailScroll = content?.virtual ? virtualLogBottomPosition(content, width, height) : ui.detailScroll;
+    ui.follow = false;
+  } else {
+    ui.follow = true;
+  }
+  draw();
+  return true;
+}
+
+function navigateScreen(target) {
+  if (target === 'launcher' && ui.remote?.enabled && !ui.remote?.includeLocal) {
+    setStatus('read-only remote: launcher is unavailable', 'error');
+    draw();
+    return false;
+  }
+  if (ui.screen === 'detail') void source.selectJob(null);
+  ui.screen = target;
+  if (target === 'fleet') ui.selectedIndex = 0;
+  if (target === 'groups') ui.groupSelection = 0;
+  if (target === 'sessions') {
+    ui.sessionSelection = 0;
+    ui.sessionScroll = 0;
+  }
+  if (target === 'launcher') {
+    const enabled = choiceValues('provider');
+    if (!enabled.includes(ui.launcher.provider)) ui.launcher.provider = enabled[0];
+    updateRouteAdvice();
+  }
+  clearStatus();
+  draw();
+  return true;
+}
+
+function clearGPrefix() {
+  if (gPrefixTimer) clearTimeout(gPrefixTimer);
+  gPrefixTimer = null;
+  ui.gPrefix = false;
+  ui.gPrefixHelp = false;
+}
+
+function armGPrefix() {
+  clearGPrefix();
+  ui.gPrefix = true;
+  gPrefixTimer = setTimeout(() => {
+    gPrefixTimer = null;
+    if (!ui.gPrefix || quitting) return;
+    ui.gPrefixHelp = true;
+    draw();
+  }, 300);
+  gPrefixTimer.unref?.();
+}
+
+function consumeGPrefix(key) {
+  if (!ui.gPrefix) return false;
+  const targets = { f: 'fleet', r: 'groups', s: 'sessions', p: 'providers', t: 'stats', l: 'launcher' };
+  const target = targets[key];
+  clearGPrefix();
+  if (!target) return false;
+  navigateScreen(target);
+  return true;
+}
+
+function openActionMenu() {
+  ui.actionMenu = {
+    query: '',
+    filtering: false,
+    selection: 0,
+    hint: ui.screen === 'fleet'
+      ? 'x now opens actions; external-thread visibility lives here'
+      : 'Unavailable actions stay visible with their reason'
+  };
+  setStatus(ui.actionMenu.hint);
+  draw();
+}
+
+function actionMenuItems() {
+  return actionMenuForContext(currentKeymapContext(), ui.actionMenu?.query || '');
+}
+
+function dispatchMenuAction(action) {
+  ui.actionMenu = null;
+  if (action === 'detail.steer') return detailAction('s');
+  if (action === 'detail.resume') return detailAction('r');
+  if (action === 'detail.release') return detailAction('R');
+  if (action === 'detail.review') return detailAction('w');
+  if (action === 'detail.nudge') return detailAction('n');
+  if (action === 'detail.cancel') return detailAction('c');
+  if (action === 'detail.revert') return detailAction('v');
+  if (action === 'fleet.externals') {
+    ui.showExternals = !ui.showExternals;
+    ui.selectedIndex = 0;
+    setStatus(`External threads ${ui.showExternals ? 'shown' : 'hidden'}`);
+    draw();
+    return;
+  }
+  if (action === 'fleet.active') {
+    ui.activeOnly = !ui.activeOnly;
+    ui.selectedIndex = 0;
+    draw();
+    return;
+  }
+  if (action === 'fleet.sort') {
+    const sorts = ['activity', 'recency', 'provider', 'tokens'];
+    ui.fleetSort = sorts[(sorts.indexOf(ui.fleetSort) + 1) % sorts.length];
+    ui.selectedIndex = 0;
+    draw();
+    return;
+  }
+  if (action === 'fleet.density') {
+    ui.fleetDensity = ui.fleetDensity === 'compact' ? 'wide' : 'compact';
+    persistPreferences();
+    draw();
+    return;
+  }
+  if (action === 'detail.follow') return toggleFollow();
+  if (action === 'detail.events') return jumpTranscriptToEvents();
+  if (action === 'detail.diff') return openFocusedToolDiff();
+  if (action === 'launcher.editor') return editLauncherBody();
+  if (action === 'launcher.dry-run') return dryRunLaunch();
+  if (action === 'view.yank') return copyFocused();
+  if (action === 'view.timestamps') return toggleTimestamps();
+  if (action === 'view.notifications') return toggleNotifications();
+  if (action === 'diagnostic.status-history') {
+    ui.statusHistoryOpen = true;
+    ui.statusHistoryPage = 0;
+    draw();
+  }
+}
+
+function handleActionMenu(key) {
+  const menu = ui.actionMenu;
+  if (!menu) return false;
+  if (key && typeof key === 'object' && key.type === 'paste') {
+    if (menu.filtering) {
+      menu.query += String(key.text || '');
+      menu.selection = 0;
+      draw();
+    }
+    return true;
+  }
+  if (key === 'escape' || (key === 'x' && !menu.filtering)) {
+    ui.actionMenu = null;
+    clearStatus();
+    draw();
+    return true;
+  }
+  if (key === '/') {
+    menu.filtering = true;
+    menu.query = '';
+    menu.selection = 0;
+    draw();
+    return true;
+  }
+  if (menu.filtering) {
+    if (key === 'enter') {
+      menu.filtering = false;
+      draw();
+    } else if (key === 'backspace') {
+      const graphemes = splitGraphemes(menu.query);
+      graphemes.pop();
+      menu.query = graphemes.join('');
+      menu.selection = 0;
+      draw();
+    } else if (key === 'ctrl-u') {
+      menu.query = '';
+      menu.selection = 0;
+      draw();
+    } else if (typeof key === 'string' && key.length && !/[\u0000-\u001f\u007f]/.test(key)) {
+      menu.query += key;
+      menu.selection = 0;
+      draw();
+    }
+    return true;
+  }
+  const items = actionMenuItems();
+  if (key === 'up' || key === 'k') menu.selection = Math.max(0, menu.selection - 1);
+  else if (key === 'down' || key === 'j') menu.selection = Math.min(Math.max(0, items.length - 1), menu.selection + 1);
+  else if (key === 'home' || key === 'g') menu.selection = 0;
+  else if (key === 'end' || key === 'G') menu.selection = Math.max(0, items.length - 1);
+  else if (key === 'enter') {
+    const selected = items[menu.selection];
+    if (!selected) return true;
+    if (selected.unavailable) {
+      menu.hint = selected.unavailable;
+      setStatus(selected.unavailable, 'error');
+      draw();
+      return true;
+    }
+    dispatchMenuAction(selected.action);
+    return true;
+  } else return true;
+  draw();
+  return true;
+}
+
+function handleHelp(key) {
+  if (!ui.help) return false;
+  if (key === '?' || key === 'escape') {
+    ui.help = false;
+    ui.helpPage = 0;
+    draw();
+    return true;
+  }
+  const pages = viewModel().overlay?.pages || [];
+  if (['down', 'j', ']', 'page-down', 'ctrl-d'].includes(key)) ui.helpPage = Math.min(Math.max(0, pages.length - 1), ui.helpPage + 1);
+  else if (['up', 'k', '[', 'page-up', 'ctrl-u'].includes(key)) ui.helpPage = Math.max(0, ui.helpPage - 1);
+  draw();
+  return true;
+}
+
 function handleKey(key) {
-  if (key === 'ctrl-c') return quit(0);
-  if (key === 'ctrl-g') {
+  if (key === 'focus-out') {
+    ui.terminalFocused = false;
+    spinnerAnimator.setActive(false);
+    return;
+  }
+  if (key === 'focus-in') {
+    ui.terminalFocused = true;
+    draw();
+    return;
+  }
+  const binding = typeof key === 'string' ? resolveKeymapAction(key, currentKeymapContext()) : null;
+  if (binding?.action === 'app.quit') return quit(0);
+  if (binding?.action === 'diagnostic.mark') {
     const marker = screen.markDiagnostic();
     setStatus(marker ? `Diagnostic marker saved at frame ${marker.frame}` : 'Diagnostic recorder is not enabled', marker ? 'info' : 'error');
     draw();
     return;
   }
   if (ui.input || ui.confirm) return editValue(key);
-  if (key === 'q') return quit(0);
-  if (ui.help) {
-    if (key === '?' || key === 'escape') ui.help = false;
-    draw();
-    return;
-  }
+  if (ui.actionMenu) return handleActionMenu(key);
+  if (ui.help) return handleHelp(key);
   if (ui.statusHistoryOpen) {
+    const pages = viewModel().overlay?.pages || [];
     if (key === 'M' || key === 'escape') ui.statusHistoryOpen = false;
+    else if (['down', 'j', ']', 'page-down', 'ctrl-d'].includes(key)) ui.statusHistoryPage = Math.min(Math.max(0, pages.length - 1), ui.statusHistoryPage + 1);
+    else if (['up', 'k', '[', 'page-up', 'ctrl-u'].includes(key)) ui.statusHistoryPage = Math.max(0, ui.statusHistoryPage - 1);
     draw();
     return;
   }
   if (key && typeof key === 'object' && key.type === 'scroll') return move(key.delta);
   if (key && typeof key === 'object' && key.type === 'click') return handleClick(key);
-  if (key === '?') { ui.help = true; draw(); return; }
-  if (key === 'M') { ui.statusHistoryOpen = true; draw(); return; }
+  if (consumeGPrefix(key)) return;
+  if (key === '?') { ui.help = true; ui.helpPage = 0; draw(); return; }
+  if (key === 'x') { openActionMenu(); return; }
+  if (key === 'M') { ui.statusHistoryOpen = true; ui.statusHistoryPage = 0; draw(); return; }
   if (key === 'escape') return goBack();
+  if (key === 'n' || key === 'N') {
+    if (ui.search?.query && jumpSearch(key === 'n' ? 1 : -1)) return;
+    setStatus(key === 'N'
+      ? 'N is previous match; no active search. Launcher moved to g l'
+      : 'n is next match; no active search. Nudge moved to x actions');
+    draw();
+    return;
+  }
   const blocked = remoteActionMessage(ui, key, selectedJob());
   if (blocked) {
     setStatus(blocked, 'error');
@@ -1306,37 +1594,34 @@ function handleKey(key) {
     draw();
     return;
   }
-  if ((key === 'n' || key === 'N') && ui.search?.query) {
-    if (jumpSearch(key === 'n' ? 1 : -1)) return;
-  }
-  if (key === 'b') {
-    const enabled = notifier.toggle();
-    ui.notifyEnabled = notifier.enabled;
-    persistPreferences();
-    setStatus(String(process.env.DELEGATE_TUI_NOTIFY ?? '1') === '0'
-      ? 'Notifications are disabled by DELEGATE_TUI_NOTIFY=0'
-      : `Notifications ${enabled ? 'enabled' : 'disabled'} for this session`);
-    draw();
-    return;
-  }
-  if (key === 'T') {
-    ui.timestampMode = ui.timestampMode === 'relative' ? 'absolute' : 'relative';
-    invalidateWrapCache();
-    persistPreferences();
-    setStatus(`Timestamps: ${ui.timestampMode}`);
-    draw();
-    return;
-  }
-  if (key === 'y' && ui.screen !== 'launcher') {
-    copyFocused();
+  if (key === 'b') return toggleNotifications();
+  if (key === 'T') return toggleTimestamps();
+  if (key === 't') return toggleTimestamps(true);
+  if (key === 'y') {
+    const copied = copyFocused();
+    if (ui.screen === 'launcher') {
+      setStatus(`${copied ? 'Yanked focused launcher value; ' : ''}launch moved to d dry-run confirmation`);
+      draw();
+    }
     return;
   }
   if (key === 'up' || key === 'k') return move(-1, { select: true });
   if (key === 'down' || key === 'j') return move(1, { select: true });
-  if (key === 'page-up') return page(-1);
-  if (key === 'page-down') return page(1);
-  if (key === 'home' || key === 'g') return moveEdge(false);
+  if (key === 'page-up' || key === 'ctrl-u') return page(-1);
+  if (key === 'page-down' || key === 'ctrl-d') return page(1);
+  if (key === 'home') return moveEdge(false);
+  if (key === 'g') {
+    armGPrefix();
+    moveEdge(false);
+    return;
+  }
   if (key === 'end') return moveEdge(true);
+  if (key === 'G') {
+    moveEdge(true);
+    setStatus('G now goes to bottom; Groups moved to g r');
+    draw();
+    return;
+  }
   if (key === 'tab' || key === 'shift-tab') {
     if (ui.screen === 'dashboard') ui.dashboardFocus = ui.dashboardFocus === 0 ? 1 : 0;
     else {
@@ -1347,42 +1632,18 @@ function handleKey(key) {
     return;
   }
   if (key === 'F') {
-    if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = 'fleet';
-    clearStatus();
-    draw();
-    return;
-  }
-  if (key === 'G') {
-    if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'groups' || ui.screen === 'group-members' ? 'dashboard' : 'groups';
-    ui.groupSelection = 0;
-    clearStatus();
-    draw();
+    navigateScreen('fleet');
     return;
   }
   if (key === 'S') {
-    if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'sessions' ? 'dashboard' : 'sessions';
-    ui.sessionSelection = 0;
-    ui.sessionScroll = 0;
-    clearStatus();
+    setStatus('Sessions moved to g s');
     draw();
     return;
   }
   if (key === 'p') {
-    if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'providers' ? 'dashboard' : 'providers'; clearStatus(); draw(); return;
-  }
-  if (key === 't') {
-    if (ui.screen === 'detail') void source.selectJob(null);
-    ui.screen = ui.screen === 'stats' ? 'dashboard' : 'stats'; clearStatus(); draw(); return;
-  }
-  if (key === 'N') {
-    if (ui.screen === 'detail') void source.selectJob(null);
-    const enabled = choiceValues('provider');
-    if (!enabled.includes(ui.launcher.provider)) ui.launcher.provider = enabled[0];
-    ui.screen = 'launcher'; clearStatus(); updateRouteAdvice(); draw(); return;
+    setStatus('Providers moved to g p');
+    draw();
+    return;
   }
   if (ui.screen === 'dashboard') {
     if (key === 'enter') {
@@ -1430,7 +1691,6 @@ function handleKey(key) {
   }
   if (ui.screen === 'fleet') {
     if (key === 'a') { ui.activeOnly = !ui.activeOnly; ui.selectedIndex = 0; draw(); return; }
-    if (key === 'x') { ui.showExternals = !ui.showExternals; ui.selectedIndex = 0; draw(); return; }
     if (key === 'o') {
       const sorts = ['activity', 'recency', 'provider', 'tokens'];
       ui.fleetSort = sorts[(sorts.indexOf(ui.fleetSort) + 1) % sorts.length];
@@ -1458,7 +1718,6 @@ function handleKey(key) {
     else if (key === 'left') cycleLauncher(-1);
     else if (key === 'right') cycleLauncher(1);
     else if (key === 'd') dryRunLaunch();
-    else if (key === 'y') launchPreviewed();
     else if (key === 'e') editLauncherBody();
     return;
   }
@@ -1472,15 +1731,7 @@ function handleKey(key) {
     return;
   }
   if (key === 'f' && [0, 4].includes(ui.detailTab)) {
-    if (ui.follow) {
-      const model = viewModel();
-      const { content, height, width } = detailViewport(model);
-      ui.detailScroll = content?.virtual ? virtualLogBottomPosition(content, width, height) : ui.detailScroll;
-      ui.follow = false;
-    } else {
-      ui.follow = true;
-    }
-    draw();
+    toggleFollow();
     return;
   }
   if (key === '/' && [0, 1, 4].includes(ui.detailTab)) { beginPaneSearch(); return; }
@@ -1497,7 +1748,7 @@ function handleKey(key) {
   }
   if (key === 'left' && ui.detailTab === 1) { pageDiff(-1); return; }
   if (key === 'right' && ui.detailTab === 1) { pageDiff(1); return; }
-  if (['s', 'r', 'R', 'n', 'c', 'v', 'w'].includes(key)) detailAction(key);
+  if (['s', 'r', 'R', 'c', 'v', 'w'].includes(key)) detailAction(key);
 }
 
 function onData(buffer) {
@@ -1537,7 +1788,10 @@ source.on('change', (next) => {
 });
 source.on('warning', (error) => { setStatus(`Store warning: ${error.message}`, 'error'); draw(); });
 screen.on('resize', () => { invalidateWrapCache(); draw(); });
-const clock = setInterval(() => { ui.now = Date.now(); draw(); }, 1000);
+const clock = setInterval(() => {
+  ui.now = Date.now();
+  if (ui.terminalFocused) draw();
+}, 1000);
 clock.unref?.();
 
 screen.start();

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mouseReportingOff, mouseReportingOn, sequences } from '../bin/lib/tui/ansi.mjs';
 import { uiPalette } from '../bin/lib/tui/palette.mjs';
-import { CellGrid, Screen, renderGridToString } from '../bin/lib/tui/screen.mjs';
+import { CellGrid, detectTerminalCapabilities, Screen, renderGridToString } from '../bin/lib/tui/screen.mjs';
 import { ByteVirtualTerminal, assertVtMatchesGrid } from './helpers/tui-vt.mjs';
 
 function capture() {
@@ -88,7 +88,11 @@ test('normal, signal, and exception exits all disable mouse and restore the term
     const raw = [];
     const exits = [];
     const input = { isTTY: true, setRawMode(value) { raw.push(value); }, resume() {}, pause() {} };
-    const screen = new Screen({ output, input, columns: 8, rows: 2, exit(code) { exits.push(code); }, errorOutput: { write() {} } });
+    const screen = new Screen({
+      output, input, columns: 8, rows: 2,
+      terminalCapabilities: { synchronizedOutput: false, bracketedPaste: false, focusReporting: false },
+      exit(code) { exits.push(code); }, errorOutput: { write() {} }
+    });
     screen.start();
     assert.match(output.text, new RegExp(mouseReportingOn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${name} enables mouse reporting`);
     assert.match(output.text, new RegExp(sequences.autowrapOff.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${name} disables autowrap`);
@@ -98,6 +102,34 @@ test('normal, signal, and exception exits all disable mouse and restore the term
     assert.deepEqual(exits, expectedExit == null ? [] : [expectedExit], `${name} preserves the exit code`);
     assert.ok(output.text.endsWith(`${sequences.reset}${mouseReportingOff}${sequences.autowrapOn}${sequences.cursorShow}${sequences.alternateScreenOff}`), `${name} emits mouse-off and autowrap-on before leaving the alternate screen`);
   }
+});
+
+test('terminal capabilities synchronize frames and restore paste and focus modes cleanly', () => {
+  const output = capture();
+  const input = { isTTY: true, setRawMode() {}, resume() {}, pause() {} };
+  assert.deepEqual(detectTerminalCapabilities({ env: { TERM: 'xterm-256color' }, input, output }), {
+    synchronizedOutput: true,
+    bracketedPaste: true,
+    focusReporting: true
+  });
+  const screen = new Screen({ output, input, columns: 8, rows: 2, env: { TERM: 'xterm-256color' } });
+  screen.start();
+  assert.match(output.text, /\u001b\[\?2004h/);
+  assert.match(output.text, /\u001b\[\?1004h/);
+  output.text = '';
+  const grid = new CellGrid(8, 2);
+  grid.write(0, 0, 'atomic');
+  const bytes = screen.render(grid);
+  assert.ok(bytes.startsWith(sequences.synchronizedOutputBegin));
+  assert.ok(bytes.endsWith(sequences.synchronizedOutputEnd));
+  screen.stop();
+  assert.match(output.text, /\u001b\[\?2026l/);
+  assert.match(output.text, /\u001b\[\?2004l/);
+  assert.match(output.text, /\u001b\[\?1004l/);
+  assert.ok(output.text.endsWith(sequences.alternateScreenOff));
+
+  const unsupported = detectTerminalCapabilities({ env: { TERM: 'dumb' }, input, output });
+  assert.deepEqual(unsupported, { synchronizedOutput: false, bracketedPaste: false, focusReporting: false });
 });
 
 test('actual bytes preserve the bottom-right cell with autowrap disabled', () => {

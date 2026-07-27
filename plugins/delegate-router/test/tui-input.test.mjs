@@ -55,3 +55,45 @@ test('input decoder retains split escape sequences until the next chunk', () => 
   assert.deepEqual(callbacks, [[{ type: 'scroll', delta: -3 }]]);
   input.close();
 });
+
+test('bracketed paste keeps a two-line payload literal instead of emitting submit keys', () => {
+  const pasted = decodeInput('\u001b[200~first line\nsecond line\u001b[201~', { final: true });
+  assert.deepEqual(pasted.events, [{ type: 'paste', text: 'first line\nsecond line' }]);
+  assert.ok(!pasted.events.includes('enter'));
+
+  const batches = [];
+  let scheduled = null;
+  const input = new BufferedInput({
+    schedule(callback) { scheduled = callback; return 1; },
+    cancel() {},
+    onFlush(events) { batches.push(events); }
+  });
+  input.push('\u001b[200~first line\n');
+  scheduled();
+  assert.deepEqual(batches, [], 'an unfinished bracketed paste never leaks embedded newlines');
+  input.push('second line\u001b[201~');
+  scheduled();
+  assert.deepEqual(batches, [[{ type: 'paste', text: 'first line\nsecond line' }]]);
+  input.close();
+
+  const splitOpening = [];
+  const fragmented = new BufferedInput({
+    schedule(callback) { scheduled = callback; return 2; },
+    cancel() {},
+    onFlush(events) { splitOpening.push(events); }
+  });
+  fragmented.push('\u001b[20');
+  scheduled();
+  assert.deepEqual(splitOpening, [], 'a split opening marker remains buffered');
+  fragmented.push('0~left\nright\u001b[201~');
+  scheduled();
+  assert.deepEqual(splitOpening, [[{ type: 'paste', text: 'left\nright' }]]);
+  fragmented.close();
+});
+
+test('focus reporting and Ctrl-D decode without ambiguity', () => {
+  assert.deepEqual(
+    decodeInput('\u001b[I\u001b[O\u0004', { final: true }).events,
+    ['focus-in', 'focus-out', 'ctrl-d']
+  );
+});

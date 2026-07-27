@@ -1,12 +1,11 @@
-const DETAIL_MUTATIONS = new Set(['s', 'r', 'R', 'n', 'c', 'v', 'w']);
-const LAUNCHER_MUTATIONS = new Set(['enter', 'left', 'right', 'd', 'y', 'e']);
+const DETAIL_MUTATIONS = new Set(['s', 'r', 'R', 'c', 'v', 'w']);
+const LAUNCHER_MUTATIONS = new Set(['enter', 'left', 'right', 'd', 'e']);
 
 export function remoteActionMessage(ui = {}, key, job = null) {
   if (!ui.remote?.enabled && !job?.readOnly) return null;
   const remoteOnly = ui.remote?.enabled && !ui.remote?.includeLocal;
   const remoteRow = job?.remote === true;
-  if ((key === 'N' && remoteOnly)
-    || (ui.screen === 'detail' && DETAIL_MUTATIONS.has(key) && (remoteRow || remoteOnly))
+  if ((ui.screen === 'detail' && DETAIL_MUTATIONS.has(key) && (remoteRow || remoteOnly))
     || (ui.screen === 'launcher' && LAUNCHER_MUTATIONS.has(key) && remoteOnly)) {
     return 'read-only remote: control actions are disabled';
   }

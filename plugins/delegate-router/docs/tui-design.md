@@ -254,6 +254,15 @@ single-key alias for Fleet. Launch moves off `y` onto the dry-run confirm
 overlay — a launch is a commitment and belongs on a confirm surface. Nudge moves
 into the `x` menu.
 
+**Progress — 2026-07-27:** implemented the registry-derived footer, contextual
+paged help, generated reference table, contextual action menu, migration hints,
+Vim-coherent bindings, and `g` prefix. The help surface now uses a centred
+maximum-width dialog, theme-specific dim scrims, overlay elevation, rhythm
+padding, structural key caps, content-sized section pages, a dedicated pointer
+section, symmetric odd-width margins, and dedicated dark, light, ASCII, and
+`NO_COLOR` coverage. Section pages use the title counter and footer hint without
+a redundant scrollbar.
+
 ## Track E — terminal capabilities (independent of aesthetics)
 
 - **`?2026` synchronized output** — wrap each frame so the terminal never paints
@@ -264,6 +273,10 @@ into the `x` menu.
 - **`?1004` focus reporting** — stop animating when the terminal is unfocused.
 - **Kitty keyboard protocol** — unambiguous Shift-Tab, Ctrl combos, and Esc vs
   Alt-prefixed sequences.
+
+**Progress — 2026-07-27:** implemented defensive synchronized frames, atomic
+bracketed-paste decoding, and focus-driven animation suspension with symmetric
+terminal teardown. Kitty keyboard negotiation remains future work.
 
 ## Motion
 

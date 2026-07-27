@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
 import { cursorTo, styleSequence } from '../bin/lib/tui/ansi.mjs';
 import { CHROME_GLYPHS } from '../bin/lib/tui/glyphs.mjs';
+import { helpPagesForContext } from '../bin/lib/tui/keymap.mjs';
 import { setUiTheme, uiPalette } from '../bin/lib/tui/palette.mjs';
 import { CellGrid, Screen } from '../bin/lib/tui/screen.mjs';
 import { assertVtMatchesGrid, ByteVirtualTerminal } from './helpers/tui-vt.mjs';
@@ -294,7 +295,11 @@ function regressionFrame(options = {}) {
     status: { text: options.status || '', right: 'notify:on' }
   };
   if (options.overlay === 'input') frame.overlay = { kind: 'input', label: 'Search', value: 'wide 界 query' };
-  if (options.overlay === 'help') frame.overlay = { kind: 'help', title: 'Help', items: [{ key: 'Esc', description: 'close overlay' }, { key: '/', description: 'search' }] };
+  if (options.overlay === 'help') frame.overlay = {
+    kind: 'help',
+    pages: helpPagesForContext({ screen: 'detail', detailTab: 0, tabCount: 6, paneCount: 1 }),
+    page: 0
+  };
   return frame;
 }
 

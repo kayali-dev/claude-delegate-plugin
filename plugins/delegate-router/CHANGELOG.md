@@ -2,6 +2,40 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.36.0 — 2026-07-27
+
+- Replaced the TUI's independent footer, help, and documentation key lists with
+  one structured `KEYMAP` registry. It now derives per-key notation, class- and
+  width-budgeted footers, contextual-first paged help, the `x` action menu, and
+  the generated reference table. Destructive actions retain a non-red warning
+  marker and their own trailing footer group; unavailable menu actions remain
+  visible with a reason.
+- Redesigned help as a centred raised dialog over a theme-specific dim scrim,
+  with `surfaceOverlay` ownership, generous rhythm-based margins/padding,
+  padded `surfaceRaised` key caps, aligned action text, quiet right-aligned
+  paging/close utilities, content-sized height, symmetric odd-width margins,
+  pointer affordances in their own quiet section, and explicit light, dark,
+  ASCII, and `NO_COLOR` fallbacks. Section paging uses one title counter and
+  the footer key hint without a redundant border-adjacent scrollbar.
+- Committed the Vim-coherent bindings: `n`/`N` are always next/previous match,
+  `y` always yanks, `g`/`G` are top/bottom, `/` searches, and `Ctrl-D` now pairs
+  with `Ctrl-U`. `g` also arms the screen prefix: `g f` Fleet, `g r` groups,
+  `g s` sessions, `g p` providers, `g t` stats, and `g l` launcher; `F`
+  remains the Fleet alias. The former `G`, `S`, `p`, `t`, and `N` screen
+  bindings report these replacements on first use. Lowercase `t` now toggles
+  timestamp mode alongside `T`.
+- Moved Fleet external-thread visibility from direct `x` activation into the
+  `x` contextual action menu, and moved narration nudge from `n` into that
+  menu. Pressing either moved binding reports the new location instead of
+  failing silently. Launcher `y` now yanks like every other screen; `d` builds
+  the dry run and opens the typed confirmation that launches the matching
+  packet.
+- Added defensive synchronized-output frames (`?2026`), bracketed paste
+  (`?2004`), and focus reporting (`?1004`). Multi-line pastes enter text inputs
+  as one literal payload instead of submitting embedded newlines, unfocused
+  terminals stop animation, unsupported modes retain the prior behavior, and
+  every enabled mode is disabled during suspend and exit.
+
 ## 0.35.0 — 2026-07-27
 
 - **Stricter push default, with an explicit widening path:** Delegate Monitor

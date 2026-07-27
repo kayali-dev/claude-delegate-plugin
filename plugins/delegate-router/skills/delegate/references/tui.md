@@ -14,7 +14,7 @@ Open a known job directly in detail view with `delegate-tui --job <id>`. An unkn
 
 From a source checkout, use `node bin/delegate-tui`. `DELEGATE_STATE_FILE`, `DELEGATE_ENABLED_PROVIDERS`, provider configuration, allowance guard bands, profile directories, and the ordinary state-directory defaults are honored. `node bin/delegate-tui --help` prints usage without switching terminal screens. If stdout is not a TTY, the command exits 2 without emitting terminal escapes.
 
-At startup the TUI measures a bounded set of width-sensitive graphemes with terminal cursor-position reports. Successful measurements are cached in private `<state-dir>/tui-prefs.json` entries keyed by `TERM`, terminal program/version, and whether tmux is interposed; saves merge per-identity measurements so concurrent local and SSH/tmux sessions cannot clobber one another. `DELEGATE_TUI_WIDTH_PROBE=off` skips the measurement, while `verbose` records the satisfying foreground/background phase, final family verdicts, measured table, and elapsed time in the `M` status-history overlay. A short foreground deadline keeps the first frame prompt with conservative glyphs, then an input-safe background continuation waits patiently for delayed tmux-over-SSH replies and atomically upgrades glyphs, cache, and screen when the batch arrives. If that continuation expires or is cancelled, a passive ten-second filter swallows only late cursor-position replies addressed to the probe row; every other input byte passes through in order, and the filter removes itself completely after the grace window.
+At startup the TUI measures a bounded set of width-sensitive graphemes with terminal cursor-position reports. Successful measurements are cached in private `<state-dir>/tui-prefs.json` entries keyed by `TERM`, terminal program/version, and whether tmux is interposed; saves merge per-identity measurements so concurrent local and SSH/tmux sessions cannot clobber one another. `DELEGATE_TUI_WIDTH_PROBE=off` skips the measurement, while `verbose` records the satisfying foreground/background phase, final family verdicts, measured table, and elapsed time in the `M` status-history overlay. A short foreground deadline keeps the first frame prompt with conservative glyphs, then an input-safe background continuation waits patiently for delayed tmux-over-SSH replies and atomically upgrades glyphs, cache, and screen when the batch arrives. If that continuation expires or is cancelled, a passive ten-second filter swallows only late cursor-position replies addressed to the probe row; every other input byte passes through in order, and the filter removes itself completely after the grace window. On an interactive terminal the TUI also requests synchronized frame output, bracketed paste, and focus reporting. Unsupported modes are ignored by the terminal; every requested mode is disabled before suspend or exit. Bracketed multi-line input is inserted as literal text, and spinner/clock animation pauses while the terminal is unfocused.
 
 The probe covers the complete visual chrome set: pane rails, floating-overlay borders, scrollbar track/thumb, braille spinner frames, eighth-block meters, sparklines, separators, truncation, selection markers, and tool/status glyphs. Each glyph has three tiers: probe-gated elegant, statically width-certain Unicode, and ASCII. The elegant candidate is used only after the active terminal layer reports width 1 for every grapheme in that candidate. `DELEGATE_TUI_ASCII=1` forces the final tier for troubleshooting, recordings, and minimal terminals.
 
@@ -79,7 +79,7 @@ CLI targets merge with that file and win when URLs conflict. Labels are redacted
 ## Screens
 
 - **Dashboard** is the default, attention-first home. The first pane contains jobs that need a person: approval or input waits, acceptance blockers, stalls, scope violations, suspect results, and budget stops. Enter opens the selected job. Four compact tiles summarize running/paused work, today's jobs and success rate, today's tokens, and mean cache hit; 14-day jobs/day and mean-duration sparklines sit beside the corresponding values. Provider meters and the last 15 notable cross-job audit/journal events complete the overview. `F` opens the complete Fleet and `Esc` walks back toward Dashboard.
-- **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider, cwd basename, model, routed effort, mode, transport-honest live activity, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, current shared-worktree writer ownership, and a Host column for federation. Shadow jobs carry a `direct` badge; a write-capable direct launch overlapping an active managed writer also carries `writer!`. Proven tool-originated external Codex sessions are dimmed with an `external` badge; `x` hides or restores them and they are shown by default. Claude hook stubs carry an `agent` badge. The full cwd remains in the detail header; compact density drops Directory, Effort, and then Host by width priority. Activity can identify approval/input waits, context compaction, an active provider subagent, an open tool, thinking, streaming, broker phases, quiet time, and stalls only when that transport exposes the corresponding signal.
+- **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider, cwd basename, model, routed effort, mode, transport-honest live activity, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, current shared-worktree writer ownership, and a Host column for federation. Shadow jobs carry a `direct` badge; a write-capable direct launch overlapping an active managed writer also carries `writer!`. Proven tool-originated external Codex sessions are dimmed with an `external` badge; the `x` action menu hides or restores them and they are shown by default. Claude hook stubs carry an `agent` badge. The full cwd remains in the detail header; compact density drops Directory, Effort, and then Host by width priority. Activity can identify approval/input waits, context compaction, an active provider subagent, an open tool, thinking, streaming, broker phases, quiet time, and stalls only when that transport exposes the corresponding signal.
 - **Groups** aggregates jobs by `groupId`, with member/running/terminal/stalled counts, newest activity, and the all-terminal barrier state. Enter opens that group's members in the ordinary fleet row format.
 - **Sessions** is a read-only, best-effort overview of Claude Code coordinator sessions around the managed fleet. It reads only the newest 64 KiB of at most 200 recently modified `~/.claude/projects/<encoded-cwd>/*.jsonl` files, shows active/idle age, project cwd, approximate size, one redacted activity label, active managed-job count by exact cwd, and existing managed writer ownership. It never opens a transcript. Enter filters Fleet to the selected cwd; `Esc` clears the Fleet filter.
 - **Job detail** has Transcript, Diff, Record, Usage, and Events tabs. A sixth Chain tab appears for a root with children or a resumed child; it orders rounds and shows changed-file count, verification exit, objective/suspicion markers, and the first outcome line. Enter on a chain round jumps to that job. The Record view includes additive verification-profile provenance, verification state, and acceptance evidence when present; historical records without those fields continue to render. The detail header always shows the current transport-honest activity. Transcript is a coalesced conversation: message deltas form one live block, completed text replaces its deltas, the latest plan replaces older plans, provider noise is omitted, and tool start/status/output/completion events form one expandable line. Provider subagents form equivalent provider-neutral blocks with their task, tiered status glyph, terminal duration, and expandable bounded output; unknown provider items use generic labeled blocks with compact summaries and expandable JSON. Metadata-only legacy items render an explicit payload-not-captured explanation. External Codex detail reads only a 64 KiB redacted tail of its source file; Claude Agent detail applies the same bound to its derivable subagent transcript. A selected read-only transcript is re-read on the ordinary refresh cadence only when its mtime or size changes, so follow mode remains live without polling unselected rows. Claude Agent transcript linkage is retried when detail opens and while it remains selected; a resolved path is saved back to the stub without a revision transition. If the coordinator transcript path was unavailable to the hook, discovery stays inside the stub cwd's encoded Claude project directory and checks at most eight newest session sidecars. An unresolved transcript shows an explicit retry explanation instead of a blank pane. Neither observed transport opens a complete external transcript and neither enables Diff or controls. Each managed Codex or Cursor file change is a separate compact cwd-relative edit line with green `+A`, red `−R`, and rename/delete labels; counts are absent when unknowable. ACP restored events collapse under one `restored history` row; replay never drives the live thinking/tool state. Network preflight/elevation, input waits, mode/model/session changes, and artifacts render as bounded typed notices. Events remains the raw normalized stream. Diff starts with per-file stats; Enter opens one file's windowed hunks. Usage labels provider tokens/output budget separately from ACP context occupancy and continuation-chain totals.
@@ -95,11 +95,11 @@ coordinates with an enclosing-symbol hint, tint the full changed row, and
 emphasize only the changed portion of paired removal/addition lines.
 - **Providers** shows enabled state, allowance windows, colored warning/avoid bands, deep-health `lastVerified` data when available, active writer jobs grouped by cwd, and a subtle aggregate `~Npp outside tracked` note when capture history contains an unattributed Codex allowance marker. That note never links to a thread and is explicitly approximate.
 - **Stats** renders the never-pruned audit-log aggregation for the last seven days, grouped by provider/model/mode/transport, plus external thread totals and aggregate-only unattributed allowance markers. `/` incrementally filters the already-loaded audit rows without touching the store.
-- **Launcher** selects a local/bundled profile and ordinary provider/model/mode/effort/scope fields, plus a verify command and comma-separated absolute ingest paths. The route-advisor pane recomputes after form changes and shows the primary route, top fallback, scores, and matching historical usage bands when available; it is advisory and never gates launch. Press `e` to edit the packet body in `$VISUAL` or `$EDITOR`, `d` for the mandatory side-effect-free packet preview, and `y` to launch only while that preview exactly matches the current form.
+- **Launcher** selects a local/bundled profile and ordinary provider/model/mode/effort/scope fields, plus a verify command and comma-separated absolute ingest paths. The route-advisor pane recomputes after form changes and shows the primary route, top fallback, scores, and matching historical usage bands when available; it is advisory and never gates launch. Press `e` to edit the packet body in `$VISUAL` or `$EDITOR`; `d` builds the mandatory side-effect-free packet preview and opens its typed launch confirmation. `y` always yanks the focused value, including on this screen.
 
 `$VISUAL`/`$EDITOR` handoff writes only a private `0600` scratch file under the Delegate Router state directory. Before terminal ownership moves to the editor, an active background width probe is cancelled without applying partial measurements and releases its CPR check listener. The TUI then disables raw mode and mouse reporting and leaves the alternate screen before spawning the editor, reinitializes the terminal afterward, and fully repaints. A signalled or nonzero editor leaves the previous packet body unchanged; when neither variable is set, editing stays inline.
 
-Transcript, Events, and an opened Diff file support case-insensitive `/` search over logical lines. Matches use the palette's search background, the title shows the current/total counter, and `n`/`N` move forward/backward with automatic scroll. `Esc` clears the search. Search hit mapping composes with the virtualized wrap cache rather than wrapping the complete journal.
+Transcript, Events, and an opened Diff file support case-insensitive `/` search over logical lines. Matches use the palette's search background, the title shows the current/total counter, and `n`/`N` unconditionally mean next/previous match with automatic scroll. Without an active search they explain how to start one; narration nudge lives in the `x` action menu. `Esc` clears the search. Search hit mapping composes with the virtualized wrap cache rather than wrapping the complete journal.
 
 Transcript tool lines prefer the richest already-redacted journal fields: commands and exit codes, file basenames and change kinds, MCP server/tool names, Cursor titles/locations, durations, and output-line counts. `Enter` expands the focused tool to its full wrapped command, a differing cwd, file list, and last approximately 20 output lines. File-change lines are individually selectable/clickable and use the same glyph-tier fallbacks as tools. `d` opens Diff filtered to the focused tool or file-change path; `Esc` clears the filter. `E` jumps to the corresponding raw Events position on a best-effort sequence mapping.
 
@@ -114,8 +114,8 @@ Codex context compaction appears between conversation blocks as a one-line syste
 - **Focus and one accent:** every pane is a tinted surface with a persistent left rail. Only the focused pane gets the accent rail; resting rails use the subtle border weight. The same accent is reserved for the left-edge selection marker, active-tab underline, and footer keys; status colors remain semantic.
 - **Breathing room:** panes use two columns and one row of inner padding, table columns keep at least two cells between them, and scrollbars retain a one-column margin. Sections have one blank row above 30 terminal rows and reclaim it at 30 or fewer. Full rectangles are reserved for floating overlays.
 - **Stable rhythm:** titles, summaries, section labels, and rows share one content-left column per pane. Selection, glyph, and diff-marker gutters are permanently reserved, so moving focus never shifts content.
-- **Contextual help:** the footer contains only actions valid for the current screen. `?` presents the full reference in the Dashboard → Fleet → Detail progression, followed by controls and launcher actions.
-- **No dead ends:** empty panes say what fills them, such as `N to launch a job` or `F to open Fleet`.
+- **Contextual help:** the footer contains only actions valid for the current screen. `?` starts with the current screen and pages by action class through the complete registry; `x` opens contextual actions and leaves unavailable entries visible with a reason.
+- **No dead ends:** empty panes say what fills them, such as `g l to launch a job` or `F to open Fleet`.
 
 ### Activity visibility by transport
 
@@ -136,37 +136,65 @@ Direct-shadow detail views otherwise render like managed jobs, including Directo
 
 ## Keys
 
-| Key | Action |
-| --- | --- |
-| `F` | Open the complete Fleet from any screen |
-| `↑`/`↓`, `j`/`k` | Move the logical selection one block; scroll follows only to keep it visible |
-| `Enter` | Open a job/diff file, expand a focused Transcript tool, or edit a launcher field |
-| `Esc` | Close the current overlay/file view or walk Detail → Fleet → Dashboard |
-| `a` | Fleet active-only toggle |
-| `x` | Fleet external-Codex visibility toggle (shown by default) |
-| `G`, `S` | Open/close Groups or coordinator Sessions |
-| `/` | Fleet filter; detail-pane search; Stats loaded-row filter |
-| `n`, `N` | Next/previous active search match; `n` otherwise keeps its narration-nudge behavior |
-| `p`, `t`, `N` | Providers, stats, launcher (`N` opens Launcher when no search is active) |
-| `[`/`]`, `1`–`6` | Switch available job-detail tabs |
-| `f` | Toggle follow in Transcript or Events |
-| `d` | From a Transcript tool or file-change line, open Diff filtered to its paths; in Launcher, build the dry run |
-| `E` | From Transcript, jump to the corresponding raw Events position |
-| `s` | Steer an active job using its current revision |
-| `r` | Resume a terminal job with a new packet |
-| `R` | Release a start-paused job using its current revision |
-| `n` | Resume a suspicious read result with the standard inline-findings nudge |
-| `c` | Cancel after typing the last four job-id characters |
-| `v` | Show the safe revert dry-run plan, then require the job-id suffix |
-| `w` | On a terminal job, collect findings and start a shared diff-aware review round |
-| `←`/`→` | Cycle launcher choices or page a selected file diff |
-| `e` | Edit the launcher packet body through `$VISUAL`/`$EDITOR` |
-| `y` | Launch the matching launcher preview |
-| `b` | Toggle desktop notifications for this TUI session |
-| `Ctrl-G` | Mark the current diagnostic frame when `DELEGATE_TUI_DIAG` is enabled |
-| Mouse click | Select a Fleet/Groups/Transcript row or switch a detail tab; wheel moves only the viewport |
-| `?` | Complete in-app key reference |
-| `q`, `Ctrl-C` | Quit immediately |
+<!-- BEGIN GENERATED KEYMAP -->
+| Key | Action | Scope |
+| --- | --- | --- |
+| `?` | keys | global |
+| `Esc` | back | global |
+| `q` | quit | global |
+| `Ctrl-C` | quit | global |
+| `Up Down` | previous / next item | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `j k` | next / previous item | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Mouse wheel` | scroll viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Mouse click` | select / open | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `PgUp PgDn` | previous / next viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Ctrl-U` | previous viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Ctrl-D` | next viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `g G` | top / bottom | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Home End` | top / bottom alias | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Tab` | next pane | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Shift-Tab` | previous pane | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Enter` | open / edit / expand | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `/` | filter / search | fleet, group-members, stats, detail |
+| `n N` | next / previous match | global |
+| `[ ]` | previous / next tab | detail |
+| `1 … 6` | open tab by number | detail |
+| `g f` | go to Fleet | global |
+| `F` | open Fleet alias | global |
+| `g r` | go to groups | global |
+| `g s` | go to sessions | global |
+| `g p` | go to providers | global |
+| `g t` | go to stats | global |
+| `g l` | go to launcher | global |
+| `s` | steer | detail |
+| `r` | resume | detail |
+| `R` | release paused start | detail |
+| `w` | review round | detail |
+| `x menu` | nudge suspicious result | detail |
+| `c` | cancel | detail |
+| `v` | safe revert | detail |
+| `x` | actions | global |
+| `x menu` | toggle external threads | fleet |
+| `a` | active jobs only | fleet |
+| `o` | cycle Fleet sort | fleet |
+| `z` | toggle Fleet density | fleet |
+| `f` | toggle follow | detail |
+| `E` | jump to raw Events | detail |
+| `d` | open focused Diff | detail |
+| `Left Right` | previous / next choice or diff page | launcher, detail |
+| `e` | edit packet body | launcher |
+| `d` | dry run, then confirm launch | launcher |
+| `y` | yank focused value | global |
+| `t T` | toggle timestamp mode | global |
+| `b` | toggle notifications | global |
+| `M` | status-message history | global |
+| `Ctrl-G` | mark diagnostic frame | global |
+<!-- END GENERATED KEYMAP -->
+
+`g` still jumps to the top and also arms the 300 ms navigation prefix: `g f`
+Fleet, `g r` groups, `g s` sessions, `g p` providers, `g t` stats, and `g l`
+launcher. `G` is bottom; `F` remains the documented Fleet alias. The first use
+of a moved legacy key reports its replacement in the status line.
 
 Revision conflicts and all other typed broker errors stay in the status line; they do not terminate the TUI. Cancellation is shown as queued until the provider acknowledges or its process exits. Revert can touch only the safe subset reported by the existing broker helper.
 

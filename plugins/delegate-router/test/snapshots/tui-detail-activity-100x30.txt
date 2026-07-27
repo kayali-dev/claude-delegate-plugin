@@ -27,4 +27,4 @@
 |                                                                                                  #
 |                                                                                                  #
 |
- [/] tabs Up/Dn select / search  | Enter expand d diff E events  | Esc back ? help q qu.. notify:on
+ s  steer | x  actions  f  follow | ! c  cancel                                  ?  keys  Esc  back

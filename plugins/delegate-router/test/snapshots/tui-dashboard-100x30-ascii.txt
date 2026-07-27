@@ -27,4 +27,4 @@
 |                                                                                                  #
 |                                                                                                  #
 |
- F fleet N new job  | Up/Dn select Tab focus Enter open  | Esc back ? help q quit         notify:on
+ Up Down  select  Enter  open  g G  top / bottom | x  actions                    ?  keys  Esc  back

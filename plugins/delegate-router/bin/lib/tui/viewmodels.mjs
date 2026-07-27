@@ -5,6 +5,7 @@ import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimes
 import { prepareDiffWindow, formatDiffRow, wrapDiffRow } from './diff.mjs';
 import { eventBlocks, eventCategory, formatEventBlock, wrapEventBlock } from './events.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR, spinnerGlyph } from './glyphs.mjs';
+import { actionMenuForContext, footerForContext, formatKeyNotation, helpPagesForContext, keymapContext, keyNotationSegments, KEYMAP } from './keymap.mjs';
 import { uiPalette as palette } from './palette.mjs';
 import { sectionGapForHeight, SPACE } from './rhythm.mjs';
 import { classifySession, correlateSessions } from './sessions.mjs';
@@ -15,28 +16,10 @@ const READ_MODES = new Set(['consult', 'plan', 'review']);
 
 export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
 
-export const HELP_ITEMS = Object.freeze([
-  { key: 'Dashboard', description: 'Attention first: jobs needing you, today metrics, providers, and recent activity' },
-  { key: 'F / Esc', description: 'Open the complete Fleet / walk back toward Dashboard' },
-  { key: 'Up/Dn, j/k, wheel', description: 'Move one line; mouse wheel moves three lines' },
-  { key: 'PgUp/PgDn', description: 'Move the focused pane by one viewport' },
-  { key: 'Home/End, g', description: 'Jump to the start or end of the focused pane' },
-  { key: 'Enter / Esc', description: 'Open or edit / go back or close an overlay' },
-  { key: 'a / /', description: 'Toggle active jobs / filter or search the focused pane' },
-  { key: 'G / S / p / t / N', description: 'Groups / coordinator sessions / providers / seven-day stats / launcher' },
-  { key: '[/], 1-6', description: 'Cycle detail tabs / open a specific tab' },
-  { key: 'f', description: 'Toggle follow mode in Transcript or Events' },
-  { key: 'Enter / d / E', description: 'Expand a Transcript tool, agent, or provider item / open its Diff / jump to raw Events' },
-  { key: 's / r / R', description: 'Steer / resume / release a paused start' },
-  { key: 'n/N / c / v / w', description: 'Search next/previous, nudge / cancel / revert / review round' },
-  { key: 'Left/Right', description: 'Cycle launcher choices or page a file diff' },
-  { key: 'd / y', description: 'Build dry-run preview / launch that exact packet' },
-  { key: 'y / T', description: 'Copy focused value / toggle absolute-relative timestamps' },
-  { key: 'o / z / M', description: 'Cycle Fleet sort / density / status-message history' },
-  { key: 'x', description: 'Show or hide read-only external Codex threads in Fleet' },
-  { key: 'Ctrl-G', description: 'Mark the current DELEGATE_TUI_DIAG frame' },
-  { key: '? / q / Ctrl-C', description: 'Toggle help / quit immediately' }
-]);
+export const HELP_ITEMS = Object.freeze(KEYMAP.map((item) => Object.freeze({
+  key: formatKeyNotation(item),
+  description: item.label
+})));
 
 function viewportOf(viewport = {}) {
   return { width: Math.max(20, Number(viewport.width || 80)), height: Math.max(8, Number(viewport.height || 24)) };
@@ -212,24 +195,6 @@ function providerBand(provider) {
   return { label: `${Math.round(used)}%`, style: palette.running };
 }
 
-function footerHints(screen, remote = false) {
-  const navigation = [{ key: 'Esc', label: 'back' }, { key: '?', label: 'help' }, { key: 'q', label: 'quit' }];
-  const rows = {
-    dashboard: [[{ key: 'F', label: 'fleet' }, { key: 'N', label: 'new job' }], [{ key: 'Up/Dn', label: 'select' }, { key: 'Tab', label: 'focus' }, { key: 'Enter', label: 'open' }], navigation],
-    fleet: [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'detail' }, { key: '/', label: 'filter' }], [{ key: 'a', label: 'active' }, { key: 'x', label: 'externals' }, { key: 'o', label: 'sort' }, { key: 'z', label: 'density' }], [{ key: 'N', label: 'new' }, { key: 'G', label: 'groups' }, { key: 'p', label: 'providers' }], navigation],
-    'group-members': [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'detail' }, { key: '/', label: 'filter' }], navigation],
-    groups: [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'members' }], navigation],
-    sessions: [[{ key: 'Up/Dn', label: 'select' }, { key: 'Enter', label: 'fleet by cwd' }], navigation],
-    providers: [[{ key: 'Up/Dn', label: 'scroll' }, { key: 'Tab', label: 'focus' }], navigation],
-    stats: [[{ key: 'Up/Dn', label: 'select' }, { key: '/', label: 'filter' }], navigation],
-    launcher: [[{ key: 'Up/Dn', label: 'field' }, { key: 'Left/Right', label: 'choice' }, { key: 'Enter', label: 'edit' }], [{ key: 'd', label: 'dry run' }, { key: 'y', label: 'launch' }], navigation],
-    detail: [[{ key: '[/]', label: 'tabs' }, { key: 'Up/Dn', label: 'select' }, { key: '/', label: 'search' }], [{ key: 'Enter', label: 'expand' }, { key: 'd', label: 'diff' }, { key: 'E', label: 'events' }], navigation]
-  };
-  const groups = rows[screen] || [navigation];
-  if (!remote) return groups;
-  return groups.map((group) => group.filter((hint) => !['N', 's', 'r', 'R', 'c', 'v', 'w'].includes(hint.key))).filter((group) => group.length);
-}
-
 function breadcrumbs(frame, ui) {
   if (frame.screen === 'detail') return [ui.detailReturn === 'dashboard' ? 'home' : 'fleet', formatDisplayValue(frame.meta?.jobId).slice(-12)];
   if (frame.screen === 'group-members') return ['groups', formatDisplayValue(ui.groupId).slice(-12)];
@@ -371,17 +336,74 @@ function commonOverlay(frame, ui, store = null) {
     if (frame.tabs) frame.tabs = { ...frame.tabs, rect: { ...frame.tabs.rect, y: Number(frame.tabs.rect?.y || 0) + 1 } };
     frame.meta = { ...(frame.meta || {}), appBarSpaced: true };
   }
-  if (frame.status && !frame.status.segments && !ui.status) frame.status.hints = frame.status.hints
-    || footerHints(frame.screen, ui.remote?.enabled && !ui.remote?.includeLocal);
+  const context = keymapContext(frame, ui, store);
+  if (frame.status) {
+    const footer = footerForContext(context, frame.width);
+    frame.status.rightHints = footer.right;
+    if (!frame.status.segments && !ui.status) {
+      frame.status.text = '';
+      frame.status.hints = footer.groups;
+    }
+  }
   frame.focusedPane = Number(ui.focusedPane || 0);
-  if (ui.help) frame.overlay = { kind: 'help', title: 'delegate-tui keys', items: HELP_ITEMS };
-  else if (ui.statusHistoryOpen) frame.overlay = {
-    kind: 'help', title: 'Status history | newest last', width: 90, keyWidth: 13,
-    items: (ui.statusHistory || []).slice(-20).flatMap((entry) => formatMultilineDisplayValue(entry.message).split('\n').map((line, index) => ({
-      key: index === 0 ? formatTimestamp(entry.at, { mode: ui.timestampMode, now: ui.now }) : '',
-      description: `${index === 0 && entry.stream ? `[${entry.stream}] ` : ''}${line}`
-    })))
-  };
+  if (ui.help) {
+    const pages = helpPagesForContext(context);
+    frame.overlay = {
+      kind: 'help',
+      title: 'DELEGATE KEYS',
+      pages,
+      page: Math.max(0, Math.min(pages.length - 1, Number(ui.helpPage || 0)))
+    };
+  } else if (ui.actionMenu) {
+    const items = actionMenuForContext(context, ui.actionMenu.query);
+    frame.overlay = {
+      kind: 'actions',
+      title: 'Actions',
+      items,
+      query: ui.actionMenu.query || '',
+      filtering: ui.actionMenu.filtering === true,
+      selected: Math.max(0, Math.min(items.length - 1, Number(ui.actionMenu.selection || 0))),
+      hint: ui.actionMenu.hint || ''
+    };
+  } else if (ui.gPrefixHelp) {
+    frame.overlay = {
+      kind: 'prefix',
+      title: 'g: go to',
+      items: KEYMAP.filter((item) => item.relation === 'sequence' && item.keys[0] === 'g')
+        .map((item) => ({ keys: keyNotationSegments(item), label: item.label }))
+    };
+  }
+  else if (ui.statusHistoryOpen) {
+    const rows = (ui.statusHistory || []).slice(-20).flatMap((entry) => formatMultilineDisplayValue(entry.message).split('\n').map((line, index) => {
+      const notation = index === 0 ? formatTimestamp(entry.at, { mode: ui.timestampMode, now: ui.now }) : '';
+      return {
+        action: 'diagnostic.status-history',
+        class: 'diagnostic',
+        scope: ['global'],
+        keys: notation ? [{ text: notation, kind: 'key' }] : [],
+        notation,
+        relation: 'single',
+        label: `${index === 0 && entry.stream ? `[${entry.stream}] ` : ''}${line}`
+      };
+    }));
+    const pages = [];
+    for (let offset = 0; offset < rows.length || (!offset && !rows.length); offset += 14) {
+      pages.push({
+        label: rows.length > 14 ? `messages ${Math.floor(offset / 14) + 1}/${Math.ceil(rows.length / 14)}` : 'messages',
+        scope: 'NEWEST LAST',
+        rows: rows.slice(offset, offset + 14)
+      });
+      if (!rows.length) break;
+    }
+    frame.overlay = {
+      kind: 'help',
+      title: 'STATUS HISTORY',
+      width: 90,
+      keyWidth: 13,
+      pages,
+      page: Math.max(0, Math.min(pages.length - 1, Number(ui.statusHistoryPage || 0)))
+    };
+  }
   else if (ui.confirm) frame.overlay = { kind: 'confirm', ...ui.confirm };
   else if (ui.input) frame.overlay = { kind: 'input', ...ui.input };
   return frame;
@@ -668,7 +690,7 @@ export function dashboardViewModel(store, ui = {}, viewport = {}) {
   const feedHeight = Math.max(3, bodyBottom - feedY);
   const panes = [{
     rect: { x: 0, y: attentionY, width, height: attentionHeight }, title: 'Needs you', focused: Number(ui.dashboardFocus || 0) === 0,
-    content: { kind: 'table', columns: [{ key: 'marker', title: '', width: 3 }, { key: 'job', title: 'Job', width: 12 }, { key: 'need', title: 'Attention', width: Math.max(18, Math.floor(width * 0.36)) }, { key: 'context', title: 'Context', width: Math.max(12, width - Math.max(18, Math.floor(width * 0.36)) - 25) }, { key: 'age', title: 'Age', width: 8, align: 'right' }], rows: attentionRows, selected: attentionSelection, empty: { message: 'nothing needs you', action: 'N to launch a job' } }
+    content: { kind: 'table', columns: [{ key: 'marker', title: '', width: 3 }, { key: 'job', title: 'Job', width: 12 }, { key: 'need', title: 'Attention', width: Math.max(18, Math.floor(width * 0.36)) }, { key: 'context', title: 'Context', width: Math.max(12, width - Math.max(18, Math.floor(width * 0.36)) - 25) }, { key: 'age', title: 'Age', width: 8, align: 'right' }], rows: attentionRows, selected: attentionSelection, empty: { message: 'nothing needs you', action: 'g l to launch a job' } }
   }];
   if (tilesHeight) {
     const gap = 1;
@@ -686,7 +708,7 @@ export function dashboardViewModel(store, ui = {}, viewport = {}) {
   });
   panes.push({
     rect: { x: 0, y: feedY, width, height: feedHeight }, title: 'Recent notable activity', focused: Number(ui.dashboardFocus || 0) === 1,
-    content: { kind: 'table', columns: [{ key: 'time', title: 'When', width: 11 }, { key: 'job', title: 'Job', width: 12 }, { key: 'event', title: 'Event', width: Math.max(18, width - 36) }, { key: 'provider', title: 'Provider', width: 10 }], rows: feedRows, selected: feedSelection, empty: { message: 'no recent activity', action: 'N to launch a job or F to open Fleet' } }
+    content: { kind: 'table', columns: [{ key: 'time', title: 'When', width: 11 }, { key: 'job', title: 'Job', width: 12 }, { key: 'event', title: 'Event', width: Math.max(18, width - 36) }, { key: 'provider', title: 'Provider', width: 10 }], rows: feedRows, selected: feedSelection, empty: { message: 'no recent activity', action: 'g l to launch a job or F to open Fleet' } }
   });
   const frame = {
     width, height, screen: 'dashboard', title: { text: 'Delegate dashboard', right: `${jobs.length} jobs` }, panes,
@@ -772,7 +794,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     panes: [{
       rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) },
       title: store.error ? `Store warning: ${formatDisplayValue(store.error)}` : 'Delegation jobs',
-      content: { kind: 'table', columns, rows, selected, scroll: ui.scroll || 0, empty: { message: 'no jobs match the filter', action: 'N to launch a job' } }
+      content: { kind: 'table', columns, rows, selected, scroll: ui.scroll || 0, empty: { message: 'no jobs match the filter', action: 'g l to launch a job' } }
     }],
     status: statusOverride || {
       style: palette.bar,
@@ -816,9 +838,9 @@ export function groupsViewModel(store, ui = {}, viewport = {}) {
     title: { text: 'Delegate groups | barrier progress', right: `${groups.length} groups` },
     panes: [{
       rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) }, title: 'Group members and all-terminal barrier',
-      content: { kind: 'table', columns, rows, selected, scroll: ui.groupScroll || 0, empty: { message: 'no job groups yet', action: 'N to launch a grouped job' } }
+      content: { kind: 'table', columns, rows, selected, scroll: ui.groupScroll || 0, empty: { message: 'no job groups yet', action: 'g l to launch a grouped job' } }
     }],
-    status: errorStatus(ui) || { text: 'Esc fleet  Up/Dn select  Enter members  G close  ? help  q quit' },
+    status: errorStatus(ui) || { text: '' },
     meta: { groupIds: groups.map((group) => group.groupId), selectedGroupId: groups[selected]?.groupId || null, selected }
   };
   return commonOverlay(frame, ui, store);
@@ -1435,9 +1457,7 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
       loadingGlyph: body.loadingGlyph,
       content: body.content
     }],
-    status: errorStatus(ui) || { text: job.readOnly || (ui.remote?.enabled && !ui.remote?.includeLocal)
-      ? 'Esc fleet  [/] tabs  / search  f follow  read-only observed job'
-      : 'Esc fleet  [/] tabs  / search  f follow  Enter expand  d diff  E events  s/r/R  n/w/c/v' },
+    status: errorStatus(ui) || { text: '' },
     meta: {
       jobId: job.id,
       tab,
@@ -1496,7 +1516,7 @@ export function providersViewModel(store, ui = {}, viewport = {}) {
       { rect: { x: 0, y: 1, width, height: providerHeight }, title: 'Allowance windows', content: { kind: 'table', columns, rows, selection: false, empty: { message: 'no providers enabled', action: 'Configure a provider to see allowance' } } },
       { rect: { x: 0, y: 2 + providerHeight, width, height: Math.max(3, height - providerHeight - 3) }, title: 'Active writer ownership by cwd', content: { kind: 'log', lines: lockLines, follow: false, scroll: ui.providerScroll || 0, empty: { message: 'no active writer locks', action: 'Implement and verify jobs appear here' } } }
     ],
-    status: errorStatus(ui) || { text: 'Esc fleet  Up/Dn scroll  p close  ? help  q quit' }
+    status: errorStatus(ui) || { text: '' }
   };
   return commonOverlay(frame, ui, store);
 }
@@ -1529,7 +1549,7 @@ export function sessionsViewModel(store, ui = {}, viewport = {}) {
     .sort((left, right) => Number(right.active) - Number(left.active)
       || Number(right.mtimeMs || 0) - Number(left.mtimeMs || 0) || String(left.id).localeCompare(String(right.id)));
   const selected = Math.max(0, Math.min(correlated.length - 1, Number(ui.sessionSelection || 0)));
-  const status = errorStatus(ui) || { text: 'Enter filter Fleet to cwd  Esc fleet/clear filter  S close  Up/Dn select  ? help  q quit' };
+  const status = errorStatus(ui) || { text: '' };
   if (scan.status === 'loading') {
     return commonOverlay({
       width, height, screen: 'sessions',
@@ -1657,8 +1677,8 @@ export function statsViewModel(store, ui = {}, viewport = {}) {
   const frame = {
     width, height, screen: 'stats',
     title: { text: `Delegation stats | last ${displayOr(stats.since, '7d')}${query ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.statsFilter)}` : ''}`, right: `${rows.length}/${stats.groups?.length || 0} audit rows` },
-    panes: [{ rect: { x: 0, y: 1, width, height: height - 2 }, title: 'Provider / normalized model / mode', content: { kind: 'table', columns, rows, selected: ui.statsSelection || 0, scroll: ui.statsScroll || 0, empty: { message: 'no audit rows in this window', action: 'N to launch a job' } } }],
-    status: errorStatus(ui) || { text: 'Esc fleet  Up/Dn select  / filter loaded audit rows  default window: 7d  ? help  q quit' },
+    panes: [{ rect: { x: 0, y: 1, width, height: height - 2 }, title: 'Provider / normalized model / mode', content: { kind: 'table', columns, rows, selected: ui.statsSelection || 0, scroll: ui.statsScroll || 0, empty: { message: 'no audit rows in this window', action: 'g l to launch a job' } } }],
+    status: errorStatus(ui) || { text: '' },
     meta: { visibleStatsCount: rows.length }
   };
   return commonOverlay(frame, ui, store);
@@ -1738,7 +1758,7 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
   const previewY = wide ? 2 + topHeight : advisorRect.y + advisorRect.height + 1;
   const frame = {
     width, height, screen: 'launcher',
-    title: { text: 'New managed job', right: preview ? 'preview ready | y launches' : 'dry run required' },
+    title: { text: 'New managed job', right: preview ? 'preview ready | launch confirmation' : 'dry run required' },
     panes: [
       { rect: { x: 0, y: 1, width: formWidth, height: topHeight }, title: `Launcher form${CHROME_SEPARATOR}profiles: ${(store.profiles || []).map(formatDisplayValue).filter(Boolean).join(', ') || 'none'}`, content: { kind: 'table', columns: [{ key: 'field', title: 'Field', width: 16 }, { key: 'value', title: 'Value', width: Math.max(10, formWidth - 18) }], rows, selected: launcher.fieldIndex || 0 } },
       {
@@ -1769,7 +1789,7 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
         }
       }
     ],
-    status: errorStatus(ui) || { text: 'Esc fleet  Up/Dn field  Left/Right cycle  Enter edit  e $EDITOR body  d dry run  y launch preview  ? help  q quit' },
+    status: errorStatus(ui) || { text: '' },
     meta: { fields: LAUNCH_FIELDS.map(([key]) => key), previewReady: Boolean(preview) }
   };
   return commonOverlay(frame, ui, store);

@@ -33,14 +33,14 @@
  ok                       notify:on
 --- help-open ---
  aaaaaaaaaaaaaaaaaaaaaaaaaaaaa🙂t..
-| Live pane                 1-3/3
-|+- Help -------------------------+#
-|| Esc            close overlay   |#
-|| /              search          |#
+|+--------------------------------+
+|| DELEGATE KEYS              1/8 |#
 ||                                |#
+|| NAVIGATION      CURRENT SCREEN |#
 ||                                |#
-|+--------------------------------+#
-|
+||  ?                     keys    |#
+||    [ ] section   ? / Esc close |#
+|+--------------------------------+
  help                     notify:on
 --- help-dismissed ---
  aaaaaaaaaaaaaaaaaaaaaaaaaaaaa🙂t..

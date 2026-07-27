@@ -36,6 +36,20 @@ function equalCell(left, right) {
   return Boolean(left && right && left.char === right.char && left.styleKey === right.styleKey && left.continuation === right.continuation);
 }
 
+export function detectTerminalCapabilities(options = {}) {
+  const env = options.env || process.env;
+  const input = options.input || process.stdin;
+  const output = options.output || process.stdout;
+  const usable = input?.isTTY === true && output?.isTTY === true
+    && String(env.TERM || '').toLowerCase() !== 'dumb'
+    && String(env.DELEGATE_TUI_TERMINAL_CAPS || '').toLowerCase() !== 'off';
+  return Object.freeze({
+    synchronizedOutput: usable,
+    bracketedPaste: usable,
+    focusReporting: usable
+  });
+}
+
 export class CellGrid {
   constructor(columns, rows) {
     this.columns = Math.max(1, Math.floor(columns));
@@ -219,6 +233,10 @@ export class Screen extends EventEmitter {
     this.columns = Math.max(1, options.columns || this.output.columns || 80);
     this.rows = Math.max(1, options.rows || this.output.rows || 24);
     this.colorMode = options.colorMode || detectColorMode(options.env || process.env);
+    this.terminalCapabilities = Object.freeze({
+      ...detectTerminalCapabilities({ env: options.env || process.env, input: this.input, output: this.output }),
+      ...(options.terminalCapabilities || {})
+    });
     this.exit = options.exit || ((code) => process.exit(code));
     this.outputCapture = options.outputCapture || null;
     this.diagnostics = options.diagnostics || null;
@@ -373,6 +391,9 @@ export class Screen extends EventEmitter {
     this.diagnostics?.nextFrame(grid, { colorMode: this.colorMode });
     if (output) {
       output += sequences.reset;
+      if (this.terminalCapabilities.synchronizedOutput) {
+        output = `${sequences.synchronizedOutputBegin}${output}${sequences.synchronizedOutputEnd}`;
+      }
       this.writeOutput(output, { frame: this.frameCounter, context: 'frame' });
     }
     this.previous = grid.clone();
@@ -386,7 +407,10 @@ export class Screen extends EventEmitter {
       if (this.input.isTTY && typeof this.input.setRawMode === 'function') this.input.setRawMode(false);
     } catch {}
     try { if (typeof this.input.pause === 'function') this.input.pause(); } catch {}
-    try { this.writeOutput(`${sequences.reset}${mouseReportingOff}${sequences.autowrapOn}${sequences.cursorShow}${sequences.alternateScreenOff}`, { context: 'restore' }); } catch {}
+    const capabilitiesOff = `${this.terminalCapabilities.synchronizedOutput ? sequences.synchronizedOutputEnd : ''}`
+      + `${this.terminalCapabilities.bracketedPaste ? sequences.bracketedPasteOff : ''}`
+      + `${this.terminalCapabilities.focusReporting ? sequences.focusReportingOff : ''}`;
+    try { this.writeOutput(`${sequences.reset}${mouseReportingOff}${capabilitiesOff}${sequences.autowrapOn}${sequences.cursorShow}${sequences.alternateScreenOff}`, { context: 'restore' }); } catch {}
     this.outputCapture?.suspend();
     this.previous = null;
     return true;
@@ -398,7 +422,9 @@ export class Screen extends EventEmitter {
     try {
       if (this.input.isTTY && typeof this.input.setRawMode === 'function') this.input.setRawMode(true);
       if (typeof this.input.resume === 'function') this.input.resume();
-      this.writeOutput(`${sequences.alternateScreenOn}${sequences.autowrapOff}${mouseReportingOn}${sequences.cursorHide}${sequences.clearScreen}${sequences.home}`, { context: 'startup' });
+      const capabilitiesOn = `${this.terminalCapabilities.bracketedPaste ? sequences.bracketedPasteOn : ''}`
+        + `${this.terminalCapabilities.focusReporting ? sequences.focusReportingOn : ''}`;
+      this.writeOutput(`${sequences.alternateScreenOn}${sequences.autowrapOff}${mouseReportingOn}${capabilitiesOn}${sequences.cursorHide}${sequences.clearScreen}${sequences.home}`, { context: 'startup' });
       this.outputCapture?.resume();
       this.previous = null;
       return true;

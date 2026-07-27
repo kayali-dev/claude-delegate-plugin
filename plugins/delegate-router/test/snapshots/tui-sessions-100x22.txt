@@ -19,4 +19,4 @@
 | 1 lines                                                                                          #
 | /work/alpha | approx 13k bytes                                                                   #
 |
- Up/Dn select Enter fleet by cwd  | Esc back ? help q quit                                notify:on
+ Up Down  select  Enter  open  g G  top / bottom | x  actions                    ?  keys  Esc  back

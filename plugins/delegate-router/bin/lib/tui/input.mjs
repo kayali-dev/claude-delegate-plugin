@@ -1,4 +1,6 @@
 const ESC = '\u001b';
+const PASTE_START = `${ESC}[200~`;
+const PASTE_END = `${ESC}[201~`;
 
 const FIXED_SEQUENCES = Object.freeze([
   [`${ESC}[A`, 'up'], [`${ESC}[B`, 'down'], [`${ESC}[C`, 'right'], [`${ESC}[D`, 'left'],
@@ -6,8 +8,9 @@ const FIXED_SEQUENCES = Object.freeze([
   [`${ESC}[H`, 'home'], [`${ESC}[1~`, 'home'], [`${ESC}OH`, 'home'],
   [`${ESC}[F`, 'end'], [`${ESC}[4~`, 'end'], [`${ESC}OF`, 'end'],
   [`${ESC}[Z`, 'shift-tab'],
+  [`${ESC}[I`, 'focus-in'], [`${ESC}[O`, 'focus-out'],
   ['\r', 'enter'], ['\n', 'enter'], ['\u007f', 'backspace'], ['\b', 'backspace'],
-  ['\u0003', 'ctrl-c'], ['\u0007', 'ctrl-g'], ['\u0015', 'ctrl-u'], ['\t', 'tab']
+  ['\u0003', 'ctrl-c'], ['\u0004', 'ctrl-d'], ['\u0007', 'ctrl-g'], ['\u0015', 'ctrl-u'], ['\t', 'tab']
 ].sort((left, right) => right[0].length - left[0].length));
 
 const ESCAPE_PREFIXES = FIXED_SEQUENCES.map(([sequence]) => sequence).filter((sequence) => sequence.startsWith(ESC));
@@ -24,6 +27,14 @@ export function decodeInput(value, options = {}) {
   let offset = 0;
   while (offset < text.length) {
     const rest = text.slice(offset);
+    if (rest.length < PASTE_START.length && PASTE_START.startsWith(rest)) break;
+    if (rest.startsWith(PASTE_START)) {
+      const end = rest.indexOf(PASTE_END, PASTE_START.length);
+      if (end < 0) break;
+      events.push({ type: 'paste', text: rest.slice(PASTE_START.length, end) });
+      offset += end + PASTE_END.length;
+      continue;
+    }
     if (rest.startsWith(`${ESC}[<`)) {
       const match = rest.match(/^\u001b\[<(\d+);(\d+);(\d+)([Mm])/);
       if (match) {
@@ -44,7 +55,8 @@ export function decodeInput(value, options = {}) {
     }
     if (matched) continue;
     if (rest[0] === ESC) {
-      const incomplete = ESCAPE_PREFIXES.some((sequence) => sequence.startsWith(rest)) || `${ESC}[<`.startsWith(rest);
+      const incomplete = ESCAPE_PREFIXES.some((sequence) => sequence.startsWith(rest))
+        || `${ESC}[<`.startsWith(rest);
       if (incomplete && !options.final) break;
       events.push('escape');
       offset += 1;

@@ -376,6 +376,12 @@ function paletteFromTokens(themeState, colorsEnabled) {
     surface: surfaceStyle,
     surfaceRaised: surfaceRaisedStyle,
     surfaceOverlay: surfaceOverlayStyle,
+    scrim: colored(colorsEnabled, {
+      fg: t.textMuted,
+      bg: themeState.base === 'light' ? t.surface : t.bg,
+      dim: true
+    }, { dim: true }),
+    keyCap: colored(colorsEnabled, { fg: t.textSecondary, bg: t.surfaceRaised, bold: true }, { underline: true, bold: true }),
     tileSurface: surfaceStyle,
     tileBorder: tileBorderStyle,
     bar: colored(colorsEnabled, { fg: t.textSecondary, bg: t.surfaceRaised }, { dim: true }),

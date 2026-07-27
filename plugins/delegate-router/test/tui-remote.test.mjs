@@ -288,7 +288,7 @@ test('RemoteDatasource satisfies the local interface, renders remote identity, t
   assert.ok(frame.panes[0].content.columns.some((column) => column.key === 'host'));
   assert.match(frame.status.right, /read-only remote/);
   assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'detail' }, 's'), 'read-only remote: control actions are disabled');
-  assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'fleet' }, 'N'), 'read-only remote: control actions are disabled');
+  assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'fleet' }, 'N'), null);
   assert.equal(remoteActionMessage({ remote: null, screen: 'detail' }, 's'), null);
 
   await source.selectJob(job.id);
