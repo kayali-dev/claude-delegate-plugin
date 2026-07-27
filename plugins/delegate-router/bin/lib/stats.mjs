@@ -1,15 +1,97 @@
 import fs from 'node:fs';
 import { brokerError } from './errors.mjs';
 import { auditLogPath } from './state.mjs';
+import {
+  outcomeLedgerSnapshot,
+  OUTCOME_RATE_MINIMUM_SAMPLE,
+  OUTCOME_RECOMMENDATION_CONFIDENCE,
+  OUTCOME_RECOMMENDATION_MINIMUM_SAMPLE
+} from './outcome-ledger.mjs';
 
 function durationMs(value) {
   if (value == null) return null;
   const match = String(value).trim().match(/^(\d+(?:\.\d+)?)([smhdw])$/i);
-  if (!match) throw brokerError('INVALID_REQUEST', "since must be a duration such as '24h' or '7d'");
+  if (!match) return null;
   const multiplier = { s: 1000, m: 60000, h: 3600000, d: 86400000, w: 604800000 }[match[2].toLowerCase()];
   const result = Number(match[1]) * multiplier;
   if (!Number.isFinite(result) || result <= 0) throw brokerError('INVALID_REQUEST', 'since duration must be positive');
   return result;
+}
+
+function semanticVersion(value) {
+  const match = String(value || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function compareSemanticVersions(left, right) {
+  const a = semanticVersion(left);
+  const b = semanticVersion(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+function dateBoundary(value, name) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}(?:T[\d:.+-]+Z?)?$/.test(text)) return null;
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed)) throw brokerError('INVALID_REQUEST', `${name} must be a valid ISO date`);
+  return parsed;
+}
+
+export function auditCohortAt(record) {
+  for (const candidate of [record?.attemptAt, record?.terminalAt, record?.at]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+
+function recordBrokerVersion(record) {
+  return record?.brokerVersion || record?.outcomeProvenance?.brokerVersion || record?.origin?.brokerVersion || null;
+}
+
+export function parseOutcomeSelection(options = {}, now = Date.now()) {
+  const rawSince = options.since == null || options.since === '' ? null : String(options.since).trim();
+  const rawUntil = options.until == null || options.until === '' ? null : String(options.until).trim();
+  let kind = 'lifetime';
+  let startAt = null;
+  let brokerVersion = null;
+  if (rawSince) {
+    const windowMs = durationMs(rawSince);
+    const date = windowMs == null ? dateBoundary(rawSince, 'since') : null;
+    const version = windowMs == null && date == null ? semanticVersion(rawSince) : null;
+    if (windowMs != null) {
+      kind = 'duration';
+      startAt = now - windowMs;
+    } else if (date != null) {
+      kind = 'date';
+      startAt = date;
+    } else if (version) {
+      kind = 'broker-version';
+      brokerVersion = version.join('.');
+    } else {
+      throw brokerError('INVALID_REQUEST', "since must be a duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.42.0')");
+    }
+  }
+  const endAt = rawUntil ? dateBoundary(rawUntil, 'until') : null;
+  if (rawUntil && endAt == null) throw brokerError('INVALID_REQUEST', "until must be an ISO date such as '2026-07-17'");
+  if (startAt != null && endAt != null && startAt >= endAt) {
+    throw brokerError('INVALID_REQUEST', 'since must be earlier than until');
+  }
+  return {
+    since: rawSince,
+    until: rawUntil,
+    kind,
+    startAt,
+    endAt,
+    brokerVersion,
+    label: kind === 'lifetime' ? rawUntil ? `until ${rawUntil}` : 'lifetime'
+      : kind === 'broker-version' ? `since broker ${brokerVersion}`
+        : `${rawSince ? `since ${rawSince}` : 'lifetime'}${rawUntil ? ` until ${rawUntil}` : ''}`
+  };
 }
 
 export function readAuditLog(file = auditLogPath()) {
@@ -100,14 +182,188 @@ function snapshotNow(options = {}) {
   return Number(value == null ? Date.now() : value);
 }
 
-function selectedRecords(records, attributedTokens, options, now) {
-  const windowMs = durationMs(options.since);
-  return records.flatMap((record, index) => windowMs == null || Number(record.at || 0) >= now - windowMs
+export function coalesceAuditRecords(records = []) {
+  const byJob = new Map();
+  const anonymous = [];
+  records.forEach((record, index) => {
+    const jobId = record?.jobId == null ? null : String(record.jobId);
+    if (!jobId) {
+      anonymous.push(record);
+      return;
+    }
+    const previous = byJob.get(jobId);
+    const rank = [
+      Number(record.auditRevision || 0),
+      Number(record.recordedAt || record.at || 0),
+      index
+    ];
+    if (!previous
+      || rank[0] > previous.rank[0]
+      || (rank[0] === previous.rank[0] && rank[1] > previous.rank[1])
+      || (rank[0] === previous.rank[0] && rank[1] === previous.rank[1] && rank[2] > previous.rank[2])) {
+      byJob.set(jobId, { record, rank });
+    }
+  });
+  return [...anonymous, ...[...byJob.values()].map((entry) => entry.record)];
+}
+
+function projectRetainedAttemptEvidence(records, jobs = []) {
+  if (!Array.isArray(jobs) || !jobs.length) return records;
+  const byId = new Map(jobs.filter((job) => job?.id).map((job) => [String(job.id), job]));
+  return records.map((record) => {
+    const job = byId.get(String(record?.jobId || ''));
+    if (!job) return record;
+    const ledger = outcomeLedgerSnapshot(job);
+    const currentDecision = ledger.acceptanceDecision.labelAvailable
+      ? ledger.acceptanceDecision
+      : record.acceptanceDecision;
+    return {
+      ...record,
+      brokerVersion: record.brokerVersion ?? ledger.provenance.brokerVersion,
+      adapterId: record.adapterId ?? ledger.provenance.adapterId,
+      adapterVersion: record.adapterVersion ?? ledger.provenance.adapterVersion,
+      providerCliVersion: record.providerCliVersion ?? ledger.provenance.providerCliVersion,
+      providerCliVersionSource: record.providerCliVersionSource ?? ledger.provenance.providerCliVersionSource,
+      policyVersion: record.policyVersion ?? ledger.provenance.policyVersion,
+      eventSchemaVersion: record.eventSchemaVersion ?? ledger.provenance.eventSchemaVersion,
+      taskShape: record.taskShape ?? ledger.taskShape,
+      packetFeatures: record.packetFeatures ?? ledger.packetFeatures,
+      verification: record.verification ?? job.verification ?? null,
+      verificationOrigin: record.verificationOrigin ?? job.verificationOrigin ?? null,
+      verificationOutcome: record.verificationOutcome ?? ledger.verificationOutcome,
+      findings: record.findings ?? ledger.findings,
+      acceptance: currentDecision?.labelAvailable ? job.acceptance : record.acceptance,
+      acceptanceDecision: currentDecision,
+      rejectionReason: currentDecision?.decision === 'rejected'
+        ? ledger.rejectionReason
+        : record.rejectionReason,
+      usage: record.usage ?? job.usage ?? null
+    };
+  });
+}
+
+function recordSelected(record, selection) {
+  const at = auditCohortAt(record);
+  if (selection.startAt != null && at < selection.startAt) return false;
+  if (selection.endAt != null && at >= selection.endAt) return false;
+  if (selection.brokerVersion) {
+    const compared = compareSemanticVersions(recordBrokerVersion(record), selection.brokerVersion);
+    if (compared == null || compared < 0) return false;
+  }
+  return true;
+}
+
+function selectedRecords(records, attributedTokens, selection) {
+  return records.flatMap((record, index) => recordSelected(record, selection)
     ? [{ record, outputTokens: attributedTokens[index] }]
     : []);
 }
 
-function aggregateSelectedStats(selected, options, now) {
+export function rateMeasurement(numerator, sampleSize, minimumSample = OUTCOME_RATE_MINIMUM_SAMPLE) {
+  const samples = Math.max(0, Number(sampleSize || 0));
+  const successes = Math.max(0, Number(numerator || 0));
+  const sufficient = samples >= minimumSample;
+  return {
+    numerator: successes,
+    sampleSize: samples,
+    minimumSample,
+    status: sufficient ? 'measured' : 'insufficient-data',
+    rate: sufficient ? successes / samples : null
+  };
+}
+
+function verificationLabel(record) {
+  if (record?.verificationOutcome?.labelAvailable === true) {
+    return record.verificationOutcome.outcome === 'pass' ? true
+      : record.verificationOutcome.outcome === 'fail' ? false
+        : null;
+  }
+  const origin = record?.verificationOrigin;
+  const state = record?.verification?.state;
+  if (origin !== 'broker') return null;
+  if (state === 'passed') return true;
+  if (['failed', 'timeout'].includes(state)) return false;
+  if (!state && Number.isInteger(record?.verification?.exitCode)) return record.verification.exitCode === 0;
+  return null;
+}
+
+function acceptanceLabel(record) {
+  const decision = record?.acceptanceDecision?.decision || record?.acceptance?.state;
+  if (decision === 'accepted') return true;
+  if (decision === 'rejected') return false;
+  return null;
+}
+
+function providerCompletionLabel(record) {
+  const completion = record?.providerCompletion;
+  if (completion?.labelAvailable !== false) {
+    if (typeof completion?.finished === 'boolean') return completion.finished;
+    if (typeof completion?.completed === 'boolean') return completion.completed;
+  }
+  const status = record?.outcome?.status;
+  return ['completed', 'failed', 'cancelled'].includes(status) ? status === 'completed' : null;
+}
+
+export function outcomeRates(records = [], options = {}) {
+  const minimumSample = Number(options.minimumSample || OUTCOME_RATE_MINIMUM_SAMPLE);
+  const providerCompletion = records.map(providerCompletionLabel).filter((value) => value != null);
+  const verification = records.map(verificationLabel).filter((value) => value != null);
+  const acceptance = records.map(acceptanceLabel).filter((value) => value != null);
+  return {
+    providerCompletion: rateMeasurement(
+      providerCompletion.filter(Boolean).length,
+      providerCompletion.length,
+      minimumSample
+    ),
+    verificationPass: rateMeasurement(
+      verification.filter(Boolean).length,
+      verification.length,
+      minimumSample
+    ),
+    ownerAcceptance: rateMeasurement(
+      acceptance.filter(Boolean).length,
+      acceptance.length,
+      minimumSample
+    )
+  };
+}
+
+function orphanedCount(records) {
+  return records.filter((record) => record?.outcome?.errorCode === 'ORPHANED').length;
+}
+
+function cohortSummary(key, records, field) {
+  return {
+    [field]: key,
+    jobs: records.length,
+    orphanedJobs: orphanedCount(records),
+    rates: outcomeRates(records)
+  };
+}
+
+function outcomeCohorts(records) {
+  const versions = new Map();
+  const windows = new Map();
+  for (const record of records) {
+    const version = recordBrokerVersion(record) || 'historical-unknown';
+    if (!versions.has(version)) versions.set(version, []);
+    versions.get(version).push(record);
+    const at = auditCohortAt(record);
+    const window = at > 0 ? new Date(at).toISOString().slice(0, 10) : 'historical-unknown-date';
+    if (!windows.has(window)) windows.set(window, []);
+    windows.get(window).push(record);
+  }
+  return {
+    brokerVersions: [...versions.entries()]
+      .map(([version, cohort]) => cohortSummary(version, cohort, 'brokerVersion'))
+      .sort((left, right) => left.brokerVersion.localeCompare(right.brokerVersion)),
+    timeWindows: [...windows.entries()]
+      .map(([window, cohort]) => cohortSummary(window, cohort, 'window'))
+      .sort((left, right) => left.window.localeCompare(right.window))
+  };
+}
+
+function aggregateSelectedStats(selected, selection, now) {
   const cells = new Map();
   for (const entry of selected) {
     const { record } = entry;
@@ -123,9 +379,6 @@ function aggregateSelectedStats(selected, options, now) {
     const records = cell.records.map((entry) => entry.record);
     const durations = records.filter((record) => record.durationMs != null).map((record) => Number(record.durationMs)).filter(Number.isFinite);
     const tokens = cell.records.map((entry) => entry.outputTokens).filter(Number.isFinite);
-    const successes = records.filter((record) => record.outcome?.status === 'completed'
-      && Number(record.scopeViolationsCount || 0) === 0
-      && (record.verification == null || (Number.isFinite(Number(record.verification.exitCode)) && Number(record.verification.exitCode) === 0))).length;
     const resumed = records.filter((record) => Boolean(record.parentJobId)).length;
     const resumeChains = new Set(records.filter((record) => record.parentJobId).map((record) => record.rootJobId || record.parentJobId)).size;
     const nudgeCount = records.reduce((sum, record) => sum + Number(record.nudgeCount || record.nudges || 0), 0);
@@ -139,8 +392,7 @@ function aggregateSelectedStats(selected, options, now) {
       mode: cell.mode,
       transport: cell.transport,
       jobs: records.length,
-      successes,
-      successRate: records.length ? successes / records.length : 0,
+      rates: outcomeRates(records),
       resumedJobs: resumed,
       resumeChains,
       nudgeCount,
@@ -155,7 +407,18 @@ function aggregateSelectedStats(selected, options, now) {
     };
   }).sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model)
     || a.mode.localeCompare(b.mode) || a.transport.localeCompare(b.transport));
-  return { since: options.since || null, generatedAt: now, jobs: selected.length, groups };
+  const records = selected.map((entry) => entry.record);
+  return {
+    since: selection.since,
+    until: selection.until,
+    selection,
+    generatedAt: now,
+    jobs: selected.length,
+    rates: outcomeRates(records),
+    cohorts: outcomeCohorts(records),
+    orphanedJobs: orphanedCount(records),
+    groups
+  };
 }
 
 function aggregateSelectedTotals(selected) {
@@ -173,18 +436,20 @@ function aggregateSelectedTotals(selected) {
 
 function aggregateSelection(records, options = {}) {
   const now = snapshotNow(options);
-  const selected = selectedRecords(records, attributeAuditOutputTokens(records), options, now);
-  return { now, selected };
+  const coalesced = coalesceAuditRecords(projectRetainedAttemptEvidence(records, options.jobs));
+  const selection = parseOutcomeSelection(options, now);
+  const selected = selectedRecords(coalesced, attributeAuditOutputTokens(coalesced), selection);
+  return { now, selected, selection, records: coalesced };
 }
 
 export function aggregateAudit(records, options = {}) {
-  const { now, selected } = aggregateSelection(records, options);
-  return { ...aggregateSelectedStats(selected, options, now), totals: aggregateSelectedTotals(selected) };
+  const { now, selected, selection } = aggregateSelection(records, options);
+  return { ...aggregateSelectedStats(selected, selection, now), totals: aggregateSelectedTotals(selected) };
 }
 
 export function aggregateAuditStats(records, options = {}) {
-  const { now, selected } = aggregateSelection(records, options);
-  return aggregateSelectedStats(selected, options, now);
+  const { now, selected, selection } = aggregateSelection(records, options);
+  return aggregateSelectedStats(selected, selection, now);
 }
 
 export function aggregateAuditTotals(records, options = {}) {
@@ -257,7 +522,8 @@ function activeTrackedJobInWindow(jobs, startAt, endAt) {
 export function computeUnattributedBurnMarkers(snapshots = [], auditRecords = [], options = {}) {
   const ordered = [...snapshots].filter((snapshot) => Number.isFinite(Number(snapshot?.at)))
     .sort((left, right) => Number(left.at) - Number(right.at));
-  const attributed = attributeAuditOutputTokens(auditRecords);
+  const coalesced = coalesceAuditRecords(auditRecords);
+  const attributed = attributeAuditOutputTokens(coalesced);
   const minimumDelta = Math.max(0, Number(options.minimumDelta ?? 0.01));
   const markers = [];
   for (let index = 1; index < ordered.length; index += 1) {
@@ -266,7 +532,7 @@ export function computeUnattributedBurnMarkers(snapshots = [], auditRecords = []
     const startAt = Number(previous.at);
     const endAt = Number(current.at);
     if (endAt <= startAt) continue;
-    const tracked = trackedAuditInWindow(auditRecords, attributed, startAt, endAt);
+    const tracked = trackedAuditInWindow(coalesced, attributed, startAt, endAt);
     if (tracked.outputTokens > 0 || tracked.jobs > 0 || activeTrackedJobInWindow(options.jobs, startAt, endAt)) continue;
     const previousByName = new Map(snapshotWindows(previous).map((window) => [window.name, window]));
     for (const window of snapshotWindows(current)) {
@@ -296,9 +562,19 @@ export function computeUnattributedBurnMarkers(snapshots = [], auditRecords = []
 
 export function unattributedBurnSummary(history = [], options = {}) {
   const now = snapshotNow(options);
-  const windowMs = durationMs(options.since);
+  const selection = parseOutcomeSelection(options, now);
+  if (selection.kind === 'broker-version') {
+    return {
+      markerCount: 0,
+      byWindow: {},
+      latest: null,
+      approximate: true,
+      selectionUnavailable: 'allowance markers have no broker-version attribution'
+    };
+  }
   const markers = history.filter((entry) => entry?.kind === 'unattributed-burn'
-    && (windowMs == null || Number(entry.at || 0) >= now - windowMs));
+    && (selection.startAt == null || Number(entry.at || 0) >= selection.startAt)
+    && (selection.endAt == null || Number(entry.at || 0) < selection.endAt));
   const byWindow = {};
   for (const marker of markers) {
     const name = String(marker.window || 'unknown');
@@ -310,10 +586,136 @@ export function unattributedBurnSummary(history = [], options = {}) {
   return { markerCount: markers.length, byWindow, latest: markers.at(-1) || null, approximate: true };
 }
 
-export function aggregateVisibilityStats(records, options = {}) {
+function recordTaskShape(record) {
+  const stored = record?.taskShape;
+  if (stored && typeof stored === 'object') return stored;
+  const mode = record?.mode || 'unknown';
   return {
-    ...aggregateAudit(records, options),
+    mode,
+    access: ['implement', 'verify'].includes(mode) ? 'write' : 'read',
+    isolation: record?.isolation || 'shared',
+    boundedScope: record?.packetFeatures?.allowedPathFence === true,
+    structuredWorkSpec: false
+  };
+}
+
+function validatedRecommendationShape(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw brokerError('INVALID_REQUEST', 'recommendFor must be a task-shape object');
+  }
+  const allowed = new Set(['mode', 'access', 'isolation', 'boundedScope', 'structuredWorkSpec']);
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.length) throw brokerError('INVALID_REQUEST', `recommendFor unknown task-shape field: ${unknown.join(', ')}`);
+  if (typeof value.mode !== 'string' || !value.mode.trim()) {
+    throw brokerError('INVALID_REQUEST', 'recommendFor.mode is required');
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    typeof item === 'string' ? item.trim() : item
+  ]));
+}
+
+function taskShapeMatches(record, requested) {
+  const shape = recordTaskShape(record);
+  return Object.entries(requested).every(([key, value]) => shape[key] === value);
+}
+
+function wilsonInterval(successes, samples) {
+  if (!(samples > 0)) return null;
+  // Fixed 95% confidence keeps results comparable and prevents a caller from
+  // lowering confidence until a preferred answer appears.
+  const z = 1.959963984540054;
+  const observed = successes / samples;
+  const denominator = 1 + (z ** 2) / samples;
+  const center = (observed + (z ** 2) / (2 * samples)) / denominator;
+  const margin = z * Math.sqrt((observed * (1 - observed) + (z ** 2) / (4 * samples)) / samples) / denominator;
+  return { lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
+}
+
+export function recommendOutcomeRouting(records = [], options = {}) {
+  const requestedTaskShape = validatedRecommendationShape(options.taskShape);
+  const { selected } = aggregateSelection(records, options);
+  const matching = selected.map((entry) => entry.record)
+    .filter((record) => taskShapeMatches(record, requestedTaskShape));
+  const providers = new Map();
+  for (const record of matching) {
+    const provider = record.provider || 'unknown';
+    if (!providers.has(provider)) providers.set(provider, { provider, labels: [] });
+    const label = acceptanceLabel(record);
+    if (label != null) providers.get(provider).labels.push(label);
+  }
+  const candidates = [...providers.values()].map(({ provider, labels }) => {
+    const accepted = labels.filter(Boolean).length;
+    const measurement = rateMeasurement(accepted, labels.length, OUTCOME_RECOMMENDATION_MINIMUM_SAMPLE);
+    return {
+      provider,
+      accepted,
+      sampleSize: labels.length,
+      minimumSample: OUTCOME_RECOMMENDATION_MINIMUM_SAMPLE,
+      status: measurement.status,
+      observedRate: measurement.rate,
+      confidenceInterval: measurement.status === 'measured' ? wilsonInterval(accepted, labels.length) : null
+    };
+  }).sort((left, right) => right.sampleSize - left.sampleSize || left.provider.localeCompare(right.provider));
+  const eligible = candidates.filter((candidate) => candidate.status === 'measured')
+    .sort((left, right) => right.observedRate - left.observedRate || left.provider.localeCompare(right.provider));
+  const base = {
+    status: 'insufficient-data',
+    metric: 'owner-acceptance',
+    requestedTaskShape,
+    matchingAttempts: matching.length,
+    minimumSamplePerProvider: OUTCOME_RECOMMENDATION_MINIMUM_SAMPLE,
+    confidence: {
+      level: OUTCOME_RECOMMENDATION_CONFIDENCE,
+      method: 'wilson-score-interval'
+    },
+    candidates,
+    recommendation: null,
+    staticRouterChanged: false
+  };
+  if (eligible.length < 2) {
+    return {
+      ...base,
+      reason: 'fewer than two providers have the minimum number of explicit owner-acceptance labels'
+    };
+  }
+  const [best, runnerUp] = eligible;
+  if (!(best.confidenceInterval.lower > runnerUp.confidenceInterval.upper)) {
+    return {
+      ...base,
+      reason: 'eligible provider confidence intervals overlap'
+    };
+  }
+  return {
+    ...base,
+    status: 'recommendation',
+    reason: 'best provider lower confidence bound exceeds the runner-up upper bound',
+    recommendation: {
+      provider: best.provider,
+      observedRate: best.observedRate,
+      sampleSize: best.sampleSize,
+      confidenceInterval: best.confidenceInterval
+    }
+  };
+}
+
+export function aggregateVisibilityStats(records, options = {}) {
+  const resolved = {
+    since: options.since,
+    until: options.until,
+    history: options.history,
+    external: options.external,
+    recommendFor: options.recommendFor,
+    jobs: options.jobs,
+    minimumDelta: options.minimumDelta,
+    now: snapshotNow(options)
+  };
+  return {
+    ...aggregateAudit(records, resolved),
     external: options.external || { threadCount: 0, usageThreadCount: 0, tokenTotals: null },
-    unattributed: unattributedBurnSummary(options.history || [], options)
+    unattributed: unattributedBurnSummary(options.history || [], resolved),
+    routingRecommendation: options.recommendFor
+      ? recommendOutcomeRouting(records, { ...resolved, taskShape: options.recommendFor })
+      : null
   };
 }

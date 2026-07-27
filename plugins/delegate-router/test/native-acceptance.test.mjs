@@ -209,13 +209,19 @@ test('P3 derives verification, records real-tree evidence, gates additive accept
     env: { ...process.env },
     input: `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
       name: 'delegate_decide',
-      arguments: { jobId: excepted.id, decision: 'rejected', reason: 'owner declined' }
+      arguments: { jobId: excepted.id, decision: 'rejected', reason: 'owner declined PASSWORD=synthetic-rejection-secret' }
     } })}\n`
   });
   assert.equal(rejected.status, 0, rejected.stderr);
   const rejectedPayload = JSON.parse(rejected.stdout.trim());
   assert.equal(JSON.parse(rejectedPayload.result.content[0].text).acceptance.state, 'rejected');
   assert.equal(inspectJob(excepted.id).acceptance.decidedBy, 'mcp:coordinator');
+  const auditLines = fs.readFileSync(path.join(root, 'state', 'audit.jsonl'), 'utf8').trim().split('\n');
+  const decisionAudit = auditLines.map(JSON.parse)
+    .find((record) => record.jobId === excepted.id && record.recordType === 'acceptance-decision');
+  assert.equal(decisionAudit.acceptanceDecision.decision, 'rejected');
+  assert.match(decisionAudit.rejectionReason, /\[REDACTED\]/);
+  assert.doesNotMatch(auditLines.join('\n'), /synthetic-rejection-secret/);
 
   const blockedEdges = detectActionableEdges({ job: failed, events: [], lastEventAt: Date.now() });
   assert.equal(blockedEdges[0].category, 'blocked');

@@ -2,6 +2,30 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.43.0 — 2026-07-27
+
+- Added the P8 local outcome ledger. New attempt records and full terminal or
+  owner-decision audit snapshots carry broker, adapter, provider CLI, policy,
+  and event-schema versions; task shape; canonical packet-section presence;
+  real-tree verification outcome; bounded findings; explicit acceptance;
+  usage; and redacted rejection reasons. Later decision snapshots coalesce by
+  job/revision without rewriting history or double-counting attempts/tokens.
+- Replaced the ambiguous displayed success rate with separate
+  provider-completion, verification-pass, and owner-acceptance measurements.
+  Every measurement includes numerator, sample size, and a minimum of 10;
+  smaller samples return `insufficient-data` and a null rate. Historical rows
+  without new fields remain readable and aggregate with explicit missing
+  labels.
+- Extended `delegate-jobs stats` and additive `delegate_stats` inputs with ISO
+  date/broker-version `since` views, exclusive date `until`, broker and UTC-day
+  cohorts, and explicit ORPHANED counts. Existing duration filters, totals,
+  transport groups, external totals, and approximate unattributed movement
+  remain.
+- Added a read-only outcome-routing recommendation shape. It uses only
+  explicit owner-acceptance labels for a matching task shape, requires 20
+  samples per provider and separated fixed-95% Wilson intervals, and otherwise
+  returns `insufficient-data`. The existing static router is unchanged.
+
 ## 0.42.0 — 2026-07-27
 
 - Added opt-in P6 broker workspaces. Managed write starts now accept additive

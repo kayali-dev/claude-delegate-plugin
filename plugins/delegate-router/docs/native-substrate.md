@@ -5,6 +5,18 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P8 outcome ledger is implemented additively. New attempts and terminal or
+  owner-decision audit snapshots retain broker/adapter/provider CLI, policy,
+  and event-schema versions; task shape; canonical packet-section presence;
+  verification, findings, acceptance, usage, and redacted rejection evidence.
+  Historical rows project with explicit gaps and are never rewritten.
+  Provider-completion, broker real-tree verification-pass, and explicit
+  owner-acceptance rates are independent measurements with numerator, sample,
+  and a minimum-10 display gate. Broker-version and UTC-day cohorts plus
+  first-class duration/date/version selection isolate old ORPHANED eras.
+  Outcome-aware provider advice requires 20 owner labels per provider and
+  separated fixed-95% Wilson intervals; sparse/overlapping data returns
+  `insufficient-data`, and the static router remains unchanged.
 - P6 transactional workspaces have shipped as a deliberately narrow,
   additive first cut. An explicit `isolation: "worktree"` write launch now
   requires separate `allowedPaths` and scheduling `pathClaims`, allocates a
@@ -584,6 +596,23 @@ findings, acceptance, usage, and rejection reasons on every attempt. Separate
 provider-completion, verification-pass, and owner-acceptance rates. Cohort views
 so a fixed-in-July failure mode stops poisoning lifetime numbers. Outcome-aware
 routing only once labels exist and only as confidence-bounded recommendation.
+
+Implementation progress (2026-07-27): complete in source. Attempt records and
+append-only terminal/decision audit snapshots carry a versioned provenance
+envelope plus task/packet/outcome evidence. Later owner decisions append a
+full redacted revision; readers coalesce by job ID and audit revision, so
+acceptance survives pruning without duplicating attempts or usage. Historical
+records remain total with missing fields and are never migrated.
+
+The three rates have distinct labeled denominators and a minimum sample of 10.
+Only broker-originated real-tree checks label verification, and only explicit
+accepted/rejected decisions label owner acceptance. `since` accepts a
+duration, ISO date, or broker version; `until` adds an exclusive date boundary;
+broker and UTC-day cohorts expose ORPHANED counts. Recommendation requests use
+owner labels for a matching task shape, require 20 samples per provider and
+non-overlapping fixed-95% Wilson intervals, otherwise say
+`insufficient-data`. They are returned as read-only evidence and are not wired
+into static route selection.
 
 ### P9 — Provider attempt-driver contract
 Extract Codex app-server, Cursor ACP, and Cursor headless behind capability

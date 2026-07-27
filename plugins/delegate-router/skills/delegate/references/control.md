@@ -457,6 +457,23 @@ After reviewing the diff and evidence, record the owner decision with
 bind the decision to an evidence digest and only update the record; they never
 apply, commit, revert, or otherwise mutate source.
 
+Each explicit decision also appends a full redacted outcome-audit revision.
+Ledger readers select the newest revision for that job, so the durable owner
+label survives job pruning without double-counting the attempt or its
+thread-cumulative usage. Rejection reasons are bounded and pass through the
+same credential redactor as prompts, events, and terminal failures.
+
+Use `delegate-jobs stats --since <duration|ISO-date|broker-version>
+[--until <ISO-date>]` or `delegate_stats` to inspect provider completion,
+real-tree verification pass, and explicit owner acceptance separately. Every
+measurement includes its numerator, sample size, and minimum sample; fewer than
+10 labels is `insufficient-data`, never a numeric rate. Broker-version and
+UTC-day cohorts retain an explicit ORPHANED count. An optional
+`--recommend-for <mode>` / `recommendFor` request requires 20 owner labels per
+provider and non-overlapping fixed 95% Wilson intervals before it returns an
+advisory provider; sparse or overlapping evidence declines. This advisory
+shape is read-only and does not feed or modify the static router.
+
 `autoFix: { maxRounds }` / `--auto-fix-rounds` is off by default and hard-capped
 at three. A continuation is permitted only for deterministic verification or
 scope evidence with unchanged scope/privileges, remaining time/output budget,

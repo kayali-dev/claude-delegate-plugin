@@ -20,9 +20,11 @@ import {
   aggregateAudit,
   aggregateAuditStats,
   aggregateAuditTotals,
+  aggregateVisibilityStats,
   attributeAuditOutputTokens,
   auditUsageBands,
   outputTokens,
+  recommendOutcomeRouting,
   usageBandKey
 } from '../bin/lib/stats.mjs';
 import { loadProfile } from '../bin/lib/profiles.mjs';
@@ -73,8 +75,16 @@ test('stats aggregate synthetic audit records and the CLI reads audit.jsonl', ()
   const stats = aggregateAuditStats(records, { since: '7d', now });
   assert.equal(stats.jobs, 2);
   assert.equal(stats.groups[0].jobs, 2);
-  assert.equal(stats.groups[0].successes, 1);
-  assert.equal(stats.groups[0].successRate, 0.5);
+  assert.deepEqual(stats.groups[0].rates.providerCompletion, {
+    numerator: 2,
+    sampleSize: 2,
+    minimumSample: 10,
+    status: 'insufficient-data',
+    rate: null
+  });
+  assert.equal(stats.groups[0].rates.verificationPass.sampleSize, 0, 'historical verification without real-tree origin is not relabelled');
+  assert.equal(stats.groups[0].rates.ownerAcceptance.sampleSize, 0);
+  assert.equal(Object.hasOwn(stats.groups[0], 'successRate'), false);
   assert.equal(stats.groups[0].resumeChains, 1);
   assert.equal(stats.groups[0].medianDurationMs, 1000);
   assert.equal(stats.groups[0].meanOutputTokens, 200);
@@ -89,6 +99,167 @@ test('stats aggregate synthetic audit records and the CLI reads audit.jsonl', ()
   assert.equal(cli.status, 0, cli.stderr);
   assert.equal(JSON.parse(cli.stdout).jobs, 2);
 }));
+
+test('outcome ledger separates sampled rates, cohorts fixed-era failures, and since version/date views', () => {
+  const rows = [];
+  const add = (jobId, date, brokerVersion, status, extra = {}) => rows.push({
+    jobId,
+    at: Date.parse(date),
+    attemptAt: Date.parse(date),
+    brokerVersion,
+    provider: 'codex',
+    model: 'sol',
+    mode: 'review',
+    outcome: { status, ...(extra.errorCode ? { errorCode: extra.errorCode } : {}) },
+    ...(extra.verification == null ? {} : {
+      verificationOrigin: 'broker',
+      verification: { state: extra.verification },
+      verificationOutcome: {
+        labelAvailable: true,
+        outcome: extra.verification === 'passed' ? 'pass' : 'fail'
+      }
+    }),
+    ...(extra.acceptance == null ? {} : {
+      acceptance: { state: extra.acceptance },
+      acceptanceDecision: { decision: extra.acceptance, labelAvailable: true }
+    })
+  });
+  for (let index = 0; index < 12; index += 1) {
+    add(`current-${index}`, `2026-07-${String(20 + (index % 3)).padStart(2, '0')}T12:00:00Z`, '0.42.0', index === 11 ? 'failed' : 'completed', {
+      verification: index < 10 ? index === 9 ? 'failed' : 'passed' : null,
+      acceptance: index < 3 ? index === 2 ? 'rejected' : 'accepted' : null
+    });
+  }
+  for (let index = 0; index < 12; index += 1) {
+    add(`old-${index}`, `2026-07-${String(11 + (index % 3)).padStart(2, '0')}T12:00:00Z`, '0.20.0', 'failed', { errorCode: 'ORPHANED' });
+  }
+
+  const current = aggregateAudit(rows, { since: '0.42.0', now: Date.parse('2026-07-27T00:00:00Z') });
+  assert.equal(current.jobs, 12);
+  assert.equal(current.rates.providerCompletion.rate, 11 / 12);
+  assert.equal(current.rates.providerCompletion.sampleSize, 12);
+  assert.equal(current.rates.verificationPass.rate, 0.9);
+  assert.equal(current.rates.verificationPass.sampleSize, 10);
+  assert.equal(current.rates.ownerAcceptance.rate, null);
+  assert.equal(current.rates.ownerAcceptance.sampleSize, 3);
+  assert.equal(current.rates.ownerAcceptance.status, 'insufficient-data');
+
+  const independent = aggregateAudit(Array.from({ length: 10 }, (_, index) => ({
+    jobId: `post-process-${index}`,
+    at: index + 1,
+    provider: 'codex',
+    mode: 'implement',
+    outcome: { status: index === 0 ? 'failed' : 'completed' },
+    providerCompletion: {
+      finished: true,
+      labelAvailable: true,
+      status: 'completed'
+    },
+    verificationOrigin: 'broker',
+    verification: { state: index < 8 ? 'passed' : 'failed' }
+  })), { now: 100 });
+  assert.equal(independent.rates.providerCompletion.rate, 1, 'broker post-processing failures do not erase provider completion');
+  assert.equal(independent.rates.verificationPass.rate, 0.8, 'verification remains an independent real-tree measurement');
+
+  const old = aggregateAudit(rows, { until: '2026-07-17', now: Date.parse('2026-07-27T00:00:00Z') });
+  assert.equal(old.jobs, 12);
+  assert.equal(old.orphanedJobs, 12);
+  assert.equal(old.rates.providerCompletion.rate, 0);
+  assert.deepEqual(old.cohorts.timeWindows.map((cohort) => [cohort.window, cohort.orphanedJobs]), [
+    ['2026-07-11', 4],
+    ['2026-07-12', 4],
+    ['2026-07-13', 4]
+  ]);
+  assert.deepEqual(old.cohorts.brokerVersions.map((cohort) => [cohort.brokerVersion, cohort.orphanedJobs]), [['0.20.0', 12]]);
+
+  const sinceDate = aggregateAudit(rows, { since: '2026-07-20', now: Date.parse('2026-07-27T00:00:00Z') });
+  assert.equal(sinceDate.jobs, 12);
+  assert.equal(sinceDate.selection.kind, 'date');
+
+  const projected = aggregateAudit([{
+    jobId: 'retained-historical',
+    at: Date.parse('2026-07-21T12:00:00Z'),
+    provider: 'codex',
+    mode: 'review',
+    outcome: { status: 'completed' }
+  }], {
+    since: '0.42.0',
+    jobs: [{
+      id: 'retained-historical',
+      provider: 'codex',
+      mode: 'review',
+      status: 'completed',
+      origin: { brokerVersion: '0.42.0' }
+    }],
+    now: Date.parse('2026-07-27T00:00:00Z')
+  });
+  assert.equal(projected.jobs, 1, 'retained job evidence enriches the view without rewriting historical audit rows');
+  assert.equal(projected.cohorts.brokerVersions[0].brokerVersion, '0.42.0');
+});
+
+test('acceptance audit revisions coalesce without double-counting attempts or usage', () => {
+  const terminal = {
+    jobId: 'attempt-1',
+    at: 1000,
+    recordedAt: 1100,
+    auditRevision: 2,
+    provider: 'codex',
+    mode: 'implement',
+    outcome: { status: 'completed' },
+    usage: { total: { outputTokens: 100 } },
+    acceptance: { state: 'ready-for-review' }
+  };
+  const decision = {
+    ...terminal,
+    recordedAt: 1200,
+    auditRevision: 3,
+    recordType: 'acceptance-decision',
+    acceptance: { state: 'accepted' },
+    acceptanceDecision: { decision: 'accepted', labelAvailable: true }
+  };
+  const aggregate = aggregateAudit([terminal, decision], { now: 2000 });
+  assert.equal(aggregate.jobs, 1);
+  assert.equal(aggregate.totals.outputTokens, 100);
+  assert.equal(aggregate.rates.ownerAcceptance.sampleSize, 1);
+  assert.equal(aggregate.rates.ownerAcceptance.rate, null);
+  assert.equal(aggregate.rates.ownerAcceptance.numerator, 1);
+});
+
+test('outcome-aware routing declines sparse labels and recommends only on separated 95% intervals', () => {
+  const row = (provider, index, accepted) => ({
+    jobId: `${provider}-${index}`,
+    at: 1000 + index,
+    provider,
+    mode: 'review',
+    taskShape: { mode: 'review', access: 'read', isolation: 'shared' },
+    outcome: { status: 'completed' },
+    acceptanceDecision: { decision: accepted ? 'accepted' : 'rejected', labelAvailable: true }
+  });
+  const sparse = [row('codex', 1, true), row('cursor', 1, false)];
+  const declined = recommendOutcomeRouting(sparse, { taskShape: { mode: 'review', access: 'read' }, now: 5000 });
+  assert.equal(declined.status, 'insufficient-data');
+  assert.equal(declined.recommendation, null);
+  assert.deepEqual(declined.confidence, { level: 0.95, method: 'wilson-score-interval' });
+  assert.ok(declined.candidates.every((candidate) => candidate.observedRate == null && candidate.confidenceInterval == null));
+  assert.equal(declined.staticRouterChanged, false);
+
+  const labelled = [
+    ...Array.from({ length: 40 }, (_, index) => row('codex', index, index < 36)),
+    ...Array.from({ length: 40 }, (_, index) => row('cursor', index, index < 8))
+  ];
+  const recommended = recommendOutcomeRouting(labelled, { taskShape: { mode: 'review', access: 'read' }, now: 5000 });
+  assert.equal(recommended.status, 'recommendation');
+  assert.equal(recommended.recommendation.provider, 'codex');
+  assert.equal(recommended.recommendation.sampleSize, 40);
+  assert.ok(recommended.recommendation.confidenceInterval.lower
+    > recommended.candidates.find((candidate) => candidate.provider === 'cursor').confidenceInterval.upper);
+  assert.equal(routeTask({
+    task: 'Review the security boundary',
+    mode: 'review',
+    usage: { claude: { known: false }, codex: { known: false }, cursor: { known: false } },
+    availability: { claude: true, codex: true, cursor: true }
+  }).primary.provider, 'codex', 'the static router remains independently deterministic');
+});
 
 test('stats attribute Codex chain deltas across every token aggregate and preserve reset and window semantics', () => {
   const base = { provider: 'codex', model: 'gpt-5.6-sol', mode: 'review', effort: 'xhigh', outcome: { status: 'completed' } };
@@ -145,6 +316,18 @@ test('combined audit aggregate captures one clock snapshot for groups, totals, a
   assert.equal(aggregate.generatedAt, 10_000);
   assert.equal(aggregate.jobs, 1);
   assert.equal(aggregate.totals.jobs, 1);
+});
+
+test('visibility ledger shares one clock snapshot across rates, recommendation, and allowance views', () => {
+  const options = { since: '1s', recommendFor: { mode: 'review' }, history: [] };
+  let clockReads = 0;
+  Object.defineProperty(options, 'now', { get: () => 10_000 + clockReads++ });
+  const aggregate = aggregateVisibilityStats([
+    { at: 9000, jobId: 'one', provider: 'codex', mode: 'review', outcome: { status: 'completed' } }
+  ], options);
+  assert.equal(clockReads, 1);
+  assert.equal(aggregate.generatedAt, 10_000);
+  assert.equal(aggregate.routingRecommendation.matchingAttempts, 1);
 });
 
 test('route candidates gain advisory usage bands without changing selection', () => {

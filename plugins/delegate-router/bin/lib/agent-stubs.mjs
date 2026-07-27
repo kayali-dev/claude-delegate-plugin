@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { appendJobEvent, inspectJob, launchOrigin, redact, updateManagedJob } from './control.mjs';
 import { listJobs, loadJob, saveJob } from './state.mjs';
+import { initializeOutcomeAttempt } from './outcome-ledger.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const MAX_PROMPT_SUMMARY = 512;
@@ -97,6 +98,12 @@ export function createClaudeAgentStub(options = {}) {
     updatedAt: createdAt,
     attributionConfidence: 'hook-correlated'
   };
+  initializeOutcomeAttempt(job, {
+    packet: options.prompt,
+    brokerVersion: origin.brokerVersion,
+    eventSchemaVersion: 1,
+    providerCliVersionSource: 'not-applicable'
+  });
   saveJob(job);
   appendJobEvent(id, 'job.created', {
     provider: 'claude',

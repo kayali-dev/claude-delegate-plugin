@@ -71,7 +71,15 @@ function thrashStore() {
     sessions: [{ id: 'session-thrash', cwd: root.cwd, mtimeMs: NOW - 5000, activeSeconds: 300, lastActivity: 'assistant function', size: 2048 }],
     sessionScan: { status: 'ready', available: true, scanned: 1, totalFiles: 1, capped: false },
     audit: [{ at: NOW - 20_000, jobId: child.id, provider: 'codex', model: 'sol', mode: 'implement', durationMs: 1200, outcome: { status: 'completed' }, usage: child.usage, scopeViolationsCount: 0, verification: { exitCode: 0 } }],
-    stats: { since: '7d', jobs: 2, groups: [{ provider: 'codex', model: 'sol', mode: 'implement', jobs: 2, successRate: 1, resumedJobs: 1, nudgeCount: 0, meanDurationMs: 1200, meanOutputTokens: 1800, budgetCount: 0, timeoutCount: 0, violationCount: 0 }] }
+    stats: { since: '7d', jobs: 2, groups: [{
+      provider: 'codex', model: 'sol', mode: 'implement', jobs: 2,
+      rates: {
+        providerCompletion: { status: 'insufficient-data', rate: null, sampleSize: 2 },
+        verificationPass: { status: 'insufficient-data', rate: null, sampleSize: 0 },
+        ownerAcceptance: { status: 'insufficient-data', rate: null, sampleSize: 0 }
+      },
+      resumedJobs: 1, nudgeCount: 0, meanDurationMs: 1200, meanOutputTokens: 1800, budgetCount: 0, timeoutCount: 0, violationCount: 0
+    }] }
   };
 }
 

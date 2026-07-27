@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { jobNeedsReconciliation } from '../control.mjs';
+import { coalesceAuditRecords, outcomeRates } from '../stats.mjs';
 import { deriveJobActivity } from './activity.mjs';
 import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimestamp, joinDisplayParts } from './display.mjs';
 import { prepareDiffWindow, formatDiffRow, wrapDiffRow } from './diff.mjs';
@@ -544,21 +545,7 @@ export function attributeAuditUsage(records = [], jobs = []) {
 }
 
 export function finalAuditRows(records = []) {
-  const byJob = new Map();
-  const anonymous = [];
-  for (const record of records) {
-    const id = formatDisplayValue(record?.jobId);
-    if (!id) { anonymous.push(record); continue; }
-    const previous = byJob.get(id);
-    if (!previous || Number(record?.at || 0) >= Number(previous?.at || 0)) byJob.set(id, record);
-  }
-  return [...anonymous, ...byJob.values()];
-}
-
-function successfulAudit(record) {
-  return record?.outcome?.status === 'completed'
-    && Number(record.scopeViolationsCount || 0) === 0
-    && (record.verification == null || Number(record.verification?.exitCode) === 0);
+  return coalesceAuditRecords(records);
 }
 
 function dashboardAttention(store, ui, now) {
@@ -627,7 +614,8 @@ export function dashboardViewModel(store, ui = {}, viewport = {}) {
   const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
   const finalAudit = finalAuditRows(store.audit || []);
   const today = finalAudit.filter((record) => Number(record.at || 0) >= dayStart.getTime() && Number(record.at || 0) <= now);
-  const successes = today.filter(successfulAudit).length;
+  const todayRates = outcomeRates(today);
+  const providerCompletion = todayRates.providerCompletion;
   const todayTokenRows = attributeAuditUsage(finalAudit, store.jobs || [])
     .filter((entry) => entry.at >= dayStart.getTime() && entry.at <= now)
     .map((entry) => entry.own);
@@ -654,7 +642,11 @@ export function dashboardViewModel(store, ui = {}, viewport = {}) {
       { text: spinnerGlyph(now), style: palette.running, spinner: true },
       { text: ` ${running} / ${paused}`, style: palette.tileValue }
     ] } : `${running} / ${paused}`, label: 'running / paused' },
-    { value: `${today.length}  ${today.length ? Math.round((successes / today.length) * 100) : 0}%`, label: 'jobs today / success', trend: jobsTrend },
+    {
+      value: `${today.length}  ${providerCompletion.status === 'measured' ? `${Math.round(providerCompletion.rate * 100)}%` : `insuf n=${providerCompletion.sampleSize}`}`,
+      label: 'jobs / provider done',
+      trend: jobsTrend
+    },
     {
       value: number(todayUsage.input + todayUsage.output), label: 'tokens today',
       detail: `in ${number(todayUsage.input)}${CHROME_SEPARATOR}out ${number(todayUsage.output)}`
@@ -718,7 +710,10 @@ export function dashboardViewModel(store, ui = {}, viewport = {}) {
       selectedJobId: Number(ui.dashboardFocus || 0) === 1 ? feed[feedSelection]?.jobId || null : attention[attentionSelection]?.job.id || null,
       attentionSelection, feedSelection, dashboardFocus: Number(ui.dashboardFocus || 0) === 1 ? 1 : 0,
       trends: { jobs: days.map((day) => day.count), duration: days.map((day) => day.duration) },
-      todayUsage, meanCacheHit, todayJobs: today.length, todaySuccesses: successes
+      todayUsage,
+      meanCacheHit,
+      todayJobs: today.length,
+      todayProviderCompletion: providerCompletion
     }
   };
   return commonOverlay(frame, ui, store);
@@ -1624,59 +1619,33 @@ export function sessionsViewModel(store, ui = {}, viewport = {}) {
   return commonOverlay(frame, ui, store);
 }
 
-function statsModelName(model) {
-  const value = formatDisplayValue(model || 'unknown');
-  const codex = value.match(/^gpt-[\d.]+-(sol|terra|luna)$/i);
-  if (codex) return codex[1].toLowerCase();
-  if (/^composer(?:-|$)/i.test(value)) return 'composer';
-  if (/^grok(?:-|$)/i.test(value)) return 'grok';
-  return value;
-}
-
-function statsWindowMs(value) {
-  const match = formatDisplayValue(value).trim().match(/^(\d+(?:\.\d+)?)([smhdw])$/i);
-  if (!match) return null;
-  return Number(match[1]) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[match[2].toLowerCase()];
-}
-
-function attributedOutputMeans(store, now, since) {
-  const window = statsWindowMs(since);
-  const cutoff = window == null ? Number.NEGATIVE_INFINITY : now - window;
-  const values = new Map();
-  for (const entry of attributeAuditUsage(store.audit || [], store.jobs || [])) {
-    if (entry.at < cutoff || entry.at > now) continue;
-    const record = entry.record || {};
-    const key = JSON.stringify([entry.provider || 'unknown', statsModelName(record.model), record.mode || 'unknown', record.transport || 'unknown']);
-    if (!values.has(key)) values.set(key, []);
-    values.get(key).push(entry.own.output);
-  }
-  return new Map([...values].map(([key, outputs]) => [key, outputs.reduce((sum, value) => sum + value, 0) / outputs.length]));
-}
-
 export function statsViewModel(store, ui = {}, viewport = {}) {
   const { width, height } = viewportOf(viewport);
   const stats = store.stats || { since: '7d', jobs: 0, groups: [] };
-  const outputMeans = attributedOutputMeans(store, nowOf(ui, store), stats.since || '7d');
   const columns = [
     { key: 'provider', title: 'Provider', width: 9 }, { key: 'model', title: 'Model', width: 14 },
-    { key: 'mode', title: 'Mode', width: 10 }, { key: 'transport', title: 'Transport', width: 13 }, { key: 'jobs', title: 'Jobs', width: 6, align: 'right' },
-    { key: 'success', title: 'Success', width: 9, align: 'right' }, { key: 'resumedJobs', title: 'Resume', width: 7, align: 'right' },
-    { key: 'nudgeCount', title: 'Nudge', width: 7, align: 'right' }, { key: 'duration', title: 'Mean ms', width: 10, align: 'right' },
-    { key: 'tokens', title: 'Out tok', width: 9, align: 'right' }, { key: 'failures', title: 'B/T/V', width: Math.max(7, width - 96) }
+    { key: 'mode', title: 'Mode', width: 10 }, { key: 'jobs', title: 'Jobs', width: 6, align: 'right' },
+    { key: 'providerRate', title: 'Provider done', width: 15, align: 'right' },
+    { key: 'verificationRate', title: 'Verification', width: 15, align: 'right' },
+    { key: 'acceptanceRate', title: 'Owner accept', width: Math.max(15, width - 69), align: 'right' }
   ];
   const query = formatDisplayValue(ui.statsFilter).toLocaleLowerCase();
   const filtered = (stats.groups || []).filter((row) => !query || formatDisplayValue(row).toLocaleLowerCase().includes(query));
   const rows = filtered.map((row) => ({
     ...row,
-    success: `${Math.round((Number(row.successRate) || 0) * 100)}%`,
-    duration: Math.round(Number(row.meanDurationMs) || 0),
-    tokens: Math.round(Number(outputMeans.get(JSON.stringify([row.provider || 'unknown', row.model || 'unknown', row.mode || 'unknown', row.transport || 'unknown']))
-      ?? row.meanOutputTokens) || 0),
-    failures: `${Math.round(Number(row.budgetCount) || 0)}/${Math.round(Number(row.timeoutCount) || 0)}/${Math.round(Number(row.violationCount) || 0)}`
+    providerRate: row.rates?.providerCompletion?.status === 'measured'
+      ? `${Math.round(row.rates.providerCompletion.rate * 100)}% n=${row.rates.providerCompletion.sampleSize}`
+      : `insuf n=${row.rates?.providerCompletion?.sampleSize || 0}`,
+    verificationRate: row.rates?.verificationPass?.status === 'measured'
+      ? `${Math.round(row.rates.verificationPass.rate * 100)}% n=${row.rates.verificationPass.sampleSize}`
+      : `insuf n=${row.rates?.verificationPass?.sampleSize || 0}`,
+    acceptanceRate: row.rates?.ownerAcceptance?.status === 'measured'
+      ? `${Math.round(row.rates.ownerAcceptance.rate * 100)}% n=${row.rates.ownerAcceptance.sampleSize}`
+      : `insuf n=${row.rates?.ownerAcceptance?.sampleSize || 0}`
   }));
   const frame = {
     width, height, screen: 'stats',
-    title: { text: `Delegation stats | last ${displayOr(stats.since, '7d')}${query ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.statsFilter)}` : ''}`, right: `${rows.length}/${stats.groups?.length || 0} audit rows` },
+    title: { text: `Outcome ledger | ${displayOr(stats.selection?.label || stats.since, '7d')}${query ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.statsFilter)}` : ''}`, right: `${rows.length}/${stats.groups?.length || 0} audit rows` },
     panes: [{ rect: { x: 0, y: 1, width, height: height - 2 }, title: 'Provider / normalized model / mode', content: { kind: 'table', columns, rows, selected: ui.statsSelection || 0, scroll: ui.statsScroll || 0, empty: { message: 'no audit rows in this window', action: 'g l to launch a job' } } }],
     status: errorStatus(ui) || { text: '' },
     meta: { visibleStatsCount: rows.length }

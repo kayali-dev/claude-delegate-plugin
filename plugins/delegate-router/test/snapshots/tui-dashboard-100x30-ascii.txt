@@ -8,8 +8,8 @@
 |                                                                                                  #
 |
 |                        |                        |                        |
-| | 1 / 0                | 1  100%                | 920                    | 0%
-| running / paused       | jobs today / success   | tokens today           | mean cache hit
+| | 1 / 0                | 1  insuf n=1           | 920                    | 0%
+| running / paused       | jobs / provider done   | tokens today           | mean cache hit
 |                        | collecting data (1d)   | in 800 | out 120       | collecting data (1d)
 |                        |                        |                        |
 | Provider allowance                                                                        1-2/2

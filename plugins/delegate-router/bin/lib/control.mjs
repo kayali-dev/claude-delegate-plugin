@@ -35,6 +35,10 @@ import {
   inspectWorkspaceRepository,
   preflightWorkspaceChangeSets
 } from './workspace.mjs';
+import {
+  initializeOutcomeAttempt,
+  outcomeLedgerSnapshot
+} from './outcome-ledger.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -208,8 +212,18 @@ function containsSensitiveValue(value) {
 
 export function terminalAuditRecord(job, options = {}) {
   const completedAt = job.completedAt || Math.floor(Date.now() / 1000);
+  const recordedAt = Date.now();
+  const attemptAt = Number(job.createdAtMs || Number(job.createdAt || 0) * 1000 || recordedAt);
+  const terminalAt = Number(job.completedAtMs || Number(completedAt) * 1000 || recordedAt);
+  const ledger = outcomeLedgerSnapshot(job);
   return redact({
-    at: Date.now(),
+    at: terminalAt,
+    recordedAt,
+    attemptAt,
+    terminalAt,
+    recordType: options.recordType || 'terminal',
+    auditRevision: Number(job.revision || 0),
+    outcomeLedgerSchemaVersion: ledger.provenance.schemaVersion,
     jobId: job.id,
     who: job.managedBy || 'legacy',
     provider: job.provider || null,
@@ -246,6 +260,20 @@ export function terminalAuditRecord(job, options = {}) {
     verification: job.verification || null,
     verificationOrigin: job.verificationOrigin || null,
     acceptance: job.acceptance || null,
+    brokerVersion: ledger.provenance.brokerVersion,
+    adapterId: ledger.provenance.adapterId,
+    adapterVersion: ledger.provenance.adapterVersion,
+    providerCliVersion: ledger.provenance.providerCliVersion,
+    providerCliVersionSource: ledger.provenance.providerCliVersionSource,
+    policyVersion: ledger.provenance.policyVersion,
+    eventSchemaVersion: ledger.provenance.eventSchemaVersion,
+    taskShape: ledger.taskShape,
+    packetFeatures: ledger.packetFeatures,
+    providerCompletion: ledger.providerCompletion,
+    verificationOutcome: ledger.verificationOutcome,
+    findings: ledger.findings,
+    acceptanceDecision: ledger.acceptanceDecision,
+    rejectionReason: ledger.rejectionReason,
     nudgeCount: job.nudgeCount || 0,
     durationMs: job.durationMs ?? Math.max(0, (completedAt - (job.createdAt || completedAt)) * 1000),
     ...(options.backfilled === true ? { backfilled: true } : {})
@@ -1339,6 +1367,7 @@ export function decideAcceptance(id, decision, options = {}) {
       priorState: current.state
     });
     saveJob(job);
+    appendAuditRecords([terminalAuditRecord(job, { recordType: 'acceptance-decision' })]);
     return {
       id: job.id,
       status: job.status,
@@ -2827,6 +2856,11 @@ export function createManagedJob(options) {
     baselineFiles: baseline.files,
     baselineHashes: baseline.hashes
   };
+  initializeOutcomeAttempt(job, {
+    packet: options.prompt,
+    eventSchemaVersion: EVENT_VERSION,
+    brokerVersion: origin.brokerVersion
+  });
   saveJob(job);
   appendJobEvent(id, 'job.created', {
     provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, containment: job.containment, groupId, startPaused: job.startPaused,
@@ -3149,6 +3183,13 @@ export function createShadowJob(options) {
     directParams: boundedDirectParams(options.params),
     overlapsManagedWriter
   };
+  initializeOutcomeAttempt(job, {
+    packet: prompt,
+    eventSchemaVersion: EVENT_VERSION,
+    brokerVersion: origin.brokerVersion,
+    providerCliVersion: options.providerCliVersion || null,
+    providerCliVersionSource: options.providerCliVersionSource
+  });
   try {
     // Direct calls may contain material the managed admission path would
     // reject. The shadow is observability-only, so persist only its redacted,

@@ -72,7 +72,15 @@ function syntheticStore() {
     profiles: ['independent-review'],
     groups: [{ groupId: 'wave-a', total: 1, running: 1, terminal: 0, stalled: 0, allTerminal: false, newestActivityAt: NOW - 5000, memberIds: [active.id] }],
     audit: [{ at: NOW - 60_000, jobId: done.id, provider: 'cursor', model: 'composer', mode: 'review', durationMs: 440_000, outcome: { status: 'completed' }, usage: done.usage, scopeViolationsCount: 0 }],
-    stats: { since: '7d', jobs: 2, groups: [{ provider: 'codex', model: 'sol', mode: 'implement', jobs: 2, successRate: 0.5, resumedJobs: 1, nudgeCount: 0, meanDurationMs: 1234, meanOutputTokens: 2000, budgetCount: 0, timeoutCount: 1, violationCount: 1 }] }
+    stats: { since: '7d', jobs: 2, groups: [{
+      provider: 'codex', model: 'sol', mode: 'implement', jobs: 2,
+      rates: {
+        providerCompletion: { status: 'insufficient-data', rate: null, sampleSize: 2 },
+        verificationPass: { status: 'insufficient-data', rate: null, sampleSize: 1 },
+        ownerAcceptance: { status: 'insufficient-data', rate: null, sampleSize: 0 }
+      },
+      resumedJobs: 1, nudgeCount: 0, meanDurationMs: 1234, meanOutputTokens: 2000, budgetCount: 0, timeoutCount: 1, violationCount: 1
+    }] }
   };
 }
 
@@ -302,8 +310,10 @@ test('providers render a smooth band-colored fill over a dim track', () => {
 test('stats and launcher frames use seven days and show the exact dry-run packet', () => {
   const store = syntheticStore();
   const stats = statsViewModel(store, {}, { width: 100, height: 30 });
-  assert.match(stats.title.text, /last 7d/);
-  assert.equal(stats.panes[0].content.rows[0].success, '50%');
+  assert.match(stats.title.text, /Outcome ledger \| 7d/);
+  assert.equal(stats.panes[0].content.rows[0].providerRate, 'insuf n=2');
+  assert.equal(stats.panes[0].content.rows[0].verificationRate, 'insuf n=1');
+  assert.equal(stats.panes[0].content.rows[0].acceptanceRate, 'insuf n=0');
   const filteredStats = statsViewModel(store, { statsFilter: 'cursor' }, { width: 100, height: 30 });
   assert.equal(filteredStats.meta.visibleStatsCount, 0);
   const launcher = launcherViewModel(store, {

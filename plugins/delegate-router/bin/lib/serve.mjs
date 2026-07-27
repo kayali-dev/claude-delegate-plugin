@@ -437,6 +437,7 @@ export function createDelegateServeServer(options = {}) {
         const usage = loadState();
         sendJson(response, aggregateVisibilityStats(readAuditLog(), {
           since: url.searchParams.get('since') || '7d',
+          jobs: listJobs(),
           external: externalThreadStats(scan),
           history: usage.history || []
         }), writeTimeoutMs);

@@ -208,9 +208,18 @@ test('dashboard and stats attribute cumulative Codex chains without multiplying 
   const statsFrame = statsViewModel(store({
     jobs,
     audit,
-    stats: { since: '7d', groups: [{ provider: 'codex', model: 'sol', mode: 'review', jobs: 6, successRate: 1, meanOutputTokens: 999 }] }
+    stats: { since: '7d', groups: [{
+      provider: 'codex', model: 'sol', mode: 'review', jobs: 6,
+      rates: {
+        providerCompletion: { status: 'insufficient-data', rate: null, sampleSize: 6 },
+        verificationPass: { status: 'insufficient-data', rate: null, sampleSize: 0 },
+        ownerAcceptance: { status: 'insufficient-data', rate: null, sampleSize: 0 }
+      }
+    }] }
   }), { now: NOW }, { width: 100, height: 30 });
-  assert.equal(statsFrame.panes[0].content.rows[0].tokens, 9, 'mean output uses attributed 55/6 instead of cumulative finals');
+  assert.equal(statsFrame.panes[0].content.rows[0].providerRate, 'insuf n=6');
+  assert.equal(statsFrame.panes[0].content.rows[0].verificationRate, 'insuf n=0');
+  assert.equal(statsFrame.panes[0].content.rows[0].acceptanceRate, 'insuf n=0');
 });
 
 test('usage attribution handles missing parents, Cursor jobs, cross-day parents, and counter resets', () => {

@@ -68,6 +68,7 @@ import {
   planRequestId,
   planReviewPresentation
 } from './planning.mjs';
+import { recordProviderCliVersion } from './outcome-ledger.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
@@ -926,12 +927,8 @@ export function assertProviderVersion(provider, binary) {
   const configuredMinimum = minimumVersion(provider);
   const required = parsedVersion(configuredMinimum);
   if (!required) throw brokerError('INVALID_REQUEST', `invalid minimum ${provider} version: ${configuredMinimum}`, { provider });
-  const launch = provider === 'cursor' ? cursorLaunchCommand(binary, ['--version']) : { command: binary, args: ['--version'] };
-  const result = spawnSync(launch.command, launch.args, {
-    encoding: 'utf8', timeout: 10000, windowsHide: true, maxBuffer: 1024 * 1024
-  });
-  const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
-  const observed = parsedVersion(output);
+  const inspected = inspectProviderVersion(provider, binary);
+  const { result, output, observed } = inspected;
   if (result.status !== 0 || !observed) {
     throw brokerError('TRANSPORT_ERROR', `could not determine ${provider} CLI version before adapter start${output ? `: ${redact(output, '', 2000)}` : ''}`, { provider });
   }
@@ -943,6 +940,32 @@ export function assertProviderVersion(provider, binary) {
     });
   }
   return { provider, observedVersion: observed, requiredVersion: required };
+}
+
+function inspectProviderVersion(provider, binary) {
+  const launch = provider === 'cursor' ? cursorLaunchCommand(binary, ['--version']) : { command: binary, args: ['--version'] };
+  const result = spawnSync(launch.command, launch.args, {
+    encoding: 'utf8', timeout: 10000, windowsHide: true, maxBuffer: 1024 * 1024
+  });
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+  const observed = parsedVersion(output);
+  return { result, output, observed };
+}
+
+// Direct shadows did not historically enforce the managed minimum-version
+// policy. Keep their launch behavior unchanged while recording a best-effort
+// local CLI version. This invokes only `<binary> --version`; it never spends
+// provider allowance or performs a provider/API round trip.
+export function detectProviderCliVersion(provider, binary) {
+  const inspected = inspectProviderVersion(provider, binary);
+  return inspected.result.status === 0 ? inspected.observed : null;
+}
+
+function persistProviderCliVersion(jobId, info, source = 'cli-version-check') {
+  if (!info?.observedVersion) return;
+  updateManagedJob(jobId, (current) => {
+    recordProviderCliVersion(current, info.observedVersion, source);
+  }, { incrementRevision: false });
 }
 
 export function recordUsage(job, usage, options = {}) {
@@ -985,6 +1008,8 @@ function terminal(job, status, phase, extra = {}) {
   // The worker's final message is self-reported and can contradict what it
   // actually did; record the plugin's own observation of changed files so the
   // coordinator's first read of the job record is grounded.
+  const providerFinished = status === 'completed';
+  const providerTerminalStatus = status;
   let changedFiles = null;
   let finalHashes = null;
   let scopeViolations = null;
@@ -1079,6 +1104,13 @@ function terminal(job, status, phase, extra = {}) {
   updateManagedJob(job.id, (current) => {
     const firstAttemptText = current.result?.firstAttemptText;
     const subagents = Array.isArray(current.result?.subagents) ? current.result.subagents : [];
+    current.providerCompletion = {
+      finished: providerFinished,
+      completed: providerFinished,
+      labelAvailable: true,
+      status: providerTerminalStatus,
+      recordedAt: new Date().toISOString()
+    };
     current.status = deferVerification ? 'running' : status;
     current.phase = deferVerification ? 'verifying' : phase;
     if (!deferVerification) current.completedAt = Math.floor(Date.now() / 1000);
@@ -1547,7 +1579,7 @@ async function runCodex(job) {
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CODEX_TIMEOUT_SECONDS', 3600);
   const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const binary = process.env.DELEGATE_CODEX_BIN || 'codex';
-  assertProviderVersion('codex', binary);
+  persistProviderCliVersion(job.id, assertProviderVersion('codex', binary));
   const rpc = new JsonRpcProcess(binary, codexSpawnArgs(job), {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
@@ -1680,7 +1712,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.42.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.43.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2505,7 +2537,7 @@ export function cursorModelCatalog(option) {
 async function runCursorAcpTransport(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
-  assertProviderVersion('cursor', binary);
+  persistProviderCliVersion(job.id, assertProviderVersion('cursor', binary));
   const rootArgs = cursorAcpArgs(job);
   const launch = cursorLaunchCommand(binary, rootArgs);
   let sessionId = job.providerSessionId;
@@ -2608,7 +2640,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.42.0' }
+      clientInfo: { name: 'delegate-router', version: '0.43.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -3090,7 +3122,7 @@ function createCursorChat(binary, job) {
 async function runCursorHeadlessTransport(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
-  assertProviderVersion('cursor', binary);
+  persistProviderCliVersion(job.id, assertProviderVersion('cursor', binary));
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
   const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const ids = process.platform === 'darwin' && process.env.DELEGATE_CURSOR_LOGIN_SHELL !== '0'
@@ -3804,6 +3836,9 @@ export async function runManagedProvider(job) {
       return;
     } catch (error) {
       const typed = normalizeBrokerError(error, { provider: job.provider, defaultCode: 'TRANSPORT_ERROR' });
+      if (typed.observedVersion) {
+        persistProviderCliVersion(job.id, { observedVersion: typed.observedVersion }, 'failed-cli-version-check');
+      }
       if (/(?:quota|usage limit|rate limit|allowance)/i.test(typed.message || '')) {
         mutateState((state) => setWindow(state, job.provider, 'quota-error', 100, { source: 'quota-error' }));
       }

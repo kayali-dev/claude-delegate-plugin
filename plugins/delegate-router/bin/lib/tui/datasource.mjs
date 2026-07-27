@@ -449,7 +449,12 @@ export class DelegateDataSource extends EventEmitter {
       const usage = loadState();
       const audit = readAuditLog();
       const external = externalThreadStats({ threads: [...this.externalJobs.values()] });
-      const visibility = aggregateVisibilityStats(audit, { since: '7d', external, history: usage.history || [] });
+      const visibility = aggregateVisibilityStats(audit, {
+        since: '7d',
+        jobs: listJobs(),
+        external,
+        history: usage.history || []
+      });
       this.metadataStamp = stamp;
       this.state = {
         ...this.state,

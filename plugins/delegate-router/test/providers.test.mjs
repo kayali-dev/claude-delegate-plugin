@@ -430,6 +430,8 @@ test('terminal jobs tag verification origin and sandbox-only CLI results warn be
   await runManagedProvider(job);
   const completed = inspectJob(job.id);
   assert.equal(completed.status, 'completed');
+  assert.equal(completed.outcomeProvenance.providerCliVersion, '0.144.1');
+  assert.equal(completed.outcomeProvenance.providerCliVersionSource, 'cli-version-check');
   assert.equal(completed.verificationOrigin, 'broker');
   assert.equal(completed.verification.exitCode, 7);
   assert.match(completed.verification.outputTail, /verification-tail/);

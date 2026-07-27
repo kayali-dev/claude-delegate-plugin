@@ -48,7 +48,7 @@ function usage() {
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
   delegate-jobs work [--json] [--id <job-or-work-id>]
   delegate-jobs group <id> [--json]
-  delegate-jobs stats [--since 7d|24h] [--json]
+  delegate-jobs stats [--since 7d|2026-07-17|0.42.0] [--until 2026-07-17] [--recommend-for mode] [--recommend-access read|write] [--json]
   delegate-jobs audit backfill [--json]
   delegate-jobs inspect <job-id> [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
@@ -124,6 +124,31 @@ function reportSchemaOption(args) {
   const raw = file ? fs.readFileSync(file, 'utf8') : value(args, '--report-schema');
   if (raw == null) return undefined;
   return JSON.parse(raw);
+}
+
+function recommendationShape(args) {
+  const mode = value(args, '--recommend-for');
+  if (mode == null) return undefined;
+  const access = value(args, '--recommend-access');
+  if (access != null && !['read', 'write'].includes(access)) {
+    throw new Error("--recommend-access must be 'read' or 'write'");
+  }
+  return { mode, ...(access == null ? {} : { access }) };
+}
+
+function rateCell(measurement) {
+  if (!measurement || measurement.status !== 'measured') {
+    return `insuf n=${measurement?.sampleSize || 0}`;
+  }
+  return `${Math.round(measurement.rate * 100)}% n=${measurement.sampleSize}`;
+}
+
+function printRate(label, measurement) {
+  if (measurement.status !== 'measured') {
+    console.log(`${label.padEnd(22)} insufficient data (n=${measurement.sampleSize}, minimum=${measurement.minimumSample}, numerator=${measurement.numerator})`);
+    return;
+  }
+  console.log(`${label.padEnd(22)} ${(measurement.rate * 100).toFixed(1)}% (n=${measurement.sampleSize}, numerator=${measurement.numerator}, minimum=${measurement.minimumSample})`);
 }
 
 function intentSources(args) {
@@ -387,17 +412,39 @@ try {
     const externalScan = scanExternalCodexThreads();
     const stats = aggregateVisibilityStats(readAuditLog(), {
       since: value(args, '--since'),
+      until: value(args, '--until'),
+      recommendFor: recommendationShape(args),
+      jobs: listJobs(),
       external: externalThreadStats(externalScan),
       history: usageState.history || []
     });
     if (args.includes('--json')) json(stats);
     else {
       if (!stats.groups.length) console.log('No audited delegation jobs in the selected window.');
-      else console.log(`Delegation stats${stats.since ? ` (last ${stats.since})` : ''}: ${stats.jobs} jobs`);
-      if (stats.groups.length) console.log('Provider Model            Mode       Transport      Jobs Success Resume Nudge Mean ms Median ms Mean out Budget Timeout Violations');
+      else console.log(`Outcome ledger (${stats.selection.label}): ${stats.jobs} attempts; ${stats.orphanedJobs} ORPHANED`);
+      console.log('Rates (unlabelled verification/acceptance attempts are excluded):');
+      printRate('Provider completion', stats.rates.providerCompletion);
+      printRate('Verification pass', stats.rates.verificationPass);
+      printRate('Owner acceptance', stats.rates.ownerAcceptance);
+      if (stats.groups.length) console.log('Provider Model            Mode       Transport      Jobs Provider done Verification Owner accept');
       for (const row of stats.groups) {
-        const percent = `${Math.round(row.successRate * 100)}%`;
-        console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.transport || 'unknown').padEnd(14)} ${String(row.jobs).padStart(4)} ${percent.padStart(7)} ${String(row.resumedJobs).padStart(6)} ${String(row.nudgeCount).padStart(5)} ${String(Math.round(row.meanDurationMs || 0)).padStart(7)} ${String(Math.round(row.medianDurationMs || 0)).padStart(9)} ${String(Math.round(row.meanOutputTokens || 0)).padStart(8)} ${String(row.budgetCount).padStart(6)} ${String(row.timeoutCount).padStart(7)} ${String(row.violationCount).padStart(10)}`);
+        console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.transport || 'unknown').padEnd(14)} ${String(row.jobs).padStart(4)} ${rateCell(row.rates.providerCompletion).padStart(13)} ${rateCell(row.rates.verificationPass).padStart(12)} ${rateCell(row.rates.ownerAcceptance).padStart(12)}`);
+      }
+      if (stats.cohorts.brokerVersions.length) {
+        console.log('Broker cohorts:');
+        for (const cohort of stats.cohorts.brokerVersions) {
+          console.log(`  ${cohort.brokerVersion}: ${cohort.jobs} attempts, ${cohort.orphanedJobs} ORPHANED; provider ${rateCell(cohort.rates.providerCompletion)}, verify ${rateCell(cohort.rates.verificationPass)}, owner ${rateCell(cohort.rates.ownerAcceptance)}`);
+        }
+      }
+      const orphanedWindows = stats.cohorts.timeWindows.filter((cohort) => cohort.orphanedJobs > 0);
+      if (orphanedWindows.length) {
+        console.log('ORPHANED time cohorts:');
+        for (const cohort of orphanedWindows) console.log(`  ${cohort.window}: ${cohort.orphanedJobs}/${cohort.jobs} ORPHANED`);
+      }
+      if (stats.routingRecommendation) {
+        const recommendation = stats.routingRecommendation;
+        console.log(`Routing recommendation: ${recommendation.status}; ${recommendation.reason}`);
+        console.log(`  confidence ${(recommendation.confidence.level * 100).toFixed(0)}% ${recommendation.confidence.method}; minimum ${recommendation.minimumSamplePerProvider} owner labels/provider; static router unchanged`);
       }
       const external = stats.external || {};
       const tokens = external.tokenTotals ? `; exact carried tokens ${external.tokenTotals.totalTokens}` : '; no carried usage counters';

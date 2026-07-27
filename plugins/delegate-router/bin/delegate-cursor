@@ -19,6 +19,7 @@ import { adoptDirectShadow, beginDirectShadow } from './lib/direct-shadow.mjs';
 import {
   ActivityTransitionEmitter,
   EphemeralCursorActivity,
+  detectProviderCliVersion,
   mapCursorHeadlessEvent,
   recordGitState,
   securityPreamble
@@ -121,6 +122,8 @@ function directShadowOptions(options, extra = {}) {
     pid: process.pid,
     workerPid: process.pid,
     writeCapable: !['consult', 'plan', 'review'].includes(options.mode),
+    providerCliVersion: options.providerCliVersion || null,
+    providerCliVersionSource: options.providerCliVersion ? 'cli-version-check' : undefined,
     params: {
       model: options.model,
       mode: options.mode,
@@ -191,6 +194,9 @@ if (!fs.existsSync(options.cwd)) fail(`cwd does not exist: ${options.cwd}`);
 
 const binary = resolveCursorBinary();
 if (!binary) fail('neither agent nor cursor-agent is executable');
+if (!options.dryRun && !options.jobId) {
+  options.providerCliVersion = detectProviderCliVersion('cursor', binary);
+}
 
 const state = loadState();
 // Same WRONG_LANE rule as the managed broker: GPT models route natively

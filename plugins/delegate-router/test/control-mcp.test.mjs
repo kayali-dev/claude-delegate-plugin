@@ -36,6 +36,11 @@ test('control MCP initializes and exposes the complete supervision surface', asy
         delete legacy.properties.pathClaims;
         delete legacy.properties.resourceClaims;
       }
+      if (name === 'delegate_stats') {
+        delete legacy.properties.until;
+        delete legacy.properties.recommendFor;
+        legacy.properties.since.description = "Optional duration such as '24h' or '7d'.";
+      }
       return { name, inputSchema: legacy };
     });
   assert.equal(
@@ -64,6 +69,8 @@ test('control MCP initializes and exposes the complete supervision surface', asy
     assert.ok(start.inputSchema.properties[option], `delegate_start.${option}`);
     assert.ok(resume.inputSchema.properties[option], `delegate_resume.${option}`);
   }
+  assert.ok(stats.inputSchema.properties.until);
+  assert.ok(stats.inputSchema.properties.recommendFor);
   for (const option of ['isolation', 'pathClaims', 'resourceClaims']) {
     assert.ok(start.inputSchema.properties[option], `delegate_start.${option}`);
   }
@@ -245,13 +252,18 @@ test('delegate_stats returns filtered audit aggregates and totals and rejects jo
   lines.on('line', (line) => responses.push(JSON.parse(line)));
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '7d' } } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '7d', jobId: 'not-allowed' } } })}\n`);
-  for (let i = 0; i < 100 && responses.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '2026-01-01', recommendFor: { mode: 'review', access: 'read' } } } })}\n`);
+  for (let i = 0; i < 100 && responses.length < 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
   child.stdin.end();
   await new Promise((resolve) => child.once('exit', resolve));
   try {
     const aggregate = JSON.parse(responses.find((response) => response.id === 1).result.content[0].text);
     assert.equal(aggregate.jobs, 2, JSON.stringify(aggregate));
     assert.equal(aggregate.groups.length, 2);
+    assert.equal(aggregate.rates.providerCompletion.sampleSize, 2);
+    assert.equal(aggregate.rates.providerCompletion.rate, null);
+    assert.equal(aggregate.rates.verificationPass.sampleSize, 0);
+    assert.equal(aggregate.rates.ownerAcceptance.sampleSize, 0);
     assert.deepEqual(aggregate.totals, {
       jobs: 2,
       terminalStatuses: { completed: 1, failed: 1, cancelled: 0 },
@@ -265,6 +277,11 @@ test('delegate_stats returns filtered audit aggregates and totals and rejects jo
       retryable: false,
       provider: null
     });
+    const recommendation = JSON.parse(responses.find((response) => response.id === 3).result.content[0].text).routingRecommendation;
+    assert.equal(recommendation.status, 'insufficient-data');
+    assert.equal(recommendation.recommendation, null);
+    assert.deepEqual(recommendation.confidence, { level: 0.95, method: 'wilson-score-interval' });
+    assert.equal(recommendation.staticRouterChanged, false);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

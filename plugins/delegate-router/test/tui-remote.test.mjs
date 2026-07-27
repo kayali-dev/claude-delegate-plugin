@@ -28,7 +28,7 @@ import {
   startDelegateServe
 } from '../bin/lib/serve.mjs';
 import { aggregateVisibilityStats, readAuditLog } from '../bin/lib/stats.mjs';
-import { loadState, saveState } from '../bin/lib/state.mjs';
+import { listJobs, loadState, saveState } from '../bin/lib/state.mjs';
 import { remoteActionMessage } from '../bin/lib/tui/action-policy.mjs';
 import { DelegateDataSource } from '../bin/lib/tui/datasource.mjs';
 import { assertDatasourceInterface } from '../bin/lib/tui/datasource-interface.mjs';
@@ -210,10 +210,14 @@ test('read-only endpoints match existing store readers and reject unsafe job ids
   const stats = await statsResponse.json();
   const expectedStats = aggregateVisibilityStats(readAuditLog(), {
     since: '7d',
+    jobs: listJobs(),
     external: { threadCount: 0, usageThreadCount: 0, tokenTotals: null },
     history: loadState().history || []
   });
-  assert.deepEqual({ ...stats, generatedAt: 0 }, { ...expectedStats, generatedAt: 0 });
+  assert.deepEqual(
+    { ...stats, generatedAt: 0, selection: { ...stats.selection, startAt: 0 } },
+    { ...expectedStats, generatedAt: 0, selection: { ...expectedStats.selection, startAt: 0 } }
+  );
 
   const unsafe = await authorized(`${running.baseUrl}/v1/jobs/..%2F..%2Fetc%2Fpasswd`);
   assert.equal(unsafe.status, 400);
