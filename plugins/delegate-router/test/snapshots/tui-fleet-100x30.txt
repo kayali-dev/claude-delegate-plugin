@@ -1,10 +1,10 @@
  delegate | fleet                            local | v?                     codex 42%   cursor off
 
 | Delegation jobs                                                                           1-2/2
+| 2 rows                                                                                           #
 | Job       Prov..  Directory   Model   Eff..  Mode   Activity  Ela..  Out/bu..  Chain   Badges    #
 |>C:1234..  codex   alpha       gpt-..  xhigh  imp..  | work..  2m05s  2.0k/8..  >654..   S1 L RF  #
 | C:abcd..  cursor  beta        comp..  -      rev..  + comp..  7m20s       120  -        ?        #
-|                                                                                                  #
 |                                                                                                  #
 |                                                                                                  #
 |                                                                                                  #

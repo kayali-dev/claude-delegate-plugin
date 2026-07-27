@@ -2,6 +2,19 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.34.0 — 2026-07-27
+
+- Replaced the secondary-screen line-list presentation with purpose-built
+  key/value, structural rail, and diff-line painters. Record, Usage, Chain, and
+  launcher review now share one humanized alignment grid; Transcript and Events
+  use scannable time/role/measure rails; opened diffs add stable line-number
+  gutters, file stats, enclosing-symbol hunk labels, full-row change tint, and
+  intra-line emphasis.
+- Added a summary strip before row one of every secondary pane, anomaly badges
+  on key/value section headers, null and copy affordances, and complete
+  Unicode/ASCII glyph tiers. Rendering remains virtualized and uses the
+  existing width, palette, surface, rail, and spacing authorities.
+
 ## 0.33.0 — 2026-07-27
 
 - Replaced rectangular TUI pane chrome with perceptual `surface` /

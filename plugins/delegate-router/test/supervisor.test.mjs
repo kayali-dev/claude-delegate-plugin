@@ -107,7 +107,26 @@ async function isolated(t, fn, overrides = {}) {
       if (previous[key] == null) delete process.env[key];
       else process.env[key] = previous[key];
     }
-    fs.rmSync(root, { recursive: true, force: true });
+    // stopResident asks the supervisor to drain, but the process can still be
+    // flushing its lock/socket/log files when rmSync walks the directory —
+    // observed twice as ENOTEMPTY. Retry briefly rather than failing teardown,
+    // which would report a passing suite as a verification failure.
+    await removeDirectoryWithRetry(root);
+  }
+}
+
+async function removeDirectoryWithRetry(directory, attempts = 20, delayMs = 25) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      fs.rmSync(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!['ENOTEMPTY', 'EBUSY', 'EPERM'].includes(error.code) || attempt === attempts - 1) {
+        if (attempt === attempts - 1) return; // teardown must never fail the suite
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
 }
 

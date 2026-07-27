@@ -3,13 +3,13 @@
  1 Transcript   2 Diff   3 Record   4 Usage   5 Events   6 Chain
 
 | Transcript | follow on | time:absolute                                                    1-6/6
-| | user                                                                                  22:11:20 #
-|   Implement it                                                                                   #
+| 3 blocks | 0 tools | 0 subagents                                                                 #
+| 22:11:20  |  user                                                                                #
+|           |  Implement it                                                                        #
 |                                                                                                  #
-| | assistant                                                                             22:13:15 #
-|   Working                                                                                        #
-|>| thinking...                                                                                    #
-|                                                                                                  #
+| 22:13:15  |  assistant                                                                           #
+|           |  Working                                                                             #
+|>22:13:08  *  | thinking...                                                                       #
 |                                                                                                  #
 |                                                                                                  #
 |                                                                                                  #

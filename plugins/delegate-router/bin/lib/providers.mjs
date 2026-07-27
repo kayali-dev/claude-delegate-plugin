@@ -26,7 +26,8 @@ import { isCodexFirstClassItemType } from './codex-item-types.mjs';
 import { buildAcceptance, evaluateAutoFix } from './acceptance.mjs';
 import {
   captureVerificationInput,
-  verificationRepositoryRevision
+  verificationRepositoryRevision,
+  revisionChangedPaths
 } from './verification-profile.mjs';
 
 export { securityPreamble } from './packet.mjs';
@@ -864,7 +865,26 @@ function terminal(job, status, phase, extra = {}) {
     }
     if (!deferVerification && status === 'completed' && ['implement', 'verify'].includes(current.mode)) {
       current.completedRevision = verificationRepositoryRevision(current.cwd);
-      current.baseDrift = Boolean(current.baseRevision && current.completedRevision && current.baseRevision !== current.completedRevision);
+      // HEAD moving is not drift. A coordinator committing unrelated work (docs,
+      // another package) while a job runs must not block its acceptance — that
+      // fires constantly in an active repo and trains the owner to ignore the
+      // signal. Drift means the job's OWN inputs moved: the files it changed, or
+      // the paths it declared in scope. Bare revision inequality is recorded for
+      // evidence but only overlap blocks.
+      const movedPaths = new Set(revisionChangedPaths(current.cwd, current.baseRevision, current.completedRevision));
+      // Overlap is judged against the files this job ACTUALLY changed, not its
+      // allowedPaths fence. A fence is often a whole package, so using it makes
+      // any commit inside that package look like drift. A genuine dependency
+      // change elsewhere is already caught by the verification run itself,
+      // which executes against the post-change tree.
+      const jobPaths = (current.changedFiles?.paths || [])
+        .map((entry) => String(entry || '').replace(/^\.\//, '')).filter(Boolean);
+      const overlap = jobPaths.filter((candidate) => [...movedPaths]
+        .some((moved) => moved === candidate || moved.startsWith(`${candidate}/`) || candidate.startsWith(`${moved}/`)));
+      current.revisionMoved = Boolean(current.baseRevision && current.completedRevision
+        && current.baseRevision !== current.completedRevision);
+      current.baseDriftPaths = overlap;
+      current.baseDrift = overlap.length > 0;
       current.acceptance = buildAcceptance(current);
     }
   });
@@ -1319,7 +1339,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.33.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.34.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2133,7 +2153,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.33.0' }
+      clientInfo: { name: 'delegate-router', version: '0.34.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

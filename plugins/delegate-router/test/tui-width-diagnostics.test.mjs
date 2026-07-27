@@ -322,7 +322,7 @@ test('the full elegant glyph set proves under one coalesced CPR delivery', async
   for (const [key, value] of Object.entries(GLYPH_TIERS.elegant)) assert.deepEqual(CHROME_GLYPHS[key], value, key);
 });
 
-test('pipelined probe proves all 57 glyphs at local and ssh-like RTTs', async (t) => {
+test('pipelined probe proves the complete glyph set at local and ssh-like RTTs', async (t) => {
   t.after(clearGraphemeWidthOverrides);
   const replies = WIDTH_PROBE_GRAPHEMES.map(() => '\u001b[20;2R').join('');
   for (const delayMs of [1, 20]) {
@@ -334,7 +334,7 @@ test('pipelined probe proves all 57 glyphs at local and ssh-like RTTs', async (t
       }
     };
     const result = await probeTerminalWidths({ screen, input, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 40 });
-    assert.equal(Object.keys(result.widths).length, 57, `${delayMs}ms batch proves the complete set`);
+    assert.equal(Object.keys(result.widths).length, WIDTH_PROBE_GRAPHEMES.length, `${delayMs}ms batch proves the complete set`);
     assert.ok(result.elapsedMs < (delayMs === 1 ? 15 : 60), `${delayMs}ms RTT completed in ${result.elapsedMs.toFixed(1)}ms`);
   }
 });
@@ -356,14 +356,13 @@ test('probe budget scales with streamed reply cadence and distinguishes budget e
     }
   };
   t.after(() => clearInterval(serialTimer));
-  // Nominal streamed duration is 57×7ms ≈ 400ms; the budget must leave real
-  // headroom for event-loop delay under parallel suite load or this assertion
-  // races the wall clock (observed flaking at 502ms with 55/57 measured).
+  // Nominal streamed duration is probe-count x 7ms; the budget must leave real
+  // headroom for event-loop delay under parallel suite load.
   const serialForeground = await probeTerminalWidths({
     screen: serialScreen, input: serialInput, probes: WIDTH_PROBE_GRAPHEMES, timeoutMs: 45, maxBudgetMs: 2000
   });
   const serial = serialForeground.background ? await serialForeground.background.done : serialForeground;
-  assert.equal(Object.keys(serial.widths).length, 57, 'a render-cycle-paced terminal completes after the old 45ms cutoff');
+  assert.equal(Object.keys(serial.widths).length, WIDTH_PROBE_GRAPHEMES.length, 'a render-cycle-paced terminal completes after the old 45ms cutoff');
   assert.ok(serial.elapsedMs > 45 && serial.elapsedMs < 2000, `scaled batch completed in ${serial.elapsedMs.toFixed(1)}ms`);
 
   const budgetInput = new ProbeInput();

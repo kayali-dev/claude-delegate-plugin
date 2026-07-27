@@ -22,16 +22,24 @@ function inner(rect) {
 // testing, wrapping, highlighting, and painting must all use this exact rect.
 export function paneContentRect(pane, options = {}) {
   const rect = pane.rect;
-  if (pane.border !== false) return inner(rect);
-  const padded = {
+  const base = pane.border !== false ? inner(rect) : {
     x: rect.x + SPACE.railGap,
     y: rect.y,
     width: Math.max(0, rect.width - SPACE.paneColumn),
     height: rect.height
   };
-  return options.scrollbar === true && padded.width > SPACE.scrollbarMargin
-    ? { ...padded, width: padded.width - SPACE.scrollbarMargin }
-    : padded;
+  const padded = pane.border === false && options.scrollbar === true && base.width > SPACE.scrollbarMargin
+    ? { ...base, width: base.width - SPACE.scrollbarMargin }
+    : base;
+  if (!pane.summary || padded.height <= 0) return padded;
+  return { ...padded, y: padded.y + 1, height: Math.max(0, padded.height - 1) };
+}
+
+export function paneSummaryRect(pane, options = {}) {
+  if (!pane?.summary) return null;
+  const withoutSummary = paneContentRect({ ...pane, summary: null }, options);
+  if (!withoutSummary.height) return null;
+  return { x: withoutSummary.x, y: withoutSummary.y, width: withoutSummary.width, height: 1 };
 }
 
 function textOf(cell) {
@@ -186,6 +194,139 @@ export function paintTable(grid, rect, table = {}) {
     endIndex: rowCount ? Math.min(rowCount - 1, scroll + Math.max(0, visibleRows - 1)) : -1,
     follow: false
   };
+}
+
+export function humanizeKey(value) {
+  return formatDisplayValue(value)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function keyValueMissing(value) {
+  return value == null || value === '' || (typeof value === 'number' && !Number.isFinite(value));
+}
+
+function keyValueText(value) {
+  if (keyValueMissing(value)) return CHROME_GLYPHS.nullValue;
+  return formatDisplayValue(value, { maxLength: 16_384 });
+}
+
+function keyValueSections(content) {
+  if (Array.isArray(content.sections)) return content.sections;
+  return [{ label: content.label || 'Details', rows: content.rows || [] }];
+}
+
+export function keyValueLabelWidth(content = {}) {
+  let maximum = 0;
+  for (const section of keyValueSections(content)) {
+    for (const row of section?.rows || []) maximum = Math.max(maximum, displayWidth(humanizeKey(row?.key)));
+  }
+  return Math.max(14, Math.min(22, Number(content.labelWidth || maximum || 14)));
+}
+
+function keyValueLayout(content = {}) {
+  const lines = [];
+  const sectionGap = Math.max(0, Math.min(SPACE.section, Number(content.sectionGap ?? SPACE.section)));
+  const sections = keyValueSections(content);
+  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+    const section = sections[sectionIndex] || {};
+    if (sectionGap) lines.push({ kind: 'gap', sectionIndex });
+    lines.push({ kind: 'header', section, sectionIndex });
+    for (const row of section.rows || []) lines.push({ kind: 'row', row, section, sectionIndex });
+  }
+  return { sections, lines };
+}
+
+function keyValueScroll(content, lines, height) {
+  const selectedSection = Number.isInteger(content.selectedSection) ? content.selectedSection : -1;
+  let requestedScroll = Math.max(0, Number(content.scroll || 0));
+  if (selectedSection >= 0) {
+    const start = lines.findIndex((line) => line.sectionIndex === selectedSection && line.kind === 'header');
+    let end = -1;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (lines[index].sectionIndex !== selectedSection) continue;
+      end = index;
+      break;
+    }
+    if (start >= 0 && start < requestedScroll) requestedScroll = start;
+    else if (end >= requestedScroll + height) requestedScroll = Math.max(0, end - height + 1);
+  }
+  return Math.max(0, Math.min(Math.max(0, lines.length - height), requestedScroll));
+}
+
+function keyValueCopy(row, value, available) {
+  if (row?.copy === false || keyValueMissing(row?.value)) return false;
+  if (row?.copy === true) return true;
+  const key = humanizeKey(row?.key);
+  return /(?:\bid\b|path|cwd|command|hash|origin|checkpoint|packet|prompt)/.test(key)
+    || displayWidth(value) > Math.max(24, Math.floor(available * 0.72));
+}
+
+export function paintKeyValue(grid, rect, content = {}) {
+  const ownerStyle = content.style || palette.surface;
+  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
+  const { lines } = keyValueLayout(content);
+  const labelWidth = Math.min(keyValueLabelWidth(content), Math.max(1, rect.width - SPACE.tableColumn - 1));
+  const selectedSection = Number.isInteger(content.selectedSection) ? content.selectedSection : -1;
+  const scroll = keyValueScroll(content, lines, rect.height);
+  for (let visual = 0; visual < rect.height; visual += 1) {
+    const line = lines[scroll + visual];
+    if (!line) continue;
+    const y = rect.y + visual;
+    const selected = line.sectionIndex === selectedSection && content.focused !== false;
+    const lineStyle = selected ? mergeStyle(ownerStyle, palette.selection) : ownerStyle;
+    if (selected) {
+      grid.fill(rect.x, y, rect.width, 1, ' ', lineStyle);
+      if (line.kind === 'header') grid.set(rect.x - 1, y, CHROME_GLYPHS.selectionBar, mergeStyle(ownerStyle, palette.selectionBar));
+    }
+    if (line.kind === 'gap') continue;
+    if (line.kind === 'header') {
+      const label = humanizeKey(line.section.label || 'Details').toUpperCase();
+      const badge = line.section.badge;
+      const badgeText = badge ? formatDisplayValue(badge.text ?? badge) : '';
+      const badgeWidth = Math.min(displayWidth(badgeText), Math.max(0, Math.floor(rect.width / 2)));
+      const labelWidthAvailable = Math.max(0, rect.width - badgeWidth - (badgeText ? SPACE.railGap : 0));
+      grid.write(rect.x, y, truncateToWidth(label, labelWidthAvailable, { ellipsis: true }), mergeStyle(lineStyle, palette.dim), labelWidthAvailable);
+      if (badgeText) {
+        const x = rect.x + rect.width - badgeWidth;
+        grid.write(x, y, truncateToWidth(badgeText, badgeWidth, { ellipsis: true }), mergeStyle(lineStyle, badge.style || palette.badgeWarn), badgeWidth);
+      }
+      continue;
+    }
+    const row = line.row || {};
+    const value = keyValueText(row.value);
+    const valueX = rect.x + labelWidth + SPACE.tableColumn;
+    const available = Math.max(0, rect.x + rect.width - valueX);
+    const copy = keyValueCopy(row, value, available);
+    const valueWidth = Math.max(0, available - (copy ? SPACE.tableColumn : 0));
+    writePadded(grid, rect.x, y, humanizeKey(row.key), labelWidth, mergeStyle(lineStyle, palette.dim));
+    const valueStyle = mergeStyle(lineStyle, keyValueMissing(row.value) ? palette.dim : styleOf(row.value) || row.style || palette.body);
+    const segments = segmentsOf(row.value);
+    if (segments) writeSegments(grid, valueX, y, segments, valueWidth, valueStyle);
+    else writePadded(grid, valueX, y, value, valueWidth, valueStyle);
+    if (copy && available > 0) grid.set(rect.x + rect.width - 1, y, CHROME_GLYPHS.copyAffordance, mergeStyle(lineStyle, palette.dim));
+  }
+  return {
+    kind: 'key-value', scroll, totalItems: lines.length,
+    visibleItems: Math.min(rect.height, lines.length),
+    viewportItems: Math.min(rect.height, lines.length),
+    startIndex: lines.length ? scroll : 0,
+    endIndex: lines.length ? Math.min(lines.length - 1, scroll + Math.max(0, rect.height - 1)) : -1,
+    follow: false,
+    labelWidth
+  };
+}
+
+export function keyValueSectionIndexAt(pane, x, y) {
+  if (pane?.content?.kind !== 'key-value') return null;
+  const rect = paneContentRect(pane, { scrollbar: true });
+  if (x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height) return null;
+  const { lines } = keyValueLayout(pane.content);
+  const scroll = keyValueScroll(pane.content, lines, rect.height);
+  return lines[scroll + y - rect.y]?.sectionIndex ?? null;
 }
 
 export function tableRowIndexAt(pane, x, y) {
@@ -712,6 +853,124 @@ export function paintLogPane(grid, rect, log = {}, options = {}) {
   };
 }
 
+export function paintRail(grid, rect, rail = {}, options = {}) {
+  const metrics = paintVirtualLogPane(grid, rect, { ...rail, virtual: true }, options.wrapCache || defaultWrapCache);
+  return { ...metrics, kind: 'rail' };
+}
+
+function searchedSegments(segments, ranges) {
+  let offset = 0;
+  return segments.map((segment) => {
+    const text = textOf(segment);
+    const start = offset;
+    const end = start + text.length;
+    offset = end;
+    const matched = ranges.some((range) => range.end > start && range.start < end);
+    return matched ? { ...segment, text, style: mergeStyle(styleOf(segment), palette.searchMatch) } : { ...segment, text };
+  });
+}
+
+function diffChangeSegments(row, rowStyle) {
+  const marker = row.kind === 'added' ? '+' : '-';
+  const emphasis = row.kind === 'added' ? palette.diffAddedEmphasis : palette.diffRemovedEmphasis;
+  const dim = row.kind === 'added' ? palette.diffAddedDim : palette.diffRemovedDim;
+  const content = formatDisplayValue(row.content);
+  const span = row.changeSpan;
+  if (!span) return [{ text: marker, style: mergeStyle(rowStyle, emphasis) }, { text: content, style: mergeStyle(rowStyle, emphasis) }];
+  const prefix = content.slice(0, span.prefix);
+  const changed = content.slice(span.prefix, span.changedEnd);
+  const suffix = content.slice(span.changedEnd);
+  return [
+    { text: marker, style: mergeStyle(rowStyle, emphasis) },
+    ...(prefix ? [{ text: prefix, style: mergeStyle(rowStyle, dim) }] : []),
+    ...(changed ? [{ text: changed, style: mergeStyle(rowStyle, emphasis) }] : []),
+    ...(suffix ? [{ text: suffix, style: mergeStyle(rowStyle, dim) }] : [])
+  ];
+}
+
+function paintDiffGutter(grid, rect, y, row, rowStyle) {
+  const numberWidth = Math.max(3, Math.min(7, Number(row.numberWidth || 3)));
+  const oldText = row.oldLine == null ? '' : formatDisplayValue(row.oldLine);
+  const newText = row.newLine == null ? '' : formatDisplayValue(row.newLine);
+  writePadded(grid, rect.x, y, oldText, numberWidth, mergeStyle(rowStyle, palette.dim), 'right');
+  writePadded(grid, rect.x + numberWidth + 1, y, newText, numberWidth, mergeStyle(rowStyle, palette.dim), 'right');
+  const separatorX = rect.x + numberWidth * 2 + 2;
+  grid.set(separatorX, y, CHROME_GLYPHS.diffSeparator, mergeStyle(rowStyle, palette.dim));
+  return separatorX + SPACE.tableColumn;
+}
+
+export function paintDiffLine(grid, rect, diff = {}, options = {}) {
+  const cache = options.wrapCache || defaultWrapCache;
+  const { entries, visible, start, lineMetrics } = virtualLogLayout({ ...diff, virtual: true }, rect.width, rect.height, cache);
+  const ownerStyle = diff.style || palette.surface;
+  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
+  for (let visual = 0; visual < visible.length; visual += 1) {
+    const line = visible[visual];
+    const row = entries[line.entryIndex] || {};
+    const y = rect.y + visual;
+    if (row.kind === 'file-band') {
+      const bandStyle = mergeStyle(ownerStyle, palette.borderSubtle);
+      grid.fill(rect.x, y, rect.width, 1, ' ', bandStyle);
+      const measure = `+${formatDisplayValue(row.additions || 0)} ${CHROME_GLYPHS.minus}${formatDisplayValue(row.deletions || 0)}`;
+      const measureWidth = Math.min(displayWidth(measure), Math.max(0, Math.floor(rect.width / 3)));
+      const pathWidth = Math.max(0, rect.width - measureWidth - (measureWidth ? SPACE.tableColumn : 0));
+      grid.write(rect.x, y, truncateToWidth(formatDisplayValue(row.path), pathWidth, { ellipsis: true }), mergeStyle(bandStyle, palette.paneTitle), pathWidth);
+      if (measureWidth) grid.write(rect.x + rect.width - measureWidth, y, measure, mergeStyle(bandStyle, palette.metadata), measureWidth);
+      continue;
+    }
+    const rowStyle = row.kind === 'added' ? mergeStyle(ownerStyle, palette.diffAddedRow)
+      : row.kind === 'removed' ? mergeStyle(ownerStyle, palette.diffRemovedRow)
+        : ownerStyle;
+    grid.fill(rect.x, y, rect.width, 1, ' ', rowStyle);
+    const contentX = paintDiffGutter(grid, rect, y, row, rowStyle);
+    const available = Math.max(0, rect.x + rect.width - contentX);
+    if (!available) continue;
+    let segments;
+    if (row.kind === 'added' || row.kind === 'removed') segments = diffChangeSegments(row, rowStyle);
+    else if (row.kind === 'hunk') segments = [
+      { text: `${CHROME_GLYPHS.railSystem} `, style: mergeStyle(rowStyle, palette.hunk) },
+      { text: formatDisplayValue(row.symbol || 'changed lines'), style: mergeStyle(rowStyle, palette.hunk) }
+    ];
+    else if (row.kind === 'header') segments = [{ text: formatDisplayValue(row.raw), style: mergeStyle(rowStyle, palette.diffHeader) }];
+    else if (row.kind === 'meta') segments = [{ text: formatDisplayValue(row.raw), style: mergeStyle(rowStyle, palette.dim) }];
+    else segments = [{ text: ` ${formatDisplayValue(row.content ?? row.raw)}`, style: mergeStyle(rowStyle, palette.body) }];
+    writeSegments(grid, contentX, y, searchedSegments(segments, line.ranges || []), available, rowStyle);
+  }
+  return {
+    kind: 'diff', scroll: start, totalItems: lineMetrics.estimatedTotalLines,
+    startIndex: lineMetrics.estimatedOffsetLines,
+    endIndex: lineMetrics.estimatedTotalLines
+      ? Math.min(lineMetrics.estimatedTotalLines - 1, lineMetrics.estimatedOffsetLines + Math.max(0, visible.length - 1))
+      : -1,
+    visibleItems: visible.length,
+    viewportItems: lineMetrics.viewportLines,
+    lineMetrics,
+    follow: false
+  };
+}
+
+export function paintSummaryStrip(grid, rect, summary = {}, ownerStyle = palette.surface) {
+  if (!rect || !rect.width || !rect.height) return;
+  const source = typeof summary === 'string' ? { text: summary } : summary;
+  const style = mergeStyle(ownerStyle, source.style || palette.metadata);
+  grid.fill(rect.x, rect.y, rect.width, 1, ' ', ownerStyle);
+  const badge = source.badge;
+  const badgeText = badge ? formatDisplayValue(badge.text ?? badge) : '';
+  const badgeWidth = Math.min(displayWidth(badgeText), Math.max(0, Math.floor(rect.width / 2)));
+  const width = Math.max(0, rect.width - badgeWidth - (badgeText ? SPACE.tableColumn : 0));
+  if (Array.isArray(source.segments)) writeSegments(grid, rect.x, rect.y, source.segments, width, style);
+  else grid.write(rect.x, rect.y, truncateToWidth(formatDisplayValue(source.text), width, { ellipsis: true }), style, width);
+  if (badgeWidth) {
+    grid.write(
+      rect.x + rect.width - badgeWidth,
+      rect.y,
+      truncateToWidth(badgeText, badgeWidth, { ellipsis: true }),
+      mergeStyle(ownerStyle, badge.style || palette.badgeWarn),
+      badgeWidth
+    );
+  }
+}
+
 export function paintEmptyState(grid, rect, empty = {}) {
   const ownerStyle = empty.style || palette.surface;
   grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
@@ -870,6 +1129,17 @@ function paintContent(grid, rect, content = {}, options = {}) {
     if (!rowCount && content.empty) return paintEmptyState(grid, rect, { ...content.empty, style: content.empty.style || options.ownerStyle });
     return paintTable(grid, rect, { ...styled, focused: options.focused });
   }
+  if (content.kind === 'key-value') return paintKeyValue(grid, rect, { ...styled, focused: options.focused });
+  if (content.kind === 'rail') {
+    const count = content.entries?.length;
+    if (!count && content.empty) return paintEmptyState(grid, rect, { ...content.empty, style: content.empty.style || options.ownerStyle });
+    return paintRail(grid, rect, { ...styled, focused: options.focused }, options);
+  }
+  if (content.kind === 'diff') {
+    const count = content.entries?.length;
+    if (!count && content.empty) return paintEmptyState(grid, rect, { ...content.empty, style: content.empty.style || options.ownerStyle });
+    return paintDiffLine(grid, rect, { ...styled, focused: options.focused }, options);
+  }
   if (content.kind === 'log' || content.kind === 'text') {
     const count = content.virtual ? content.entries?.length : content.lines?.length;
     if (!count && content.empty) return paintEmptyState(grid, rect, { ...content.empty, style: content.empty.style || options.ownerStyle });
@@ -960,8 +1230,10 @@ function paintScrollIndicator(grid, pane, contentRect, metrics) {
   }
   const x = pane.rect.x + pane.rect.width - 1;
   const bordered = pane.border !== false;
-  const top = bordered ? contentRect.y : pane.rect.y;
-  const bottom = bordered ? contentRect.y + contentRect.height : pane.rect.y + pane.rect.height;
+  // The summary strip is part of the pane's interior chrome, so the rail stays
+  // continuous beside it even though only the rows below it scroll.
+  const top = bordered ? pane.rect.y + SPACE.paneRow : pane.rect.y;
+  const bottom = bordered ? pane.rect.y + pane.rect.height - SPACE.paneRow : pane.rect.y + pane.rect.height;
   const height = Math.max(0, bottom - top);
   if (!height) return;
   const trackStyle = mergeStyle(pane.style || palette.surface, palette.borderSubtle);
@@ -1050,8 +1322,10 @@ export function paintFrame(frame, options = {}) {
       style: pane.style || ownerStyle,
       railStyle: focused ? palette.focusBorder : palette.borderSubtle
     };
-    const scrollable = ['table', 'log', 'text'].includes(pane.content?.kind);
+    const scrollable = ['table', 'log', 'text', 'key-value', 'rail', 'diff'].includes(pane.content?.kind);
     const contentRect = paintPane(grid, decorated, { scrollbar: scrollable });
+    const summaryRect = paneSummaryRect(decorated, { scrollbar: scrollable });
+    if (summaryRect) paintSummaryStrip(grid, summaryRect, decorated.summary, decorated.style);
     const metrics = paintContent(grid, contentRect, pane.content, { ...options, focused, ownerStyle: decorated.style });
     if (scrollable) paintScrollIndicator(grid, decorated, contentRect, metrics);
   }

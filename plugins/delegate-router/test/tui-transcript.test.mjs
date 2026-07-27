@@ -106,7 +106,7 @@ test('tool pairs collapse output and expand only journaled command, cwd, files, 
   ];
   const collapsed = projector.project(events, { now: AT + 4000, jobCwd: '/work' });
   assert.equal(collapsed.length, 1);
-  assert.match(formatTranscriptBlock(collapsed[0]), /^\$ bun run checks \| \+ \| 4s \| \.{1,2} output \(3 lines\)$/);
+  assert.match(formatTranscriptBlock(collapsed[0]), /^\$ bun run checks \| \+ \| exit 0 \| 4s \| \.{1,2} output \(3 lines\)$/);
   assert.doesNotMatch(formatTranscriptBlock(collapsed[0]), /one|cwd:/);
 
   const expanded = projector.project(events, { now: AT + 4000, jobCwd: '/work', expandedTools: new Set(['cmd']) });
@@ -168,9 +168,9 @@ test('Codex and Cursor file changes render compact per-file counts, actions, col
   assert.deepEqual(blocks.map((block) => transcriptToolPaths(block, '/work')), [
     ['src/a.js'], ['src/no-count.js'], ['src/new.js'], ['src/gone.js'], ['src/cursor.js']
   ]);
-  const colored = wrapTranscriptBlock(blocks[0], 120).fragments[0].segments;
-  assert.deepEqual(colored.find((segment) => segment.text === '+2')?.style, uiPalette.positive);
-  assert.deepEqual(colored.find((segment) => segment.text === '−1')?.style, uiPalette.negative);
+  const measured = wrapTranscriptBlock(blocks[0], 120).fragments[0];
+  assert.match(measured.text, /[+]\d+\s+−\d+\s*$/);
+  assert.ok(measured.segments.every((segment) => segment.style !== uiPalette.positive && segment.style !== uiPalette.negative), 'successful file measures rely on glyphs, not semantic color');
   const rendered = blocks.map(formatTranscriptBlock).join('\n');
   assert.doesNotMatch(rendered, /\[object Object\]|NaN/);
   configureGlyphs({ env: { TERM: 'dumb', LANG: 'C', DELEGATE_TUI_ASCII: '1' }, widths: {} });
@@ -416,7 +416,7 @@ test('expanded output distinguishes real line breaks from literal backslash-n te
     event(4, 'tool.completed', { item: { id: 'lines', type: 'commandExecution', command: ['node', '-e', 'work()'], status: 'completed', exitCode: 0 } })
   ], { expandedTools: new Set(['lines']), now: AT + 4000 });
   const rendered = wrapTranscriptBlock(blocks[0], 80).lines.join('\n');
-  assert.match(rendered, /    first\n    second    column\n    literal\\nkept\n    last/);
+  assert.match(rendered, /[|]\s+first\s*\n\s+[|]\s+second    column\s*\n\s+[|]\s+literal\\nkept\s*\n\s+`-\s+last/);
   assert.doesNotMatch(rendered, /first\\nsecond/);
   assert.doesNotMatch(rendered, /\u0007/);
 });

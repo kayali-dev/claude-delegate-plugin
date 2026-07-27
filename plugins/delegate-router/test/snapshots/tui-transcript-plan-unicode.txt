@@ -1,5 +1,5 @@
-| plan                                      22:13:20
-  ✓ completed item
-  ⠋ active item
-  ○ pending item
-  ✗ failed item
+22:13:20  ◈  plan
+          │  ✓ completed item
+          │  ⠋ active item
+          │  ○ pending item
+          └─ ✗ failed item

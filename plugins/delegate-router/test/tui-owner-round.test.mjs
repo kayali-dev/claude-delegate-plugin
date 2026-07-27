@@ -8,6 +8,7 @@ import {
   dashboardTileBandOwnership,
   paintFrame,
   paintLogPane,
+  paintRail,
   settleVirtualFollow,
   virtualLogBottomPosition,
   WrapCache
@@ -246,7 +247,7 @@ test('usage attribution handles missing parents, Cursor jobs, cross-day parents,
   assert.equal(dashboard.meta.todayUsage.input, 320, 'cross-day child subtracts yesterday while missing/Cursor jobs remain full');
 });
 
-test('events use aligned semantic columns, lazy JSON styling, grouping gaps, and expansion', () => {
+test('events use structural rails, fixed measures, grouping gaps, and lazy expansion', () => {
   const events = [
     { seq: 1, at: NOW - 3000, type: 'message.delta', data: { text: 'hello', count: 1 } },
     { seq: 2, at: NOW - 2000, type: 'message.delta', data: { text: 'again', count: 2 } },
@@ -254,17 +255,18 @@ test('events use aligned semantic columns, lazy JSON styling, grouping gaps, and
   ];
   const blocks = eventBlocks(events);
   const collapsed = wrapEventBlock(blocks[1], 70, '', { now: NOW, timestampMode: 'relative', expandedEvents: new Set() });
-  assert.match(collapsed.lines[0], /^\s+2\s+/);
-  assert.ok(!collapsed.lines.at(-1), 'different next type inserts one blank grouping row');
-  assert.ok(collapsed.fragments[0].segments.some((segment) => segment.style === uiPalette.eventSeq));
-  assert.ok(collapsed.fragments[1].segments.some((segment) => segment.style === uiPalette.jsonKey));
+  assert.match(collapsed.lines[0], /^\s*2s ago\s+\|\s+#2\s+message\.delta/);
+  assert.ok(!collapsed.lines.at(-1), 'every event block inserts one blank grouping row');
+  assert.ok(collapsed.fragments[0].segments.some((segment) => segment.text.includes('#2')));
+  assert.ok(collapsed.fragments[1].segments.some((segment) => segment.style === uiPalette.dim));
   const expanded = wrapEventBlock(blocks[2], 42, '', { now: NOW, timestampMode: 'relative', expandedEvents: new Set([blocks[2].key]) });
   assert.ok(expanded.lines.length > collapsed.lines.length);
+  assert.match(wrapEventBlock(blocks[2], 70, '', { now: NOW, timestampMode: 'relative', expandedEvents: new Set() }).lines[0], /exit 0\s*$/);
 
   const many = eventBlocks(Array.from({ length: 5000 }, (_, index) => ({ seq: index + 1, at: NOW, type: 'message.delta', data: { text: `row ${index}` } })));
   const cache = new WrapCache();
   const grid = new CellGrid(80, 12);
-  paintLogPane(grid, { x: 0, y: 0, width: 80, height: 12 }, {
+  paintRail(grid, { x: 0, y: 0, width: 80, height: 12 }, {
     virtual: true, entries: many, formatEntry: formatEventBlock,
     wrapEntry: (block, width, formatted) => wrapEventBlock(block, width, formatted, { now: NOW, timestampMode: 'relative', expandedEvents: new Set() }),
     follow: false, scroll: { entry: 2500, line: 0 }

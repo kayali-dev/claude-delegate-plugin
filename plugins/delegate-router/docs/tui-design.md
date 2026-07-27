@@ -138,6 +138,23 @@ will.
 
 ## Track C — the missing painters
 
+### Progress — 2026-07-27
+
+- Implemented `paintKeyValue` with a single 14–22-column label grid across
+  sections, humanized keys, dim null marks, section anomaly badges, and
+  right-edge copy affordances. Record, Usage, Chain, and launcher review now
+  use it instead of serialized or hand-padded lines.
+- Implemented `paintRail` for Transcript and Events with fixed time, structural
+  role, content, and measure zones; block gaps; neutral success treatment; and
+  complete glyph-tier fallbacks.
+- Implemented `paintDiffLine` with stable old/new line gutters, per-file stats,
+  enclosing-symbol hunk labels, full-row change tints, and common-edge
+  intra-line emphasis. Diff windows are prepared when loaded or paged and only
+  the visible rows are formatted during paint.
+- Added summary strips to every secondary pane and extended headless,
+  nasty-journal, `NO_COLOR`, ASCII, glyph-probe, snapshot, and viewport-cost
+  coverage without changing navigation or the underlying data shown.
+
 **`paintKeyValue`** (Record, Usage, Chain, launcher review): one alignment grid
 across all sections (`labelWidth = clamp(maxLabel, 14, 22)`); uppercase dim
 section labels with one blank line above; humanised keys (`objectiveMet` →

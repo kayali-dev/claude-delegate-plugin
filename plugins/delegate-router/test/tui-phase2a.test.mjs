@@ -62,9 +62,11 @@ test('chain tab orders resume rounds and exposes exact jump targets', () => {
   const frame = detailViewModel(store, { jobId: second.id, detailTab: 5, chainSelection: 1 }, { width: 110, height: 28 });
   assert.equal(frame.tabs.items.at(-1), 'Chain');
   assert.deepEqual(frame.meta.chainJobIds, [root.id, second.id, third.id]);
-  assert.match(frame.panes[0].content.rowAt(1).marker.text, /suspect:short/);
-  assert.equal(frame.panes[0].content.rowAt(1).verify, '7');
-  assert.equal(frame.meta.chainJobIds[frame.panes[0].content.selected], second.id);
+  const selected = frame.panes[0].content.sections[1];
+  assert.match(selected.rows.find((row) => row.key === 'resultMarker').value, /suspect:short/);
+  assert.equal(selected.rows.find((row) => row.key === 'verifyExit').value, 7);
+  assert.equal(frame.meta.chainJobIds[frame.panes[0].content.selectedSection], second.id);
+  assert.equal(selected.badge.text, 'FAILED');
 });
 
 test('incremental logical search maps hits lazily through the wrap cache and navigates both directions', () => {

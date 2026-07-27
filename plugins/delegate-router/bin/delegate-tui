@@ -16,6 +16,7 @@ import { loadJob } from './lib/state.mjs';
 import {
   compareVirtualPositions,
   invalidateWrapCache,
+  keyValueSectionIndexAt,
   paneContentRect,
   paintFrame,
   scrollVirtualLog,
@@ -34,6 +35,7 @@ import { RemoteDatasource } from './lib/tui/remote-datasource.mjs';
 import { composeDatasources } from './lib/tui/composite-datasource.mjs';
 import { resolveRemoteTargets } from './lib/tui/remote-config.mjs';
 import { editTextInEditor, withEditorInputHandoff } from './lib/tui/editor.mjs';
+import { prepareDiffWindow } from './lib/tui/diff.mjs';
 import { BufferedInput } from './lib/tui/input.mjs';
 import { NotificationDispatcher } from './lib/tui/notifications.mjs';
 import { copyToClipboard } from './lib/tui/clipboard.mjs';
@@ -817,7 +819,17 @@ function openDiffPaths(paths, label = null) {
   ui.detailTab = 1;
   ui.diffPaths = selected;
   ui.diffFile = label || (selected.length === 1 ? selected[0] : `${selected.length} tool paths`);
-  ui.diffWindow = sliceDiff(filtered, { offset: 0, maxChars: DIFF_WINDOW });
+  const stat = store.diffStatsByJob?.[ui.jobId] || {};
+  const selectedStats = (stat.files || []).filter((file) => selected.includes(file.path));
+  const additions = selectedStats.length
+    ? selectedStats.reduce((total, file) => total + Number(file.additions || 0), 0)
+    : Number(stat.totalAdditions || 0);
+  const deletions = selectedStats.length
+    ? selectedStats.reduce((total, file) => total + Number(file.deletions || 0), 0)
+    : Number(stat.totalDeletions || 0);
+  ui.diffWindow = prepareDiffWindow(sliceDiff(filtered, { offset: 0, maxChars: DIFF_WINDOW }), {
+    band: { path: ui.diffFile, additions, deletions }
+  });
   ui.detailScroll = 0;
   clearSearch();
   draw();
@@ -830,7 +842,17 @@ function pageDiff(direction) {
     ? ui.diffWindow?.nextOffset
     : Math.max(0, Number(ui.diffWindow?.offset || 0) - DIFF_WINDOW);
   if (offset == null) return;
-  ui.diffWindow = sliceDiff(diff, { offset, maxChars: DIFF_WINDOW });
+  const stat = store.diffStatsByJob?.[ui.jobId] || {};
+  const selectedStats = (stat.files || []).filter((file) => (ui.diffPaths || []).includes(file.path));
+  const additions = selectedStats.length
+    ? selectedStats.reduce((total, file) => total + Number(file.additions || 0), 0)
+    : Number(stat.totalAdditions || 0);
+  const deletions = selectedStats.length
+    ? selectedStats.reduce((total, file) => total + Number(file.deletions || 0), 0)
+    : Number(stat.totalDeletions || 0);
+  ui.diffWindow = prepareDiffWindow(sliceDiff(diff, { offset, maxChars: DIFF_WINDOW }), {
+    band: { path: ui.diffFile, additions, deletions }
+  });
   ui.detailScroll = 0;
   clearSearch();
   draw();
@@ -1220,6 +1242,14 @@ function handleClick(event) {
           if (!toggleToolBlock(block)) draw();
         } else draw();
       }
+    }
+    return;
+  }
+  if (ui.screen === 'detail' && ui.detailTab === 5 && pane?.content?.kind === 'key-value') {
+    const section = keyValueSectionIndexAt(pane, event.x, event.y);
+    if (section != null) {
+      ui.chainSelection = section;
+      draw();
     }
     return;
   }

@@ -203,8 +203,8 @@ test('diff line semantics color additions, deletions, and hunk headers through t
 
 test('accent is reserved for live focus rather than default transcript, tool, or diff content', () => {
   assert.equal(transcriptLineStyle({}, { lineKind: 'unknown-provider-fragment' }), uiPalette.body);
-  assert.equal(lineStyleForEvent({ type: 'tool.started' }), uiPalette.eventTagTool);
-  assert.equal(lineStyleForEvent({ type: 'tool.completed' }), uiPalette.positive);
+  assert.equal(lineStyleForEvent({ type: 'tool.started' }), uiPalette.body);
+  assert.equal(lineStyleForEvent({ type: 'tool.completed' }), uiPalette.body);
   assert.equal(lineStyleForEvent({ type: 'tool.failed' }), uiPalette.failed);
   for (const style of [
     transcriptLineStyle({}, { lineKind: 'unknown-provider-fragment' }),

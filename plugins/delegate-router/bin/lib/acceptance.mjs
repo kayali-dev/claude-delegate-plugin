@@ -54,7 +54,11 @@ export function acceptanceEvidence(job) {
     base: {
       launchedRevision: job?.baseRevision || null,
       completedRevision: job?.completedRevision || null,
-      drifted: job?.baseDrift === true || verification?.inputChanged === true
+      drifted: job?.baseDrift === true || verification?.inputChanged === true,
+      // Recorded for evidence: HEAD moved, but only overlap with this job's own
+      // paths counts as drift that blocks acceptance.
+      revisionMoved: job?.revisionMoved === true,
+      driftPaths: job?.baseDriftPaths || []
     }
   };
 }

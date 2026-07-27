@@ -53,6 +53,21 @@ export function verificationRepositoryRevision(cwd) {
   return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
 }
 
+// Paths changed between two revisions, repo-relative. Used to decide whether a
+// revision move during a job actually touched that job's inputs, rather than
+// treating any commit as drift.
+export function revisionChangedPaths(cwd, fromRevision, toRevision) {
+  if (!cwd || !fromRevision || !toRevision || fromRevision === toRevision) return [];
+  const result = spawnSync('git', ['diff', '--name-only', `${fromRevision}..${toRevision}`], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  if (result.status !== 0 || !result.stdout) return [];
+  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
 function instructionDirectories(cwd, root) {
   const directories = [];
   let current = canonicalDirectory(cwd);

@@ -201,8 +201,9 @@ test('fleet and Record derive failed state for stale queued records before durab
   assert.ok(!activeOnly.meta.visibleJobIds.includes(stale.id));
 
   const record = detailViewModel(store, { jobId: stale.id, detailTab: 2, now: NOW }, { width: 100, height: 30 });
-  assert.match(record.panes[0].content.lines[0].text, /^\(reconciled\)/);
-  assert.match(record.panes[0].content.lines.map((line) => line.text ?? line).join('\n'), /"status": "failed"/);
+  const recordRows = record.panes[0].content.sections.flatMap((section) => section.rows);
+  assert.match(recordRows.find((row) => row.key === 'reconciled').value, /durable record update pending/);
+  assert.equal(recordRows.find((row) => row.key === 'status').value, 'failed');
 });
 
 test('detail view models every tab and exposes diff-file selection metadata', () => {
@@ -215,7 +216,7 @@ test('detail view models every tab and exposes diff-file selection metadata', ()
   const diff = detailViewModel(store, { jobId: 'codex-active-1234567', detailTab: 1 }, { width: 100, height: 30 });
   assert.deepEqual(diff.meta.diffFiles, ['src/a.js']);
   const record = detailViewModel(store, { jobId: 'cursor-done-abcdef0', detailTab: 2 }, { width: 100, height: 30 });
-  assert.match(record.panes[0].content.lines.join('\n'), /"resumable"/);
+  assert.ok(record.panes[0].content.sections.some((section) => section.rows.some((row) => row.key.startsWith('resumable '))));
 });
 
 test('detail transcript exposes history hydration progress instead of a blank pane', () => {
@@ -421,14 +422,14 @@ test('fixed 100x30 fleet headless frame is deterministic', (t) => {
 
   const grid = paintFrame(frame);
   assert.deepEqual(grid.get(0, 29).style, uiPalette.bar);
-  assert.deepEqual(grid.get(2, 3).style, { ...uiPalette.surfaceRaised, ...uiPalette.header });
-  assert.deepEqual(grid.get(1, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selectionBar });
-  assert.deepEqual(grid.get(4, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection, ...uiPalette.selectedId });
-  assert.deepEqual(grid.get(3, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection, ...uiPalette.selectedId });
-  assert.equal(grid.get(3, 4).style.bold, true);
-  assert.equal(grid.get(3, 4).style.fg, uiPalette.surfaceRaised.fg);
-  assert.deepEqual(grid.get(24, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection });
-  assert.equal(grid.get(24, 4).style.bold, undefined);
+  assert.deepEqual(grid.get(2, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.header });
+  assert.deepEqual(grid.get(1, 5).style, { ...uiPalette.surfaceRaised, ...uiPalette.selectionBar });
+  assert.deepEqual(grid.get(4, 5).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection, ...uiPalette.selectedId });
+  assert.deepEqual(grid.get(3, 5).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection, ...uiPalette.selectedId });
+  assert.equal(grid.get(3, 5).style.bold, true);
+  assert.equal(grid.get(3, 5).style.fg, uiPalette.surfaceRaised.fg);
+  assert.deepEqual(grid.get(24, 5).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection });
+  assert.equal(grid.get(24, 5).style.bold, undefined);
 });
 
 test('every screen paints at realistic resize breakpoints with filters, follow, launcher, and help state', () => {
@@ -523,8 +524,8 @@ test('every screen reserves selection and prefix gutters so content columns neve
     const secondGrid = paintFrame(second);
     assert.equal(first.panes.length, second.panes.length, `${name} pane count`);
     for (let index = 0; index < first.panes.length; index += 1) {
-      const firstRect = paneContentRect(first.panes[index], { scrollbar: ['table', 'log', 'text'].includes(first.panes[index].content?.kind) });
-      const secondRect = paneContentRect(second.panes[index], { scrollbar: ['table', 'log', 'text'].includes(second.panes[index].content?.kind) });
+      const firstRect = paneContentRect(first.panes[index], { scrollbar: ['table', 'log', 'text', 'key-value', 'rail', 'diff'].includes(first.panes[index].content?.kind) });
+      const secondRect = paneContentRect(second.panes[index], { scrollbar: ['table', 'log', 'text', 'key-value', 'rail', 'diff'].includes(second.panes[index].content?.kind) });
       assert.deepEqual(firstRect, secondRect, `${name} pane ${index} content rect`);
       assert.deepEqual(firstInk(firstGrid, firstRect), firstInk(secondGrid, secondRect), `${name} pane ${index} content-left columns`);
       if (first.panes[index].title) {
@@ -538,7 +539,7 @@ test('every screen reserves selection and prefix gutters so content columns neve
     jobId: 'codex-active-1234567', detailTab: 0, now: NOW, follow: false, transcriptSelection: 0
   }, viewport);
   const transcriptLines = paintFrame(transcript).lines();
-  const userColumn = transcriptLines.find((line) => line.includes('| user'))?.indexOf('user');
+  const userColumn = transcriptLines.find((line) => /[|]\s+user/.test(line))?.indexOf('user');
   const bodyColumn = transcriptLines.find((line) => line.includes('Implement it'))?.indexOf('Implement it');
   assert.equal(userColumn, bodyColumn, 'glyph-prefixed and plain transcript content share one content column');
 
@@ -552,11 +553,13 @@ test('every screen reserves selection and prefix gutters so content columns neve
   }, viewport);
   const diffRect = paneContentRect(diff.panes[0], { scrollbar: true });
   const diffLines = paintFrame(diff).lines();
-  for (const [line, content] of [['+added', 'added'], ['-removed', 'removed'], [' context', 'context']]) {
+  const changed = [['+added', 'added'], ['-removed', 'removed'], [' context', 'context']].map(([line, content]) => {
     const rendered = diffLines.find((value) => value.includes(line));
     assert.ok(rendered, `diff renders ${line}`);
-    assert.equal(rendered.indexOf(content), diffRect.x + SPACE.railGap, `${line[0]} marker owns the reserved diff gutter`);
-  }
+    assert.ok(rendered.includes('|'), `${line} retains the line-number separator`);
+    return rendered.indexOf(content);
+  });
+  assert.equal(new Set(changed).size, 1, 'added, removed, and context content share one fixed line-number gutter');
 });
 
 export { syntheticStore };

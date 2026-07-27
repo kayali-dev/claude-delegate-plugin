@@ -2,7 +2,8 @@ import path from 'node:path';
 import { jobNeedsReconciliation } from '../control.mjs';
 import { deriveJobActivity } from './activity.mjs';
 import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimestamp, joinDisplayParts } from './display.mjs';
-import { eventBlocks, formatEventBlock, wrapEventBlock } from './events.mjs';
+import { prepareDiffWindow, formatDiffRow, wrapDiffRow } from './diff.mjs';
+import { eventBlocks, eventCategory, formatEventBlock, wrapEventBlock } from './events.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR, spinnerGlyph } from './glyphs.mjs';
 import { uiPalette as palette } from './palette.mjs';
 import { sectionGapForHeight, SPACE } from './rhythm.mjs';
@@ -42,7 +43,7 @@ function viewportOf(viewport = {}) {
 }
 
 function nowOf(ui, store = null) {
-  const local = Number(ui.now ?? Date.now());
+  const local = Number(ui.now ?? store?.updatedAt ?? 0);
   const offset = Number(ui.remote?.clockOffsetMs ?? store?.remote?.clockOffsetMs ?? 0);
   return local + (Number.isFinite(offset) ? offset : 0);
 }
@@ -51,7 +52,7 @@ function active(job) {
   return job.external !== true && job.transport !== 'external' && !TERMINAL.has(job.status);
 }
 
-export function effectiveJobRecord(job, nowMs = Date.now()) {
+export function effectiveJobRecord(job, nowMs = 0) {
   if (!job) return job;
   if (job.tuiReconciledFrom) {
     return { ...job, displayReconciled: true, reconciliationPending: false, reconciledFrom: job.tuiReconciledFrom };
@@ -235,6 +236,28 @@ function breadcrumbs(frame, ui) {
   return [frame.screen === 'dashboard' ? 'home' : frame.screen];
 }
 
+function paneItemCount(content = {}) {
+  if (content.kind === 'table') return Math.max(0, Number(content.rowCount ?? content.rows?.length ?? 0));
+  if (content.kind === 'key-value') return (content.sections || []).reduce((total, section) => total + (section.rows?.length || 0), 0);
+  if (content.virtual || content.kind === 'rail' || content.kind === 'diff') return content.entries?.length || 0;
+  if (content.kind === 'log' || content.kind === 'text') return content.lines?.length || 0;
+  return 0;
+}
+
+function defaultPaneSummary(pane = {}) {
+  const content = pane.content || {};
+  const count = paneItemCount(content);
+  const noun = content.kind === 'table' ? 'rows'
+    : content.kind === 'key-value' ? 'fields'
+      : content.kind === 'rail' ? 'blocks'
+        : content.kind === 'diff' ? 'diff rows'
+          : 'lines';
+  const badges = content.kind === 'key-value'
+    ? (content.sections || []).filter((section) => section.badge).length
+    : 0;
+  return { text: joinDisplayParts([`${count} ${noun}`, badges ? `${badges} unusual` : '']) };
+}
+
 export function applyHeightPressure(panes = [], rows = 0, contentBottom = Number.MAX_SAFE_INTEGER) {
   const desiredGap = sectionGapForHeight(rows);
   if (desiredGap === SPACE.section || panes.length < 2) return panes.map((pane) => ({ ...pane, rect: { ...pane.rect } }));
@@ -274,6 +297,12 @@ export function applyHeightPressure(panes = [], rows = 0, contentBottom = Number
 }
 
 function commonOverlay(frame, ui, store = null) {
+  if (frame.screen !== 'dashboard') {
+    frame.panes = (frame.panes || []).map((pane) => ({
+      ...pane,
+      summary: pane.summary || defaultPaneSummary(pane)
+    }));
+  }
   const remote = ui.remote;
   if (remote?.enabled) {
     const connection = remote.connection || { status: 'connecting', attempt: 0 };
@@ -816,10 +845,8 @@ export function lineStyleForEvent(event) {
   if (event.type?.startsWith('message.')) return palette.body;
   if (event.type?.startsWith('tool.')) {
     if (/(?:failed|error|denied)$/.test(event.type)) return palette.failed;
-    if (/(?:completed|succeeded)$/.test(event.type)) return palette.positive;
-    return palette.eventTagTool;
+    return palette.body;
   }
-  if (event.type === 'usage.updated') return palette.positive;
   return palette.dim;
 }
 
@@ -863,11 +890,11 @@ export function transcriptLineStyle(block, fragment) {
   if (kind === 'file-change') return palette.body;
   if (kind === 'message-header') return block.role === 'user' ? palette.header : palette.metadata;
   if (kind === 'tool-failed' || kind === 'notice-error' || kind === 'plan-failed') return palette.failed;
-  if (kind === 'tool-running' || kind === 'notice-warning') return palette.badgeWarn;
-  if (kind === 'compaction-active') return palette.accent;
+  if (kind === 'notice-warning') return palette.badgeWarn;
+  if (kind === 'tool-running' || kind === 'compaction-active') return palette.body;
   if (kind === 'compaction-complete') return palette.dim;
-  if (kind === 'plan-complete') return palette.planCompleted;
-  if (kind === 'plan-active') return palette.planActive;
+  if (kind === 'plan-complete') return palette.dim;
+  if (kind === 'plan-active') return palette.body;
   if (kind === 'plan-pending') return palette.planPending;
   if (kind === 'meta' || kind === 'notice') return palette.dim;
   return palette.body;
@@ -894,34 +921,129 @@ function derivedDrift(job) {
   };
 }
 
-function recordLines(job) {
-  const curated = {
-    status: job.status,
-    phase: job.phase,
-    checkpoint: job.checkpoint || '',
-    verificationProfile: job.verificationProfile || '',
-    verification: job.verification || '',
-    verificationOrigin: job.verificationOrigin || '',
-    acceptance: job.acceptance || '',
-    driftReport: derivedDrift(job),
-    resumable: derivedResumable(job),
-    objectiveMet: job.objectiveMet ?? '',
-    scopeViolations: job.scopeViolations || [],
-    error: job.error || '',
-    errorCode: job.errorCode || '',
-    transport: job.transport || '',
-    origin: job.origin || '',
-    cwd: job.cwd || '',
-    coordinatorSessionId: job.coordinatorSessionId || '',
-    agentType: job.agentType || '',
-    promptSummary: job.promptSummary || '',
-    approximateSize: job.approximateSizeLabel || job.approximateSize || '',
-    activityLabel: job.activityLabel || ''
-  };
-  return formatDisplayValue(curated, { space: 2, maxLength: 64_000 }).split('\n');
+function compactFieldValue(value) {
+  if (value == null || value === '' || (typeof value === 'number' && !Number.isFinite(value))) return null;
+  if (Array.isArray(value)) {
+    if (!value.length) return null;
+    if (value.every((entry) => entry == null || ['string', 'number', 'boolean'].includes(typeof entry))) {
+      return value.map((entry) => formatDisplayValue(entry)).filter(Boolean).join(', ') || null;
+    }
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (!entries.length) return null;
+  }
+  return typeof value === 'object'
+    ? formatDisplayValue(value, { maxLength: 16_384 })
+    : value;
 }
 
-function usageLines(job, store) {
+function objectRows(prefix, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [{ key: prefix, value: compactFieldValue(value) }];
+  const entries = Object.entries(value);
+  if (!entries.length) return [{ key: prefix, value: null }];
+  return entries.map(([key, entry]) => ({
+    key: `${prefix} ${key}`,
+    value: compactFieldValue(entry)
+  }));
+}
+
+function scopeViolationCount(job) {
+  return Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Math.max(0, Number(job.scopeViolations || 0));
+}
+
+function verificationFailed(job) {
+  const verification = job.verification || {};
+  const exitCode = Number(verification.exitCode ?? verification.exit_code);
+  return verification.passed === false
+    || verification.ok === false
+    || (Number.isFinite(exitCode) && exitCode !== 0)
+    || /fail|error|blocked/i.test(formatDisplayValue(verification.status));
+}
+
+function acceptanceBlocked(job) {
+  const acceptance = job.acceptance;
+  return acceptance?.blocked === true
+    || acceptance?.accepted === false
+    || /blocked|failed|rejected|missing/i.test(formatDisplayValue(acceptance));
+}
+
+function driftCount(job) {
+  const drift = derivedDrift(job);
+  return [...(drift.modified || []), ...(drift.newFiles || []), ...(drift.outsideScope || [])].length;
+}
+
+export function recordSections(job) {
+  const drift = derivedDrift(job);
+  const resumable = derivedResumable(job);
+  const violations = scopeViolationCount(job);
+  const verifyFailed = verificationFailed(job);
+  const blocked = acceptanceBlocked(job) || job.objectiveMet === false;
+  const drifted = driftCount(job);
+  return [
+    {
+      label: 'State',
+      ...(job.status === 'failed' || job.error ? { badge: { text: 'FAILED', style: palette.failed } }
+        : blocked ? { badge: { text: 'ACCEPTANCE BLOCKED', style: palette.badgeWarn } } : {}),
+      rows: [
+        { key: 'status', value: job.status },
+        { key: 'phase', value: job.phase },
+        { key: 'checkpoint', value: job.checkpoint, copy: true },
+        { key: 'objectiveMet', value: job.objectiveMet },
+        { key: 'error', value: job.error },
+        { key: 'errorCode', value: job.errorCode },
+        ...(job.displayReconciled ? [{
+          key: 'reconciled',
+          value: job.reconciliationPending
+            ? `displaying ${formatDisplayValue(job.reconciledFrom)} as failed; durable record update pending`
+            : `stale ${formatDisplayValue(job.reconciledFrom)} record persisted as failed by this TUI`,
+          style: palette.dim
+        }] : [])
+      ]
+    },
+    {
+      label: 'Verification',
+      ...(verifyFailed ? { badge: { text: 'VERIFY FAILED', style: palette.failed } }
+        : acceptanceBlocked(job) ? { badge: { text: 'ACCEPTANCE BLOCKED', style: palette.badgeWarn } } : {}),
+      rows: [
+        { key: 'verificationProfile', value: job.verificationProfile },
+        { key: 'verificationOrigin', value: job.verificationOrigin },
+        ...objectRows('verification', job.verification),
+        ...objectRows('acceptance', job.acceptance)
+      ]
+    },
+    {
+      label: 'Scope and drift',
+      ...(violations ? { badge: { text: `SCOPE ${violations}`, style: palette.failed } }
+        : drifted ? { badge: { text: `DRIFT ${drifted}`, style: palette.badgeWarn } } : {}),
+      rows: [
+        ...objectRows('driftReport', drift),
+        { key: 'scopeViolations', value: compactFieldValue(job.scopeViolations) }
+      ]
+    },
+    {
+      label: 'Continuation',
+      rows: [
+        ...objectRows('resumable', resumable),
+        { key: 'transport', value: job.transport },
+        { key: 'coordinatorSessionId', value: job.coordinatorSessionId, copy: true },
+        { key: 'agentType', value: job.agentType }
+      ]
+    },
+    {
+      label: 'Origin',
+      rows: [
+        ...objectRows('origin', job.origin),
+        { key: 'cwd', value: job.cwd, copy: true },
+        { key: 'promptSummary', value: job.promptSummary },
+        { key: 'approximateSize', value: job.approximateSizeLabel || job.approximateSize },
+        { key: 'activityLabel', value: job.activityLabel }
+      ]
+    }
+  ];
+}
+
+function usageContent(job, store) {
   const current = jobUsage(job, store.eventsByJob?.[job.id]);
   const jobsById = new Map((store.jobs || []).map((entry) => [entry.id, entry]));
   const chain = [job];
@@ -944,19 +1066,43 @@ function usageLines(job, store) {
   const filled = Math.floor(eighths / 8);
   const partial = eighths % 8;
   const budgetBar = `${CHROME_GLYPHS.meter[7].repeat(filled)}${partial && filled < barWidth ? CHROME_GLYPHS.meter[partial - 1] : ''}${CHROME_GLYPHS.horizontal.repeat(Math.max(0, barWidth - filled - (partial ? 1 : 0)))}`;
-  return [
-    `Input tokens       ${number(current.input)}`,
-    `Cached input       ${number(current.cached)} (${cachedPercent}%)`,
-    `Output tokens      ${number(current.output)}`,
-    `Total tokens       ${number(current.total)}`,
-    `Output budget      ${max > 0 ? `${number(current.output)} / ${number(max)}  [${budgetBar}]` : 'not set'}`,
-    '',
-    `Chain root         ${formatDisplayValue(chain[0]?.id || job.id)}`,
-    `Observed jobs      ${chain.length}`,
-    `Chain input        ${number(cumulative.input)}`,
-    `Chain output       ${number(cumulative.output)}`,
-    `Chain total        ${number(cumulative.total)}`
-  ];
+  const budgetExceeded = max > 0 && current.output >= max;
+  return {
+    summary: {
+      text: joinDisplayParts([
+        `${number(current.total)} current tokens`,
+        `${chain.length} chain job${chain.length === 1 ? '' : 's'}`,
+        max > 0 ? `${number(current.output)}/${number(max)} output` : 'no output budget'
+      ]),
+      ...(budgetExceeded ? { badge: { text: 'BUDGET EXCEEDED', style: palette.failed } } : {})
+    },
+    sections: [
+      {
+        label: 'Current',
+        ...(budgetExceeded ? { badge: { text: 'BUDGET EXCEEDED', style: palette.failed } } : {}),
+        rows: [
+          { key: 'inputTokens', value: number(current.input) },
+          { key: 'cachedInput', value: `${number(current.cached)} (${cachedPercent}%)` },
+          { key: 'outputTokens', value: number(current.output) },
+          { key: 'totalTokens', value: number(current.total) },
+          {
+            key: 'outputBudget',
+            value: max > 0 ? `${number(current.output)} / ${number(max)}  [${budgetBar}]` : null
+          }
+        ]
+      },
+      {
+        label: 'Continuation chain',
+        rows: [
+          { key: 'chainRoot', value: formatDisplayValue(chain[0]?.id || job.id), copy: true },
+          { key: 'observedJobs', value: chain.length },
+          { key: 'chainInput', value: number(cumulative.input) },
+          { key: 'chainOutput', value: number(cumulative.output) },
+          { key: 'chainTotal', value: number(cumulative.total) }
+        ]
+      }
+    ]
+  };
 }
 
 const chainIndexCache = new WeakMap();
@@ -1010,31 +1156,46 @@ function searchQuery(ui, pane) {
 
 function chainContent(store, job, ui, width) {
   const chain = detailChain(store, job);
-  const columns = [
-    { key: 'id', title: 'Round', width: 11, selectedStyle: palette.selectedId },
-    { key: 'mode', title: 'Mode', width: 10 },
-    { key: 'files', title: 'Files', width: 7, align: 'right' },
-    { key: 'verify', title: 'Verify', width: 8, align: 'right' },
-    { key: 'marker', title: 'Result marker', width: 20 },
-    { key: 'outcome', title: 'Outcome', width: Math.max(12, width - 58) }
-  ];
-  const rowAt = (index) => {
-    const round = chain.jobs[index];
-    if (!round) return null;
+  const sections = chain.jobs.map((round, index) => {
     const markers = [];
     if (round.objectiveMet != null) markers.push(`objective:${formatDisplayValue(round.objectiveMet)}`);
     if (round.resultSuspect) markers.push(`suspect:${formatDisplayValue(round.resultSuspect)}`);
     const outcome = displayOr(round.resultText || round.result?.text || round.result || round.error, '-').split(/\r?\n/, 1)[0];
+    const verifyExit = round.verification?.exitCode;
+    const failed = round.status === 'failed' || (verifyExit != null && Number(verifyExit) !== 0);
+    const blocked = round.resultSuspect || round.objectiveMet === false;
     return {
-      id: shortId(round), mode: round.mode || '-', files: Number(round.changedFiles?.count ?? round.changedFiles?.files?.length ?? round.changedFiles?.entries?.length ?? 0),
-      verify: round.verification?.exitCode == null ? '-' : formatDisplayValue(round.verification.exitCode),
-      marker: { text: markers.join(', ') || '-', style: round.resultSuspect || round.objectiveMet === false ? palette.badgeWarn : palette.dim },
-      outcome
+      label: `Round ${index + 1} ${shortId(round)}`,
+      ...(failed ? { badge: { text: 'FAILED', style: palette.failed } }
+        : blocked ? { badge: { text: 'BLOCKED', style: palette.badgeWarn } } : {}),
+      rows: [
+        { key: 'mode', value: round.mode },
+        { key: 'status', value: round.status },
+        { key: 'files', value: Number(round.changedFiles?.count ?? round.changedFiles?.files?.length ?? round.changedFiles?.entries?.length ?? 0) },
+        { key: 'verifyExit', value: verifyExit },
+        { key: 'objectiveMet', value: round.objectiveMet },
+        { key: 'resultMarker', value: markers.join(', ') || null, style: blocked ? palette.badgeWarn : palette.dim },
+        { key: 'outcome', value: outcome }
+      ]
     };
-  };
+  });
+  const unusual = sections.filter((section) => section.badge).length;
   return {
     title: `Chain${CHROME_SEPARATOR}${chain.jobs.length} rounds`,
-    content: { kind: 'table', columns, rows: [], rowCount: chain.jobs.length, rowAt, selected: ui.chainSelection || 0, scroll: ui.detailScroll || 0 },
+    summary: {
+      text: joinDisplayParts([
+        `${chain.jobs.length} rounds`,
+        `${chain.jobs.reduce((total, round) => total + Number(round.changedFiles?.count ?? round.changedFiles?.files?.length ?? round.changedFiles?.entries?.length ?? 0), 0)} files`,
+        unusual ? `${unusual} unusual` : ''
+      ])
+    },
+    content: {
+      kind: 'key-value',
+      sections,
+      selectedSection: ui.chainSelection || 0,
+      scroll: ui.detailScroll || 0,
+      sectionGap: sectionGapForHeight(ui.viewportHeight)
+    },
     scrollItemCount: chain.jobs.length,
     chainJobIds: chain.ids
   };
@@ -1063,12 +1224,24 @@ function detailContent(job, store, ui, tab, activity) {
       thinkingSince: activity.since,
       thinkingSeq: activity.sourceSeq
     });
+    const tools = entries.filter((entry) => entry.kind === 'tool');
+    const agents = tools.filter((entry) => entry.tool?.category === 'subagent');
+    const anomalies = entries.filter((entry) => entry.tool?.failed || entry.kind === 'notice' && /scope|budget|error/.test(entry.noticeType || '')).length;
     return {
       title: `Transcript${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${CHROME_SEPARATOR}time:${ui.timestampMode === 'relative' ? 'relative' : 'absolute'}${historyState}${searchSuffix(ui, 'transcript')}`,
+      summary: {
+        text: joinDisplayParts([
+          `${entries.length} blocks`,
+          `${tools.length} tools`,
+          `${agents.length} subagents`,
+          anomalies ? `${anomalies} anomalies` : ''
+        ]),
+        ...(anomalies ? { badge: { text: `${anomalies} ANOMALIES`, style: palette.failed } } : {})
+      },
       loading: hydration?.loading === true,
       loadingGlyph: spinnerGlyph(nowOf(ui, store)),
       content: entries.length ? {
-        kind: 'log', virtual: true, entries, formatEntry: formatTranscriptBlock, wrapEntry: wrapTranscriptBlock, styleLine: transcriptLineStyle,
+        kind: 'rail', virtual: true, entries, formatEntry: formatTranscriptBlock, wrapEntry: wrapTranscriptBlock, styleLine: transcriptLineStyle,
         measureKey: `transcript:${job.id}`,
         follow: ui.follow !== false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'transcript'),
         selectedEntry: ui.follow !== false
@@ -1079,20 +1252,58 @@ function detailContent(job, store, ui, tab, activity) {
     };
   }
   if (tab === 1) {
+    const stat = store.diffStatsByJob?.[job.id] || { files: [], totalAdditions: 0, totalDeletions: 0 };
+    const outsideScope = scopeViolationCount(job);
     if (ui.diffFile) {
       const window = ui.diffWindow || { diff: '', offset: 0, totalChars: 0, nextOffset: null };
       const diffText = formatDisplayValue(window.diff);
-      const lines = diffText.split('\n');
+      const selectedPaths = ui.diffPaths?.length ? ui.diffPaths : [ui.diffFile];
+      const selectedStats = (stat.files || []).filter((file) => selectedPaths.includes(file.path));
+      const additions = selectedStats.length
+        ? selectedStats.reduce((total, file) => total + Number(file.additions || 0), 0)
+        : Number(stat.totalAdditions || 0);
+      const deletions = selectedStats.length
+        ? selectedStats.reduce((total, file) => total + Number(file.deletions || 0), 0)
+        : Number(stat.totalDeletions || 0);
+      const prepared = Array.isArray(window.rows) ? window : prepareDiffWindow(window, {
+        band: { path: ui.diffFile, additions, deletions }
+      });
+      const rows = prepared.rows || [];
       return {
         title: `Diff${CHROME_SEPARATOR}${formatDisplayValue(ui.diffFile)}${CHROME_SEPARATOR}${window.offset}-${window.offset + diffText.length}/${window.totalChars}${searchSuffix(ui, 'diff')}`,
-        content: { kind: 'log', virtual: true, entries: lines, formatEntry: formatDisplayValue, styleEntry: diffLineStyle, measureKey: `diff:${job.id}:${formatDisplayValue(ui.diffFile)}`, follow: false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'diff') },
-        scrollItemCount: lines.length
+        summary: {
+          text: joinDisplayParts([
+            `${selectedStats.length || 1} file${selectedStats.length === 1 ? '' : 's'}`,
+            `+${additions} ${CHROME_GLYPHS.minus}${deletions}`,
+            outsideScope ? `${outsideScope} outside scope` : ''
+          ]),
+          ...(outsideScope ? { badge: { text: `${outsideScope} OUTSIDE SCOPE`, style: palette.failed } } : {})
+        },
+        content: {
+          kind: 'diff',
+          virtual: true,
+          entries: rows,
+          formatEntry: formatDiffRow,
+          wrapEntry: wrapDiffRow,
+          measureKey: `diff:${job.id}:${formatDisplayValue(ui.diffFile)}:${window.offset}`,
+          follow: false,
+          scroll: ui.detailScroll || 0,
+          searchQuery: searchQuery(ui, 'diff')
+        },
+        scrollItemCount: rows.length
       };
     }
-    const stat = store.diffStatsByJob?.[job.id] || { files: [], totalAdditions: 0, totalDeletions: 0 };
     const files = stat.files || [];
     return {
       title: `Diff${CHROME_SEPARATOR}+${stat.totalAdditions || 0} -${stat.totalDeletions || 0}`,
+      summary: {
+        text: joinDisplayParts([
+          `${files.length} files`,
+          `+${stat.totalAdditions || 0} ${CHROME_GLYPHS.minus}${stat.totalDeletions || 0}`,
+          outsideScope ? `${outsideScope} outside scope` : ''
+        ]),
+        ...(outsideScope ? { badge: { text: `${outsideScope} OUTSIDE SCOPE`, style: palette.failed } } : {})
+      },
       content: {
         kind: 'table', selected: ui.diffSelection || 0, scroll: ui.detailScroll || 0,
         columns: [{ key: 'path', title: 'File', width: 60 }, { key: 'additions', title: '+', width: 8, align: 'right' }, { key: 'deletions', title: '-', width: 8, align: 'right' }],
@@ -1103,29 +1314,52 @@ function detailContent(job, store, ui, tab, activity) {
     };
   }
   if (tab === 2) {
-    const lines = [
-      ...(job.displayReconciled ? [{
-        text: job.reconciliationPending
-          ? `(reconciled) displaying ${formatDisplayValue(job.reconciledFrom)} as failed; durable record update pending`
-          : `(reconciled) stale ${formatDisplayValue(job.reconciledFrom)} record persisted as failed by this TUI`,
-        style: palette.dim
-      }] : []),
-      ...recordLines(job)
-    ];
+    const sections = recordSections(job);
+    const violations = scopeViolationCount(job);
+    const blocked = acceptanceBlocked(job) || job.objectiveMet === false;
+    const verifyFailed = verificationFailed(job);
+    const fieldCount = sections.reduce((total, section) => total + section.rows.length, 0);
     return {
-    title: 'Record | curated fields',
-    content: {
-      kind: 'log',
-      lines,
-      follow: false,
-      scroll: ui.detailScroll || 0
-    },
-    scrollItemCount: lines.length
-  };
+      title: 'Record | curated fields',
+      summary: {
+        text: joinDisplayParts([
+          `${fieldCount} fields`,
+          violations ? `${violations} outside scope` : '',
+          verifyFailed ? 'verification failed' : '',
+          blocked ? 'acceptance blocked' : ''
+        ]),
+        ...((violations || verifyFailed || blocked) ? {
+          badge: {
+            text: violations ? `${violations} OUTSIDE SCOPE` : verifyFailed ? 'VERIFY FAILED' : 'ACCEPTANCE BLOCKED',
+            style: violations || verifyFailed ? palette.failed : palette.badgeWarn
+          }
+        } : {})
+      },
+      content: {
+        kind: 'key-value',
+        sections,
+        follow: false,
+        scroll: ui.detailScroll || 0,
+        sectionGap: sectionGapForHeight(ui.viewportHeight)
+      },
+      scrollItemCount: fieldCount + sections.length
+    };
   }
   if (tab === 3) {
-    const lines = usageLines(job, store);
-    return { title: 'Usage | current and continuation chain', content: { kind: 'log', lines, follow: false, scroll: ui.detailScroll || 0 }, scrollItemCount: lines.length };
+    const usage = usageContent(job, store);
+    const fieldCount = usage.sections.reduce((total, section) => total + section.rows.length, 0);
+    return {
+      title: 'Usage | current and continuation chain',
+      summary: usage.summary,
+      content: {
+        kind: 'key-value',
+        sections: usage.sections,
+        follow: false,
+        scroll: ui.detailScroll || 0,
+        sectionGap: sectionGapForHeight(ui.viewportHeight)
+      },
+      scrollItemCount: fieldCount + usage.sections.length
+    };
   }
   if (tab === 5) return chainContent(store, job, ui, Math.max(1, Number(ui.viewportWidth || 80) - 2));
   const typeFilter = formatDisplayValue(ui.eventFilter).toLowerCase();
@@ -1138,10 +1372,23 @@ function detailContent(job, store, ui, tab, activity) {
   });
   return {
     title: `Events${CHROME_SEPARATOR}${typeFilter ? `type /${typeFilter}` : 'all'}${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${historyState}${searchSuffix(ui, 'events')}`,
+    summary: {
+      text: joinDisplayParts([
+        `${filtered.length} events`,
+        `${filtered.filter((block) => eventCategory(block.event?.type) === 'error').length} errors`,
+        `${filtered.filter((block) => eventCategory(block.event?.type) === 'warning').length} warnings`
+      ]),
+      ...(filtered.some((block) => eventCategory(block.event?.type) === 'error') ? {
+        badge: {
+          text: `${filtered.filter((block) => eventCategory(block.event?.type) === 'error').length} ERRORS`,
+          style: palette.failed
+        }
+      } : {})
+    },
     loading: hydration?.loading === true,
     loadingGlyph: spinnerGlyph(eventNow),
     content: filtered.length ? {
-      kind: 'log', virtual: true, entries: filtered, formatEntry: formatEventBlock, wrapEntry,
+      kind: 'rail', virtual: true, entries: filtered, formatEntry: formatEventBlock, wrapEntry,
       measureKey: `events:${job.id}:${typeFilter}`,
       follow: ui.follow !== false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'events'),
       selectedEntry: ui.follow !== false
@@ -1162,7 +1409,7 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
   const activity = deriveJobActivity(job, activityEvents(store, job), { now });
   const tabs = detailTabs(store, job);
   const tab = Math.max(0, Math.min(tabs.length - 1, Number(ui.detailTab || 0)));
-  const body = detailContent(job, store, { ...ui, viewportWidth: width }, tab, activity);
+  const body = detailContent(job, store, { ...ui, viewportWidth: width, viewportHeight: height }, tab, activity);
   const headerActivity = activityIndicator(activity, now);
   const visibility = activity.visibilityNote ? `${CHROME_SEPARATOR}${formatDisplayValue(activity.visibilityNote)}` : '';
   const originProject = job.origin?.projectDir
@@ -1180,7 +1427,14 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
     title: { text: joinDisplayParts([`origin ${originName}`, job.id, job.provider, job.resolvedModel || job.model || 'auto']), right: headerActivity.text, rightStyle: activityStyle(activity) },
     headerActivity,
     tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: tabs, active: tab },
-    panes: [{ rect: { x: 0, y: 3, width, height: Math.max(3, height - 4) }, title: body.title, loading: body.loading, loadingGlyph: body.loadingGlyph, content: body.content }],
+    panes: [{
+      rect: { x: 0, y: 3, width, height: Math.max(3, height - 4) },
+      title: body.title,
+      summary: body.summary,
+      loading: body.loading,
+      loadingGlyph: body.loadingGlyph,
+      content: body.content
+    }],
     status: errorStatus(ui) || { text: job.readOnly || (ui.remote?.enabled && !ui.remote?.includeLocal)
       ? 'Esc fleet  [/] tabs  / search  f follow  read-only observed job'
       : 'Esc fleet  [/] tabs  / search  f follow  Enter expand  d diff  E events  s/r/R  n/w/c/v' },
@@ -1433,6 +1687,36 @@ export function routeAdvisorLines(route) {
   ];
 }
 
+function routeAdvisorSections(route) {
+  if (!route) return [{ label: 'Route review', rows: [{ key: 'status', value: 'Calculating route advice...' }] }];
+  const candidateRows = (value) => {
+    if (!value) return [{ key: 'route', value: null }];
+    const band = value.usageBand;
+    const exact = (input) => Number.isFinite(Number(input)) ? String(Math.round(Number(input))) : null;
+    return [
+      { key: 'provider', value: value.provider },
+      { key: 'model', value: value.model },
+      { key: 'score', value: number(value.score) },
+      { key: 'p50 output', value: band ? exact(band.p50OutputTokens) : null },
+      { key: 'p90 output', value: band ? exact(band.p90OutputTokens) : null },
+      { key: 'samples', value: band ? exact(band.samples) : null }
+    ];
+  };
+  return [
+    {
+      label: 'Route review',
+      rows: [
+        { key: 'kind', value: route.kind },
+        { key: 'mode', value: route.mode },
+        { key: 'effort', value: route.effort },
+        { key: 'reason', value: displayOr(route.primary?.reason, 'Advisory only; dry-run admission remains authoritative.') }
+      ]
+    },
+    { label: 'Primary', rows: candidateRows(route.primary) },
+    { label: 'Fallback', rows: candidateRows(route.fallbacks?.[0]) }
+  ];
+}
+
 export function launcherViewModel(store, ui = {}, viewport = {}) {
   const { width, height } = viewportOf(viewport);
   const launcher = ui.launcher || {};
@@ -1457,8 +1741,33 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
     title: { text: 'New managed job', right: preview ? 'preview ready | y launches' : 'dry run required' },
     panes: [
       { rect: { x: 0, y: 1, width: formWidth, height: topHeight }, title: `Launcher form${CHROME_SEPARATOR}profiles: ${(store.profiles || []).map(formatDisplayValue).filter(Boolean).join(', ') || 'none'}`, content: { kind: 'table', columns: [{ key: 'field', title: 'Field', width: 16 }, { key: 'value', title: 'Value', width: Math.max(10, formWidth - 18) }], rows, selected: launcher.fieldIndex || 0 } },
-      { rect: { x: 0, y: previewY, width, height: Math.max(3, height - previewY - 1) }, title: 'Mandatory dry-run preview | exact provider packet', content: { kind: 'log', lines: previewLines, follow: false, scroll: launcher.previewScroll || 0 } },
-      { rect: advisorRect, title: 'Route advisor | advisory only', content: { kind: 'log', lines: routeAdvisorLines(launcher.routeAdvice), follow: false, scroll: 0 } }
+      {
+        rect: { x: 0, y: previewY, width, height: Math.max(3, height - previewY - 1) },
+        title: 'Mandatory dry-run preview | exact provider packet',
+        summary: {
+          text: preview
+            ? joinDisplayParts([`${formatDisplayValue(preview.provider)}/${formatDisplayValue(preview.model)}`, `${warnings.length} warnings`, `${previewLines.length} packet lines`])
+            : '0 packet lines | dry run required',
+          ...(warnings.length ? { badge: { text: `${warnings.length} WARNINGS`, style: palette.badgeWarn } } : {})
+        },
+        content: { kind: 'log', lines: previewLines, follow: false, scroll: launcher.previewScroll || 0 }
+      },
+      {
+        rect: advisorRect,
+        title: 'Route advisor | advisory only',
+        summary: {
+          text: launcher.routeAdvice
+            ? joinDisplayParts([`${launcher.routeAdvice.fallbacks?.length || 0} fallbacks`, 'advisory'])
+            : 'route advice pending'
+        },
+        content: {
+          kind: 'key-value',
+          sections: routeAdvisorSections(launcher.routeAdvice),
+          follow: false,
+          scroll: 0,
+          sectionGap: sectionGapForHeight(height)
+        }
+      }
     ],
     status: errorStatus(ui) || { text: 'Esc fleet  Up/Dn field  Left/Right cycle  Enter edit  e $EDITOR body  d dry run  y launch preview  ? help  q quit' },
     meta: { fields: LAUNCH_FIELDS.map(([key]) => key), previewReady: Boolean(preview) }

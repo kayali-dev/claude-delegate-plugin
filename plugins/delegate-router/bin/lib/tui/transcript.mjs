@@ -4,7 +4,7 @@ import { isCodexFirstClassItemType } from '../codex-item-types.mjs';
 import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimestamp, joinDisplayParts } from './display.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR, spinnerGlyph } from './glyphs.mjs';
 import { uiPalette as palette } from './palette.mjs';
-import { displayWidth, graphemeWidth, splitGraphemes, truncateToWidth } from './width.mjs';
+import { displayWidth, graphemeWidth, padToWidth, splitGraphemes, truncateToWidth } from './width.mjs';
 
 const TRANSCRIPT_NOTICE = /^(?:approval\.(?:requested|resolved)|correction\.|scope\.violation$|budget\.exceeded$|error$|network\.|input\.|session\.updated$|mode\.updated$|model\.updated$|commands\.updated$|subagent\.activity$|artifact\.created$)/;
 const SUCCESS = /^(?:completed|complete|success|succeeded|ok|approved|accepted)$/i;
@@ -517,6 +517,7 @@ function locationSummary(files) {
 
 function toolSummaryParts(tool) {
   const duration = compactDuration(tool.durationMs);
+  const exit = tool.exitCode == null ? '' : `exit ${formatDisplayValue(tool.exitCode)}`;
   const output = tool.outputLineCount ? `${CHROME_GLYPHS.truncation} output (${tool.outputLineCount} lines)` : '';
   let parts;
   if (tool.category === 'subagent') {
@@ -537,7 +538,7 @@ function toolSummaryParts(tool) {
     parts = [`${CHROME_GLYPHS.toolCursor} ${tool.title}`, locations, tool.glyph];
   }
   parts ||= [`${CHROME_GLYPHS.toolCommand} ${tool.title || tool.itemType || 'tool'}`, tool.glyph];
-  return { text: joinDisplayParts(parts), rightText: joinDisplayParts([duration, output]) };
+  return { text: joinDisplayParts(parts), rightText: joinDisplayParts([exit, duration, output]) };
 }
 
 function toolSummary(tool) {
@@ -935,46 +936,61 @@ export class TranscriptProjector {
 
 export function transcriptLogicalLines(block) {
   if (block.kind === 'message') {
-    const streaming = block.streaming ? `${CHROME_SEPARATOR}${block.spinner || CHROME_GLYPHS.spinner} streaming` : '';
-    const header = `| ${displayOr(block.role, 'assistant')}${streaming}`;
+    const streaming = block.streaming ? `${block.spinner || CHROME_GLYPHS.spinner} streaming` : '';
     const paragraphs = formatMultilineDisplayValue(block.text).split('\n');
     return [
-      { text: header, rightText: formatDisplayValue(block.timestamp), kind: 'message-header', nowrap: true, spinner: block.streaming ? block.spinner : null },
-      ...paragraphs.map((text) => ({ text, kind: 'body', indent: '  ' })),
+      {
+        text: displayOr(block.role, 'assistant'),
+        time: formatDisplayValue(block.timestamp),
+        rightText: streaming,
+        rail: CHROME_GLYPHS.railMessage,
+        kind: 'message-header',
+        nowrap: true,
+        spinner: block.streaming ? block.spinner : null
+      },
+      ...paragraphs.map((text) => ({ text, kind: 'body', rail: CHROME_GLYPHS.railMessage })),
       ...(block.gapAfter ? [{ text: '', kind: 'gap' }] : [])
     ];
   }
   if (block.kind === 'tool') {
     const summary = toolSummaryParts(block.tool);
-    const lines = [{ ...summary, kind: block.tool.failed ? 'tool-failed' : block.tool.running ? 'tool-running' : 'tool', nowrap: true, spinner: block.tool.running ? block.tool.glyph : null }];
+    const lines = [{
+      ...summary,
+      time: formatDisplayValue(block.timestamp),
+      rail: block.expanded ? CHROME_GLYPHS.railBranch : CHROME_GLYPHS.railEnd,
+      kind: block.tool.failed ? 'tool-failed' : block.tool.running ? 'tool-running' : 'tool',
+      nowrap: true,
+      spinner: block.tool.running ? block.tool.glyph : null
+    }];
     if (block.expanded) {
       if (block.tool.category === 'subagent') {
-        if (block.tool.agentId) lines.push({ text: `agent id: ${formatDisplayValue(block.tool.agentId)}`, kind: 'meta', indent: '  ' });
-        if (block.tool.agentType) lines.push({ text: `agent type: ${formatDisplayValue(block.tool.agentType)}`, kind: 'meta', indent: '  ' });
-        if (block.tool.status) lines.push({ text: `status: ${formatDisplayValue(block.tool.status)}`, kind: block.tool.failed ? 'tool-failed' : 'meta', indent: '  ' });
-        if (block.tool.usage) lines.push({ text: `usage: ${formatDisplayValue(block.tool.usage)}`, kind: 'meta', indent: '  ' });
-        lines.push({ text: `${block.tool.detailLabel}:`, kind: 'meta', indent: '  ' });
-        for (const line of block.tool.detailLines || []) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+        if (block.tool.agentId) lines.push({ text: `agent id: ${formatDisplayValue(block.tool.agentId)}`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+        if (block.tool.agentType) lines.push({ text: `agent type: ${formatDisplayValue(block.tool.agentType)}`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+        if (block.tool.status) lines.push({ text: `status: ${formatDisplayValue(block.tool.status)}`, kind: block.tool.failed ? 'tool-failed' : 'meta', rail: CHROME_GLYPHS.railChild });
+        if (block.tool.usage) lines.push({ text: `usage: ${formatDisplayValue(block.tool.usage)}`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+        lines.push({ text: `${block.tool.detailLabel}:`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+        for (const line of block.tool.detailLines || []) lines.push({ text: formatDisplayValue(line), kind: 'body', rail: CHROME_GLYPHS.railChild });
       } else if (block.tool.category === 'provider-item') {
-        lines.push({ text: `${block.tool.detailLabel}:`, kind: 'meta', indent: '  ' });
-        for (const line of block.tool.detailLines || []) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+        lines.push({ text: `${block.tool.detailLabel}:`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+        for (const line of block.tool.detailLines || []) lines.push({ text: formatDisplayValue(line), kind: 'body', rail: CHROME_GLYPHS.railChild });
       } else if (block.tool.command) {
         const commandLines = formatMultilineDisplayValue(block.tool.command).split('\n');
-        commandLines.forEach((text, index) => lines.push({ text: `${index === 0 ? 'command: ' : ''}${text}`, kind: 'body', indent: index === 0 ? '  ' : '           ' }));
-        if (block.tool.showCwd) lines.push({ text: `cwd: ${formatDisplayValue(block.tool.cwd)}`, kind: 'meta', indent: '  ' });
-        for (const file of block.tool.files) lines.push({ text: `${formatDisplayValue(file.kind)}: ${formatDisplayValue(file.path)}`, kind: 'meta', indent: '  ' });
+        commandLines.forEach((text, index) => lines.push({ text: `${index === 0 ? 'command: ' : ''}${text}`, kind: 'body', rail: CHROME_GLYPHS.railChild }));
+        if (block.tool.showCwd) lines.push({ text: `cwd: ${formatDisplayValue(block.tool.cwd)}`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+        for (const file of block.tool.files) lines.push({ text: `${formatDisplayValue(file.kind)}: ${formatDisplayValue(file.path)}`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
         if (block.tool.outputTail.length) {
-          lines.push({ text: `output tail (${block.tool.outputTail.length}/${block.tool.outputLineCount} lines):`, kind: 'meta', indent: '  ' });
-          for (const line of block.tool.outputTail) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+          lines.push({ text: `output tail (${block.tool.outputTail.length}/${block.tool.outputLineCount} lines):`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+          for (const line of block.tool.outputTail) lines.push({ text: formatDisplayValue(line), kind: 'body', rail: CHROME_GLYPHS.railChild });
         }
       } else {
-        if (block.tool.showCwd) lines.push({ text: `cwd: ${formatDisplayValue(block.tool.cwd)}`, kind: 'meta', indent: '  ' });
-        for (const file of block.tool.files) lines.push({ text: `${formatDisplayValue(file.kind)}: ${formatDisplayValue(file.path)}`, kind: 'meta', indent: '  ' });
+        if (block.tool.showCwd) lines.push({ text: `cwd: ${formatDisplayValue(block.tool.cwd)}`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+        for (const file of block.tool.files) lines.push({ text: `${formatDisplayValue(file.kind)}: ${formatDisplayValue(file.path)}`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
         if (block.tool.outputTail.length) {
-          lines.push({ text: `output tail (${block.tool.outputTail.length}/${block.tool.outputLineCount} lines):`, kind: 'meta', indent: '  ' });
-          for (const line of block.tool.outputTail) lines.push({ text: formatDisplayValue(line), kind: 'body', indent: '    ' });
+          lines.push({ text: `output tail (${block.tool.outputTail.length}/${block.tool.outputLineCount} lines):`, kind: 'meta', rail: CHROME_GLYPHS.railChild });
+          for (const line of block.tool.outputTail) lines.push({ text: formatDisplayValue(line), kind: 'body', rail: CHROME_GLYPHS.railChild });
         }
       }
+      if (lines.length > 1) lines[lines.length - 1].rail = CHROME_GLYPHS.railEnd;
     }
     if (block.gapAfter) lines.push({ text: '', kind: 'gap' });
     return lines;
@@ -988,38 +1004,38 @@ export function transcriptLogicalLines(block) {
     const added = hasCounts ? `+${block.change.added}` : '';
     const removed = hasCounts ? `${elegant ? '\u2212' : '-'}${block.change.removed}` : '';
     const prefix = `${glyph} ${label}`;
-    const countText = hasCounts ? ` (${added} ${removed})` : '';
     return [
       {
-        text: `${prefix}${countText}`,
+        text: prefix,
+        time: formatDisplayValue(block.timestamp),
+        rightText: hasCounts ? `${added} ${removed}` : '',
+        rail: CHROME_GLYPHS.railEnd,
         kind: 'file-change',
         nowrap: true,
-        segments: [
-          { text: prefix },
-          ...(hasCounts ? [
-            { text: ' (' },
-            { text: added, style: palette.positive },
-            { text: ' ' },
-            { text: removed, style: palette.negative },
-            { text: ')' }
-          ] : [])
-        ]
+        segments: [{ text: prefix }]
       },
       ...(block.gapAfter ? [{ text: '', kind: 'gap' }] : [])
     ];
   }
   if (block.kind === 'plan') {
-    const lines = [{ text: '| plan', rightText: formatDisplayValue(block.timestamp), kind: 'plan-header', nowrap: true }];
+    const lines = [{
+      text: 'plan',
+      time: formatDisplayValue(block.timestamp),
+      rail: CHROME_GLYPHS.railSystem,
+      kind: 'plan-header',
+      nowrap: true
+    }];
     for (const entry of block.entries || []) {
       const status = planStatusKind(entry.status);
       const glyph = planGlyph(entry.status, block.spinner);
       lines.push({
         text: `${glyph} ${formatDisplayValue(entry.text)}`,
         kind: `plan-${status}`,
-        indent: '  ',
+        rail: CHROME_GLYPHS.railChild,
         ...(status === 'active' ? { spinner: glyph } : {})
       });
     }
+    if (lines.length > 1) lines[lines.length - 1].rail = CHROME_GLYPHS.railEnd;
     if (block.gapAfter) lines.push({ text: '', kind: 'gap' });
     return lines;
   }
@@ -1028,7 +1044,9 @@ export function transcriptLogicalLines(block) {
     return [
       {
         text: `${glyph} context compaction`,
+        time: formatDisplayValue(block.timestamp),
         rightText: block.inProgress || block.durationMs == null ? '' : compactDuration(block.durationMs),
+        rail: CHROME_GLYPHS.railSystem,
         kind: block.inProgress ? 'compaction-active' : 'compaction-complete',
         nowrap: true,
         ...(block.inProgress ? { spinner: glyph } : {})
@@ -1038,20 +1056,35 @@ export function transcriptLogicalLines(block) {
   }
   if (block.kind === 'restored') {
     return [
-      { text: `> restored history (${block.count} event${block.count === 1 ? '' : 's'})`, rightText: formatDisplayValue(block.timestamp), kind: 'restored', nowrap: true },
+      {
+        text: `restored history (${block.count} event${block.count === 1 ? '' : 's'})`,
+        time: formatDisplayValue(block.timestamp),
+        rail: CHROME_GLYPHS.railSystem,
+        kind: 'restored',
+        nowrap: true
+      },
       ...(block.gapAfter ? [{ text: '', kind: 'gap' }] : [])
     ];
   }
   const kind = block.kind === 'thinking' ? 'thinking' : /scope|budget|error/.test(block.noticeType || '') ? 'notice-error'
     : block.noticeType === 'approval.requested' ? 'notice-warning' : 'notice';
   return [
-    { text: block.text, kind, nowrap: true, spinner: block.kind === 'thinking' ? block.text?.[0] : null },
+    {
+      text: block.text,
+      time: formatDisplayValue(block.timestamp),
+      rail: CHROME_GLYPHS.railSystem,
+      kind,
+      nowrap: true,
+      spinner: block.kind === 'thinking' ? block.text?.[0] : null
+    },
     ...(block.gapAfter ? [{ text: '', kind: 'gap' }] : [])
   ];
 }
 
 export function formatTranscriptBlock(block) {
-  return transcriptLogicalLines(block).map((line) => joinDisplayParts([line.text, line.rightText])).join('\n');
+  return transcriptLogicalLines(block).map((line) => line.kind === 'file-change' && line.rightText
+    ? `${line.text} (${line.rightText})`
+    : joinDisplayParts([line.text, line.rightText])).join('\n');
 }
 
 function glyphOffsets(value) {
@@ -1065,24 +1098,48 @@ function glyphOffsets(value) {
 }
 
 function wrappedLineFragments(line, width, globalStart) {
-  const prefix = line.indent || '';
-  const available = Math.max(1, width - displayWidth(prefix));
+  if (!line.text && line.kind === 'gap') {
+    return [{ text: '', sourceText: '', prefix: '', start: globalStart, end: globalStart, lineKind: line.kind }];
+  }
+  const timeWidth = width >= 44 ? 9 : 0;
+  const railWidth = Math.min(2, Math.max(1, width - timeWidth - 1));
+  const measureWidth = width >= 60 ? 14 : width >= 44 ? 9 : 0;
+  const separators = (timeWidth ? 1 : 0) + 1 + (measureWidth ? 1 : 0);
+  const available = Math.max(1, width - timeWidth - railWidth - measureWidth - separators);
+  const rail = truncateToWidth(formatDisplayValue(line.rail || CHROME_GLYPHS.railChild), railWidth, { ellipsis: false });
+  const time = timeWidth ? truncateToWidth(formatDisplayValue(line.time), timeWidth, { ellipsis: true }) : '';
+  const measure = measureWidth ? truncateToWidth(formatDisplayValue(line.rightText), measureWidth, { ellipsis: true }) : '';
+  const compose = (content, first, contentSegments = null) => {
+    const timeText = timeWidth ? `${padToWidth(first ? time : '', timeWidth)} ` : '';
+    const railText = `${padToWidth(rail, railWidth)} `;
+    const ownsMeasure = Boolean(measureWidth && first && measure);
+    const contentText = ownsMeasure ? padToWidth(content, available) : content;
+    const measureText = ownsMeasure ? ` ${padToWidth(measure, measureWidth, 'right')}` : '';
+    const text = `${timeText}${railText}${contentText}${measureText}`;
+    const segments = [
+      ...(timeWidth ? [{ text: timeText, style: palette.dim }] : []),
+      { text: railText, style: line.kind.includes('failed') || line.kind === 'notice-error' ? palette.failed : palette.metadata },
+      ...(contentSegments || [{ text: contentText }]),
+      ...(ownsMeasure && contentSegments && displayWidth(contentSegments.map((segment) => segment.text).join('')) < available
+        ? [{ text: ' '.repeat(available - displayWidth(contentSegments.map((segment) => segment.text).join(''))) }]
+        : []),
+      ...(ownsMeasure ? [{ text: measureText, style: palette.dim }] : [])
+    ];
+    return { text, segments };
+  };
   if (line.nowrap) {
-    // Tool commands and block labels are the primary value. Keep at least
-    // sixty percent for the left side and compact duration/output metadata in
-    // the pinned right column when space is tight.
-    const right = truncateToWidth(formatDisplayValue(line.rightText), Math.max(0, Math.floor(width * 0.4)), { ellipsis: true });
-    const rightWidth = displayWidth(right);
-    const leftWidth = Math.max(0, width - rightWidth - (right ? 1 : 0));
-    const left = truncateToWidth(formatDisplayValue(line.text), leftWidth, { ellipsis: true });
-    const gap = Math.max(0, width - displayWidth(left) - rightWidth);
-    const text = right ? `${left}${' '.repeat(gap)}${right}` : left;
-    const preservesSegments = !right && left === formatDisplayValue(line.text) && Array.isArray(line.segments);
+    const left = truncateToWidth(formatDisplayValue(line.text), available, { ellipsis: true });
+    const preservesSegments = left === formatDisplayValue(line.text) && Array.isArray(line.segments);
+    const rendered = compose(left, true, preservesSegments ? line.segments : null);
+    const text = rendered.text;
     return [{ text, sourceText: text, prefix: '', start: globalStart, end: globalStart + text.length, lineKind: line.kind,
-      ...(preservesSegments ? { segments: line.segments } : {}),
+      segments: rendered.segments,
       ...(line.spinner ? { spinnerChar: line.spinner } : {}) }];
   }
-  if (!line.text) return [{ text: '', sourceText: '', prefix: '', start: globalStart, end: globalStart, lineKind: line.kind }];
+  if (!line.text) {
+    const rendered = compose('', true);
+    return [{ text: rendered.text, sourceText: rendered.text, prefix: '', start: globalStart, end: globalStart + rendered.text.length, lineKind: line.kind, segments: rendered.segments }];
+  }
   const glyphs = glyphOffsets(line.text);
   const fragments = [];
   let cursor = 0;
@@ -1105,12 +1162,13 @@ function wrappedLineFragments(line, width, globalStart) {
     const startOffset = glyphs[cursor].start;
     const endOffset = glyphs[pieceEnd - 1].end;
     const sourceText = line.text.slice(startOffset, endOffset);
-    const text = `${prefix}${sourceText}`;
-    fragments.push({ text, sourceText, prefix, start: globalStart + startOffset, end: globalStart + endOffset, lineKind: line.kind,
+    const rendered = compose(sourceText, fragments.length === 0);
+    const text = rendered.text;
+    fragments.push({ text, sourceText: text, prefix: '', start: globalStart + startOffset, end: globalStart + endOffset, lineKind: line.kind, segments: rendered.segments,
       ...(line.spinner && text.includes(line.spinner) ? { spinnerChar: line.spinner } : {}) });
     cursor = Math.max(end, pieceEnd);
   }
-  return fragments.length ? fragments : [{ text: prefix, sourceText: '', prefix, start: globalStart, end: globalStart, lineKind: line.kind }];
+  return fragments.length ? fragments : [{ text: '', sourceText: '', prefix: '', start: globalStart, end: globalStart, lineKind: line.kind }];
 }
 
 export function wrapTranscriptBlock(block, width, formatted = formatTranscriptBlock(block)) {
@@ -1118,8 +1176,9 @@ export function wrapTranscriptBlock(block, width, formatted = formatTranscriptBl
   const fragments = [];
   let start = 0;
   for (let index = 0; index < lines.length; index += 1) {
-    fragments.push(...wrappedLineFragments(lines[index], Math.max(1, width), start));
-    start += lines[index].text.length + (index < lines.length - 1 ? 1 : 0);
+    const wrapped = wrappedLineFragments(lines[index], Math.max(1, width), start);
+    fragments.push(...wrapped);
+    start += wrapped.reduce((total, fragment) => total + fragment.text.length + 1, 0);
   }
   return { value: formatDisplayValue(formatted), fragments, lines: fragments.map((fragment) => fragment.text) };
 }
