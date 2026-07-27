@@ -137,6 +137,43 @@ failure. `finishedPath` stays as the external sentinel.
 
 Fixes: work no longer dies with the session; babysitting loops disappear.
 
+### P2.4 — Notification scope: session and worktree identity
+
+v0.30.0 scoped push notifications by `origin.projectDir`. That fixed cross-repo
+noise but leaves two cases where a session is still told about work that is not
+its own — both owner-reported from live use:
+
+1. **Two sessions in the same project.** A monitor is given a project directory
+   and no session identity, so sibling sessions in one repo cross-notify. The
+   scoping key cannot separate them.
+2. **`--worktree` sessions.** `workspace.project_dir` is documented as *the
+   directory where Claude Code was launched*, so manually-created worktrees
+   (`git worktree add`, then launch there) are correctly isolated — their launch
+   directories differ. But when Claude Code creates the worktree itself, both
+   sessions launch from the same parent, so they likely share a project dir and
+   cross-notify. This is inferred from the documented semantics of
+   `worktree.original_cwd` and **must be verified empirically before shipping a
+   fix based on it**.
+
+Both are the same defect at different granularity: the scope key is coarser
+than the thing a user thinks of as "my work".
+
+- Record `origin.sessionId` (the MCP server knows its own session) and a
+  resolved `origin.workspaceId` that prefers the most specific workspace
+  identity available — worktree path when inside one, project dir otherwise.
+  `origin.cwd` is already captured and differs for worktree sessions even when
+  the project dir does not.
+- A monitor has no session id of its own, so `SessionStart` writes a correlation
+  marker the monitor resolves at boot; if correlation fails, fall back to
+  workspace scope rather than guessing, and say so in the status line.
+- Default scope becomes **this session's own work**, with `workspace` and `all`
+  as explicit opt-ins. Three honest levels instead of one approximate one.
+- Origin-less legacy records stay silent at every level except `all`.
+
+Anti-goal: do not gate control operations on scope. Cross-session management is
+legitimate; this is about not being told about work that is not yours, never
+about restricting what you may touch.
+
 ### P2.5 — Live collision alerts
 
 Scope violations are found *after* files change, and the writer guard is blind
