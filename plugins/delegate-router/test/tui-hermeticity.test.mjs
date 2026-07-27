@@ -12,7 +12,7 @@ import { CHROME_GLYPHS, configureGlyphs, glyphConfiguration } from '../bin/lib/t
 import { createPalette, setUiTheme, uiPalette } from '../bin/lib/tui/palette.mjs';
 import { loadTuiPreferences, tuiPreferencesPath } from '../bin/lib/tui/preferences.mjs';
 import { claudeProjectsDirectory } from '../bin/lib/tui/sessions.mjs';
-import { createViewModel, dashboardViewModel, DETAIL_TABS } from '../bin/lib/tui/viewmodels.mjs';
+import { createViewModel, dashboardViewModel, DETAIL_TABS, WORK_TABS } from '../bin/lib/tui/viewmodels.mjs';
 import { terminalWidthIdentity, WIDTH_PROBE_GRAPHEMES } from '../bin/lib/tui/width-probe.mjs';
 import { dataDir } from '../bin/lib/state.mjs';
 
@@ -187,6 +187,7 @@ test('polluted user prefs and probe cache cannot alter owner or dashboard contra
         { screen: 'sessions' },
         { screen: 'stats' },
         { screen: 'launcher', launcher: { fieldIndex: 0 } },
+        ...WORK_TABS.map((_tab, workTab) => ({ screen: 'work', workTab, workIndex: 0 })),
         ...DETAIL_TABS.map((_tab, detailTab) => ({ screen: 'detail', jobId: 'codex-hermetic-attention', detailTab }))
       ];
       for (const screenUi of screens) {

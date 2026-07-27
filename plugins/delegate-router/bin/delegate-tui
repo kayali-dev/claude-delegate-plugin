@@ -2,9 +2,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import {
+  decideAcceptance,
   filterDiffPaths,
   inspectJob,
   launchManagedJob,
+  preflightManagedIntegration,
+  prepareManagedIntegration,
   reviewRoundManagedJob,
   resumeManagedJob,
   revertManagedJob,
@@ -285,6 +288,7 @@ const ui = {
   groupSelection: 0, groupScroll: 0, groupId: null, groupMemberSelection: 0, groupMemberScroll: 0,
   sessionSelection: 0, sessionScroll: 0,
   providerScroll: 0, statsSelection: 0, statsScroll: 0, statsFilter: '', notifyEnabled: notifier.enabled,
+  workIndex: 0, workTab: 0, workScroll: 0,
   timestampMode: preferences.timestampMode, fleetDensity: preferences.fleetDensity, fleetSort: 'recency', theme: preferences.theme,
   statusHistory: [], statusHistoryOpen: false, statusHistoryPage: 0, terminalFocused: true, gPrefix: false, gPrefixHelp: false,
   remote: store.remote || null,
@@ -395,7 +399,8 @@ function liveJob(id) {
 
 function selectedJob() {
   if (ui.screen === 'detail') return store.jobs.find((job) => job.id === ui.jobId) || null;
-  const id = viewModel().meta?.selectedJobId;
+  const model = viewModel();
+  const id = model.meta?.selectedJobId || model.meta?.jobId;
   return store.jobs.find((job) => job.id === id) || null;
 }
 
@@ -811,6 +816,19 @@ function commitConfirm() {
     runMutation(() => revertManagedJob(confirm.jobId), (result) => `Revert finished: ${result.reverted.length} reverted, ${result.skipped.length} skipped, ${result.conflicts.length} conflicts`);
   } else if (confirm.action === 'launch') {
     launchPreviewed();
+  } else if (confirm.action === 'work-accept' || confirm.action === 'work-reject') {
+    const decision = confirm.action === 'work-accept' ? 'accepted' : 'rejected';
+    runMutation(
+      () => decideAcceptance(confirm.jobId, decision, { decidedBy: 'tui:owner' }),
+      (result) => `Evidence-bound decision recorded: ${result.acceptance.state}`
+    );
+  } else if (confirm.action === 'work-integrate') {
+    runMutation(
+      () => prepareManagedIntegration(confirm.jobIds),
+      (result) => result.applied
+        ? `Integration worktree prepared: ${result.integration.id}; owner tree unchanged`
+        : `Integration stopped at ${result.stage}: ${result.conflicts?.length || 0} conflicts`
+    );
   }
   draw();
 }
@@ -1054,6 +1072,103 @@ function detailAction(key) {
   draw();
 }
 
+function beginWorkDecision(decision) {
+  const model = viewModel();
+  const accepted = decision === 'accepted';
+  const jobId = accepted ? model.meta?.acceptJobId : model.meta?.rejectJobId;
+  const unavailable = accepted ? model.meta?.acceptUnavailable : model.meta?.rejectUnavailable;
+  if (!jobId) {
+    setStatus(unavailable || `${decision} is unavailable for this WorkItem`, 'error');
+    draw();
+    return;
+  }
+  const job = store.jobs.find((candidate) => candidate.id === jobId);
+  const expected = jobId.slice(-4);
+  ui.confirm = {
+    action: accepted ? 'work-accept' : 'work-reject',
+    jobId,
+    expected,
+    value: '',
+    danger: !accepted,
+    title: `${accepted ? 'Accept' : 'Reject'} evidence${CHROME_SEPARATOR}${jobId}`,
+    lines: [
+      `Current acceptance: ${formatDisplayValue(job?.acceptance?.state || 'missing')}`,
+      `Evidence digest: ${formatDisplayValue(job?.acceptance?.evidenceDigest || 'broker will bind the current evidence')}`,
+      accepted
+        ? 'This records acceptance only; it does not apply changes into the owner tree.'
+        : 'This records rejection against the current evidence.',
+      `Type the last 4 job-id characters to record the decision: ${expected}`
+    ],
+    label: 'Suffix'
+  };
+  draw();
+}
+
+function beginWorkIntegration() {
+  const model = viewModel();
+  const jobIds = model.meta?.integrationJobIds || [];
+  if (!jobIds.length) {
+    setStatus(model.meta?.integrationUnavailable || 'Integration composition is unavailable', 'error');
+    draw();
+    return;
+  }
+  try {
+    const preflight = preflightManagedIntegration(jobIds);
+    if (!preflight.ok) {
+      const conflicts = (preflight.conflicts || []).map((entry) => `${formatDisplayValue(entry.path || '<inventory>')}: ${formatDisplayValue(entry.reason)}`);
+      setStatus(`Integration preflight blocked: ${conflicts.join('; ') || 'unknown conflict'}`, 'error');
+      draw();
+      return;
+    }
+    ui.confirm = {
+      action: 'work-integrate',
+      jobIds,
+      expected: 'integrate',
+      value: '',
+      danger: false,
+      title: `Compose integration worktree${CHROME_SEPARATOR}${jobIds.length} change set${jobIds.length === 1 ? '' : 's'}`,
+      lines: [
+        `CAS preflight passed at ${formatDisplayValue(preflight.currentRevision || 'current HEAD')}.`,
+        'Composition writes only a broker-owned integration worktree.',
+        'Direct application into the owner working tree remains disabled.',
+        'Type integrate to prepare the integration worktree.'
+      ],
+      label: 'Confirm'
+    };
+    draw();
+  } catch (error) {
+    const typed = normalizeBrokerError(error, { defaultCode: 'INTERNAL' });
+    setStatus(`[${typed.code}] ${typed.message}`, 'error');
+    draw();
+  }
+}
+
+function workAction(key) {
+  const model = viewModel();
+  if (['a', 'r', 'i'].includes(key) && model.meta?.workTab !== 2) {
+    setStatus('Open Approve mode before recording a decision or composing an integration worktree', 'error');
+    draw();
+    return;
+  }
+  if (key === 'w' && model.meta?.workTab !== 5) {
+    setStatus('Open Converge mode to inspect the bounded next-round policy first', 'error');
+    draw();
+    return;
+  }
+  if (key === 'a') beginWorkDecision('accepted');
+  else if (key === 'r') beginWorkDecision('rejected');
+  else if (key === 'i') beginWorkIntegration();
+  else if (key === 'w') {
+    const job = (store.jobs || []).find((candidate) => candidate.id === model.meta?.nextRoundJobId);
+    if (!job) {
+      setStatus(model.meta?.nextRoundUnavailable || 'Bounded next round is unavailable', 'error');
+      draw();
+      return;
+    }
+    beginReviewRound(job);
+  }
+}
+
 function detailViewport(model = viewModel()) {
   const pane = model.panes?.[0];
   const rect = pane ? paneContentRect(pane, { scrollbar: ['table', 'log', 'text'].includes(pane.content?.kind) }) : null;
@@ -1244,6 +1359,11 @@ function move(direction, options = {}) {
         ui.detailScroll = Math.max(0, Math.min(maxScroll, Number(ui.detailScroll || 0) + direction));
       }
     }
+  } else if (ui.screen === 'work') {
+    const count = viewModel().meta.scrollItemCount || 0;
+    const pane = viewModel().panes?.[Math.max(0, Math.min((viewModel().panes?.length || 1) - 1, ui.focusedPane || 0))];
+    const visible = Math.max(1, paneContentRect(pane || { rect: { width: screen.columns, height: screen.rows } }, { scrollbar: true }).height);
+    ui.workScroll = Math.max(0, Math.min(Math.max(0, count - visible), Number(ui.workScroll || 0) + direction));
   } else if (ui.screen === 'groups') {
     const count = store.groups?.length || 0;
     ui.groupSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.groupSelection + direction));
@@ -1295,6 +1415,8 @@ function moveEdge(end) {
         ui.detailScroll = end ? maxScroll : 0;
       }
     }
+  } else if (ui.screen === 'work') {
+    ui.workScroll = end ? Math.max(0, (model.meta.scrollItemCount || 0) - Math.max(1, screen.rows - 8)) : 0;
   } else if (ui.screen === 'groups') {
     ui.groupSelection = end ? Math.max(0, (store.groups?.length || 0) - 1) : 0;
   } else if (ui.screen === 'group-members') {
@@ -1354,12 +1476,28 @@ function switchDetailTab(tab) {
   draw();
 }
 
+function switchWorkTab(tab) {
+  const count = viewModel().meta.tabs?.length || 6;
+  const next = Math.max(0, Math.min(count - 1, tab));
+  if (next === ui.workTab) return;
+  ui.workTab = next;
+  ui.workScroll = 0;
+  ui.focusedPane = 0;
+  clearStatus();
+  draw();
+}
+
 function handleClick(event) {
   if (event.button !== 0) return;
   const model = viewModel();
   if (ui.screen === 'detail' && event.y === model.tabs?.rect?.y) {
     const tab = tabIndexAtColumn(model.tabs.items, event.x, model.tabs.rect);
     if (tab != null) switchDetailTab(tab);
+    return;
+  }
+  if (ui.screen === 'work' && event.y === model.tabs?.rect?.y) {
+    const tab = tabIndexAtColumn(model.tabs.items, event.x, model.tabs.rect);
+    if (tab != null) switchWorkTab(tab);
     return;
   }
   const pane = model.panes?.find((entry) => event.x >= entry.rect.x && event.x < entry.rect.x + entry.rect.width
@@ -1452,6 +1590,11 @@ function navigateScreen(target) {
   if (ui.screen === 'detail') void source.selectJob(null);
   ui.screen = target;
   if (target === 'fleet') ui.selectedIndex = 0;
+  if (target === 'work') {
+    ui.workIndex = 0;
+    ui.workTab = 0;
+    ui.workScroll = 0;
+  }
   if (target === 'groups') ui.groupSelection = 0;
   if (target === 'sessions') {
     ui.sessionSelection = 0;
@@ -1488,7 +1631,7 @@ function armGPrefix() {
 
 function consumeGPrefix(key) {
   if (!ui.gPrefix) return false;
-  const targets = { f: 'fleet', r: 'groups', s: 'sessions', p: 'providers', t: 'stats', l: 'launcher' };
+  const targets = { w: 'work', f: 'fleet', r: 'groups', s: 'sessions', p: 'providers', t: 'stats', l: 'launcher' };
   const target = targets[key];
   clearGPrefix();
   if (!target) return false;
@@ -1523,6 +1666,10 @@ function dispatchMenuAction(action) {
   if (action === 'detail.nudge') return detailAction('n');
   if (action === 'detail.cancel') return detailAction('c');
   if (action === 'detail.revert') return detailAction('v');
+  if (action === 'work.accept') return workAction('a');
+  if (action === 'work.reject') return workAction('r');
+  if (action === 'work.integrate') return workAction('i');
+  if (action === 'work.next-round') return workAction('w');
   if (action === 'fleet.externals') {
     ui.showExternals = !ui.showExternals;
     ui.selectedIndex = 0;
@@ -1777,6 +1924,29 @@ function handleKey(key) {
   if (ui.screen === 'group-members') {
     if (key === '/') { beginInput('fleet-filter', 'Filter id/model/cwd', ui.filter); return; }
     if (key === 'enter') openJobDetail(selectedJob(), 'group-members');
+    return;
+  }
+  if (ui.screen === 'work') {
+    if (/^[1-6]$/.test(key)) {
+      switchWorkTab(Number(key) - 1);
+      return;
+    }
+    if (key === '[' || key === ']') {
+      const count = viewModel().meta.tabs?.length || 6;
+      switchWorkTab((ui.workTab + (key === ']' ? 1 : -1) + count) % count);
+      return;
+    }
+    if (key === 'left' || key === 'right') {
+      const count = viewModel().meta.workItemCount || 0;
+      if (count > 1) {
+        ui.workIndex = (ui.workIndex + (key === 'right' ? 1 : -1) + count) % count;
+        ui.workScroll = 0;
+        clearStatus();
+        draw();
+      }
+      return;
+    }
+    if (['a', 'r', 'i', 'w'].includes(key)) workAction(key);
     return;
   }
   if (ui.screen === 'stats') {

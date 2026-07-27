@@ -24,7 +24,9 @@ import {
   launcherViewModel,
   providersViewModel,
   sessionsViewModel,
-  statsViewModel
+  statsViewModel,
+  WORK_TABS,
+  workViewModel
 } from '../bin/lib/tui/viewmodels.mjs';
 
 const NOW = 1_700_000_000_000;
@@ -464,6 +466,9 @@ test('every screen paints at realistic resize breakpoints with filters, follow, 
   const screens = [
     (viewport) => dashboardViewModel(store, { now: NOW, dashboardFocus: 0 }, viewport),
     (viewport) => fleetViewModel(store, { now: NOW, filter: 'work', activeOnly: false, selectedIndex: 1 }, viewport),
+    ...(WORK_TABS.map((_name, workTab) => (viewport) => workViewModel(store, {
+      screen: 'work', workTab, workIndex: 0, workScroll: 0, now: NOW
+    }, viewport))),
     ...(DETAIL_TABS.map((_name, detailTab) => (viewport) => detailViewModel(store, {
       jobId: 'codex-active-1234567', detailTab, now: NOW, follow: detailTab % 2 === 0,
       eventFilter: detailTab === 4 ? 'message' : '', diffSelection: 0

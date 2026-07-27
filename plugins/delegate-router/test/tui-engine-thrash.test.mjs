@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { paneContentRect, paintFrame, virtualLogScrollToEntry } from '../bin/lib/tui/components.mjs';
 import { Screen } from '../bin/lib/tui/screen.mjs';
-import { createViewModel, DETAIL_TABS } from '../bin/lib/tui/viewmodels.mjs';
+import { createViewModel, DETAIL_TABS, WORK_TABS } from '../bin/lib/tui/viewmodels.mjs';
 import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
 import { setUiTheme } from '../bin/lib/tui/palette.mjs';
 import { graphemeWidth, isEastAsianAmbiguousCodePoint, isWidthSuspect, setGraphemeWidthOverrides } from '../bin/lib/tui/width.mjs';
@@ -123,18 +123,19 @@ test('seeded real-screen thrash bytes always equal independently composed intend
         screen.resize(...size);
       }
     }
-    const phase = step % 17;
+    const phase = step % 23;
     if (phase === 0) ui = { ...ui, screen: 'dashboard', help: false, input: null, confirm: null, statusHistoryOpen: false, dashboardFocus: step % 2 };
     else if (phase === 1) ui = { ...ui, screen: 'fleet', help: false, input: null, confirm: null, statusHistoryOpen: false, selectedIndex: step % 2, filter: step % 34 ? '' : 'function' };
     else if (phase >= 2 && phase <= 7) ui = { ...ui, screen: 'detail', jobId: 'codex-thrash-root', detailTab: phase - 2, help: false, input: null, confirm: null, statusHistoryOpen: false };
-    else if (phase === 8) ui = { ...ui, screen: 'providers' };
-    else if (phase === 9) ui = { ...ui, screen: 'groups' };
-    else if (phase === 10) ui = { ...ui, screen: 'group-members', groupId: 'thrash-wave' };
-    else if (phase === 11) ui = { ...ui, screen: 'sessions' };
-    else if (phase === 12) ui = { ...ui, screen: 'stats' };
-    else if (phase === 13) ui = { ...ui, screen: 'launcher', launcher: { fieldIndex: step % 9, profile: 'independent-review', provider: 'codex', model: 'sol', mode: 'review', effort: 'high', prompt: 'Review assistant function', allowedPaths: 'src', previewScroll: step % 3, preview: { provider: 'codex', model: 'sol', mode: 'review', packetWarnings: [], packet: '# Objective\nReview assistant function' } } };
-    else if (phase === 14) ui = { ...ui, screen: 'fleet', help: true };
-    else if (phase === 15) ui = { ...ui, screen: 'fleet', help: false, statusHistoryOpen: true, statusHistory: [{ at: NOW, stream: 'stderr', message: 'assistant function diagnostic' }] };
+    else if (phase >= 8 && phase <= 13) ui = { ...ui, screen: 'work', workTab: phase - 8, workIndex: 0, workScroll: step % 4, help: false, input: null, confirm: null, statusHistoryOpen: false };
+    else if (phase === 14) ui = { ...ui, screen: 'providers' };
+    else if (phase === 15) ui = { ...ui, screen: 'groups' };
+    else if (phase === 16) ui = { ...ui, screen: 'group-members', groupId: 'thrash-wave' };
+    else if (phase === 17) ui = { ...ui, screen: 'sessions' };
+    else if (phase === 18) ui = { ...ui, screen: 'stats' };
+    else if (phase === 19) ui = { ...ui, screen: 'launcher', launcher: { fieldIndex: step % 9, profile: 'independent-review', provider: 'codex', model: 'sol', mode: 'review', effort: 'high', prompt: 'Review assistant function', allowedPaths: 'src', previewScroll: step % 3, preview: { provider: 'codex', model: 'sol', mode: 'review', packetWarnings: [], packet: '# Objective\nReview assistant function' } } };
+    else if (phase === 20) ui = { ...ui, screen: 'fleet', help: true };
+    else if (phase === 21) ui = { ...ui, screen: 'fleet', help: false, statusHistoryOpen: true, statusHistory: [{ at: NOW, stream: 'stderr', message: 'assistant function diagnostic' }] };
     else ui = { ...ui, screen: 'fleet', statusHistoryOpen: false, input: { kind: 'input', label: 'Search', value: 'assistant function' } };
 
     if (ui.screen === 'detail' && ui.detailTab === 0) {
@@ -154,6 +155,7 @@ test('seeded real-screen thrash bytes always equal independently composed intend
 
     const frame = createViewModel(store, ui, { width: output.columns, height: output.rows });
     assert.ok(DETAIL_TABS.includes(frame.tabs?.items?.[frame.tabs?.active]) || frame.screen !== 'detail', `${seed} step=${step}: valid detail tab`);
+    assert.ok(WORK_TABS.includes(frame.tabs?.items?.[frame.tabs?.active]) || frame.screen !== 'work', `${seed} step=${step}: valid work tab`);
     const intended = paintFrame(frame);
     const independent = paintFrame(createViewModel(store, ui, { width: output.columns, height: output.rows }));
     for (let y = 0; y < intended.rows; y += 1) {

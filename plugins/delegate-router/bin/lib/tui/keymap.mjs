@@ -5,7 +5,7 @@ export const KEY_CLASSES = Object.freeze(['navigation', 'steering', 'destructive
 export const KEY_RELATIONS = Object.freeze(['single', 'alternatives', 'pair', 'range', 'chord', 'sequence']);
 
 const SCREENS = Object.freeze([
-  'dashboard', 'fleet', 'groups', 'group-members', 'sessions', 'providers', 'stats', 'launcher', 'detail'
+  'dashboard', 'work', 'fleet', 'groups', 'group-members', 'sessions', 'providers', 'stats', 'launcher', 'detail'
 ]);
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
@@ -112,7 +112,11 @@ export const KEYMAP = Object.freeze([
   }),
   entry({ keys: ['[', ']'], relation: 'pair', label: 'previous / next tab', action: 'detail.tab.cycle', scope: ['detail'], class: 'navigation', footer: true, footerLabel: 'tabs', footerOrder: 0, menu: false, when: (ctx) => Number(ctx.tabCount || 0) > 1 }),
   entry({ keys: ['1', '6'], relation: 'range', label: 'open tab by number', action: 'detail.tab.open', scope: ['detail'], class: 'navigation', menu: false }),
+  entry({ keys: ['[', ']'], relation: 'pair', label: 'previous / next cockpit mode', action: 'work.tab.cycle', scope: ['work'], class: 'navigation', footer: true, footerLabel: 'modes', footerOrder: 0, menu: false, when: (ctx) => Number(ctx.tabCount || 0) > 1 }),
+  entry({ keys: ['1', '6'], relation: 'range', label: 'open cockpit mode by number', action: 'work.tab.open', scope: ['work'], class: 'navigation', menu: false }),
+  entry({ keys: ['Left', 'Right'], relation: 'pair', label: 'previous / next WorkItem', action: 'work.item.cycle', scope: ['work'], class: 'navigation', footer: true, footerLabel: 'WorkItem', footerOrder: 25, menu: false, when: (ctx) => Number(ctx.workItemCount || 0) > 1 }),
 
+  entry({ keys: ['g', 'w'], relation: 'sequence', label: 'go to WorkItems', action: 'screen.work', scope: ['global'], class: 'navigation', footer: true, footerOrder: 45, menu: false }),
   entry({ keys: ['g', 'f'], relation: 'sequence', label: 'go to Fleet', action: 'screen.fleet', scope: ['global'], class: 'navigation', footer: true, footerOrder: 50, menu: false }),
   entry({ keys: ['F'], label: 'open Fleet alias', action: 'screen.fleet.alias', scope: ['global'], class: 'navigation', menu: false }),
   entry({ keys: ['g', 'r'], relation: 'sequence', label: 'go to groups', action: 'screen.groups', scope: ['global'], class: 'navigation', menu: false }),
@@ -157,6 +161,26 @@ export const KEYMAP = Object.freeze([
   entry({
     keys: ['v'], label: 'safe revert', action: 'detail.revert', scope: ['detail'], class: 'destructive', footer: true,
     when: (ctx) => terminalReason(ctx) == null, unavailableReason: terminalReason
+  }),
+  entry({
+    keys: ['a'], label: 'accept current evidence', action: 'work.accept', scope: ['work'], class: 'steering', footer: true,
+    when: (ctx) => ctx.workTab === 2 && Boolean(ctx.workAcceptJobId),
+    unavailableReason: (ctx) => ctx.workTab !== 2 ? 'open Approve mode' : ctx.workAcceptUnavailable || null
+  }),
+  entry({
+    keys: ['i'], label: 'compose integration worktree', action: 'work.integrate', scope: ['work'], class: 'steering', footer: true,
+    when: (ctx) => ctx.workTab === 2 && Array.isArray(ctx.workIntegrationJobIds) && ctx.workIntegrationJobIds.length > 0,
+    unavailableReason: (ctx) => ctx.workTab !== 2 ? 'open Approve mode' : ctx.workIntegrationUnavailable || null
+  }),
+  entry({
+    keys: ['w'], label: 'launch bounded next round', action: 'work.next-round', scope: ['work'], class: 'steering', footer: true,
+    when: (ctx) => ctx.workTab === 5 && Boolean(ctx.workNextRoundJobId),
+    unavailableReason: (ctx) => ctx.workTab !== 5 ? 'open Converge mode' : ctx.workNextRoundUnavailable || null
+  }),
+  entry({
+    keys: ['r'], label: 'reject current evidence', action: 'work.reject', scope: ['work'], class: 'destructive', footer: true,
+    when: (ctx) => ctx.workTab === 2 && Boolean(ctx.workRejectJobId),
+    unavailableReason: (ctx) => ctx.workTab !== 2 ? 'open Approve mode' : ctx.workRejectUnavailable || null
   }),
 
   entry({ keys: ['x'], label: 'actions', action: 'overlay.actions', scope: ['global'], class: 'view', footer: true, menu: false }),
@@ -378,6 +402,16 @@ export function keymapContext(frame = {}, ui = {}, store = {}) {
     paneCount: (frame.panes || []).filter((pane) => pane.focusable !== false).length,
     searchQuery: ui.search?.query || '',
     remoteOnly: Boolean(ui.remote?.enabled && !ui.remote?.includeLocal),
+    workItemCount: Number(frame.meta?.workItemCount || 0),
+    workTab: Number(frame.meta?.workTab ?? ui.workTab ?? 0),
+    workAcceptJobId: frame.meta?.acceptJobId || null,
+    workAcceptUnavailable: frame.meta?.acceptUnavailable || null,
+    workRejectJobId: frame.meta?.rejectJobId || null,
+    workRejectUnavailable: frame.meta?.rejectUnavailable || null,
+    workIntegrationJobIds: frame.meta?.integrationJobIds || [],
+    workIntegrationUnavailable: frame.meta?.integrationUnavailable || null,
+    workNextRoundJobId: frame.meta?.nextRoundJobId || null,
+    workNextRoundUnavailable: frame.meta?.nextRoundUnavailable || null,
     job
   });
 }

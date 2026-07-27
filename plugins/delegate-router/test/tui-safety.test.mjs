@@ -6,7 +6,7 @@ import test from 'node:test';
 import { paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
 import { formatDisplayValue } from '../bin/lib/tui/display.mjs';
 import { displayWidth } from '../bin/lib/tui/width.mjs';
-import { detailViewModel, fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
+import { detailViewModel, fleetViewModel, WORK_TABS, workViewModel } from '../bin/lib/tui/viewmodels.mjs';
 
 const NOW = 1_700_000_000_000;
 
@@ -53,7 +53,7 @@ test('safe display formatting handles every provider value shape without implici
   assert.ok(formatDisplayValue({ value: 'x'.repeat(300) }, { maxLength: 40 }).length <= 40);
 });
 
-test('nasty journal renders every detail tab and fleet without coercion artifacts or frame overflow', () => {
+test('nasty journal renders every detail tab, WorkItem mode, and fleet without coercion artifacts or frame overflow', () => {
   const store = nastyStore();
   const malformedFleetStore = nastyStore();
   malformedFleetStore.jobs[0] = { ...malformedFleetStore.jobs[0], cwd: { path: '/work/object' }, effort: { tier: 'xhigh' } };
@@ -65,6 +65,11 @@ test('nasty journal renders every detail tab and fleet without coercion artifact
       jobId: 'codex-nasty-journal', detailTab, now: NOW, follow: false, transcriptSelection: 0,
       expandedTools: new Set(['argv']),
       ...(detailTab === 1 ? { diffFile: 'src/🙂.mjs', diffPaths: ['src/🙂.mjs'], diffWindow: { diff: store.diffsByJob['codex-nasty-journal'], offset: 0, totalChars: store.diffsByJob['codex-nasty-journal'].length } } : {})
+    }, { width: 100, height: 30 }));
+  }
+  for (let workTab = 0; workTab < WORK_TABS.length; workTab += 1) {
+    frames.push(workViewModel(store, {
+      screen: 'work', workTab, workIndex: 0, workScroll: 0, now: NOW
     }, { width: 100, height: 30 }));
   }
   for (const frame of frames) {

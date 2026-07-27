@@ -52,7 +52,7 @@ DELEGATE_CONNECT_TOKEN='<printed token>' delegate-tui --connect http://127.0.0.1
 
 The header includes `[remote]` and the connected host, and Fleet adds a Host column when space permits. Fleet data polls every five seconds; the selected job follows its event journal over SSE. Connection loss remains in the status line and retries automatically with bounded backoff instead of terminating the dashboard.
 
-The export is read-only by construction: it exposes authenticated GET health, jobs, event pages/streams, transcript, bounded diff, job/provider usage, coordinator-session, and aggregate-stat reads only. It accepts job ids and bounded repository-relative diff selectors, never server filesystem paths. Steer, resume, release, nudge, review round, cancel, revert, and launcher keys report `read-only remote` and do nothing.
+The export is read-only by construction: it exposes authenticated GET health, jobs, event pages/streams, transcript, bounded diff, job/provider usage, coordinator-session, and aggregate-stat reads only. It accepts job ids and bounded repository-relative diff selectors, never server filesystem paths. Steer, resume, release, nudge, review round, cancel, revert, launcher, WorkItem decision, integration-composition, and bounded-next-round keys report `read-only remote` and do nothing.
 
 The one-remote form above is unchanged. For a federated view, open one SSH tunnel per host and repeat `--connect`; repeat `--token-file` in the same order. `DELEGATE_CONNECT_TOKEN` is the fallback for every target without a paired token file. Add `--include-local` when the machine running the TUI should appear beside the remotes:
 
@@ -79,6 +79,27 @@ CLI targets merge with that file and win when URLs conflict. Labels are redacted
 ## Screens
 
 - **Dashboard** is the default, attention-first home. The first pane contains jobs that need a person: approval or input waits, acceptance blockers, stalls, scope violations, suspect results, and budget stops. Enter opens the selected job. Four compact tiles summarize running/paused work, today's jobs and success rate, today's tokens, and mean cache hit; 14-day jobs/day and mean-duration sparklines sit beside the corresponding values. Provider meters and the last 15 notable cross-job audit/journal events complete the overview. `F` opens the complete Fleet and `Esc` walks back toward Dashboard.
+- **WorkItem cockpit** is the additive work-level surface opened with `g w`;
+  Fleet and all job-centric screens remain unchanged. `Left`/`Right` selects a
+  projected WorkItem, `[`/`]` or `1`-`6` selects Compose, Review, Approve,
+  Compare, Replay, or Converge. Compose renders the stored P5 field
+  provenance/confidence card and visibly blocks write dispatch when a field is
+  unresolved; editing and dispatch remain in the existing Launcher. Review
+  keeps the changed-file diff, immutable base, verification evidence,
+  scope/drift verdict, and finding checklist on one surface. Approve offers
+  typed, P3 evidence-bound accept/reject only when the broker can perform the
+  decision. Isolated attempts cannot be accepted into the owner tree:
+  `i` may compose their captured change sets into a broker-owned integration
+  worktree after CAS preflight, while owner-tree application is visibly
+  disabled. Compare places the latest two candidates under the same diff,
+  checks, findings, duration, usage, and unresolved-risk criteria. Converge
+  coalesces findings as open/resolved/regressed (`open*` means a historical
+  finding had no recorded status and is conservatively open) and shows the
+  bounded round policy before `w` can launch the existing review-round path.
+  Replay is visibly disabled in this first cut: the normalized journal has no
+  persisted projection checkpoints or reversible reducer, so accurate
+  arbitrary rewind would require full-prefix and endpoint whole-journal loads.
+  No scrub control is rendered until Replay can preserve O(viewport).
 - **Fleet** sorts active jobs before terminal jobs, then by recent activity. It shows provider, cwd basename, model, routed effort, mode, transport-honest live activity, elapsed time, output-token budget, continuation/group markers, safety badges, provider allowance, current shared-worktree writer ownership, and a Host column for federation. Shadow jobs carry a `direct` badge; a write-capable direct launch overlapping an active managed writer also carries `writer!`. Proven tool-originated external Codex sessions are dimmed with an `external` badge; the `x` action menu hides or restores them and they are shown by default. Claude hook stubs carry an `agent` badge. The full cwd remains in the detail header; compact density drops Directory, Effort, and then Host by width priority. Activity can identify approval/input waits, context compaction, an active provider subagent, an open tool, thinking, streaming, broker phases, quiet time, and stalls only when that transport exposes the corresponding signal.
 - **Groups** aggregates jobs by `groupId`, with member/running/terminal/stalled counts, newest activity, and the all-terminal barrier state. Enter opens that group's members in the ordinary fleet row format.
 - **Sessions** is a read-only, best-effort overview of Claude Code coordinator sessions around the managed fleet. It reads only the newest 64 KiB of at most 200 recently modified `~/.claude/projects/<encoded-cwd>/*.jsonl` files, shows active/idle age, project cwd, approximate size, one redacted activity label, active managed-job count by exact cwd, and existing managed writer ownership. It never opens a transcript. Enter filters Fleet to the selected cwd; `Esc` clears the Fleet filter.
@@ -155,22 +176,26 @@ Direct-shadow detail views otherwise render like managed jobs, including Directo
 | `Esc` | back | global |
 | `q` | quit | global |
 | `Ctrl-C` | quit | global |
-| `Up Down` | previous / next item | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `j k` | next / previous item | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Mouse wheel` | scroll viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Mouse click` | select / open | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `PgUp PgDn` | previous / next viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Ctrl-U` | previous viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Ctrl-D` | next viewport | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `g G` | top / bottom | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Home End` | top / bottom alias | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Tab` | next pane | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Shift-Tab` | previous pane | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
-| `Enter` | open / edit / expand | dashboard, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Up Down` | previous / next item | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `j k` | next / previous item | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Mouse wheel` | scroll viewport | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Mouse click` | select / open | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `PgUp PgDn` | previous / next viewport | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Ctrl-U` | previous viewport | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Ctrl-D` | next viewport | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `g G` | top / bottom | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Home End` | top / bottom alias | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Tab` | next pane | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Shift-Tab` | previous pane | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
+| `Enter` | open / edit / expand | dashboard, work, fleet, groups, group-members, sessions, providers, stats, launcher, detail |
 | `/` | filter / search | fleet, group-members, stats, detail |
 | `n N` | next / previous match | global |
 | `[ ]` | previous / next tab | detail |
 | `1 … 6` | open tab by number | detail |
+| `[ ]` | previous / next cockpit mode | work |
+| `1 … 6` | open cockpit mode by number | work |
+| `Left Right` | previous / next WorkItem | work |
+| `g w` | go to WorkItems | global |
 | `g f` | go to Fleet | global |
 | `F` | open Fleet alias | global |
 | `g r` | go to groups | global |
@@ -186,6 +211,10 @@ Direct-shadow detail views otherwise render like managed jobs, including Directo
 | `x menu` | nudge suspicious result | detail |
 | `c` | cancel | detail |
 | `v` | safe revert | detail |
+| `a` | accept current evidence | work |
+| `i` | compose integration worktree | work |
+| `w` | launch bounded next round | work |
+| `r` | reject current evidence | work |
 | `x` | actions | global |
 | `x menu` | toggle external threads | fleet |
 | `a` | active jobs only | fleet |
@@ -204,10 +233,11 @@ Direct-shadow detail views otherwise render like managed jobs, including Directo
 | `Ctrl-G` | mark diagnostic frame | global |
 <!-- END GENERATED KEYMAP -->
 
-`g` still jumps to the top and also arms the 300 ms navigation prefix: `g f`
-Fleet, `g r` groups, `g s` sessions, `g p` providers, `g t` stats, and `g l`
-launcher. `G` is bottom; `F` remains the documented Fleet alias. The first use
-of a moved legacy key reports its replacement in the status line.
+`g` still jumps to the top and also arms the 300 ms navigation prefix: `g w`
+WorkItems, `g f` Fleet, `g r` groups, `g s` sessions, `g p` providers, `g t`
+stats, and `g l` launcher. `G` is bottom; `F` remains the documented Fleet
+alias. The first use of a moved legacy key reports its replacement in the
+status line.
 
 Revision conflicts and all other typed broker errors stay in the status line; they do not terminate the TUI. Cancellation is shown as queued until the provider acknowledges or its process exits. Revert can touch only the safe subset reported by the existing broker helper.
 

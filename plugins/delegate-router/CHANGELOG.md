@@ -2,6 +2,29 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.44.0 — 2026-07-27
+
+- Added the P7 WorkItem cockpit as a new `g w` TUI surface without replacing
+  Dashboard, Fleet, job detail, Groups, Sessions, Providers, Stats, or
+  Launcher. Compose reuses the P5 structured spec card with field provenance,
+  confidence, and visible unresolved write-dispatch blockers.
+- Review now keeps the bounded changed-file diff, immutable base revision,
+  broker verification, scope/drift verdict, and findings checklist together.
+  Compare aligns the latest two candidates under the same diff-shape, checks,
+  findings, duration, usage, and unresolved-risk criteria. Converge coalesces
+  open/resolved/regressed findings and shows the WorkSpec round bound before
+  offering the existing review-round action.
+- Approve exposes only existing P3 evidence-bound accept/reject decisions and
+  P6 CAS-preflighted integration-worktree composition. Direct application into
+  the owner's tree remains absent and is explicitly labelled deferred.
+- Replay is visibly disabled in this narrower first cut. The normalized journal
+  has no persisted projection checkpoints or reversible reducer, so arbitrary
+  historical state cannot be rebuilt without full-prefix loading (and the
+  endpoint requires the entire journal) while preserving O(viewport).
+- Added WorkItem modes and actions through the single KEYMAP registry, including
+  generated footer/help/reference documentation, remote read-only policy,
+  ASCII/NO_COLOR coverage, nasty-journal coverage, and 120x40 frame tests.
+
 ## 0.43.0 — 2026-07-27
 
 - Added the P8 local outcome ledger. New attempt records and full terminal or

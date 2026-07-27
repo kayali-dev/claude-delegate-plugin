@@ -5,6 +5,19 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P7 work-item cockpit is implemented as an additive TUI surface over the
+  existing total P1 projection. Compose shows P5 provenance/confidence and
+  unresolved dispatch blockers; Review combines changed files, immutable base,
+  verification, scope/drift, and findings; Approve records the existing P3
+  evidence-bound decisions and offers only P6 integration-worktree
+  composition; Compare aligns two candidates under common criteria; and
+  Converge shows open/resolved/regressed findings plus the bounded policy
+  before the existing next-round action. Fleet, Detail, Groups, Sessions,
+  Stats, and their bindings are unchanged. Replay is visibly disabled because
+  the normalized journal has neither persisted projection checkpoints nor a
+  reversible reducer: accurate arbitrary rewind would require a full-prefix
+  load and the endpoint would require the entire journal, violating
+  O(viewport). Direct owner-tree application remains absent.
 - P8 outcome ledger is implemented additively. New attempts and terminal or
   owner-decision audit snapshots retain broker/adapter/provider CLI, policy,
   and event-schema versions; task shape; canonical packet-section presence;
@@ -589,6 +602,17 @@ provenance), review (diff + verification + drift + findings together), approve
 (CAS apply into integration workspace), compare (candidates side by side),
 replay (scrub by event sequence), converge (findings open/resolved/regressed
 with the bounded next-round policy shown before launch).
+
+Implementation progress (2026-07-27): the additive cockpit ships Compose,
+Review, Approve, Compare, and Converge on the existing P1 projection and P3/P6
+broker seams. Existing job-centric screens and controls are unchanged. Approve
+can record evidence-bound accept/reject and can prepare a broker-owned
+integration worktree, but never presents direct owner-tree application.
+Replay is deliberately disabled with its reason rendered: the current
+normalized journal cannot rebuild an arbitrary historical projection without
+loading the full prefix, and its endpoint requires the entire journal. A later
+cut needs persisted projection checkpoints or a reversible reducer before a
+scrubber can satisfy O(viewport).
 
 ### P8 — Outcome ledger
 Broker/adapter/provider versions, packet features, task shape, verification,

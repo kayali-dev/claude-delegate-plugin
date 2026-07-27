@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { jobNeedsReconciliation } from '../control.mjs';
 import { coalesceAuditRecords, outcomeRates } from '../stats.mjs';
+import { projectJobsAsWorkItems } from '../work-projection.mjs';
 import { deriveJobActivity } from './activity.mjs';
 import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimestamp, joinDisplayParts } from './display.mjs';
 import { prepareDiffWindow, formatDiffRow, wrapDiffRow } from './diff.mjs';
@@ -16,6 +17,7 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
 
 export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
+export const WORK_TABS = Object.freeze(['Compose', 'Review', 'Approve', 'Compare', 'Replay', 'Converge']);
 
 export const HELP_ITEMS = Object.freeze(KEYMAP.map((item) => Object.freeze({
   key: formatKeyNotation(item),
@@ -199,6 +201,7 @@ function providerBand(provider) {
 function breadcrumbs(frame, ui) {
   if (frame.screen === 'detail') return [ui.detailReturn === 'dashboard' ? 'home' : 'fleet', formatDisplayValue(frame.meta?.jobId).slice(-12)];
   if (frame.screen === 'group-members') return ['groups', formatDisplayValue(ui.groupId).slice(-12)];
+  if (frame.screen === 'work') return ['work', formatDisplayValue(frame.meta?.workId).slice(-12)];
   return [frame.screen === 'dashboard' ? 'home' : frame.screen];
 }
 
@@ -1776,9 +1779,585 @@ export function launcherViewModel(store, ui = {}, viewport = {}) {
   return commonOverlay(frame, ui, store);
 }
 
+const workItemCache = new WeakMap();
+
+function projectedWorkItems(store) {
+  const jobs = Array.isArray(store.jobs) ? store.jobs : [];
+  if (!workItemCache.has(jobs)) workItemCache.set(jobs, projectJobsAsWorkItems(jobs));
+  return workItemCache.get(jobs);
+}
+
+function workAttemptJobs(work, store) {
+  const byId = new Map((Array.isArray(store.jobs) ? store.jobs : []).map((job) => [job.id, job]));
+  return (work?.runs || []).map((run) => byId.get(run.attempt?.id)).filter(Boolean);
+}
+
+function latestWorkJob(work, store) {
+  return workAttemptJobs(work, store).at(-1) || null;
+}
+
+function workFindingRows(work) {
+  const byId = new Map();
+  for (const finding of Array.isArray(work?.findings) ? work.findings : []) {
+    const safeFinding = finding && typeof finding === 'object' ? finding : {};
+    const key = formatDisplayValue(safeFinding.id) || `finding-${byId.size + 1}`;
+    byId.set(key, safeFinding);
+  }
+  return [...byId.entries()].map(([id, finding]) => {
+    const declared = ['open', 'resolved', 'regressed'].includes(finding.status) ? finding.status : null;
+    const status = declared || 'open*';
+    const style = declared === 'resolved' ? palette.positive
+      : declared === 'regressed' ? palette.failed : palette.badgeWarn;
+    return {
+      id,
+      status: { text: status, style },
+      severity: displayOr(finding.severity, '-'),
+      criterion: displayOr(finding.criterion, 'unattributed finding'),
+      evidence: compactFieldValue(finding.evidence),
+      legacyStatus: !declared
+    };
+  });
+}
+
+function workFindingCounts(rows) {
+  return rows.reduce((counts, row) => {
+    const status = row.status.text === 'open*' ? 'open' : row.status.text;
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, { open: 0, resolved: 0, regressed: 0 });
+}
+
+function compilationField(compilation, key, fallback) {
+  const field = compilation?.fields?.[key];
+  if (field && typeof field === 'object') return field;
+  return {
+    value: fallback,
+    confidence: null,
+    status: fallback == null || Array.isArray(fallback) && !fallback.length ? 'unresolved' : 'projected',
+    provenance: [{
+      kind: 'compatibility-projection',
+      source: 'historical job record',
+      detail: 'Field-level P5 provenance was not recorded for this historical attempt.'
+    }]
+  };
+}
+
+function composeSections(work, rootJob) {
+  const compilation = rootJob?.specCompilation || null;
+  const spec = work?.spec || {};
+  const definitions = [
+    ['objective', 'Objective', spec.objective],
+    ['scopeClaim', 'Scope claim', spec.scopeClaim],
+    ['acceptanceCriteria', 'Acceptance criteria', spec.acceptanceCriteria],
+    ['verifyRecipe', 'Verification recipe', spec.verifyRecipe],
+    ['budget', 'Budget', spec.budget],
+    ['base', 'Immutable base', spec.base]
+  ];
+  const sections = definitions.map(([key, label, fallback]) => {
+    const field = compilationField(compilation, key, fallback);
+    const unresolved = field.status === 'unresolved' || field.confidence === 'low';
+    const confidence = field.confidence ? formatDisplayValue(field.confidence).toUpperCase() : 'UNKNOWN';
+    const status = formatDisplayValue(field.status || 'projected').toUpperCase();
+    const provenance = Array.isArray(field.provenance) ? field.provenance.slice(0, 3) : [];
+    return {
+      label: `${label} [${confidence}${CHROME_SEPARATOR}${status}]`,
+      ...(unresolved ? { badge: { text: 'UNRESOLVED', style: palette.badgeWarn } } : {}),
+      rows: [
+        {
+          key: 'value',
+          value: compactFieldValue(field.status === 'unresolved' || field.confidence === 'low'
+            ? field.value
+            : field.value ?? fallback)
+        },
+        ...(provenance.flatMap((source, index) => [
+          { key: `source ${index + 1}`, value: joinDisplayParts([source?.kind, source?.source], ': '), style: palette.dim },
+          { key: `why ${index + 1}`, value: source?.detail, style: palette.dim }
+        ]))
+      ]
+    };
+  });
+  const compatibilitySource = {
+    kind: 'compatibility-projection',
+    source: 'historical job record',
+    detail: 'P5 authority provenance was not recorded for this historical attempt.'
+  };
+  const authority = compilation?.authority && typeof compilation.authority === 'object'
+    ? compilation.authority
+    : {
+        allowedPaths: {
+          value: rootJob?.allowedPaths || null,
+          confidence: null,
+          status: rootJob?.allowedPaths?.length ? 'projected' : 'unknown',
+          provenance: [compatibilitySource]
+        },
+        network: {
+          value: rootJob?.network === true ? 'enabled' : 'not recorded',
+          status: 'projected',
+          provenance: [compatibilitySource]
+        },
+        sandbox: {
+          value: displayOr(rootJob?.sandbox, 'not recorded'),
+          status: 'projected',
+          provenance: [compatibilitySource]
+        }
+      };
+  for (const [key, field] of Object.entries(authority)) {
+    if (!field || typeof field !== 'object') continue;
+    const unresolved = field.status === 'unresolved' || field.confidence === 'low';
+    const confidence = field.confidence ? `${formatDisplayValue(field.confidence).toUpperCase()}${CHROME_SEPARATOR}` : '';
+    const provenance = Array.isArray(field.provenance) ? field.provenance.slice(0, 3) : [];
+    sections.push({
+      label: `Authority: ${key} [${confidence}${formatDisplayValue(field.status || 'projected').toUpperCase()}]`,
+      ...(unresolved ? { badge: { text: 'DISPATCH BLOCKED', style: palette.failed } } : {}),
+      rows: [
+        { key: 'value', value: compactFieldValue(field.value) },
+        ...(provenance.flatMap((source, index) => [
+          { key: `source ${index + 1}`, value: joinDisplayParts([source?.kind, source?.source], ': '), style: palette.dim },
+          { key: `why ${index + 1}`, value: source?.detail, style: palette.dim }
+        ]))
+      ]
+    });
+  }
+  return sections;
+}
+
+function workChangedFiles(job) {
+  if (Array.isArray(job?.changedFiles)) return job.changedFiles;
+  if (Array.isArray(job?.changedFiles?.entries)) return job.changedFiles.entries;
+  if (Array.isArray(job?.changedFiles?.files)) return job.changedFiles.files;
+  return [];
+}
+
+function workDiffShape(job, store) {
+  const stat = store.diffStatsByJob?.[job?.id] || {};
+  const finiteCount = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  };
+  const files = finiteCount(job?.changedFiles?.count ?? stat.files?.length ?? workChangedFiles(job).length);
+  const additions = finiteCount(stat.totalAdditions);
+  const deletions = finiteCount(stat.totalDeletions);
+  return {
+    files,
+    additions,
+    deletions,
+    label: `${files} files${CHROME_SEPARATOR}+${additions} ${CHROME_GLYPHS.minus}${deletions}`
+  };
+}
+
+function workEvidenceSections(work, job, store) {
+  const drift = derivedDrift(job || {});
+  const shape = workDiffShape(job, store);
+  const findings = workFindingRows(work);
+  const counts = workFindingCounts(findings);
+  return [
+    {
+      label: 'Immutable base and decision',
+      rows: [
+        { key: 'attempt', value: job?.id, copy: true },
+        { key: 'base revision', value: work?.spec?.base?.revision || job?.baseRevision, copy: true },
+        { key: 'decision', value: work?.decision?.state || job?.acceptance?.state },
+        { key: 'decision evidence', value: compactFieldValue(work?.decision?.evidenceRefs) }
+      ]
+    },
+    {
+      label: 'Changed files and scope',
+      ...((drift.outsideScope || []).length ? { badge: { text: `${drift.outsideScope.length} OUTSIDE SCOPE`, style: palette.failed } } : {}),
+      rows: [
+        { key: 'diff shape', value: shape.label },
+        { key: 'changed paths', value: compactFieldValue(workChangedFiles(job)) },
+        { key: 'outside scope', value: compactFieldValue(drift.outsideScope) },
+        { key: 'base drift', value: compactFieldValue(job?.baseDrift || job?.acceptance?.evidence?.baseDrift) }
+      ]
+    },
+    {
+      label: 'Verification evidence',
+      ...(verificationFailed(job || {}) ? { badge: { text: 'VERIFY FAILED', style: palette.failed } } : {}),
+      rows: [
+        { key: 'origin', value: job?.verificationOrigin },
+        ...objectRows('verification', job?.verification),
+        { key: 'acceptance state', value: job?.acceptance?.state },
+        { key: 'evidence digest', value: job?.acceptance?.evidenceDigest, copy: true }
+      ]
+    },
+    {
+      label: 'Findings verdict',
+      ...((counts.open || counts.regressed) ? { badge: { text: `${counts.open + counts.regressed} OPEN`, style: palette.badgeWarn } } : {}),
+      rows: [
+        { key: 'open', value: counts.open },
+        { key: 'resolved', value: counts.resolved },
+        { key: 'regressed', value: counts.regressed },
+        { key: 'scope verdict', value: (drift.outsideScope || []).length ? 'blocked: outside-scope changes' : 'inside declared scope' }
+      ]
+    }
+  ];
+}
+
+function candidateSections(job, work, store) {
+  const shape = workDiffShape(job, store);
+  const usage = jobUsage(job || {}, store.eventsByJob?.[job?.id] || []);
+  const findings = [
+    ...(Array.isArray(job?.result?.structured?.findings) ? job.result.structured.findings : []),
+    ...(Array.isArray(job?.findings) ? job.findings : [])
+  ];
+  const unresolved = findings.filter((finding) => !['resolved'].includes(finding?.status)).length
+    + Number(job?.scopeViolations?.length || 0)
+    + Number(verificationFailed(job || {}));
+  return [
+    {
+      label: 'Same criteria',
+      ...(unresolved ? { badge: { text: `${unresolved} RISKS`, style: palette.badgeWarn } } : {}),
+      rows: [
+        { key: 'provider / model', value: joinDisplayParts([job?.provider, job?.resolvedModel || job?.model], '/') },
+        { key: 'diff shape', value: shape.label },
+        { key: 'checks', value: verificationFailed(job || {}) ? 'failed' : job?.verification ? 'recorded pass / non-failure' : 'missing' },
+        { key: 'findings', value: findings.length },
+        { key: 'duration', value: duration(job?.durationMs ?? ((timestampMs(job?.completedAt) || timestampMs(job?.updatedAt)) - timestampMs(job?.createdAt))) },
+        { key: 'usage', value: `${number(usage.total)} tokens${CHROME_SEPARATOR}${number(usage.output)} out` },
+        { key: 'unresolved risks', value: unresolved }
+      ]
+    },
+    {
+      label: 'Evidence',
+      rows: [
+        { key: 'verification', value: compactFieldValue(job?.verification) },
+        { key: 'acceptance', value: compactFieldValue(job?.acceptance) },
+        { key: 'scope violations', value: compactFieldValue(job?.scopeViolations) },
+        { key: 'result marker', value: job?.resultSuspect || job?.objectiveMet === false ? displayOr(job?.resultSuspect, 'objective not met') : 'none recorded' }
+      ]
+    }
+  ];
+}
+
+function workActionMeta(work, job, store, findings) {
+  const local = job && !job.remote && !job.readOnly
+    && !['external', 'claude-agent', 'direct-mcp', 'direct-cli', 'direct-acp'].includes(job.transport);
+  const completedWrite = local && job.status === 'completed' && ['implement', 'verify'].includes(job.mode);
+  const finalDecision = ['accepted', 'rejected', 'superseded'].includes(job?.acceptance?.state);
+  const integrationJobIds = local
+    && TERMINAL.has(job?.status)
+    && job?.isolation === 'worktree'
+    && job?.changeSet
+    ? [job.id]
+    : [];
+  const maxRounds = Number(work?.spec?.budget?.maxRounds);
+  const usedRounds = work?.runs?.length || 0;
+  const remainingRounds = Number.isSafeInteger(maxRounds) && maxRounds > 0 ? Math.max(0, maxRounds - usedRounds) : null;
+  const unresolvedFindings = findings.filter((row) => ['open*', 'open', 'regressed'].includes(row.status.text)).length;
+  const resumable = derivedResumable(job || {});
+  return {
+    acceptJobId: completedWrite && !finalDecision && job.isolation !== 'worktree' && job.acceptance?.state === 'ready-for-review' ? job.id : null,
+    acceptUnavailable: job?.isolation === 'worktree'
+      ? 'owner-tree apply is deferred; compose an integration worktree instead'
+      : !completedWrite ? 'needs a completed local implement/verify attempt'
+        : finalDecision ? `already ${job.acceptance.state}`
+          : job?.acceptance?.state !== 'ready-for-review' ? `acceptance is ${displayOr(job?.acceptance?.state, 'missing')}` : null,
+    rejectJobId: completedWrite && !finalDecision ? job.id : null,
+    rejectUnavailable: !completedWrite ? 'needs a completed local implement/verify attempt'
+      : finalDecision ? `already ${job.acceptance.state}` : null,
+    integrationJobIds,
+    integrationUnavailable: integrationJobIds.length ? null : 'needs a terminal isolated attempt with a captured change set',
+    nextRoundJobId: local && TERMINAL.has(job?.status) && resumable.ok && remainingRounds > 0 && unresolvedFindings > 0 ? job.id : null,
+    nextRoundUnavailable: !local ? 'needs a local managed attempt'
+      : !TERMINAL.has(job?.status) ? 'needs a terminal attempt'
+        : !resumable.ok ? resumable.reason
+          : remainingRounds == null ? 'WorkSpec has no bounded maxRounds policy'
+            : remainingRounds <= 0 ? 'WorkSpec round budget is exhausted'
+              : unresolvedFindings <= 0 ? 'no open or regressed findings' : null,
+    maxRounds: Number.isSafeInteger(maxRounds) && maxRounds > 0 ? maxRounds : null,
+    usedRounds,
+    remainingRounds,
+    unresolvedFindings
+  };
+}
+
+export function workViewModel(store, ui = {}, viewport = {}) {
+  const { width, height } = viewportOf(viewport);
+  const items = projectedWorkItems(store);
+  if (!items.length) {
+    return commonOverlay({
+      width, height, screen: 'work',
+      title: { text: 'WorkItem cockpit', right: '0 work items' },
+      tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: WORK_TABS, active: 0 },
+      panes: [{
+        rect: { x: 0, y: 3, width, height: Math.max(3, height - 4) },
+        title: 'No projected work',
+        content: { kind: 'empty', message: 'no WorkItems in the current store', action: 'Existing Fleet and job detail remain available' }
+      }],
+      status: errorStatus(ui) || { text: '' },
+      meta: { workIds: [], workItemCount: 0, workId: null, workTab: 0, tabs: WORK_TABS }
+    }, ui, store);
+  }
+  const index = Math.max(0, Math.min(items.length - 1, Number(ui.workIndex || 0)));
+  const work = items[index];
+  const jobs = workAttemptJobs(work, store);
+  const rootJob = jobs[0] || null;
+  const job = jobs.at(-1) || null;
+  const tab = Math.max(0, Math.min(WORK_TABS.length - 1, Number(ui.workTab || 0)));
+  const findings = workFindingRows(work);
+  const findingCounts = workFindingCounts(findings);
+  const actions = workActionMeta(work, job, store, findings);
+  const bodyHeight = Math.max(3, height - 4);
+  const baseFrame = {
+    width, height, screen: 'work',
+    title: {
+      text: joinDisplayParts(['WorkItem cockpit', work.id, `${jobs.length} candidate${jobs.length === 1 ? '' : 's'}`]),
+      right: `${index + 1}/${items.length}${CHROME_SEPARATOR}${displayOr(work.decision?.state || job?.acceptance?.state, 'undecided')}`
+    },
+    tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: WORK_TABS, active: tab },
+    panes: [],
+    status: errorStatus(ui) || { text: '' },
+    meta: {
+      workIds: items.map((item) => item.id),
+      workItemCount: items.length,
+      workId: work.id,
+      workIndex: index,
+      workTab: tab,
+      tabs: WORK_TABS,
+      jobId: job?.id || null,
+      candidateJobIds: jobs.map((candidate) => candidate.id),
+      findingCounts,
+      ...actions
+    }
+  };
+  if (tab === 0) {
+    const sections = composeSections(work, rootJob);
+    const unresolved = Array.isArray(rootJob?.specCompilation?.unresolved)
+      ? rootJob.specCompilation.unresolved
+      : sections.filter((section) => section.badge).map((section) => section.label.split(' [')[0]);
+    baseFrame.panes = [{
+      rect: { x: 0, y: 3, width, height: bodyHeight },
+      title: 'Structured WorkSpec card | field provenance and confidence',
+      summary: {
+        text: joinDisplayParts([`${sections.length} fields`, unresolved.length ? `${unresolved.length} unresolved` : 'confirmed']),
+        ...(unresolved.length ? { badge: { text: 'WRITE DISPATCH BLOCKED', style: palette.failed } } : {})
+      },
+      content: {
+        kind: 'key-value',
+        sections: [
+          ...sections,
+          {
+            label: 'Dispatch',
+            ...(unresolved.length ? { badge: { text: 'BLOCKED', style: palette.failed } } : {}),
+            rows: [
+              { key: 'state', value: unresolved.length ? 'blocked until unresolved fields are confirmed' : 'spec was confirmed before this attempt launched' },
+              { key: 'unresolved', value: compactFieldValue(unresolved) },
+              { key: 'cockpit action', value: 'read-only card; edit and dispatch through the existing Launcher' }
+            ]
+          }
+        ],
+        follow: false,
+        scroll: ui.workScroll || 0,
+        sectionGap: sectionGapForHeight(height)
+      }
+    }];
+  } else if (tab === 1) {
+    const shape = workDiffShape(job, store);
+    const rawDiff = formatDisplayValue(store.diffsByJob?.[job?.id] || '', { maxLength: 12_000 });
+    const prepared = rawDiff ? prepareDiffWindow({
+      diff: rawDiff,
+      offset: 0,
+      totalChars: rawDiff.length,
+      nextOffset: null
+    }, { band: { path: `${shape.files} changed files`, additions: shape.additions, deletions: shape.deletions } }) : null;
+    const diffContent = prepared?.rows?.length ? {
+      kind: 'diff',
+      virtual: true,
+      entries: prepared.rows,
+      formatEntry: formatDiffRow,
+      wrapEntry: wrapDiffRow,
+      measureKey: `work-review:${work.id}:${job?.id}`,
+      follow: false,
+      scroll: ui.workScroll || 0
+    } : {
+      kind: 'table',
+      selection: false,
+      columns: [{ key: 'path', title: 'Changed file', width: Math.max(16, Math.floor(width * 0.45)) }],
+      rows: workChangedFiles(job).map((entry) => ({
+        path: formatDisplayValue(entry?.path || entry)
+      })),
+      empty: { message: 'no diff artifact available', action: 'Changed-file inventory and decision evidence remain visible' }
+    };
+    const evidence = workEvidenceSections(work, job, store);
+    const findingsTable = {
+      kind: 'table',
+      selection: false,
+      scroll: ui.workScroll || 0,
+      columns: [
+        { key: 'status', title: 'State', width: 10 },
+        { key: 'severity', title: 'Severity', width: 9 },
+        { key: 'criterion', title: 'Finding / criterion', width: Math.max(18, Math.floor(width * 0.32)) }
+      ],
+      rows: findings,
+      empty: { message: 'no findings recorded', action: 'Verification and scope evidence still gate the decision' }
+    };
+    if (width >= 90) {
+      const leftWidth = Math.max(42, Math.floor(width * 0.56));
+      const rightWidth = width - leftWidth - 1;
+      const evidenceHeight = Math.max(8, Math.floor(bodyHeight * 0.58));
+      baseFrame.panes = [
+        {
+          rect: { x: 0, y: 3, width: leftWidth, height: bodyHeight },
+          title: 'Changed files | bounded diff',
+          summary: { text: shape.label },
+          content: diffContent
+        },
+        {
+          rect: { x: leftWidth + 1, y: 3, width: rightWidth, height: evidenceHeight },
+          title: 'Verification | scope / drift | base revision',
+          content: { kind: 'key-value', sections: evidence, follow: false, scroll: ui.workScroll || 0, sectionGap: sectionGapForHeight(height) }
+        },
+        {
+          rect: { x: leftWidth + 1, y: 4 + evidenceHeight, width: rightWidth, height: Math.max(3, bodyHeight - evidenceHeight - 1) },
+          title: 'Findings checklist',
+          summary: { text: `${findingCounts.open} open${CHROME_SEPARATOR}${findingCounts.resolved} resolved${CHROME_SEPARATOR}${findingCounts.regressed} regressed` },
+          content: findingsTable
+        }
+      ];
+    } else {
+      const first = Math.max(5, Math.floor(bodyHeight * 0.44));
+      const second = Math.max(5, Math.floor((bodyHeight - first - 2) * 0.55));
+      baseFrame.panes = [
+        { rect: { x: 0, y: 3, width, height: first }, title: 'Changed files | bounded diff', summary: { text: shape.label }, content: diffContent },
+        { rect: { x: 0, y: 4 + first, width, height: second }, title: 'Verification | scope / drift | base revision', content: { kind: 'key-value', sections: evidence, follow: false, scroll: ui.workScroll || 0, sectionGap: 0 } },
+        { rect: { x: 0, y: 5 + first + second, width, height: Math.max(3, bodyHeight - first - second - 2) }, title: 'Findings checklist', content: findingsTable }
+      ];
+    }
+  } else if (tab === 2) {
+    const acceptance = job?.acceptance || {};
+    baseFrame.panes = [{
+      rect: { x: 0, y: 3, width, height: bodyHeight },
+      title: 'Evidence-bound owner decision | no owner-tree apply',
+      summary: {
+        text: joinDisplayParts([displayOr(acceptance.state, 'evidence missing'), actions.integrationJobIds.length ? `${actions.integrationJobIds.length} isolated change sets` : 'shared / no captured change set']),
+        ...(acceptance.state === 'blocked' ? { badge: { text: 'ACCEPTANCE BLOCKED', style: palette.failed } } : {})
+      },
+      content: {
+        kind: 'key-value',
+        sections: [
+          {
+            label: 'P3 decision evidence',
+            rows: [
+              { key: 'attempt', value: job?.id, copy: true },
+              { key: 'state', value: acceptance.state },
+              { key: 'blocked by', value: compactFieldValue(acceptance.blockedBy) },
+              { key: 'evidence', value: compactFieldValue(acceptance.evidence) },
+              { key: 'evidence digest', value: acceptance.evidenceDigest, copy: true }
+            ]
+          },
+          {
+            label: 'Accept / reject',
+            rows: [
+              { key: 'accept', value: actions.acceptJobId ? 'available: a (typed confirmation)' : `disabled: ${actions.acceptUnavailable}` },
+              { key: 'reject', value: actions.rejectJobId ? 'available: r (typed confirmation)' : `disabled: ${actions.rejectUnavailable}` },
+              { key: 'binding', value: 'delegate_decide / decideAcceptance; broker binds the current evidence digest' }
+            ]
+          },
+          {
+            label: 'Integration worktree',
+            ...(actions.integrationJobIds.length ? { badge: { text: 'COMPOSITION AVAILABLE', style: palette.positive } } : {}),
+            rows: [
+              { key: 'compose', value: actions.integrationJobIds.length ? 'available: i (typed confirmation)' : `disabled: ${actions.integrationUnavailable}` },
+              { key: 'candidate attempts', value: compactFieldValue(actions.integrationJobIds) },
+              { key: 'destination', value: 'broker-owned integration worktree only' },
+              { key: 'owner tree apply', value: 'DISABLED: direct multi-file application is deliberately deferred', style: palette.failed }
+            ]
+          }
+        ],
+        follow: false,
+        scroll: ui.workScroll || 0,
+        sectionGap: sectionGapForHeight(height)
+      }
+    }];
+  } else if (tab === 3) {
+    const candidates = jobs.slice(-2);
+    baseFrame.panes = candidates.length < 2 ? [{
+      rect: { x: 0, y: 3, width, height: bodyHeight },
+      title: 'Candidate comparison',
+      content: { kind: 'empty', message: 'comparison needs two candidates under the same WorkItem', action: 'Resume or review-round attempts remain grouped by the existing WorkItem projection' }
+    }] : candidates.map((candidate, candidateIndex) => {
+      const paneWidth = candidateIndex === 0 ? Math.floor((width - 1) / 2) : width - Math.floor((width - 1) / 2) - 1;
+      const x = candidateIndex === 0 ? 0 : Math.floor((width - 1) / 2) + 1;
+      return {
+        rect: { x, y: 3, width: paneWidth, height: bodyHeight },
+        title: `Candidate ${candidateIndex + 1}${CHROME_SEPARATOR}${candidate.id}`,
+        summary: { text: workDiffShape(candidate, store).label },
+        content: {
+          kind: 'key-value',
+          sections: candidateSections(candidate, work, store),
+          follow: false,
+          scroll: ui.workScroll || 0,
+          sectionGap: sectionGapForHeight(height)
+        }
+      };
+    });
+  } else if (tab === 4) {
+    baseFrame.panes = [{
+      rect: { x: 0, y: 3, width, height: bodyHeight },
+      title: 'Replay | deliberately unavailable in this cut',
+      content: {
+        kind: 'log',
+        lines: [
+          'Replay disabled: the normalized journal has no projection checkpoints or reversible reducer.',
+          'Accurate arbitrary rewind requires full-prefix loading; the endpoint requires the entire journal.',
+          'Deferred to preserve O(viewport). No scrub control is rendered.'
+        ],
+        follow: false,
+        scroll: 0
+      }
+    }];
+  } else {
+    const policySections = [{
+      label: 'Bounded next-round policy',
+      ...(actions.nextRoundJobId ? { badge: { text: 'ROUND AVAILABLE', style: palette.positive } } : { badge: { text: 'ROUND DISABLED', style: palette.badgeWarn } }),
+      rows: [
+        { key: 'open / regressed findings', value: actions.unresolvedFindings },
+        { key: 'rounds used', value: actions.usedRounds },
+        { key: 'maximum rounds', value: actions.maxRounds },
+        { key: 'remaining rounds', value: actions.remainingRounds },
+        { key: 'provider / model', value: joinDisplayParts([job?.provider, job?.resolvedModel || job?.model], '/') },
+        { key: 'verify recipe', value: compactFieldValue(work?.spec?.verifyRecipe) },
+        { key: 'legacy status', value: 'open* means no historical status was recorded; it is treated as open' },
+        { key: 'launch', value: actions.nextRoundJobId ? 'available: w after this policy is visible' : `disabled: ${actions.nextRoundUnavailable}` }
+      ]
+    }];
+    const findingsHeight = Math.max(7, Math.floor(bodyHeight * 0.58));
+    baseFrame.panes = [
+      {
+        rect: { x: 0, y: 3, width, height: findingsHeight },
+        title: 'Finding convergence',
+        summary: {
+          text: `${findingCounts.open} open${CHROME_SEPARATOR}${findingCounts.resolved} resolved${CHROME_SEPARATOR}${findingCounts.regressed} regressed`,
+          ...((findingCounts.open || findingCounts.regressed) ? { badge: { text: `${findingCounts.open + findingCounts.regressed} NEED WORK`, style: palette.badgeWarn } } : {})
+        },
+        content: {
+          kind: 'table',
+          selection: false,
+          scroll: ui.workScroll || 0,
+          columns: [
+            { key: 'status', title: 'State', width: 11 },
+            { key: 'severity', title: 'Severity', width: 10 },
+            { key: 'criterion', title: 'Criterion / finding', width: Math.max(20, width - 23) }
+          ],
+          rows: findings,
+          empty: { message: 'no findings recorded', action: 'No next round is offered without an open or regressed finding' }
+        }
+      },
+      {
+        rect: { x: 0, y: 4 + findingsHeight, width, height: Math.max(3, bodyHeight - findingsHeight - 1) },
+        title: 'Policy shown before launch',
+        content: { kind: 'key-value', sections: policySections, follow: false, scroll: ui.workScroll || 0, sectionGap: sectionGapForHeight(height) }
+      }
+    ];
+  }
+  baseFrame.meta.scrollItemCount = Math.max(0, ...(baseFrame.panes || []).map((pane) => paneItemCount(pane.content)));
+  return commonOverlay(baseFrame, ui, store);
+}
+
 export function createViewModel(store, ui = {}, viewport = {}) {
   const effectiveUi = ui.remote || !store.remote ? ui : { ...ui, remote: store.remote };
   if (effectiveUi.screen === 'dashboard') return dashboardViewModel(store, effectiveUi, viewport);
+  if (effectiveUi.screen === 'work') return workViewModel(store, effectiveUi, viewport);
   if (effectiveUi.screen === 'detail') return detailViewModel(store, effectiveUi, viewport);
   if (effectiveUi.screen === 'groups') return groupsViewModel(store, effectiveUi, viewport);
   if (effectiveUi.screen === 'group-members') return groupMembersViewModel(store, effectiveUi, viewport);

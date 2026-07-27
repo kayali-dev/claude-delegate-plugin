@@ -293,6 +293,8 @@ test('RemoteDatasource satisfies the local interface, renders remote identity, t
   assert.match(frame.status.right, /read-only remote/);
   assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'detail' }, 's'), 'read-only remote: control actions are disabled');
   assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'detail' }, 'a'), 'read-only remote: control actions are disabled');
+  assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'work' }, 'a'), 'read-only remote: control actions are disabled');
+  assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'work' }, 'i'), 'read-only remote: control actions are disabled');
   assert.equal(remoteActionMessage({ remote: connected.remote, screen: 'fleet' }, 'N'), null);
   assert.equal(remoteActionMessage({ remote: null, screen: 'detail' }, 's'), null);
 
