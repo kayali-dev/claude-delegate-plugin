@@ -81,12 +81,22 @@ function orderRuns(records) {
 }
 
 function verifyRecipe(job) {
-  if (!isRecord(job?.verify)) return null;
-  return {
+  if (isRecord(job?.verify) && job.verify.command) {
+    return {
+      schemaVersion: WORK_SCHEMA_VERSION,
+      command: stringOrNull(job.verify.command),
+      timeoutSeconds: numberOrNull(job.verify.timeoutSeconds),
+      source: job.verificationProfile?.recipe?.source == null ? null : copy(job.verificationProfile.recipe.source)
+    };
+  }
+  const exception = stringOrNull(job?.verify?.exception)
+    || (['no-recipe', 'exception', 'skipped'].includes(job?.verification?.state)
+      ? stringOrNull(job.verification.reason) : null);
+  return exception ? {
     schemaVersion: WORK_SCHEMA_VERSION,
-    command: stringOrNull(job.verify.command),
-    timeoutSeconds: numberOrNull(job.verify.timeoutSeconds)
-  };
+    exception,
+    reason: exception
+  } : null;
 }
 
 function baseFor(job) {
@@ -104,7 +114,7 @@ function budgetFor(job) {
   return {
     schemaVersion: WORK_SCHEMA_VERSION,
     wallTimeSeconds: numberOrNull(job?.timeoutSeconds),
-    maxRounds: numberOrNull(job?.maxRounds),
+    maxRounds: numberOrNull(job?.autoFix?.maxRounds ?? job?.maxRounds),
     maxOutputTokens: numberOrNull(job?.maxOutputTokens)
   };
 }
@@ -141,7 +151,22 @@ function projectAttempt(job) {
       durationMs: numberOrNull(job?.durationMs)
     },
     usage: job?.usage == null ? null : copy(job.usage),
-    changedFiles: job?.changedFiles == null ? null : copy(job.changedFiles)
+    changedFiles: job?.changedFiles == null ? null : copy(job.changedFiles),
+    acceptance: job?.acceptance == null ? null : copy(job.acceptance)
+  };
+}
+
+function projectedDecision(job) {
+  const acceptance = job?.acceptance;
+  if (!isRecord(acceptance)) return null;
+  return {
+    schemaVersion: WORK_SCHEMA_VERSION,
+    state: stringOrNull(acceptance.state),
+    by: stringOrNull(acceptance.decidedBy),
+    at: acceptance.decidedAt ?? null,
+    evidenceRefs: acceptance.evidenceDigest ? [acceptance.evidenceDigest] : [],
+    blockedBy: Array.isArray(acceptance.blockedBy) ? copy(acceptance.blockedBy) : [],
+    evidence: acceptance.evidence == null ? null : copy(acceptance.evidence)
   };
 }
 
@@ -233,7 +258,7 @@ export function projectChainAsWorkItem(jobs = []) {
     runs,
     findings,
     changeSets,
-    decision: null,
+    decision: projectedDecision(ordered.findLast((job) => isRecord(job?.acceptance))),
     timestamps: {
       schemaVersion: WORK_SCHEMA_VERSION,
       createdAt: timestamp(ordered, 'createdAt', 'min'),

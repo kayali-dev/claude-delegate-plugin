@@ -166,15 +166,22 @@ export function detectActionableEdges(snapshot, options = {}) {
   if (inputOutstanding(job, events)) edges.push(candidate(job, 'needs-input:request', 'needs-input', 2, { input: 'request' }));
   if (blockedApproval(events)) edges.push(candidate(job, 'needs-input:permission', 'needs-input', 2, { input: 'permission' }));
 
-  if (job.status === 'completed' && WRITE_MODES.has(job.mode)) {
-    edges.push(candidate(job, 'ready-for-review:write', 'ready-for-review', 3));
+  if (job.status === 'completed' && WRITE_MODES.has(job.mode) && job.acceptance?.state === 'blocked') {
+    edges.push(candidate(job, 'acceptance:blocked', 'blocked', 3, {
+      blockedBy: Array.isArray(job.acceptance.blockedBy) ? job.acceptance.blockedBy : []
+    }));
+  } else if (job.status === 'completed' && WRITE_MODES.has(job.mode)
+    && (!job.acceptance || job.acceptance.state === 'ready-for-review')) {
+    // Historical records have no acceptance field. Preserve their previous
+    // notification behavior while every P3 record follows acceptance state.
+    edges.push(candidate(job, 'ready-for-review:write', 'ready-for-review', 4));
   } else if (job.status === 'completed' && READ_MODES.has(job.mode)) {
     const findings = findingCount(job);
-    if (findings > 0) edges.push(candidate(job, 'ready-for-review:findings', 'ready-for-review', 3, { findings }));
+    if (findings > 0) edges.push(candidate(job, 'ready-for-review:findings', 'ready-for-review', 4, { findings }));
   }
 
   if (job.status === 'failed' || String(job.errorCode || '').toUpperCase() === 'ORPHANED' || cancelledByError(job)) {
-    edges.push(candidate(job, 'failure', 'failure', 4));
+    edges.push(candidate(job, 'failure', 'failure', 5));
   }
 
   const activityAt = lastActivityAt(snapshot);
@@ -182,12 +189,17 @@ export function detectActionableEdges(snapshot, options = {}) {
     && !['paused', 'user-input-required'].includes(job.phase)
     && activityAt != null
     && now - activityAt >= stallMs) {
-    edges.push(candidate(job, 'stalled', 'stalled', 5, { idleMs: Math.max(0, now - activityAt) }));
+    edges.push(candidate(job, 'stalled', 'stalled', 6, { idleMs: Math.max(0, now - activityAt) }));
   }
   return edges.sort((left, right) => left.priority - right.priority || left.key.localeCompare(right.key));
 }
 
 function checkLabel(job) {
+  const state = job?.verification?.state;
+  if (state === 'passed') return 'checks passed';
+  if (state === 'failed') return 'checks failed';
+  if (state === 'timeout') return 'checks timed out';
+  if (state === 'stale') return 'checks stale';
   const exitCode = Number(job?.verification?.exitCode);
   if (Number.isFinite(exitCode)) return exitCode === 0 ? 'checks passed' : 'checks failed';
   return 'checks not run';
@@ -216,6 +228,10 @@ export function formatEdgeLine(edge) {
   if (edge.category === 'needs-input') {
     return `${prefix} ${id} needs-input (${edge.input === 'permission' ? 'permission blocked' : 'human response required'})`;
   }
+  if (edge.category === 'blocked') {
+    const reasons = (edge.blockedBy || []).map((reason) => field(reason, '', 48)).filter(Boolean);
+    return `${prefix} ${id} blocked (${safeMode(edge.job)}, ${checkLabel(edge.job)}${reasons.length ? `, ${reasons.join('+')}` : ''})`;
+  }
   if (edge.category === 'ready-for-review') {
     if (edge.findings) {
       return `${prefix} ${id} ready-for-review (${safeMode(edge.job)}, ${edge.findings} finding${edge.findings === 1 ? '' : 's'})`;
@@ -236,6 +252,7 @@ export function formatStartupSummary(edges) {
   const labels = [
     ['policy-breach', 'policy breach'],
     ['needs-input', 'input'],
+    ['blocked', 'blocked'],
     ['ready-for-review', 'review'],
     ['failure', 'failure'],
     ['stalled', 'stalled']

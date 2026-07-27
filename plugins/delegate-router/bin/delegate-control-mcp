@@ -7,6 +7,7 @@ import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessi
 import { readProjectedWorkItems } from './lib/work-read.mjs';
 import {
   capEventsBySize,
+  decideAcceptance,
   diffStat,
   filterDiffPaths,
   groupSummary,
@@ -79,7 +80,8 @@ const TOOLS = [
   { name: 'delegate_resume', description: 'Start a new supervised job on the same provider session or thread.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, cwd: { type: 'string' }, effort: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, maxOutputTokens: { type: 'integer', minimum: 1 }, retryPolicy: { type: 'object', required: ['maxAttempts', 'retryOn'], additionalProperties: false, properties: { maxAttempts: { type: 'integer', minimum: 1, maximum: 5 }, retryOn: { type: 'array', uniqueItems: true, items: { enum: ['transport', 'rate-limit'] } } } }, verify: { type: 'object', required: ['command'], additionalProperties: false, properties: { command: { type: 'string', minLength: 1 }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400, default: 600 } } }, network: { type: 'boolean' }, networkAllow: { type: 'array', items: { type: 'string' } }, addDirs: { type: 'array', items: { type: 'string' } }, approveMcps: { type: 'boolean' }, cursorWorktree: { type: 'boolean' }, cursorWorktreeBase: { type: 'string' }, sandbox: { enum: ['auto', 'off'] }, allowedPaths: { type: 'array', items: { type: 'string' } }, allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' } } } },
   { name: 'delegate_review_round', description: 'Resume a terminal job with findings plus its recorded diff stat, changed files, and allowed scope.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string', minLength: 1 } } } },
   { name: 'delegate_usage', description: 'Return per-job observed usage, chain-cumulative token totals, and provider allowance headroom.', inputSchema: jobOnly() },
-  { name: 'delegate_work', description: 'Return read-only WorkItem compatibility projections derived from existing job records. Accepts either a job id or projected work id; unfiltered reads default to the 20 most recent WorkItems.', inputSchema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 } } } }
+  { name: 'delegate_work', description: 'Return read-only WorkItem compatibility projections derived from existing job records. Accepts either a job id or projected work id; unfiltered reads default to the 20 most recent WorkItems.', inputSchema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 } } } },
+  { name: 'delegate_decide', description: 'Record an owner/coordinator acceptance decision against the current broker evidence. This never applies, commits, or reverts code.', inputSchema: { type: 'object', required: ['jobId', 'decision'], additionalProperties: false, properties: { jobId: { type: 'string' }, decision: { enum: ['accepted', 'rejected'] }, reason: { type: 'string', maxLength: 2000 } } } }
 ];
 
 function jobOnly() {
@@ -140,6 +142,12 @@ async function dispatch(name, args) {
       ...(args.id == null && args.limit == null ? { limit: 20 } : {})
     });
   }
+  if (name === 'delegate_decide') {
+    return decideAcceptance(args.jobId, args.decision, {
+      reason: args.reason,
+      decidedBy: 'mcp:coordinator'
+    });
+  }
   throw brokerError('INVALID_REQUEST', `Unknown tool: ${name}`);
 }
 
@@ -157,7 +165,7 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.30.0' }
+        serverInfo: { name: 'delegate-control', version: '0.31.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

@@ -5,7 +5,7 @@
 1. Inspect the current worktree and identify pre-existing changes.
 2. Define an explicit allowed path scope and non-goals.
 3. Select read-only or write access deliberately.
-4. Specify acceptance criteria and verification commands.
+4. Specify acceptance criteria; inspect the derived verification profile or provide an explicit command/recorded exception.
 5. Record the provider, model, mode, and start.
 
 Use `delegate-cursor --dry-run ...` when an explicit user constraint, unfamiliar machine, or sensitive workspace makes the resolved command worth inspecting first.
@@ -158,7 +158,27 @@ Codex interruption waits up to `DELEGATE_DRAIN_GRACE_MS` (default 3000, maximum 
 
 `DELEGATE_MAX_CHANGED_FILES` defaults to 200. Codex live `fileChange` paths crossing it interrupt and fail with non-retryable `LARGE_WRITE` plus a checkpoint. Cursor exposes only completion inventory, so its record is flagged `largeWrite: true` and evented `large.write` post-hoc; that asymmetry cannot prevent Cursor's writes.
 
-Every write mode must set `verify: { command, timeoutSeconds }` (default 600 seconds) to the project's real check command. The worker runs `/bin/sh -c` in the real job cwd only after provider success, outside the provider sandbox, and records command, exit code, duration, and a redacted output tail. A nonzero verdict does not rewrite the provider outcome: status remains `completed`, while `delegate-jobs wait` exits 6.
+Every write mode gets broker verification by default. Precedence is: nearest
+`CLAUDE.md`, then nearest `AGENTS.md`, with non-mutating commands from Commands,
+Quality, Development Workflow, Verification, Tests, or Testing sections;
+package manifests are the fallback, preferring `check`, then `checks`, then
+`test` + `lint` + `typecheck`, using the declared/detected bun, pnpm, yarn, or
+npm runner. The profile is cached per repository under the state directory and
+records the source path, sections/scripts, package manager, and cache state.
+Only commands actually present in those sources qualify.
+
+Explicit `verify: { command, timeoutSeconds }` (default 600 seconds) always
+wins. If no reliable non-mutating check exists, record
+`verify: { exception: "<reason>" }`; `DELEGATE_VERIFY=off` disables broker
+verification globally. These are documented escape hatches, not silent
+absence: inspect records `exception`, `no-recipe`, or `skipped` with a reason.
+After provider success and nonzero observed changes, the broker runs the recipe
+on the real repository tree with one overall timeout and a bounded redacted
+tail. It fingerprints the repository revision and worktree metadata before and
+after; movement makes the evidence stale and blocks acceptance. Zero-change
+jobs never run verification. A nonzero verdict or timeout does not rewrite the
+provider outcome: status remains `completed`, while `delegate-jobs wait` keeps
+its existing exit 6 behavior for a nonzero verification exit.
 
 Adapters assert their CLI versions before opening a provider session. `DELEGATE_MIN_CODEX_VERSION` and `DELEGATE_MIN_CURSOR_VERSION` override the validated built-in floors (`0.144.0` and `2026.7.0` respectively); a lower observed version fails with non-retryable `PROVIDER_TOO_OLD` and reports both versions.
 
@@ -185,4 +205,22 @@ Long result text can be read with `delegate_inspect.resultWindow` or `delegate-j
 
 ## Acceptance
 
-Do not report completion solely from an agent message. Require every write-mode delegation to declare `verify: { command, timeoutSeconds }` with the project's real check command. Treat its real-tree verdict as the verification of record; never substitute a worker's self-reported sandbox green. Inspect changes, verify requested behavior, and identify any checks that could not run. External-agent claims are evidence to validate, not proof.
+Do not report completion solely from an agent message. `status` retains its
+provider-lifecycle meaning. Write-mode completion adds
+`acceptance: { state, blockedBy, evidence, decidedBy, decidedAt }`:
+`ready-for-review` when the mechanical evidence is clean, or `blocked` for
+verification failure/timeout, zero changes, scope violation, unresolved
+structured findings, or base/input drift. No broker path auto-accepts.
+
+After reviewing the diff and evidence, record the owner decision with
+`delegate-jobs accept|reject <id> [--reason ...]` or additive MCP
+`delegate_decide`. Acceptance is refused while blockers remain. Both commands
+bind the decision to an evidence digest and only update the record; they never
+apply, commit, revert, or otherwise mutate source.
+
+`autoFix: { maxRounds }` / `--auto-fix-rounds` is off by default and hard-capped
+at three. A continuation is permitted only for deterministic verification or
+scope evidence with unchanged scope/privileges, remaining time/output budget,
+and a lower failure or scope-violation count. Ambiguity, semantic findings,
+timeout, drift, no progress, exhausted budget, or the cap stops the loop and
+records why.

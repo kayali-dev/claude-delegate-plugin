@@ -5,13 +5,18 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { brokerError, normalizeBrokerError } from './errors.mjs';
-import { auditLogPath, avoidPercentFor, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerEnabled, saveJob, validateProvider } from './state.mjs';
+import { auditLogPath, avoidPercentFor, dataDir, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerConfigPath, providerEnabled, saveJob, statePath, validateProvider } from './state.mjs';
 import { isProcessAlive } from './process.mjs';
 import { withFileLock } from './lock.mjs';
 import { assembleProviderPrompt } from './packet.mjs';
 import { applyProfile, lintPacket } from './profiles.mjs';
 import { ensureSupervisorReady, submitJobToSupervisor } from './supervisor-client.mjs';
 import { supervisorBrokerVersion } from './supervisor-common.mjs';
+import { acceptanceEvidenceDigest, buildAcceptance } from './acceptance.mjs';
+import {
+  deriveVerificationProfile,
+  verificationRepositoryRevision
+} from './verification-profile.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -190,6 +195,8 @@ export function terminalAuditRecord(job, options = {}) {
     },
     usage: job.usage || null,
     verification: job.verification || null,
+    verificationOrigin: job.verificationOrigin || null,
+    acceptance: job.acceptance || null,
     nudgeCount: job.nudgeCount || 0,
     durationMs: job.durationMs ?? Math.max(0, (completedAt - (job.createdAt || completedAt)) * 1000),
     ...(options.backfilled === true ? { backfilled: true } : {})
@@ -978,6 +985,58 @@ export function inspectJob(id) {
   };
 }
 
+export function decideAcceptance(id, decision, options = {}) {
+  assertJobId(id);
+  if (!['accepted', 'rejected'].includes(decision)) {
+    throw brokerError('INVALID_REQUEST', "acceptance decision must be 'accepted' or 'rejected'");
+  }
+  return withLock(id, () => {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    if (!WRITE_MODES.has(job.mode) || job.status !== 'completed') {
+      throw brokerError('INVALID_REQUEST', 'acceptance decisions require a completed implement or verify job', { provider: job.provider });
+    }
+    const current = job.acceptance || buildAcceptance(job);
+    if (!current) throw brokerError('INVALID_REQUEST', 'acceptance evidence is unavailable', { provider: job.provider });
+    if (decision === 'accepted' && current.state !== 'ready-for-review') {
+      throw brokerError('ACCEPTANCE_BLOCKED', `job is ${current.state}; resolve ${current.blockedBy?.join(', ') || 'the recorded blockers'} before accepting`, {
+        provider: job.provider
+      });
+    }
+    const decidedBy = redact(String(options.decidedBy || 'owner'), '', 160);
+    const reason = options.reason == null ? null : redact(String(options.reason), '', 2000);
+    const decidedAt = new Date().toISOString();
+    const evidenceDigest = acceptanceEvidenceDigest(current);
+    job.acceptance = {
+      state: decision,
+      blockedBy: current.blockedBy || [],
+      evidence: current.evidence,
+      evidenceDigest,
+      decidedBy,
+      decidedAt,
+      ...(reason ? { reason } : {}),
+      priorState: current.state
+    };
+    job.revision = (job.revision || 0) + 1;
+    job.updatedAt = Math.floor(Date.now() / 1000);
+    appendUnlocked(job, 'acceptance.decided', {
+      state: decision,
+      reason,
+      decidedBy,
+      decidedAt,
+      evidenceDigest,
+      priorState: current.state
+    });
+    saveJob(job);
+    return {
+      id: job.id,
+      status: job.status,
+      acceptance: job.acceptance,
+      revision: job.revision
+    };
+  });
+}
+
 function driftReportFor(job) {
   const changed = job.changedFiles;
   if (!changed) return { modified: [], newFiles: [], outsideScope: [] };
@@ -1064,6 +1123,9 @@ export function listManagedJobs(options = {}) {
           ? job.result.text.slice(0, 200)
           : typeof job.result?.plan === 'string' ? job.result.plan.slice(0, 200) : null,
       changedFiles: job.changedFiles || null,
+      verification: job.verification || null,
+      verificationOrigin: job.verificationOrigin || null,
+      acceptance: job.acceptance || null,
       resolvedModel: job.resolvedModel || null,
       error: job.error || null
     });
@@ -1467,11 +1529,24 @@ function gitBaseline(cwd, options = {}) {
   if (result.status !== 0) return { files: [], hashes: {} };
   const entries = result.stdout.split('\0').filter(Boolean);
   const files = [];
+  const internalState = [
+    dataDir() === path.resolve(cwd) ? null : dataDir(),
+    jobsDir(),
+    auditLogPath(),
+    statePath(),
+    providerConfigPath(),
+    path.join(dataDir(), 'verification-profiles')
+  ].filter(Boolean).map((candidate) => path.relative(cwd, candidate).replaceAll('\\', '/').replace(/\/+$/, ''))
+    .filter((candidate) => candidate && candidate !== '..' && !candidate.startsWith('../') && !path.isAbsolute(candidate));
+  const internal = (file) => internalState.some((candidate) => file === candidate || file.startsWith(`${candidate}/`));
   for (let i = 0; i < entries.length; i += 1) {
     const status = entries[i].slice(0, 2);
     const file = entries[i].slice(3);
-    if (file) files.push(file);
-    if (/[RC]/.test(status) && entries[i + 1]) files.push(entries[++i]);
+    if (file && !internal(file)) files.push(file);
+    if (/[RC]/.test(status) && entries[i + 1]) {
+      const source = entries[++i];
+      if (!internal(source)) files.push(source);
+    }
   }
   const unique = [...new Set(files)];
   const hashes = {};
@@ -1691,14 +1766,99 @@ function validatedRetryPolicy(value) {
 function validatedVerify(value, mode) {
   if (value == null) return null;
   if (!WRITE_MODES.has(mode)) throw brokerError('INVALID_REQUEST', 'verify is available only for write modes (implement and verify)');
-  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.command !== 'string' || !value.command.trim()) {
-    throw brokerError('INVALID_REQUEST', 'verify.command must be a non-empty string');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw brokerError('INVALID_REQUEST', 'verify must contain a command or an exception reason');
+  }
+  const hasCommand = typeof value.command === 'string' && value.command.trim();
+  const hasException = typeof value.exception === 'string' && value.exception.trim();
+  if (Boolean(hasCommand) === Boolean(hasException)) {
+    throw brokerError('INVALID_REQUEST', 'verify must contain exactly one of command or exception');
+  }
+  if (hasException) {
+    if (value.timeoutSeconds != null) throw brokerError('INVALID_REQUEST', 'verify.timeoutSeconds is not valid with verify.exception');
+    return { exception: value.exception.trim() };
   }
   const timeoutSeconds = value.timeoutSeconds == null ? 600 : Number(value.timeoutSeconds);
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 86400) {
     throw brokerError('INVALID_REQUEST', 'verify.timeoutSeconds must be an integer between 1 and 86400');
   }
   return { command: value.command, timeoutSeconds };
+}
+
+function validatedAutoFix(value, mode) {
+  if (value == null) return null;
+  if (!WRITE_MODES.has(mode)) throw brokerError('INVALID_REQUEST', 'autoFix is available only for write modes (implement and verify)');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw brokerError('INVALID_REQUEST', 'autoFix must be an object');
+  }
+  const maxRounds = Number(value.maxRounds);
+  if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100) {
+    throw brokerError('INVALID_REQUEST', 'autoFix.maxRounds must be an integer between 1 and 100; the broker always applies its lower hard cap');
+  }
+  const internal = value._state && typeof value._state === 'object' ? value._state : {};
+  return {
+    maxRounds,
+    round: Number.isSafeInteger(internal.round) ? internal.round : 0,
+    startedAtMs: Number.isFinite(internal.startedAtMs) ? internal.startedAtMs : Date.now(),
+    ...(internal.previousMetrics ? { previousMetrics: internal.previousMetrics } : {}),
+    ...(internal.rootJobId ? { rootJobId: internal.rootJobId } : {})
+  };
+}
+
+function resolvedVerification(value, mode, cwd) {
+  const explicit = validatedVerify(value, mode);
+  if (!WRITE_MODES.has(mode)) return { verify: explicit, verification: null, verificationProfile: null };
+  if (String(process.env.DELEGATE_VERIFY || '').trim().toLowerCase() === 'off') {
+    return {
+      verify: explicit ? { ...explicit, disabled: true } : null,
+      verification: {
+        state: 'skipped',
+        reason: 'Broker verification disabled by DELEGATE_VERIFY=off',
+        exception: 'DELEGATE_VERIFY=off',
+        recordedAt: new Date().toISOString()
+      },
+      verificationProfile: null
+    };
+  }
+  if (explicit?.exception) {
+    return {
+      verify: explicit,
+      verification: {
+        state: 'exception',
+        reason: explicit.exception,
+        exception: explicit.exception,
+        recordedAt: new Date().toISOString()
+      },
+      verificationProfile: null
+    };
+  }
+  if (explicit) return { verify: explicit, verification: { state: 'pending' }, verificationProfile: null };
+  const profile = deriveVerificationProfile(cwd);
+  if (!profile.recipe) {
+    return {
+      verify: null,
+      verification: {
+        state: 'no-recipe',
+        reason: profile.noRecipeReason,
+        source: { repoRoot: profile.repoRoot, cache: profile.cache },
+        recordedAt: new Date().toISOString()
+      },
+      verificationProfile: profile
+    };
+  }
+  const commands = profile.recipe.commands.map((entry) => ({ ...entry }));
+  return {
+    verify: {
+      command: commands[0].command,
+      commands,
+      timeoutSeconds: profile.recipe.timeoutSeconds,
+      origin: 'derived',
+      format: 'recipe-v1',
+      source: profile.recipe.source
+    },
+    verification: { state: 'pending' },
+    verificationProfile: profile
+  };
 }
 
 function resolveManagedJobOptions(options, id) {
@@ -1716,10 +1876,11 @@ function resolveManagedJobOptions(options, id) {
   const retryPolicy = validatedRetryPolicy(options.retryPolicy);
   const mode = options.mode || 'consult';
   if (options.autoNudge === true && !READ_MODES.has(mode)) throw brokerError('INVALID_REQUEST', 'autoNudge is available only for read modes');
-  const verify = validatedVerify(options.verify, mode);
   const reportSchema = validatedReportSchema(options.reportSchema);
   const cwd = path.resolve(options.cwd || process.cwd());
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw brokerError('INVALID_REQUEST', `cwd does not exist or is not a directory: ${cwd}`, { provider });
+  const { verify, verification, verificationProfile } = resolvedVerification(options.verify, mode, cwd);
+  const autoFix = validatedAutoFix(options.autoFix, mode);
   if (provider === 'cursor' && options.transport === 'headless' && options.startPaused === true) {
     throw brokerError('INVALID_REQUEST', 'startPaused requires Cursor ACP; headless cannot establish a session before its first prompt', { provider });
   }
@@ -1754,6 +1915,9 @@ function resolveManagedJobOptions(options, id) {
     retryPolicy,
     mode,
     verify,
+    verification,
+    verificationProfile,
+    autoFix,
     reportSchema,
     cwd,
     transport,
@@ -1804,7 +1968,10 @@ export function previewManagedJob(options) {
     idempotencyKey: resolved.idempotencyKey,
     groupId: resolved.groupId,
     retryPolicy: resolved.retryPolicy,
-    verify: resolved.verify ? { command: redact(resolved.verify.command), timeoutSeconds: resolved.verify.timeoutSeconds } : null,
+    verify: resolved.verify ? redact(resolved.verify) : null,
+    verification: resolved.verification,
+    verificationProfile: resolved.verificationProfile,
+    autoFix: resolved.autoFix,
     startPaused: prepared.startPaused === true,
     isolation: prepared.isolation || 'shared',
     autoNudge: prepared.autoNudge === true,
@@ -1826,7 +1993,7 @@ export function createManagedJob(options) {
   const resolved = resolveManagedJobOptions(options, id);
   const {
     sensitivePromptDetected, timeoutSeconds, maxOutputTokens, idempotencyKey, groupId, retryPolicy,
-    mode, verify, reportSchema, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
+    mode, verify, verification, verificationProfile, autoFix, reportSchema, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
@@ -1844,7 +2011,12 @@ export function createManagedJob(options) {
     if (hash) baseline.hashes[item.staged] = hash;
   }
   writePrivate(p.prompt, options.prompt);
-  if (verify) writePrivate(p.verifyCommand, verify.command);
+  const runnableVerify = verify?.command && verify.disabled !== true;
+  if (runnableVerify) {
+    writePrivate(p.verifyCommand, verify.format === 'recipe-v1'
+      ? `${JSON.stringify(verify.commands)}\n`
+      : verify.command);
+  }
   const job = {
     schemaVersion: 2,
     id,
@@ -1860,7 +2032,10 @@ export function createManagedJob(options) {
     groupId,
     retryPolicy,
     retries: 0,
-    verify: verify ? { command: redact(verify.command), timeoutSeconds: verify.timeoutSeconds } : null,
+    verify: verify ? redact(verify) : null,
+    verification,
+    verificationProfile: verificationProfile ? redact(verificationProfile) : null,
+    autoFix,
     network: options.network === true,
     networkAllow,
     addDirs,
@@ -1889,7 +2064,7 @@ export function createManagedJob(options) {
     managedBy: 'delegate-control',
     capabilities: providerCapabilities(provider, transport),
     promptPath: p.prompt,
-    verifyCommandPath: verify ? p.verifyCommand : null,
+    verifyCommandPath: runnableVerify ? p.verifyCommand : null,
     stdoutPath: p.stdout,
     stderrPath: p.stderr,
     finishedPath: p.finished,
@@ -1899,6 +2074,7 @@ export function createManagedJob(options) {
     updatedAt: now,
     isolation: options.isolation || 'shared',
     attributionConfidence: options.isolation === 'worktree' ? 'high' : 'best-effort',
+    baseRevision: verificationRepositoryRevision(cwd),
     baselineFiles: baseline.files,
     baselineHashes: baseline.hashes
   };
@@ -1907,6 +2083,11 @@ export function createManagedJob(options) {
     provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, groupId, startPaused: job.startPaused,
     network: job.network, networkAllow: job.networkAllow, addDirs: job.addDirs, approveMcps: job.approveMcps,
     cursorWorktree: job.cursorWorktree, cursorWorktreeBase: job.cursorWorktreeBase,
+    verification: job.verification,
+    verificationProfile: job.verificationProfile
+      ? { repoRoot: job.verificationProfile.repoRoot, recipe: job.verificationProfile.recipe, cache: job.verificationProfile.cache }
+      : null,
+    autoFix: job.autoFix,
     ...(job.sandbox === 'off' ? { sandbox: 'off' } : {})
   });
   if (staged.ingested.length) appendJobEvent(id, 'files.ingested', { stagingDir: staged.stagingDir, files: staged.ingested });
@@ -2327,7 +2508,9 @@ export function resumeManagedJob(id, options) {
   if (!resumability.ok) throw brokerError(resumability.code, resumability.reason, { provider: parent.provider });
   const storedParent = loadJob(id) || parent;
   let inheritedVerify = null;
-  if (storedParent.verify && storedParent.verifyCommandPath) {
+  if (storedParent.verify?.exception) {
+    inheritedVerify = { exception: storedParent.verify.exception };
+  } else if (storedParent.verify && storedParent.verifyCommandPath && storedParent.verify.origin !== 'derived') {
     try {
       inheritedVerify = {
         command: fs.readFileSync(storedParent.verifyCommandPath, 'utf8'),
@@ -2363,6 +2546,15 @@ export function resumeManagedJob(id, options) {
     sandbox: options.sandbox ?? parent.sandbox ?? null,
     allowedPaths: options.allowedPaths ?? parent.originalAllowedPaths ?? parent.allowedPaths ?? null,
     autoNudge: options.autoNudge ?? parent.autoNudge ?? false,
+    autoFix: options.autoFix ?? (parent.autoFix ? {
+      maxRounds: parent.autoFix.maxRounds,
+      _state: {
+        round: parent.autoFix.round,
+        startedAtMs: parent.autoFix.startedAtMs,
+        previousMetrics: parent.autoFix.previousMetrics,
+        rootJobId: parent.autoFix.rootJobId
+      }
+    } : null),
     reportSchema: options.reportSchema ?? parent.reportSchema ?? null,
     overrideLimit: options.overrideLimit,
     overrideWriter: options.overrideWriter,

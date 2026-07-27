@@ -25,10 +25,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage',
-    'delegate_work'
+    'delegate_work', 'delegate_decide'
   ]);
   const legacySchemas = responses[1].result.tools
-    .filter((tool) => tool.name !== 'delegate_work')
+    .filter((tool) => !['delegate_work', 'delegate_decide'].includes(tool.name))
     .map(({ name, inputSchema }) => ({ name, inputSchema }));
   assert.equal(
     createHash('sha256').update(JSON.stringify(legacySchemas)).digest('hex'),
@@ -41,6 +41,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
   const stats = responses[1].result.tools.find((tool) => tool.name === 'delegate_stats');
   const work = responses[1].result.tools.find((tool) => tool.name === 'delegate_work');
+  const decide = responses[1].result.tools.find((tool) => tool.name === 'delegate_decide');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
   assert.ok(start.inputSchema.properties.retryPolicy);
@@ -67,6 +68,8 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.ok(resume.inputSchema.properties.verify);
   assert.equal(work.inputSchema.additionalProperties, false);
   assert.deepEqual(Object.keys(work.inputSchema.properties), ['id', 'limit']);
+  assert.equal(decide.inputSchema.additionalProperties, false);
+  assert.deepEqual(decide.inputSchema.required, ['jobId', 'decision']);
 });
 
 test('delegate_stats returns filtered audit aggregates and totals and rejects job parameters', async () => {

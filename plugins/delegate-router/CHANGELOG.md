@@ -2,6 +2,35 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.31.0 — 2026-07-27
+
+- **Stricter default, with recorded escape hatches:** write-mode jobs now derive
+  a repository verification profile and run it on the real tree after observed
+  changes. Explicit `verify.command` still wins. Per-job
+  `verify: { exception: "<reason>" }` and broker-wide `DELEGATE_VERIFY=off`
+  skip the run, but both persist a visible verification exception; a repository
+  with no derivable recipe records `verification.state: "no-recipe"`.
+  Derivation checks nearest repository `CLAUDE.md` then `AGENTS.md` quality
+  sections before `package.json` scripts, caches the profile and its source in
+  the state directory, and never invents a command outside those sources.
+- Added the acceptance dimension without changing job `status`.
+  Write-mode provider completion still reports `status: "completed"` and now
+  also records `acceptance: { state, blockedBy, evidence, decidedBy,
+  decidedAt }`. Clean evidence becomes `ready-for-review`; verification
+  failure/timeout, zero changes, scope violations, unresolved structured
+  findings, or base/input drift becomes `blocked`. Acceptance is never
+  automatic. `delegate-jobs accept|reject` and the additive `delegate_decide`
+  MCP tool record an evidence-bound owner/coordinator decision without
+  applying, reverting, or committing code.
+- The push monitor consumes acceptance state. `blocked` is a distinct edge
+  ahead of `ready-for-review`, and check labels now reflect broker pass, fail,
+  timeout, stale, or recorded no-run evidence.
+- Added opt-in `autoFix: { maxRounds }` / CLI `--auto-fix-rounds`. It remains
+  off by default, is hard-capped at three rounds, continues only for
+  deterministic verification/scope evidence with measurable progress and
+  remaining budget, and stops on semantic findings, ambiguity, no progress,
+  drift, timeout, or budget exhaustion.
+
 ## 0.30.0 — 2026-07-26
 
 - Added the resident, user-level `delegate-supervisor`. Managed attempts now run

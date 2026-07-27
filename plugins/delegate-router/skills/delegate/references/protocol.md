@@ -11,6 +11,12 @@
 
 Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.events.jsonl`. Prompts, logs, commands, and state files are created with user-only permissions. Event values are recursively redacted and size-bounded.
 
+P3 fields are additive. Historical records may omit `verificationProfile`,
+structured `verification`, `acceptance`, and `autoFix`; readers and WorkItem
+projections preserve that absence without migration. New write records retain
+the repository-sourced verification profile and an acceptance object beside
+the unchanged lifecycle `status`.
+
 New job/attempt records add an immutable launch identity:
 `origin: { projectDir, cwd, brokerVersion, launchedAtMs }`. `projectDir` is the
 launcher's `CLAUDE_PROJECT_DIR`, with launch cwd as the fallback; `origin.cwd`
@@ -113,6 +119,7 @@ command.applied, command.rejected
 scope.violation, ingest.diverged
 security.warning, baseline.dirty, budget.exceeded
 job.retry, verification.finished
+acceptance.decided, autofix.launched, autofix.stopped
 error, provider.event, provider.item
 ```
 
@@ -137,7 +144,7 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 | Retryable | Codes |
 | --- | --- |
 | `true` | `LOCK_TIMEOUT`, `WRITER_ACTIVE`, `REVISION_CONFLICT`, `ORPHANED`, `PARENT_ACTIVE`, `TIMEOUT`, `RPC_TIMEOUT`, `TRANSPORT_ERROR`, `PROVIDER_ERROR`, `STATE_ERROR` |
-| `false` | `INVALID_REQUEST`, `NOT_FOUND`, `QUOTA_GUARD`, `INVALID_MODEL`, `WRONG_LANE`, `RESUME_UNSUPPORTED`, `DIRECT_TRANSPORT`, `ACP_TIER_UNAVAILABLE`, `USER_INPUT_REQUIRED`, `SECRET_IN_PROMPT`, `BUDGET_EXCEEDED`, `LARGE_WRITE`, `PROVIDER_DISABLED`, `PROVIDER_TOO_OLD`, `SESSION_UNAVAILABLE`, `UNMANAGED_JOB`, `JOB_TERMINAL`, `UNSUPPORTED_STRATEGY`, `INTERNAL` |
+| `false` | `INVALID_REQUEST`, `NOT_FOUND`, `QUOTA_GUARD`, `INVALID_MODEL`, `WRONG_LANE`, `RESUME_UNSUPPORTED`, `DIRECT_TRANSPORT`, `ACP_TIER_UNAVAILABLE`, `USER_INPUT_REQUIRED`, `SECRET_IN_PROMPT`, `BUDGET_EXCEEDED`, `LARGE_WRITE`, `PROVIDER_DISABLED`, `PROVIDER_TOO_OLD`, `SESSION_UNAVAILABLE`, `UNMANAGED_JOB`, `JOB_TERMINAL`, `ACCEPTANCE_BLOCKED`, `UNSUPPORTED_STRATEGY`, `INTERNAL` |
 
 `retryable: true` means retrying the same request, possibly after backoff, can succeed. `QUOTA_GUARD` needs a window reset or different provider; `ACP_TIER_UNAVAILABLE` needs a catalog or transport change; `USER_INPUT_REQUIRED` needs new information in a resume; and `BUDGET_EXCEEDED` needs a higher cap. `REVISION_CONFLICT` includes `currentRevision`; budget and timeout failures retain partial state for an explicit resume.
 
@@ -171,7 +178,17 @@ Codex app-server produces provider-level file and aggregated diff events. Cursor
 
 ## Completion Semantics
 
-`resultText` normalizes the three provider result shapes (Codex string, Cursor ACP object, Cursor headless CLI envelope) into one always-readable field; provider extras are preserved under `result`. Provider-spawned child work stays distinct in `result.subagents[]` as bounded `{ id, type, task, status, durationMs, output }` entries, with exposed name/usage fields when available. Read-mode jobs whose final message is narration-length are flagged `resultSuspect: 'short-final-message'`; jobs whose preserved subagent output substantially outweighs the parent response use the distinct `subagent-output-dominates-final` code. Opt-in `autoNudge` performs one same-session correction, replaces the result, and preserves `result.firstAttemptText`. `reportSchema` parses only the last fenced JSON object into `result.structured`, surfaces `objectiveMet`, and otherwise sets `structuredMissing`. Cursor sessions that advertise a model only as its fast variant are escaped to the headless transport with the CLI's non-fast id when one exists (`cursor:acp-tier-fallback`), or proceed fast with a `cursor:fast-fallback` event; a session reporting a different model than negotiated raises `cursor:model-mismatch`. Cursor plan-mode plans arrive as ACP `plan` updates, not agent messages: they are journaled as `plan.updated` and folded into the terminal record as `result.plan`, while `result.text` carries only conversational messages. `completed` means the provider turn and optional verification command ended, not that the objective was met. Read `result`, `changedFiles`, `driftReport`, and the diff before treating a job as successful. `delegate-jobs wait` exits 5 when a write-mode job completes with zero observed file changes and 6 when verification is nonzero; verification failure leaves status `completed`. Terminal failures and cancellations include a checkpoint, while `resumable` uses the exact same decision predicate as `delegate_resume`. Codex threads that engaged the multi-agent review flow may refuse direct resume; that surfaces as `RESUME_UNSUPPORTED`, and the recovery is a fresh job whose packet folds in the prior findings.
+`resultText` normalizes the three provider result shapes (Codex string, Cursor ACP object, Cursor headless CLI envelope) into one always-readable field; provider extras are preserved under `result`. Provider-spawned child work stays distinct in `result.subagents[]` as bounded `{ id, type, task, status, durationMs, output }` entries, with exposed name/usage fields when available. Read-mode jobs whose final message is narration-length are flagged `resultSuspect: 'short-final-message'`; jobs whose preserved subagent output substantially outweighs the parent response use the distinct `subagent-output-dominates-final` code. Opt-in `autoNudge` performs one same-session correction, replaces the result, and preserves `result.firstAttemptText`. `reportSchema` parses only the last fenced JSON object into `result.structured`, surfaces `objectiveMet`, and otherwise sets `structuredMissing`. Cursor sessions that advertise a model only as its fast variant are escaped to the headless transport with the CLI's non-fast id when one exists (`cursor:acp-tier-fallback`), or proceed fast with a `cursor:fast-fallback` event; a session reporting a different model than negotiated raises `cursor:model-mismatch`. Cursor plan-mode plans arrive as ACP `plan` updates, not agent messages: they are journaled as `plan.updated` and folded into the terminal record as `result.plan`, while `result.text` carries only conversational messages.
+
+`completed` retains exactly its provider-lifecycle meaning. Verification
+failure/timeout never converts it to `failed`. Write completion separately
+records acceptance state: broker `ready-for-review` for clean evidence or
+`blocked` with explicit reasons; only `delegate-jobs accept|reject` or
+`delegate_decide` records `accepted`/`rejected`. The decision retains the
+evidence and digest it was made against and performs no source operation.
+Existing consumers may continue branching on `status === "completed"`.
+`delegate-jobs wait` keeps exit 5 for zero observed changes and 6 for nonzero
+verification.
 
 ## Honest Cursor non-parity
 

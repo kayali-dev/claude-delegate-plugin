@@ -5,6 +5,14 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P3 acceptance-by-default is implemented additively. Write attempts derive and
+  cache repository-sourced verification profiles, run broker verification on a
+  stable real-tree observation after nonzero changes, and retain every
+  no-recipe, explicit-exception, global-disable, timeout, failure, and stale
+  path. Existing `status` values are unchanged; `acceptance` records
+  ready/blocked evidence beside them, while CLI/MCP decisions alone can mark an
+  attempt accepted or rejected. Automatic deterministic fix continuations are
+  opt-in, progress-checked, budget-checked, and hard-capped at three.
 - P2b resident ownership is implemented additively. `delegate-supervisor` is a
   lazily started, single-instance user process reached through a private
   `0600` Unix-domain socket. It owns worker process groups, persists attempt

@@ -4,6 +4,7 @@ import { normalizeBrokerError } from './lib/errors.mjs';
 import { terminatePid } from './lib/process.mjs';
 import {
   backfillAuditLog,
+  decideAcceptance,
   diffStat,
   filterDiffPaths,
   groupSummary,
@@ -31,7 +32,7 @@ import { readProjectedWorkItems } from './lib/work-read.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
   delegate-jobs work [--json] [--id <job-or-work-id>]
   delegate-jobs group <id> [--json]
@@ -47,7 +48,8 @@ function usage() {
   delegate-jobs cancel <job-id> [--expected-revision N]
   delegate-jobs release <job-id> [--expected-revision N]
   delegate-jobs respond <job-id> --expected-revision N [--request-id id] [--answer text|--accept|--reject|--response-json json] [--command-id id]
-  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command --verify-timeout-seconds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs accept|reject <job-id> [--reason text]
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs review-round <job-id> --prompt <findings-or-file> [--prompt-file path]
   delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs usage <job-id> [--json]
@@ -84,9 +86,20 @@ function retryPolicy(args) {
 
 function verifyOption(args) {
   const command = value(args, '--verify-command');
+  const exception = value(args, '--verify-exception');
   const timeoutSeconds = value(args, '--verify-timeout-seconds');
+  if (command != null && exception != null) throw new Error('choose only one of --verify-command or --verify-exception');
+  if (exception != null) {
+    if (timeoutSeconds != null) throw new Error('--verify-timeout-seconds is not valid with --verify-exception');
+    return { exception };
+  }
   if (command == null && timeoutSeconds == null) return undefined;
   return { command, ...(timeoutSeconds == null ? {} : { timeoutSeconds: Number(timeoutSeconds) }) };
+}
+
+function autoFixOption(args) {
+  const maxRounds = value(args, '--auto-fix-rounds');
+  return maxRounds == null ? undefined : { maxRounds: Number(maxRounds) };
 }
 
 function reportSchemaOption(args) {
@@ -149,7 +162,7 @@ try {
       groupId: value(args, '--group'), startPaused: args.includes('--start-paused'),
       ingestFiles: value(args, '--ingest-files')?.split(',').map((item) => item.trim()).filter(Boolean),
       autoNudge: args.includes('--auto-nudge'), reportSchema: reportSchemaOption(args),
-      retryPolicy: retryPolicy(args), verify: verifyOption(args),
+      retryPolicy: retryPolicy(args), verify: verifyOption(args), autoFix: autoFixOption(args),
       network: args.includes('--network'), sandbox: value(args, '--sandbox'),
       networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),
       addDirs: values(args, '--add-dir'), approveMcps: args.includes('--approve-mcps'),
@@ -193,8 +206,8 @@ try {
     if (args.includes('--json')) json(jobs);
     else if (!jobs.length) console.log('No delegation jobs.');
     else {
-      console.log('Job ID                         Provider Status     Phase       Model');
-      for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${displayModel(job)}`);
+      console.log('Job ID                         Provider Status     Phase       Acceptance       Model');
+      for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${(job.acceptance?.state || '-').padEnd(16)} ${displayModel(job)}`);
     }
     for (const job of jobs) renderVerificationOrigin(job);
   } else if (command === 'work') {
@@ -282,7 +295,7 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       job = requireJob(id);
     }
-    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, changedFiles: job.changedFiles || null, verification: job.verification || null, result: job.result, error: job.error });
+    json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, changedFiles: job.changedFiles || null, verification: job.verification || null, acceptance: job.acceptance || null, result: job.result, error: job.error });
     if (job.status !== 'completed') process.exit(job.status === 'failed' ? 3 : 4);
     if (job.verification?.exitCode) {
       console.error(`${job.id} completed but verification exited ${job.verification.exitCode}`);
@@ -349,6 +362,11 @@ try {
       ...(accepts || rejects ? { accept: accepts } : {}),
       ...(responseJson ? { response: JSON.parse(responseJson) } : {})
     }, raw == null ? null : Number(raw)));
+  } else if (command === 'accept' || command === 'reject') {
+    json(decideAcceptance(args[0], command === 'accept' ? 'accepted' : 'rejected', {
+      reason: value(args, '--reason'),
+      decidedBy: `cli:${process.env.USER || 'owner'}`
+    }));
   } else if (command === 'resume') {
     const rawTimeout = value(args, '--timeout-seconds');
     const rawMaxOutputTokens = value(args, '--max-output-tokens');
@@ -356,7 +374,7 @@ try {
       prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? undefined : Number(rawTimeout),
       maxOutputTokens: rawMaxOutputTokens == null ? undefined : Number(rawMaxOutputTokens),
-      retryPolicy: retryPolicy(args), verify: verifyOption(args),
+      retryPolicy: retryPolicy(args), verify: verifyOption(args), autoFix: autoFixOption(args),
       network: args.includes('--network') ? true : undefined, sandbox: value(args, '--sandbox'),
       networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),
       addDirs: values(args, '--add-dir').length ? values(args, '--add-dir') : undefined,
@@ -382,9 +400,9 @@ try {
         offset: Number(value(args, '--offset', 0)),
         maxChars: Number(value(args, '--max-chars', 60000))
       });
-      if (args.includes('--json')) json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, verificationOrigin: job.verificationOrigin || null, ...window });
+      if (args.includes('--json')) json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, verificationOrigin: job.verificationOrigin || null, acceptance: job.acceptance || null, ...window });
       else process.stdout.write(window.resultText);
-    } else json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, verificationOrigin: job.verificationOrigin || null, result: job.result, error: job.error });
+    } else json({ id: job.id, status: job.status, model: job.model, session: job.providerSessionId || job.session, usage: job.usage, durationMs: job.durationMs, verificationOrigin: job.verificationOrigin || null, verification: job.verification || null, acceptance: job.acceptance || null, result: job.result, error: job.error });
     renderVerificationOrigin(job);
   } else if (command === 'logs') {
     const job = requireJob(args[0]);

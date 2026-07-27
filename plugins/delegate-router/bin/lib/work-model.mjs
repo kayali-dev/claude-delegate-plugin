@@ -2,6 +2,7 @@ export const WORK_SCHEMA_VERSION = 1;
 
 export const WORK_DECISION_STATES = Object.freeze([
   'ready-for-review',
+  'blocked',
   'accepted',
   'rejected',
   'superseded'

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, completeIngestedFiles, DeltaRedactor, diffStat, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
+import { appendJobEvent, claimCommands, completeCommand, completeIngestedFiles, DeltaRedactor, diffStat, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, resumeManagedJob, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -23,6 +23,11 @@ import { terminateProcessTree } from './process.mjs';
 import { loadJob, mutateState, setWindow } from './state.mjs';
 import { captureCodexAllowanceSnapshot } from './allowance.mjs';
 import { isCodexFirstClassItemType } from './codex-item-types.mjs';
+import { buildAcceptance, evaluateAutoFix } from './acceptance.mjs';
+import {
+  captureVerificationInput,
+  verificationRepositoryRevision
+} from './verification-profile.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
@@ -773,7 +778,13 @@ function terminal(job, status, phase, extra = {}) {
       }
     } catch {}
   }
-  const deferVerification = status === 'completed' && job.verify && !loadJob(job.id)?.verification;
+  const storedBeforeTerminal = loadJob(job.id);
+  const deferVerification = status === 'completed'
+    && changedFiles?.count > 0
+    && job.verify?.command
+    && job.verify?.disabled !== true
+    && job.verifyCommandPath
+    && storedBeforeTerminal?.verification?.state === 'pending';
   let ingestOutcome = null;
   if (status === 'completed' && !deferVerification && job.stagingDir) {
     try { ingestOutcome = completeIngestedFiles(job); }
@@ -806,9 +817,18 @@ function terminal(job, status, phase, extra = {}) {
       : null;
     if (text != null) current.resultText = text;
     if (!deferVerification && status === 'completed') {
-      current.verificationOrigin = current.verification
+      if (current.verification?.state === 'pending' && changedFiles?.count === 0) {
+        current.verification = {
+          state: 'skipped',
+          reason: 'Verification did not run because the write-mode job produced zero observed file changes',
+          recordedAt: new Date().toISOString()
+        };
+      }
+      current.verificationOrigin = ['passed', 'failed', 'timeout', 'stale'].includes(current.verification?.state)
         ? 'broker'
-        : current.sandbox === 'off' ? 'unsandboxed-worker' : 'worker-sandbox';
+        : current.verification
+          ? 'broker-policy'
+          : current.sandbox === 'off' ? 'unsandboxed-worker' : 'worker-sandbox';
     }
     if (!deferVerification && status === 'completed' && current.reportSchema) {
       const structured = parseLastStructuredResult(text, current.reportSchema);
@@ -842,11 +862,19 @@ function terminal(job, status, phase, extra = {}) {
       && subagentOutputChars > Math.max(finalMessageChars * 2, finalMessageChars + 500)) {
       current.resultSuspect = 'subagent-output-dominates-final';
     }
+    if (!deferVerification && status === 'completed' && ['implement', 'verify'].includes(current.mode)) {
+      current.completedRevision = verificationRepositoryRevision(current.cwd);
+      current.baseDrift = Boolean(current.baseRevision && current.completedRevision && current.baseRevision !== current.completedRevision);
+      current.acceptance = buildAcceptance(current);
+    }
   });
   appendJobEvent(job.id, deferVerification
     ? 'job.state'
     : status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error',
   deferVerification ? { status: 'running', phase: 'verifying' } : extra);
+  if (!deferVerification && status === 'completed' && ['implement', 'verify'].includes(job.mode)) {
+    maybeLaunchAutoFix(loadJob(job.id));
+  }
 }
 
 function recordSession(jobId, sessionId, turnId = undefined) {
@@ -1291,7 +1319,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.30.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.31.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2105,7 +2133,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.30.0' }
+      clientInfo: { name: 'delegate-router', version: '0.31.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -2574,52 +2602,143 @@ async function runCursorHeadless(job) {
 function verificationFailure(job, message, exitCode = 127) {
   return {
     command: job.verify?.command || '[unavailable]',
+    state: 'failed',
     exitCode,
     durationMs: 0,
     outputTail: redact(message, '', 2000)
   };
 }
 
-async function executeVerification(job) {
-  let command;
-  try { command = fs.readFileSync(job.verifyCommandPath, 'utf8'); }
-  catch (error) { return verificationFailure(job, `verification command is unavailable: ${error.message}`); }
-  const started = Date.now();
+function verificationCommands(job) {
+  let stored;
+  try { stored = fs.readFileSync(job.verifyCommandPath, 'utf8'); }
+  catch (error) { return { error: `verification command is unavailable: ${error.message}` }; }
+  if (job.verify?.format !== 'recipe-v1') return { commands: [{ command: stored, cwd: '.' }] };
+  try {
+    const commands = JSON.parse(stored);
+    if (!Array.isArray(commands) || !commands.length
+      || !commands.every((entry) => entry && typeof entry.command === 'string' && entry.command.trim())) {
+      return { error: 'derived verification recipe is invalid' };
+    }
+    return { commands };
+  } catch (error) {
+    return { error: `derived verification recipe is unreadable: ${error.message}` };
+  }
+}
+
+function verificationCommandCwd(job, entry) {
+  const root = job.verificationProfile?.repoRoot || job.cwd;
+  const resolved = path.resolve(root, entry.cwd || '.');
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`verification command cwd escapes repository root: ${entry.cwd}`);
+  }
+  return resolved;
+}
+
+async function executeVerificationCommand(job, entry, deadline, append, repositoryRoot) {
+  let commandCwd;
+  try { commandCwd = verificationCommandCwd(job, entry); }
+  catch (error) { return { exitCode: 127, error: error.message, timedOut: false }; }
   return new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-c', command], {
-      cwd: job.cwd,
-      env: process.env,
-      detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
-    });
-    let output = '';
+    let child;
+    let writeProtection = 'change-detection';
+    try {
+      const escapedRoot = repositoryRoot.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+      const sandboxProfile = `(version 1)(allow default)(deny file-write* (subpath "${escapedRoot}"))`;
+      const sandboxProbe = process.platform === 'darwin' && fs.existsSync('/usr/bin/sandbox-exec')
+        ? spawnSync('/usr/bin/sandbox-exec', ['-p', '(version 1)(allow default)', '/usr/bin/true'], {
+          encoding: 'utf8',
+          timeout: 2000,
+          windowsHide: true
+        })
+        : null;
+      const executable = sandboxProbe?.status === 0 ? '/usr/bin/sandbox-exec' : '/bin/sh';
+      writeProtection = sandboxProbe?.status === 0 ? 'sandbox-exec' : 'change-detection';
+      const args = sandboxProbe?.status === 0
+        ? ['-p', sandboxProfile, '/bin/sh', '-e', '-c', entry.command]
+        : ['-e', '-c', entry.command];
+      child = spawn(executable, args, {
+        cwd: commandCwd,
+        env: process.env,
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    } catch (error) {
+      resolve({ exitCode: 127, error: error.message, timedOut: false, writeProtection: 'unavailable' });
+      return;
+    }
     let settled = false;
     let timedOut = false;
-    let timer;
-    const append = (chunk) => { output = `${output}${String(chunk)}`.slice(-8192); };
-    const finish = (exitCode) => {
+    const finish = (exitCode, signal = null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve({
-        command: job.verify.command,
-        exitCode,
-        durationMs: Date.now() - started,
-        outputTail: redact(output.slice(-2000), '', 2000)
+        exitCode: timedOut ? 124 : Number.isInteger(exitCode) ? exitCode : signal ? 128 : 1,
+        timedOut,
+        writeProtection
       });
     };
     child.stdout.on('data', append);
     child.stderr.on('data', append);
     child.once('error', (error) => { append(error.message); finish(127); });
-    child.once('exit', (code, signal) => finish(timedOut ? 124 : Number.isInteger(code) ? code : signal ? 128 : 1));
-    timer = setTimeout(async () => {
+    child.once('exit', finish);
+    const remaining = Math.max(1, deadline - Date.now());
+    const timer = setTimeout(async () => {
       timedOut = true;
       await terminateProcessTree(child);
       finish(124);
-    }, job.verify.timeoutSeconds * 1000);
+    }, remaining);
     timer.unref?.();
   });
+}
+
+async function executeVerification(job) {
+  const loaded = verificationCommands(job);
+  if (loaded.error) return verificationFailure(job, loaded.error);
+  const started = Date.now();
+  const deadline = started + job.verify.timeoutSeconds * 1000;
+  const before = captureVerificationInput(job.cwd);
+  let output = '';
+  let exitCode = 0;
+  let timedOut = false;
+  let writeProtection = 'change-detection';
+  const executed = [];
+  const append = (chunk) => { output = `${output}${String(chunk)}`.slice(-8192); };
+  for (const entry of loaded.commands) {
+    if (Date.now() >= deadline) {
+      exitCode = 124;
+      timedOut = true;
+      break;
+    }
+    const result = await executeVerificationCommand(job, entry, deadline, append, before.repoRoot);
+    executed.push({ command: entry.command, cwd: entry.cwd || '.' });
+    if (result.error) append(result.error);
+    exitCode = result.exitCode;
+    timedOut = result.timedOut;
+    writeProtection = result.writeProtection || writeProtection;
+    if (exitCode !== 0) break;
+  }
+  const after = captureVerificationInput(job.cwd);
+  const inputChanged = before.digest !== after.digest;
+  const state = timedOut ? 'timeout'
+    : exitCode !== 0 ? 'failed'
+      : inputChanged ? 'stale' : 'passed';
+  return {
+    command: job.verify.command,
+    commands: redact(executed),
+    state,
+    exitCode,
+    timedOut,
+    durationMs: Date.now() - started,
+    outputTail: redact(output.slice(-2000), '', 2000),
+    input: before,
+    completedInput: after,
+    inputChanged,
+    writeProtection
+  };
 }
 
 async function finishVerification(job) {
@@ -2627,6 +2746,128 @@ async function finishVerification(job) {
   updateManagedJob(job.id, (current) => { current.verification = verification; }, { incrementRevision: false });
   appendJobEvent(job.id, 'verification.finished', verification);
   terminal(loadJob(job.id), 'completed', 'completed');
+}
+
+function autoFixPrompt(job, decision) {
+  const verification = job.verification || {};
+  const violations = (job.scopeViolations || []).map((entry) => entry?.path).filter(Boolean).slice(0, 20);
+  return `Objective:
+Fix only the deterministic broker evidence from automatic fix round ${decision.round}.
+
+Mode:
+implement
+
+Allowed scope:
+${(job.originalAllowedPaths || job.allowedPaths || []).map((entry) => `- ${entry}`).join('\n') || '- unchanged from the parent job'}
+
+Relevant context:
+Verification state: ${verification.state || 'not-run'}
+Verification exit code: ${verification.exitCode ?? 'n/a'}
+${verification.outputTail ? `Bounded verification tail:\n${redact(verification.outputTail, '', 2000)}` : ''}
+${violations.length ? `Out-of-scope paths still observed:\n${violations.map((entry) => `- ${entry}`).join('\n')}` : ''}
+
+Constraints and non-goals:
+- Do not widen scope, privileges, network access, or the original objective.
+- Address deterministic check or scope evidence only. Do not interpret or loop on semantic review findings.
+- A completed job with zero changed files is a failed objective.
+
+Acceptance criteria:
+- The recorded deterministic failure count or scope-violation count decreases.
+- The inherited real-tree verification recipe passes.
+
+Required verification:
+The broker will run the inherited recipe on the real tree.
+
+Stop and report when:
+- The evidence is ambiguous, requires judgment, or cannot be fixed inside the inherited scope.
+
+Return:
+Outcome, changed files, verification-relevant changes, risks, and blockers.`;
+}
+
+function recordAutoFixStop(job, decision) {
+  updateManagedJob(job.id, (current) => {
+    current.autoFix = {
+      ...current.autoFix,
+      state: 'stopped',
+      stopReason: decision.reason,
+      stoppedAt: new Date().toISOString(),
+      ...(decision.metrics ? { metrics: decision.metrics } : {})
+    };
+  }, { incrementRevision: false });
+  appendJobEvent(job.id, 'autofix.stopped', {
+    reason: decision.reason,
+    round: job.autoFix?.round || 0,
+    metrics: decision.metrics || null
+  });
+}
+
+function remainingOutputBudget(job) {
+  if (!job.maxOutputTokens) return null;
+  const used = usageTotals(job.usage)?.outputTokens || 0;
+  return Math.max(0, job.maxOutputTokens - used);
+}
+
+function remainingWallTime(job) {
+  if (!job.timeoutSeconds) return null;
+  const startedAt = Number(job.autoFix?.startedAtMs || Number(job.createdAt || 0) * 1000);
+  return Math.max(0, Math.floor((job.timeoutSeconds * 1000 - Math.max(0, Date.now() - startedAt)) / 1000));
+}
+
+function maybeLaunchAutoFix(job) {
+  if (!job?.autoFix) return null;
+  const decision = evaluateAutoFix(job);
+  if (decision.action !== 'launch') {
+    recordAutoFixStop(job, decision);
+    return null;
+  }
+  const timeoutSeconds = remainingWallTime(job);
+  const maxOutputTokens = remainingOutputBudget(job);
+  if ((job.timeoutSeconds && timeoutSeconds < 60) || (job.maxOutputTokens && maxOutputTokens < 1)) {
+    recordAutoFixStop(job, { action: 'stop', reason: 'budget-exhausted', metrics: decision.metrics });
+    return null;
+  }
+  try {
+    const child = resumeManagedJob(job.id, {
+      prompt: autoFixPrompt(job, decision),
+      timeoutSeconds: timeoutSeconds || job.timeoutSeconds,
+      maxOutputTokens: maxOutputTokens || job.maxOutputTokens,
+      autoFix: {
+        maxRounds: decision.maxRounds,
+        _state: {
+          round: decision.round,
+          startedAtMs: job.autoFix.startedAtMs,
+          previousMetrics: decision.metrics,
+          rootJobId: job.autoFix.rootJobId || job.id
+        }
+      },
+      reportLint: false
+    });
+    updateManagedJob(job.id, (current) => {
+      current.autoFix = {
+        ...current.autoFix,
+        state: 'launched',
+        metrics: decision.metrics,
+        childJobId: child.id,
+        launchedAt: new Date().toISOString()
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(job.id, 'autofix.launched', {
+      round: decision.round,
+      maxRounds: decision.maxRounds,
+      metrics: decision.metrics,
+      childJobId: child.id
+    });
+    return child;
+  } catch (error) {
+    recordAutoFixStop(job, {
+      action: 'stop',
+      reason: 'launch-failed',
+      metrics: decision.metrics,
+      error: redact(error.message)
+    });
+    return null;
+  }
 }
 
 async function runProviderAttempt(job) {
