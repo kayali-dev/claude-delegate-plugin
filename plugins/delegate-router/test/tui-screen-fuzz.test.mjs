@@ -158,7 +158,11 @@ test('suspect-width repaint owns every background cell beside the scrollbar', ()
     }
   }
   assert.equal(intended.get(98, 2).continuation, false, 'inner padding keeps content spans out of the scrollbar-adjacent cell');
-  assert.equal(JSON.parse(terminal.cells[2][98].style).bg ?? null, null, 'vacated selection background is cleared');
+  assert.equal(
+    JSON.parse(terminal.cells[2][98].style).bg ?? null,
+    `256:${uiPalette.surfaceRaised.bg.index}`,
+    'vacated selection background returns to the raised pane surface'
+  );
 });
 
 test('ambiguous suspect spans take the new owner style in every background direction', () => {
@@ -238,21 +242,26 @@ test('scroll-thrash keeps every scrollbar edge cell composed and clears old thum
     };
     const grid = paintFrame(frame);
     const columns = [
-      { x: 31, start: 1, end: 16, top: CHROME_GLYPHS.corner, bottom: CHROME_GLYPHS.corner, trackStyle: uiPalette.focusBorder },
-      { x: 63, start: 1, end: 17, top: null, bottom: null, trackStyle: uiPalette.border },
-      { x: 95, start: 1, end: 16, top: CHROME_GLYPHS.corner, bottom: CHROME_GLYPHS.corner, follow: true, trackStyle: uiPalette.border }
+      { x: 31, trackStart: 2, trackEnd: 16, padding: [1, 16], owner: uiPalette.surfaceRaised },
+      { x: 63, trackStart: 1, trackEnd: 17, padding: [], owner: uiPalette.surface },
+      { x: 95, trackStart: 2, trackEnd: 16, padding: [1, 16], follow: true, owner: uiPalette.surface }
     ];
     for (const column of columns) {
-      if (column.top) assert.equal(grid.get(column.x, column.start).char, column.top, `step=${step}: top join`);
-      if (column.bottom) assert.equal(grid.get(column.x, column.end).char, column.bottom, `step=${step}: bottom join`);
-      const firstTrack = column.start + (column.top ? 1 : 0);
-      const afterTrack = column.end;
+      for (const y of column.padding) {
+        assert.equal(grid.get(column.x, y).char, ' ', `step=${step}: scrollbar padding ${column.x},${y}`);
+        assert.deepEqual(grid.get(column.x, y).style, column.owner, `step=${step}: scrollbar padding owner ${column.x},${y}`);
+      }
+      const firstTrack = column.trackStart;
+      const afterTrack = column.trackEnd;
       const thumbs = new Set();
       for (let y = firstTrack; y < afterTrack; y += 1) {
         const cell = grid.get(column.x, y);
         const char = cell.char;
         assert.ok(char === CHROME_GLYPHS.scrollTrack || char === CHROME_GLYPHS.scrollThumb, `step=${step}: complete scrollbar cell ${column.x},${y} is ${JSON.stringify(char)}`);
-        assert.deepEqual(cell.style, char === CHROME_GLYPHS.scrollThumb ? uiPalette.scrollThumb : column.trackStyle, `step=${step}: ${char === CHROME_GLYPHS.scrollThumb ? 'thumb' : 'track'} style at ${column.x},${y}`);
+        const expected = char === CHROME_GLYPHS.scrollThumb
+          ? { ...column.owner, ...uiPalette.scrollThumb }
+          : { ...column.owner, ...uiPalette.borderSubtle };
+        assert.deepEqual(cell.style, expected, `step=${step}: ${char === CHROME_GLYPHS.scrollThumb ? 'thumb' : 'track'} style at ${column.x},${y}`);
         if (char === CHROME_GLYPHS.scrollThumb) thumbs.add(y);
       }
       const lengthKey = `${column.x}:${total}`;
@@ -262,7 +271,7 @@ test('scroll-thrash keeps every scrollbar edge cell composed and clears old thum
       const old = previousThumbs.get(column.x) || new Set();
       for (const y of old) if (!thumbs.has(y)) {
         assert.equal(grid.get(column.x, y).char, CHROME_GLYPHS.scrollTrack, `step=${step}: stale thumb at ${column.x},${y}`);
-        assert.deepEqual(grid.get(column.x, y).style, column.trackStyle, `step=${step}: stale thumb style at ${column.x},${y}`);
+        assert.deepEqual(grid.get(column.x, y).style, { ...column.owner, ...uiPalette.borderSubtle }, `step=${step}: stale thumb style at ${column.x},${y}`);
       }
       if (column.follow) assert.ok(thumbs.has(afterTrack - 1), `step=${step}: growing follow thumb remains bottom-pinned`);
       previousThumbs.set(column.x, thumbs);

@@ -2,6 +2,21 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.33.0 — 2026-07-27
+
+- Replaced rectangular TUI pane chrome with perceptual `surface` /
+  `surfaceRaised` tints and persistent left rails. Focused rails use the accent;
+  resting rails and scrollbar tracks use `borderSubtle`; full rectangles remain
+  only on floating overlays, where `borderActive` is used.
+- Added the shared `0 1 2 3 4 6 8` spacing scale, two-column/one-row pane
+  padding, two-column table gaps, a scrollbar margin, fixed selection/prefix
+  gutters, one content-left column per pane, and named compact-height handling
+  that removes section blank rows at 30 rows or fewer.
+- Added headless invariants for selection-stable content columns on every
+  screen, diff and glyph-prefix gutters, both sides of the height threshold,
+  surface ownership, overlay-only boxes, and Unicode/ASCII rail fallbacks.
+  Keys, navigation, content, data, CLI flags, and MCP schemas are unchanged.
+
 ## 0.32.0 — 2026-07-27
 
 - Re-authored the TUI palette as 41 perceptual OKLCH tokens with tinted

@@ -359,7 +359,11 @@ function paletteFromTokens(themeState, colorsEnabled) {
   // surfaces continue to own their complete rectangles.
   const bodyStyle = colored(colorsEnabled, { fg: t.text });
   const surfaceStyle = colored(colorsEnabled, { fg: t.text, bg: t.surface });
+  const surfaceRaisedStyle = colored(colorsEnabled, { fg: t.text, bg: t.surfaceRaised });
+  const surfaceOverlayStyle = colored(colorsEnabled, { fg: t.text, bg: t.surfaceOverlay });
+  const borderSubtleStyle = colored(colorsEnabled, { fg: t.borderSubtle }, { dim: true });
   const borderStyle = colored(colorsEnabled, { fg: t.border }, { dim: true });
+  const borderActiveStyle = colored(colorsEnabled, { fg: t.borderActive });
   const tileBorderStyle = colored(colorsEnabled, { fg: t.borderSubtle, bg: t.surface }, { dim: true });
   return Object.freeze({
     colorsEnabled,
@@ -370,10 +374,14 @@ function paletteFromTokens(themeState, colorsEnabled) {
     body: bodyStyle,
     dashboardBg: bodyStyle,
     surface: surfaceStyle,
+    surfaceRaised: surfaceRaisedStyle,
+    surfaceOverlay: surfaceOverlayStyle,
     tileSurface: surfaceStyle,
     tileBorder: tileBorderStyle,
     bar: colored(colorsEnabled, { fg: t.textSecondary, bg: t.surfaceRaised }, { dim: true }),
+    borderSubtle: borderSubtleStyle,
     border: borderStyle,
+    borderActive: borderActiveStyle,
     focusBorder: colored(colorsEnabled, { fg: t.accent }, { bold: true }),
     paneTitle: colored(colorsEnabled, { fg: t.textSecondary, bold: true }, { bold: true }),
     screenTitle: colored(colorsEnabled, { fg: t.textSecondary, bold: true }, { bold: true }),
@@ -425,7 +433,7 @@ function paletteFromTokens(themeState, colorsEnabled) {
     jsonString: bodyStyle,
     jsonNumber: colored(colorsEnabled, { fg: t.infoFg }),
     jsonLiteral: colored(colorsEnabled, { fg: t.warningFg }),
-    scrollTrack: borderStyle,
+    scrollTrack: borderSubtleStyle,
     scrollThumb: colored(colorsEnabled, { fg: t.accent }, { underline: true }),
     meterTrack: colored(colorsEnabled, { fg: t.meterTrack }, { dim: true }),
     meterFill: colored(colorsEnabled, { fg: t.meterFill }),

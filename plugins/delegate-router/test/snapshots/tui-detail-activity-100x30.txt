@@ -2,7 +2,7 @@
 
  1 Transcript   2 Diff   3 Record   4 Usage   5 Events   6 Chain
 
-+- Transcript | follow on | time:absolute ------------------------------------------------- 1-6/6 -+
+| Transcript | follow on | time:absolute                                                    1-6/6
 | | user                                                                                  22:11:20 #
 |   Implement it                                                                                   #
 |                                                                                                  #
@@ -26,5 +26,5 @@
 |                                                                                                  #
 |                                                                                                  #
 |                                                                                                  #
-+--------------------------------------------------------------------------------------------------+
+|
  [/] tabs Up/Dn select / search  | Enter expand d diff E events  | Esc back ? help q qu.. notify:on

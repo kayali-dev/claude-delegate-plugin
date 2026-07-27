@@ -94,8 +94,8 @@ test('scrollable panes paint a palette-only track, proportional thumb, and title
   };
   const grid = paintFrame(frame);
   const indicatorX = 43;
-  assert.equal(grid.get(indicatorX, 1).char, CHROME_GLYPHS.corner);
-  assert.equal(grid.get(indicatorX, 10).char, CHROME_GLYPHS.corner);
+  assert.equal(grid.get(indicatorX, 1).char, ' ');
+  assert.equal(grid.get(indicatorX, 10).char, ' ');
   const indicatorStyles = Array.from({ length: 8 }, (_, row) => grid.get(indicatorX, 2 + row).style);
   assert.ok(Array.from({ length: 8 }, (_, row) => grid.get(indicatorX, 2 + row).char).every((char) => char === CHROME_GLYPHS.scrollTrack || char === CHROME_GLYPHS.scrollThumb));
   assert.ok(indicatorStyles.some((style) => style.fg === uiPalette.scrollTrack.fg || style.dim === uiPalette.scrollTrack.dim));
@@ -124,8 +124,8 @@ test('moving scrollbar thumbs repaint the complete owned edge column', () => {
   }
   assert.ok(topThumb.length > 0);
   assert.ok(topThumb.some((y) => bottom.get(x, y).char === CHROME_GLYPHS.scrollTrack), 'old thumb cells become explicit track cells');
-  assert.equal(bottom.get(x, 1).char, CHROME_GLYPHS.corner);
-  assert.equal(bottom.get(x, 12).char, CHROME_GLYPHS.corner);
+  assert.equal(bottom.get(x, 1).char, ' ');
+  assert.equal(bottom.get(x, 12).char, ' ');
 });
 
 test('scrollbar geometry has constant length, monotonic position, and bounded endpoints', () => {

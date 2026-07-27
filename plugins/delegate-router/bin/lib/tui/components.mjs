@@ -3,15 +3,19 @@ import { formatDisplayValue } from './display.mjs';
 import { CHROME_GLYPHS, normalizeChromePunctuation, spinnerGlyph } from './glyphs.mjs';
 import { displayWidth, padToWidth, stripAnsi, truncateToWidth, wrapToWidth } from './width.mjs';
 import { uiPalette as palette } from './palette.mjs';
+import { SPACE } from './rhythm.mjs';
 
 function mergeStyle(...styles) {
   return Object.assign({}, ...styles.filter(Boolean));
 }
 
 function inner(rect) {
-  // Borders own the edge cells; content gets one column of breathing room on
-  // both sides. Vertical space remains dense enough for small terminals.
-  return { x: rect.x + 2, y: rect.y + 1, width: Math.max(0, rect.width - 4), height: Math.max(0, rect.height - 2) };
+  return {
+    x: rect.x + SPACE.paneColumn,
+    y: rect.y + SPACE.paneRow,
+    width: Math.max(0, rect.width - SPACE.paneColumn * 2),
+    height: Math.max(0, rect.height - SPACE.paneRow * 2)
+  };
 }
 
 // This is the sole pane-to-display mapping. Selection scrolling, click hit
@@ -19,8 +23,15 @@ function inner(rect) {
 export function paneContentRect(pane, options = {}) {
   const rect = pane.rect;
   if (pane.border !== false) return inner(rect);
-  const padded = { x: rect.x + 1, y: rect.y, width: Math.max(0, rect.width - 2), height: rect.height };
-  return options.scrollbar === true && padded.width > 1 ? { ...padded, width: padded.width - 1 } : padded;
+  const padded = {
+    x: rect.x + SPACE.railGap,
+    y: rect.y,
+    width: Math.max(0, rect.width - SPACE.paneColumn),
+    height: rect.height
+  };
+  return options.scrollbar === true && padded.width > SPACE.scrollbarMargin
+    ? { ...padded, width: padded.width - SPACE.scrollbarMargin }
+    : padded;
 }
 
 function textOf(cell) {
@@ -91,18 +102,27 @@ export function paintBox(grid, rect, options = {}) {
 
 export function paintPane(grid, pane, options = {}) {
   const rect = pane.rect;
-  const ownerStyle = pane.style || (pane.content?.kind === 'tile' ? palette.tileSurface : palette.body);
+  const ownerStyle = pane.style || palette.surface;
   grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
-  if (pane.border !== false) paintBox(grid, rect, {
-    title: pane.title,
-    loading: pane.loading,
-    loadingGlyph: pane.loadingGlyph,
-    style: pane.borderStyle,
-    titleStyle: pane.titleStyle,
-    // Scrollable panes give their complete right edge to the scrollbar
-    // painter. The box must not partially own its corners or track cells.
-    rightEdge: options.scrollbar !== true
-  });
+  if (pane.border !== false && rect.width > 0 && rect.height > 0) {
+    for (let y = rect.y; y < rect.y + rect.height; y += 1) {
+      grid.set(rect.x, y, CHROME_GLYPHS.paneRail, mergeStyle(ownerStyle, pane.railStyle || palette.borderSubtle));
+    }
+    if ((pane.title || pane.loading) && rect.width > SPACE.paneColumn * 2) {
+      const available = Math.max(0, rect.width - SPACE.paneColumn * 2);
+      const titleStyle = mergeStyle(ownerStyle, pane.titleStyle || palette.paneTitle);
+      const titleSegments = segmentsOf(pane.title);
+      const segments = titleSegments
+        ? [...titleSegments]
+        : [{ text: normalizeChromePunctuation(textOf(pane.title)), style: titleStyle }];
+      if (pane.loading) {
+        segments.push({ text: CHROME_GLYPHS.separator, style: mergeStyle(ownerStyle, palette.dim) });
+        segments.push({ text: pane.loadingGlyph || spinnerGlyph(), style: mergeStyle(ownerStyle, palette.dim), spinner: true });
+        segments.push({ text: ' loading', style: mergeStyle(ownerStyle, palette.dim) });
+      }
+      writeSegments(grid, rect.x + SPACE.paneColumn, rect.y, segments, available, titleStyle);
+    }
+  }
   return paneContentRect(pane, options);
 }
 
@@ -118,15 +138,17 @@ export function paintTable(grid, rect, table = {}) {
     Math.max(requestedScroll, selected >= requestedScroll + visibleRows ? selected - visibleRows + 1 : requestedScroll),
     Math.max(0, rowCount - visibleRows)
   ));
-  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', table.style || palette.body);
+  const ownerStyle = table.style || palette.surface;
+  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
   const widths = columns.map((column) => Math.max(1, Number(column.width || 1)));
   if (headerRows) {
     let x = rect.x;
     for (let index = 0; index < columns.length && x < rect.x + rect.width; index += 1) {
       const width = Math.min(widths[index], rect.x + rect.width - x);
-      const contentWidth = index < columns.length - 1 ? Math.max(1, width - 1) : width;
-      writePadded(grid, x, rect.y, normalizeChromePunctuation(columns[index].title || ''), contentWidth, columns[index].headerStyle || palette.header, columns[index].align);
-      if (contentWidth < width) grid.set(x + contentWidth, rect.y, ' ', columns[index].headerStyle || palette.header);
+      const contentWidth = index < columns.length - 1 ? Math.max(1, width - SPACE.tableColumn) : width;
+      const headerStyle = mergeStyle(ownerStyle, columns[index].headerStyle || palette.header);
+      writePadded(grid, x, rect.y, normalizeChromePunctuation(columns[index].title || ''), contentWidth, headerStyle, columns[index].align);
+      if (contentWidth < width) grid.fill(x + contentWidth, rect.y, width - contentWidth, 1, ' ', headerStyle);
       x += width;
     }
   }
@@ -137,22 +159,24 @@ export function paintTable(grid, rect, table = {}) {
     let x = rect.x;
     const y = rect.y + headerRows + visual;
     const rowSelected = rowIndex === selected && table.selection !== false && table.focused !== false;
-    const rowBaseStyle = rowSelected ? mergeStyle(row.style, table.rowStyle, palette.selection) : mergeStyle(row.style, table.rowStyle);
-    grid.fill(rect.x, y, rect.width + (rowSelected ? 1 : 0), 1, ' ', rowBaseStyle);
-    if (rowSelected) grid.set(rect.x - 1, y, CHROME_GLYPHS.selectionBar, palette.selectionBar);
+    const rowBaseStyle = rowSelected
+      ? mergeStyle(ownerStyle, row.style, table.rowStyle, palette.selection)
+      : mergeStyle(ownerStyle, row.style, table.rowStyle);
+    grid.fill(rect.x, y, rect.width, 1, ' ', rowBaseStyle);
+    if (rowSelected) grid.set(rect.x - 1, y, CHROME_GLYPHS.selectionBar, mergeStyle(ownerStyle, palette.selectionBar));
     let availableRight = rect.x + rect.width;
     for (let index = 0; index < columns.length && x < rect.x + rect.width; index += 1) {
       const column = columns[index];
       const width = Math.min(widths[index], availableRight - x);
-      const contentWidth = index < columns.length - 1 ? Math.max(1, width - 1) : width;
+      const contentWidth = index < columns.length - 1 ? Math.max(1, width - SPACE.tableColumn) : width;
       const value = Array.isArray(row.cells) ? row.cells[index] : row[column.key];
       const style = rowSelected
         ? mergeStyle(rowBaseStyle, styleOf(value), column.selectedStyle)
-        : mergeStyle(row.style, styleOf(value), table.rowStyle);
+        : mergeStyle(ownerStyle, row.style, styleOf(value), table.rowStyle);
       const segments = segmentsOf(value);
       if (segments) writeSegments(grid, x, y, segments, contentWidth, style);
       else writePadded(grid, x, y, textOf(value), contentWidth, style, column.align);
-      if (contentWidth < width) grid.set(x + contentWidth, y, ' ', style);
+      if (contentWidth < width) grid.fill(x + contentWidth, y, width - contentWidth, 1, ' ', style);
       x += width;
     }
   }
@@ -582,17 +606,18 @@ export function virtualLogLayout(log, width, height, cache = defaultWrapCache) {
 
 function paintVirtualLogPane(grid, rect, log, cache) {
   const { entries, visible, start, lineMetrics } = virtualLogLayout(log, rect.width, rect.height, cache);
-  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', log.style || palette.body);
+  const ownerStyle = log.style || palette.surface;
+  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
   for (let index = 0; index < visible.length; index += 1) {
     const line = visible[index];
     const selected = log.focused !== false && Number(log.selectedEntry) === line.entryIndex;
-    const style = mergeStyle(line.style || log.lineStyle || palette.body, selected ? palette.selection : null);
+    const style = mergeStyle(ownerStyle, line.style || log.lineStyle || palette.body, selected ? palette.selection : null);
     if (selected && rect.width > 0) {
       // The right padding cell shares the selected owner style. This gives a
       // suspect-width grapheme at the content edge a same-style confinement
       // span without allowing it to touch the scrollbar owner.
       grid.set(rect.x + rect.width, rect.y + index, ' ', style);
-      grid.set(rect.x - 1, rect.y + index, CHROME_GLYPHS.selectionBar, palette.selectionBar);
+      grid.set(rect.x - 1, rect.y + index, CHROME_GLYPHS.selectionBar, mergeStyle(ownerStyle, palette.selectionBar));
       writeSearchLine(grid, rect.x, rect.y + index, line.fragment, line.ranges, rect.width, style);
     } else writeSearchLine(grid, rect.x, rect.y + index, line.fragment, line.ranges, rect.width, style);
   }
@@ -670,11 +695,12 @@ export function paintLogPane(grid, rect, log = {}, options = {}) {
   }
   const maxScroll = Math.max(0, expanded.length - rect.height);
   const scroll = log.follow !== false ? maxScroll : Math.max(0, Math.min(maxScroll, Number(log.scroll || 0)));
-  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', log.style || palette.body);
+  const ownerStyle = log.style || palette.surface;
+  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
   for (let index = 0; index < rect.height; index += 1) {
     const line = expanded[scroll + index];
     if (!line) continue;
-    const style = line.style || log.lineStyle || palette.body;
+    const style = mergeStyle(ownerStyle, line.style || log.lineStyle || palette.body);
     writeSearchLine(grid, rect.x, rect.y + index, line.fragment, line.ranges, rect.width, style);
   }
   return {
@@ -687,16 +713,17 @@ export function paintLogPane(grid, rect, log = {}, options = {}) {
 }
 
 export function paintEmptyState(grid, rect, empty = {}) {
-  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', empty.style || palette.body);
+  const ownerStyle = empty.style || palette.surface;
+  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
   if (!rect.width || !rect.height) return null;
   const message = `${CHROME_GLYPHS.empty} ${formatDisplayValue(empty.message || 'nothing here')}`;
   const action = formatDisplayValue(empty.action);
   const y = rect.y + Math.max(0, Math.floor((rect.height - (action ? 2 : 1)) / 2));
   const text = truncateToWidth(message, rect.width, { ellipsis: true });
-  grid.write(rect.x + Math.max(0, Math.floor((rect.width - displayWidth(text)) / 2)), y, text, empty.messageStyle || palette.empty, displayWidth(text));
+  grid.write(rect.x + Math.max(0, Math.floor((rect.width - displayWidth(text)) / 2)), y, text, mergeStyle(ownerStyle, empty.messageStyle || palette.empty), displayWidth(text));
   if (action && y + 1 < rect.y + rect.height) {
     const hint = truncateToWidth(action, rect.width, { ellipsis: true });
-    grid.write(rect.x + Math.max(0, Math.floor((rect.width - displayWidth(hint)) / 2)), y + 1, hint, empty.actionStyle || palette.dim, displayWidth(hint));
+    grid.write(rect.x + Math.max(0, Math.floor((rect.width - displayWidth(hint)) / 2)), y + 1, hint, mergeStyle(ownerStyle, empty.actionStyle || palette.dim), displayWidth(hint));
   }
   return { kind: 'empty', totalItems: 0, viewportItems: rect.height, startIndex: 0, endIndex: -1, follow: false };
 }
@@ -784,12 +811,27 @@ export function paintConfirmPrompt(grid, rect, prompt = {}) {
   const boxHeight = Math.min(rect.height, Math.max(5, lines.length + 4));
   const x = rect.x + Math.floor((rect.width - boxWidth) / 2);
   const y = rect.y + Math.floor((rect.height - boxHeight) / 2);
-  grid.fill(x, y, boxWidth, boxHeight, ' ', palette.body);
-  paintBox(grid, { x, y, width: boxWidth, height: boxHeight }, { title: prompt.title || 'Confirm', titleStyle: palette.warningTitle });
+  grid.fill(x, y, boxWidth, boxHeight, ' ', palette.surfaceOverlay);
+  paintBox(grid, { x, y, width: boxWidth, height: boxHeight }, {
+    title: prompt.title || 'Confirm',
+    titleStyle: mergeStyle(palette.surfaceOverlay, palette.warningTitle),
+    style: mergeStyle(palette.surfaceOverlay, palette.borderActive)
+  });
   for (let index = 0; index < lines.length && y + 1 + index < y + boxHeight - 2; index += 1) {
-    grid.write(x + 2, y + 1 + index, truncateToWidth(lines[index], boxWidth - 4, { ellipsis: true }), prompt.danger ? palette.danger : palette.body, boxWidth - 4);
+    grid.write(
+      x + SPACE.overlayColumn,
+      y + SPACE.overlayRow + index,
+      truncateToWidth(lines[index], boxWidth - SPACE.overlayColumn * 2, { ellipsis: true }),
+      mergeStyle(palette.surfaceOverlay, prompt.danger ? palette.danger : palette.body),
+      boxWidth - SPACE.overlayColumn * 2
+    );
   }
-  paintTextInput(grid, { x: x + 2, y: y + boxHeight - 2, width: boxWidth - 4, height: 1 }, { label: prompt.label || 'Type', value: prompt.value || '' });
+  paintTextInput(grid, {
+    x: x + SPACE.overlayColumn,
+    y: y + boxHeight - SPACE.overlayColumn,
+    width: boxWidth - SPACE.overlayColumn * 2,
+    height: SPACE.overlayRow
+  }, { label: prompt.label || 'Type', value: prompt.value || '' });
 }
 
 export function paintHelpOverlay(grid, rect, help = {}) {
@@ -797,30 +839,41 @@ export function paintHelpOverlay(grid, rect, help = {}) {
   const height = Math.min(rect.height - 2, Math.max(6, (help.items || []).length + 4));
   const x = rect.x + Math.max(1, Math.floor((rect.width - width) / 2));
   const y = rect.y + Math.max(1, Math.floor((rect.height - height) / 2));
-  grid.fill(x, y, width, height, ' ', palette.body);
-  paintBox(grid, { x, y, width, height }, { title: help.title || 'Help' });
-  let row = y + 1;
+  grid.fill(x, y, width, height, ' ', palette.surfaceOverlay);
+  paintBox(grid, { x, y, width, height }, {
+    title: help.title || 'Help',
+    style: mergeStyle(palette.surfaceOverlay, palette.borderActive),
+    titleStyle: mergeStyle(palette.surfaceOverlay, palette.paneTitle)
+  });
+  let row = y + SPACE.overlayRow;
   for (const item of help.items || []) {
     if (row >= y + height - 1) break;
     const keyWidth = Math.min(18, Math.max(8, Number(help.keyWidth || 14)));
-    writePadded(grid, x + 2, row, item.key, keyWidth, palette.header);
-    grid.write(x + 2 + keyWidth + 1, row, truncateToWidth(formatDisplayValue(item.description), width - keyWidth - 5, { ellipsis: true }), palette.body, width - keyWidth - 5);
-    row += 1;
+    writePadded(grid, x + SPACE.overlayColumn, row, item.key, keyWidth, mergeStyle(palette.surfaceOverlay, palette.header));
+    grid.write(
+      x + SPACE.overlayColumn + keyWidth + SPACE.railGap,
+      row,
+      truncateToWidth(formatDisplayValue(item.description), width - keyWidth - SPACE.overlayColumn * 2 - SPACE.railGap, { ellipsis: true }),
+      palette.surfaceOverlay,
+      width - keyWidth - SPACE.overlayColumn * 2 - SPACE.railGap
+    );
+    row += SPACE.overlayRow;
   }
 }
 
 function paintContent(grid, rect, content = {}, options = {}) {
-  if (content.kind === 'empty') return paintEmptyState(grid, rect, content);
-  if (content.kind === 'tile') return paintTile(grid, rect, content);
+  const styled = { ...content, style: content.style || options.ownerStyle };
+  if (content.kind === 'empty') return paintEmptyState(grid, rect, styled);
+  if (content.kind === 'tile') return paintTile(grid, rect, styled);
   if (content.kind === 'table') {
     const rowCount = Number(content.rowCount ?? content.rows?.length ?? 0);
-    if (!rowCount && content.empty) return paintEmptyState(grid, rect, content.empty);
-    return paintTable(grid, rect, { ...content, focused: options.focused });
+    if (!rowCount && content.empty) return paintEmptyState(grid, rect, { ...content.empty, style: content.empty.style || options.ownerStyle });
+    return paintTable(grid, rect, { ...styled, focused: options.focused });
   }
   if (content.kind === 'log' || content.kind === 'text') {
     const count = content.virtual ? content.entries?.length : content.lines?.length;
-    if (!count && content.empty) return paintEmptyState(grid, rect, content.empty);
-    return paintLogPane(grid, rect, { ...content, focused: options.focused }, options);
+    if (!count && content.empty) return paintEmptyState(grid, rect, { ...content.empty, style: content.empty.style || options.ownerStyle });
+    return paintLogPane(grid, rect, { ...styled, focused: options.focused }, options);
   }
   if (content.kind === 'tabs') return paintTabBar(grid, rect, content.tabs, content.active);
   return null;
@@ -842,10 +895,9 @@ function finiteInteger(value, fallback = 0) {
   return Number.isFinite(number) ? Math.floor(number) : fallback;
 }
 
-// The tile band deliberately declares ownership for its complete footprint,
-// including the blank row on either side and odd-width remainder columns.
-// A tile owns every cell in its pane rect; all other cells in this band belong
-// to the dashboard background. This is shared by composition and invariants.
+// The tile band declares exact surface ownership for its footprint, including
+// odd-width remainder columns. Section gaps remain frame-background cells when
+// present and disappear entirely under the named height-pressure threshold.
 export function dashboardTileBandOwnership(frame) {
   if (frame?.screen !== 'dashboard') return null;
   const regions = (frame.panes || [])
@@ -854,8 +906,8 @@ export function dashboardTileBandOwnership(frame) {
   if (!regions.length) return null;
   const top = Math.min(...regions.map(({ rect }) => rect.y));
   const bottom = Math.max(...regions.map(({ rect }) => rect.y + rect.height - 1));
-  const y = Math.max(0, top - 1);
-  const last = Math.min(Number(frame.height || 0) - 1, bottom + 1);
+  const y = Math.max(0, top);
+  const last = Math.min(Number(frame.height || 0) - 1, bottom);
   const sparklineRegions = [];
   for (const pane of frame.panes || []) {
     if (pane.content?.kind !== 'tile') continue;
@@ -896,26 +948,23 @@ function paintScrollIndicator(grid, pane, contentRect, metrics) {
   if (pane.rect.width < 1 || pane.rect.height < 1) return;
   const total = Math.max(0, Number(metrics?.totalItems || 0));
   const viewport = Math.max(0, Number(metrics?.viewportItems ?? contentRect.height));
-  if (pane.border !== false && pane.rect.width > 8) {
+  if (pane.border !== false && pane.rect.width > SPACE.screenBoundary * 4) {
     const readout = ` ${scrollReadout(metrics, pane.rect.width)} `;
-    const maximum = Math.max(0, pane.rect.width - 4);
+    const maximum = Math.max(0, pane.rect.width - SPACE.paneColumn * 2);
     const text = truncateToWidth(readout, maximum, { ellipsis: true });
-    const x = Math.max(pane.rect.x + 2, pane.rect.x + pane.rect.width - displayWidth(text) - 2);
-    grid.write(x, pane.rect.y, text, pane.borderStyle || palette.border, Math.min(maximum, displayWidth(text)));
+    const x = Math.max(
+      pane.rect.x + SPACE.paneColumn,
+      pane.rect.x + pane.rect.width - displayWidth(text) - SPACE.paneColumn
+    );
+    grid.write(x, pane.rect.y, text, mergeStyle(pane.style || palette.surface, palette.borderSubtle), Math.min(maximum, displayWidth(text)));
   }
-  // The scrollbar replaces the complete right pane edge. It is the sole
-  // painter for this column, including both border joins, on every frame.
   const x = pane.rect.x + pane.rect.width - 1;
-  const bordered = pane.border !== false && pane.rect.height >= 2;
-  const top = bordered ? pane.rect.y + 1 : pane.rect.y;
-  const bottom = bordered ? pane.rect.y + pane.rect.height - 1 : pane.rect.y + pane.rect.height;
-  if (bordered) {
-    grid.set(x, pane.rect.y, CHROME_GLYPHS.cornerTopRight, pane.borderStyle || palette.border);
-    grid.set(x, pane.rect.y + pane.rect.height - 1, CHROME_GLYPHS.cornerBottomRight, pane.borderStyle || palette.border);
-  }
+  const bordered = pane.border !== false;
+  const top = bordered ? contentRect.y : pane.rect.y;
+  const bottom = bordered ? contentRect.y + contentRect.height : pane.rect.y + pane.rect.height;
   const height = Math.max(0, bottom - top);
   if (!height) return;
-  const trackStyle = pane.borderStyle || palette.scrollTrack;
+  const trackStyle = mergeStyle(pane.style || palette.surface, palette.borderSubtle);
   for (let row = 0; row < height; row += 1) grid.set(x, top + row, CHROME_GLYPHS.scrollTrack, trackStyle);
   const geometry = scrollbarGeometry({
     track: height,
@@ -924,7 +973,9 @@ function paintScrollIndicator(grid, pane, contentRect, metrics) {
     offset: metrics?.startIndex,
     follow: metrics?.follow === true
   });
-  for (let row = geometry.thumbStart; row < geometry.thumbStart + geometry.thumbLen; row += 1) grid.set(x, top + row, CHROME_GLYPHS.scrollThumb, palette.scrollThumb);
+  for (let row = geometry.thumbStart; row < geometry.thumbStart + geometry.thumbLen; row += 1) {
+    grid.set(x, top + row, CHROME_GLYPHS.scrollThumb, mergeStyle(pane.style || palette.surface, palette.scrollThumb));
+  }
 }
 
 export function paintFrame(frame, options = {}) {
@@ -991,17 +1042,17 @@ export function paintFrame(frame, options = {}) {
     const pane = panes[paneIndex];
     const focused = pane.focused ?? paneIndex === fallbackFocus;
     const dashboardTile = frame.screen === 'dashboard' && pane.content?.kind === 'tile';
-    // Border chrome is semantic, not frame-owned data: always resolve it from
-    // the live palette at paint time so a frame created around preference
-    // loading cannot retain a stale theme object.
+    const ownerStyle = dashboardTile
+      ? palette.surface
+      : focused ? palette.surfaceRaised : palette.surface;
     const decorated = {
       ...pane,
-      style: dashboardTile ? palette.tileSurface : pane.style,
-      borderStyle: dashboardTile ? palette.tileBorder : focused ? palette.focusBorder : palette.border
+      style: pane.style || ownerStyle,
+      railStyle: focused ? palette.focusBorder : palette.borderSubtle
     };
     const scrollable = ['table', 'log', 'text'].includes(pane.content?.kind);
     const contentRect = paintPane(grid, decorated, { scrollbar: scrollable });
-    const metrics = paintContent(grid, contentRect, pane.content, { ...options, focused });
+    const metrics = paintContent(grid, contentRect, pane.content, { ...options, focused, ownerStyle: decorated.style });
     if (scrollable) paintScrollIndicator(grid, decorated, contentRect, metrics);
   }
   if (frame.status) {

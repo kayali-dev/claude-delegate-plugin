@@ -35,7 +35,7 @@ function dashboardStore(now) {
   };
 }
 
-function assertScreenBorderChrome(frame, grid, palette, label) {
+function assertScreenSurfaceChrome(frame, grid, palette, label) {
   const panes = frame.panes || [];
   const focusable = panes.map((pane, index) => ({ pane, index })).filter(({ pane }) => pane.focusable !== false);
   const fallback = focusable[Math.max(0, Math.min(focusable.length - 1, Number(frame.focusedPane || 0)))]?.index ?? 0;
@@ -43,22 +43,28 @@ function assertScreenBorderChrome(frame, grid, palette, label) {
     const pane = panes[index];
     if (pane.border === false || pane.rect.width < 2 || pane.rect.height < 2) continue;
     const focused = pane.focused ?? index === fallback;
-    const border = frame.screen === 'dashboard' && pane.content?.kind === 'tile'
-      ? palette.tileBorder
-      : focused ? palette.focusBorder : palette.border;
+    const owner = frame.screen === 'dashboard' && pane.content?.kind === 'tile'
+      ? palette.surface
+      : focused ? palette.surfaceRaised : palette.surface;
+    const rail = { ...owner, ...(focused ? palette.focusBorder : palette.borderSubtle) };
     const left = pane.rect.x;
     const right = pane.rect.x + pane.rect.width - 1;
     const top = pane.rect.y;
     const bottom = pane.rect.y + pane.rect.height - 1;
-    for (const [x, y, position] of [
-      [left, top, 'top-left'], [right, top, 'top-right'],
-      [left, bottom, 'bottom-left'], [right, bottom, 'bottom-right']
-    ]) assert.deepEqual(grid.get(x, y).style, border, `${label} pane ${index} ${position}`);
-    for (let y = top + 1; y < bottom; y += 1) {
-      assert.deepEqual(grid.get(left, y).style, border, `${label} pane ${index} left edge row ${y}`);
-      const rightCell = grid.get(right, y);
-      if (rightCell.char === CHROME_GLYPHS.scrollThumb) assert.deepEqual(rightCell.style, palette.scrollThumb, `${label} pane ${index} thumb row ${y}`);
-      else assert.deepEqual(rightCell.style, border, `${label} pane ${index} right edge row ${y}`);
+    for (let y = top; y <= bottom; y += 1) {
+      assert.equal(grid.get(left, y).char, CHROME_GLYPHS.paneRail, `${label} pane ${index} rail row ${y}`);
+      assert.deepEqual(grid.get(left, y).style, rail, `${label} pane ${index} rail style row ${y}`);
+    }
+    for (let x = left + 1; x <= right; x += 1) {
+      assert.notEqual(grid.get(x, top).char, CHROME_GLYPHS.horizontal, `${label} pane ${index} has no top box`);
+      assert.notEqual(grid.get(x, bottom).char, CHROME_GLYPHS.horizontal, `${label} pane ${index} has no bottom box`);
+    }
+    if (['table', 'log', 'text'].includes(pane.content?.kind)) {
+      for (let y = top + 1; y < bottom; y += 1) {
+        const rightCell = grid.get(right, y);
+        if (rightCell.char === CHROME_GLYPHS.scrollThumb) assert.deepEqual(rightCell.style, { ...owner, ...palette.scrollThumb }, `${label} pane ${index} thumb row ${y}`);
+        else assert.deepEqual(rightCell.style, { ...owner, ...palette.borderSubtle }, `${label} pane ${index} track row ${y}`);
+      }
     }
   }
 }
@@ -139,12 +145,15 @@ test('polluted user prefs and probe cache cannot alter owner or dashboard contra
         ]
       };
       const borderGrid = paintFrame(borderFrame);
-      assert.deepEqual(borderGrid.get(23, 2).style, expectedPalette.border);
-      assert.deepEqual(borderGrid.get(49, 2).style, expectedPalette.border);
+      assert.equal(borderGrid.get(0, 2).char, CHROME_GLYPHS.paneRail);
+      assert.equal(borderGrid.get(26, 2).char, CHROME_GLYPHS.paneRail);
+      assert.deepEqual(borderGrid.get(23, 2).style, expectedPalette.surface);
+      assert.deepEqual(borderGrid.get(49, 2).style, expectedPalette.surface);
       for (let y = 3; y < 10; y += 1) {
         const style = borderGrid.get(49, y).style;
         const expected = style.fg?.index === expectedPalette.scrollThumb.fg?.index
-          ? expectedPalette.scrollThumb : expectedPalette.scrollTrack;
+          ? { ...expectedPalette.surface, ...expectedPalette.scrollThumb }
+          : { ...expectedPalette.surface, ...expectedPalette.borderSubtle };
         assert.deepEqual(style, expected);
       }
 
@@ -153,7 +162,7 @@ test('polluted user prefs and probe cache cannot alter owner or dashboard contra
       assert.deepEqual(dashboard.meta.attentionJobIds, ['codex-hermetic-attention']);
       const dashboardGrid = paintFrame(dashboard);
       const focused = dashboard.panes.find((pane) => pane.focused);
-      assert.deepEqual(dashboardGrid.get(focused.rect.x, focused.rect.y).style, expectedPalette.focusBorder);
+      assert.deepEqual(dashboardGrid.get(focused.rect.x, focused.rect.y).style, { ...expectedPalette.surfaceRaised, ...expectedPalette.focusBorder });
       assert.equal(dashboardGrid.get(0, 1).char, ' ');
       assert.deepEqual(dashboardGrid.get(0, 1).style, expectedPalette.body);
 
@@ -183,7 +192,7 @@ test('polluted user prefs and probe cache cannot alter owner or dashboard contra
       for (const screenUi of screens) {
         const frame = createViewModel(productStore, { ...screenUi, now: 1_720_000_000_000 }, { width: 100, height: 30 });
         const grid = paintFrame(frame);
-        assertScreenBorderChrome(frame, grid, persistedPalette, `${screenUi.screen}:${screenUi.detailTab ?? ''}`);
+        assertScreenSurfaceChrome(frame, grid, persistedPalette, `${screenUi.screen}:${screenUi.detailTab ?? ''}`);
       }
     });
     assert.equal(process.env.DELEGATE_STATE_FILE, harness.stateFile, 'nested pollution proof restores the file harness environment');

@@ -105,6 +105,19 @@ will.
 
 ## Track B — surfaces and rhythm
 
+### Progress — 2026-07-27
+
+- Implemented tinted `surface` / `surfaceRaised` pane ownership with persistent
+  `▎` rails, accent focus rails, subtle resting rails, subtle scrollbar tracks,
+  and normal/active overlay border weights. Full rectangles now remain only on
+  floating help and confirmation surfaces.
+- Centralized the `0 1 2 3 4 6 8` spacing scale, asymmetric pane padding,
+  two-cell table gaps and indent, the scrollbar margin, and the named
+  30-row height-pressure threshold.
+- Locked title/content alignment plus selection, glyph-prefix, and diff marker
+  gutters with headless every-screen invariants. Unicode probing, ASCII and
+  `NO_COLOR` retain the same layout, with a structural `|` rail fallback.
+
 - **A full rectangle is the most expensive containment device available. Spend
   it only on overlays.** Regions are a background tint + a left rail (`▎`), not
   a box. Borders split into subtle/normal/active; subtle is the resting state.

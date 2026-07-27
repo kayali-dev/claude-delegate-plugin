@@ -1,9 +1,9 @@
  delegate | fleet                            local | v?                     codex 42%   cursor off
 
-+- Delegation jobs ------------------------------------------------------------------------ 1-2/2 -+
-| Job       Provi.. Directory   Model   Effort Mode   Activity  Elap.. Out/bud.. Chain   Badges    #
-|>C:1234567 codex   alpha       gpt-5.. xhigh  impl.. | worki..  2m05s 2.0k/8... >654321  S1 L RF  #
-| C:abcdef0 cursor  beta        compo.. -      review + compl..  7m20s       120 -        ?        #
+| Delegation jobs                                                                           1-2/2
+| Job       Prov..  Directory   Model   Eff..  Mode   Activity  Ela..  Out/bu..  Chain   Badges    #
+|>C:1234..  codex   alpha       gpt-..  xhigh  imp..  | work..  2m05s  2.0k/8..  >654..   S1 L RF  #
+| C:abcd..  cursor  beta        comp..  -      rev..  + comp..  7m20s       120  -        ?        #
 |                                                                                                  #
 |                                                                                                  #
 |                                                                                                  #
@@ -26,5 +26,5 @@
 |                                                                                                  #
 |                                                                                                  #
 |                                                                                                  #
-+--------------------------------------------------------------------------------------------------+
+|
  Up/Dn select Enter detail / filter  | a active x externals o sort z density  notify:on | writers:1

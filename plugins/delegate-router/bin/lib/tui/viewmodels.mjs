@@ -5,6 +5,7 @@ import { displayOr, formatDisplayValue, formatMultilineDisplayValue, formatTimes
 import { eventBlocks, formatEventBlock, wrapEventBlock } from './events.mjs';
 import { CHROME_GLYPHS, CHROME_SEPARATOR, spinnerGlyph } from './glyphs.mjs';
 import { uiPalette as palette } from './palette.mjs';
+import { sectionGapForHeight, SPACE } from './rhythm.mjs';
 import { classifySession, correlateSessions } from './sessions.mjs';
 import { formatTranscriptBlock, TranscriptProjector, wrapTranscriptBlock } from './transcript.mjs';
 
@@ -234,6 +235,44 @@ function breadcrumbs(frame, ui) {
   return [frame.screen === 'dashboard' ? 'home' : frame.screen];
 }
 
+export function applyHeightPressure(panes = [], rows = 0, contentBottom = Number.MAX_SAFE_INTEGER) {
+  const desiredGap = sectionGapForHeight(rows);
+  if (desiredGap === SPACE.section || panes.length < 2) return panes.map((pane) => ({ ...pane, rect: { ...pane.rect } }));
+  const bands = new Map();
+  for (let index = 0; index < panes.length; index += 1) {
+    const pane = panes[index];
+    const y = Number(pane.rect?.y || 0);
+    if (!bands.has(y)) bands.set(y, []);
+    bands.get(y).push({ pane, index });
+  }
+  const ordered = [...bands.entries()].sort(([left], [right]) => left - right);
+  let removed = SPACE.none;
+  let previousBottom = null;
+  const adjusted = [];
+  for (const [originalY, band] of ordered) {
+    let y = originalY - removed;
+    if (previousBottom != null) {
+      const gap = Math.max(SPACE.none, y - previousBottom);
+      const reclaim = Math.min(SPACE.section - desiredGap, Math.max(SPACE.none, gap - desiredGap));
+      removed += reclaim;
+      y -= reclaim;
+    }
+    for (const { pane, index } of band) adjusted.push({ pane: { ...pane, rect: { ...pane.rect, y } }, index });
+    previousBottom = Math.max(...band.map(({ pane }) => y + Number(pane.rect?.height || 0)));
+  }
+  if (removed > SPACE.none) {
+    const lastY = Math.max(...adjusted.map(({ pane }) => pane.rect.y));
+    for (const { pane } of adjusted) {
+      if (pane.rect.y !== lastY) continue;
+      pane.rect.height = Math.max(SPACE.none, Math.min(
+        Number(pane.rect.height || 0) + removed,
+        Number(contentBottom) - pane.rect.y
+      ));
+    }
+  }
+  return adjusted.sort((left, right) => left.index - right.index).map(({ pane }) => pane);
+}
+
 function commonOverlay(frame, ui, store = null) {
   const remote = ui.remote;
   if (remote?.enabled) {
@@ -281,7 +320,7 @@ function commonOverlay(frame, ui, store = null) {
       const requestedHeight = Number(pane.rect?.height || 0);
       return { ...pane, rect: { ...pane.rect, y, height: Math.max(0, Math.min(requestedHeight, contentBottom - y)) }, requestedHeight };
     });
-    // Preserve a usable three-row pane (two borders plus one content row) by
+    // Preserve a usable three-row pane (title, content, and bottom padding) by
     // borrowing the spacer row from an earlier flexible pane when necessary.
     // This matters on compact split layouts such as Sessions.
     for (let index = 0; index < shifted.length; index += 1) {
@@ -295,7 +334,11 @@ function commonOverlay(frame, ui, store = null) {
       for (let following = index; following < shifted.length; following += 1) shifted[following].rect.y -= deficit;
       pane.rect.height = Math.min(pane.requestedHeight, contentBottom - pane.rect.y);
     }
-    frame.panes = shifted.map(({ requestedHeight: _requestedHeight, ...pane }) => pane);
+    frame.panes = applyHeightPressure(
+      shifted.map(({ requestedHeight: _requestedHeight, ...pane }) => pane),
+      frame.height,
+      contentBottom
+    );
     if (frame.tabs) frame.tabs = { ...frame.tabs, rect: { ...frame.tabs.rect, y: Number(frame.tabs.rect?.y || 0) + 1 } };
     frame.meta = { ...(frame.meta || {}), appBarSpaced: true };
   }
@@ -654,8 +697,8 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
       return Number(right.job.lastActivityAt || right.job.updatedAt * 1000 || 0) - Number(left.job.lastActivityAt || left.job.updatedAt * 1000 || 0);
     })() || formatDisplayValue(left.job.id).localeCompare(formatDisplayValue(right.job.id)));
   const selected = Math.max(0, Math.min(entries.length - 1, Number(ui.selectedIndex || 0)));
-  // Scrollbars replace the right pane border, leaving the full inner table
-  // width available while keeping a single owner for the edge column.
+  // Pane padding permanently reserves one margin cell before the scrollbar,
+  // leaving a single owner for the edge column.
   const innerWidth = Math.max(1, width - 4);
   const columns = fleetColumns(innerWidth, ui.remote, ui.fleetDensity);
   const rows = entries.map(({ job, usage, activity }) => {

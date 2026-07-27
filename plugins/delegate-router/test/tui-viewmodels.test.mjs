@@ -6,9 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
+import { paneContentRect, paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
 import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
 import { createPalette, uiPalette } from '../bin/lib/tui/palette.mjs';
+import { HEIGHT_PRESSURE_MAX_ROWS, sectionGapForHeight, SPACE, SPACING_SCALE } from '../bin/lib/tui/rhythm.mjs';
 import { formatTranscriptBlock } from '../bin/lib/tui/transcript.mjs';
 import { clearGraphemeWidthOverrides, setGraphemeWidthOverrides, truncateToWidth } from '../bin/lib/tui/width.mjs';
 import { WIDTH_PROBE_GRAPHEMES } from '../bin/lib/tui/width-probe.mjs';
@@ -22,6 +23,7 @@ import {
   groupsViewModel,
   launcherViewModel,
   providersViewModel,
+  sessionsViewModel,
   statsViewModel
 } from '../bin/lib/tui/viewmodels.mjs';
 
@@ -112,7 +114,7 @@ test('fleet directory truncates by display width and compact density drops direc
   store.jobs[1].cwd = `/work/${dirname}`;
   const wide = fleetViewModel(store, { now: NOW, fleetDensity: 'wide' }, { width: 100, height: 30 });
   const directory = wide.panes[0].content.columns.find((column) => column.key === 'dir');
-  const expected = truncateToWidth(dirname, directory.width - 1, { ellipsis: true });
+  const expected = truncateToWidth(dirname, directory.width - SPACE.tableColumn, { ellipsis: true });
   const rendered = renderFrameToString(wide);
   assert.ok(rendered.includes(expected));
   assert.ok(!rendered.includes(dirname));
@@ -334,7 +336,7 @@ test('dashboard is attention-first and derives today tiles, providers, feed, and
   const focused = frame.panes.find((pane) => pane.focused);
   assert.ok(focused);
   assert.deepEqual(uiPalette.focusBorder, expectedPalette.focusBorder, 'renderer and expectation share the isolated palette');
-  assert.deepEqual(grid.get(focused.rect.x, focused.rect.y).style, expectedPalette.focusBorder);
+  assert.deepEqual(grid.get(focused.rect.x, focused.rect.y).style, { ...expectedPalette.surfaceRaised, ...expectedPalette.focusBorder });
   assert.equal(grid.get(0, 1).char, ' ', 'row one remains the app-bar-owned spacer');
   assert.deepEqual(grid.get(0, 1).style, expectedPalette.body);
 });
@@ -354,8 +356,8 @@ test('dashboard frame snapshots are deterministic in ASCII and probe-proven Unic
   configureGlyphs({ env: { TERM: 'tmux-256color', LANG: 'en_US.UTF-8' }, widths });
   const unicode = renderFrameToString(frame(), { trimEnd: true });
   assert.equal(unicode, fs.readFileSync(path.join(directory, 'tui-dashboard-100x30-unicode.txt'), 'utf8').trimEnd());
-  assert.match(unicode, /╭─ Needs you/);
-  assert.match(ascii, /\+- Needs you/);
+  assert.match(unicode, /▎ Needs you/);
+  assert.match(ascii, /\| Needs you/);
 });
 
 test('dashboard trend frames snapshot sparse, single-day, flat, and normal histories exactly', (t) => {
@@ -385,8 +387,9 @@ test('dashboard trend frames snapshot sparse, single-day, flat, and normal histo
     const tiles = frame.panes.filter((pane) => pane.content?.kind === 'tile');
     const top = Math.min(...tiles.map((pane) => pane.rect.y));
     const bottom = Math.max(...tiles.map((pane) => pane.rect.y + pane.rect.height - 1));
-    return `## ${name}\n${rendered.slice(top, bottom + 1).join('\n')}`;
-  }).join('\n\n');
+    const tileRows = rendered.slice(top, bottom + 1).map((line) => line.trimEnd());
+    return `## ${name}\n${tileRows.join('\n')}`;
+  }).join('\n\n').trimEnd();
   const expected = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'snapshots', 'tui-dashboard-trends.txt'), 'utf8').trimEnd();
   assert.equal(snapshot, expected);
   assert.match(snapshot, /collecting data \(2d\)/);
@@ -418,16 +421,13 @@ test('fixed 100x30 fleet headless frame is deterministic', (t) => {
 
   const grid = paintFrame(frame);
   assert.deepEqual(grid.get(0, 29).style, uiPalette.bar);
-  assert.deepEqual(grid.get(2, 3).style, uiPalette.header);
-  assert.deepEqual(grid.get(1, 4).style, uiPalette.selectionBar);
-  assert.deepEqual(grid.get(4, 4).style, { ...uiPalette.selectedId, ...uiPalette.selection });
-  assert.deepEqual(
-    Object.fromEntries(Object.entries(grid.get(3, 4).style).filter(([key]) => key !== 'bold')),
-    uiPalette.selection
-  );
+  assert.deepEqual(grid.get(2, 3).style, { ...uiPalette.surfaceRaised, ...uiPalette.header });
+  assert.deepEqual(grid.get(1, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selectionBar });
+  assert.deepEqual(grid.get(4, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection, ...uiPalette.selectedId });
+  assert.deepEqual(grid.get(3, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection, ...uiPalette.selectedId });
   assert.equal(grid.get(3, 4).style.bold, true);
-  assert.equal(Object.hasOwn(grid.get(3, 4).style, 'fg'), false);
-  assert.deepEqual(grid.get(24, 4).style, uiPalette.selection);
+  assert.equal(grid.get(3, 4).style.fg, uiPalette.surfaceRaised.fg);
+  assert.deepEqual(grid.get(24, 4).style, { ...uiPalette.surfaceRaised, ...uiPalette.selection });
   assert.equal(grid.get(24, 4).style.bold, undefined);
 });
 
@@ -461,6 +461,101 @@ test('every screen paints at realistic resize breakpoints with filters, follow, 
       assert.equal(grid.rows, viewport.height);
       assert.equal(grid.get(0, viewport.height - 1).style.bg, uiPalette.bar.bg);
     }
+  }
+});
+
+test('the spacing scale and named height-pressure threshold control real section gaps', () => {
+  assert.deepEqual(SPACING_SCALE, [0, 1, 2, 3, 4, 6, 8]);
+  assert.equal(SPACING_SCALE.includes(5), false);
+  assert.equal(SPACING_SCALE.includes(7), false);
+  assert.equal(SPACE.paneColumn, 2);
+  assert.equal(SPACE.paneRow, 1);
+  assert.equal(SPACE.tableColumn, 2);
+  assert.equal(SPACE.indent, 2);
+  assert.equal(SPACE.scrollbarMargin, 1);
+  assert.equal(sectionGapForHeight(HEIGHT_PRESSURE_MAX_ROWS), 0);
+  assert.equal(sectionGapForHeight(HEIGHT_PRESSURE_MAX_ROWS + 1), 1);
+
+  const store = syntheticStore();
+  const compressed = providersViewModel(store, {}, { width: 100, height: HEIGHT_PRESSURE_MAX_ROWS });
+  const relaxed = providersViewModel(store, {}, { width: 100, height: HEIGHT_PRESSURE_MAX_ROWS + 1 });
+  const gap = (frame) => frame.panes[1].rect.y - (frame.panes[0].rect.y + frame.panes[0].rect.height);
+  assert.equal(gap(compressed), 0, 'compact screens reclaim the section blank row');
+  assert.equal(gap(relaxed), 1, 'relaxed screens retain exactly one section blank row');
+});
+
+test('every screen reserves selection and prefix gutters so content columns never shift', () => {
+  const store = syntheticStore();
+  store.groups.push({ ...store.groups[0], groupId: 'wave-b', newestActivityAt: NOW - 10_000, memberIds: ['cursor-done-abcdef0'] });
+  store.jobs[0].groupId = 'wave-a';
+  store.diffStatsByJob['codex-active-1234567'].files.push({ path: 'src/b.js', additions: 2, deletions: 0 });
+  store.stats.groups.push({ ...store.stats.groups[0], provider: 'cursor', model: 'composer', mode: 'review' });
+  store.sessionScan = { status: 'ready', available: true, scanned: 2, totalFiles: 2, capped: false };
+  store.sessions = [
+    { id: 'session-a', cwd: '/work/alpha', mtimeMs: NOW - 1_000, size: 100, lastActivity: 'working' },
+    { id: 'session-b', cwd: '/work/beta', mtimeMs: NOW - 2_000, size: 200, lastActivity: 'reviewing' }
+  ];
+
+  const viewport = { width: 100, height: 30 };
+  const pairs = [
+    ['Dashboard', dashboardViewModel(store, { now: NOW, dashboardAttentionSelection: 0 }, viewport), dashboardViewModel(store, { now: NOW, dashboardAttentionSelection: 1 }, viewport)],
+    ['Fleet', fleetViewModel(store, { now: NOW, selectedIndex: 0 }, viewport), fleetViewModel(store, { now: NOW, selectedIndex: 1 }, viewport)],
+    ['Groups', groupsViewModel(store, { now: NOW, groupSelection: 0 }, viewport), groupsViewModel(store, { now: NOW, groupSelection: 1 }, viewport)],
+    ['Group members', groupMembersViewModel(store, { now: NOW, groupId: 'wave-a', groupMemberSelection: 0 }, viewport), groupMembersViewModel(store, { now: NOW, groupId: 'wave-a', groupMemberSelection: 1 }, viewport)],
+    ['Sessions', sessionsViewModel(store, { now: NOW, sessionSelection: 0 }, viewport), sessionsViewModel(store, { now: NOW, sessionSelection: 1 }, viewport)],
+    ['Providers', providersViewModel(store, { now: NOW, focusedPane: 0 }, viewport), providersViewModel(store, { now: NOW, focusedPane: 1 }, viewport)],
+    ['Stats', statsViewModel(store, { now: NOW, statsSelection: 0 }, viewport), statsViewModel(store, { now: NOW, statsSelection: 1 }, viewport)],
+    ['Launcher', launcherViewModel(store, { now: NOW, launcher: { fieldIndex: 0 } }, viewport), launcherViewModel(store, { now: NOW, launcher: { fieldIndex: 1 } }, viewport)],
+    ...DETAIL_TABS.map((name, detailTab) => [
+      `Detail/${name}`,
+      detailViewModel(store, { jobId: 'codex-active-1234567', detailTab, now: NOW, follow: false, transcriptSelection: 0, eventSelection: 0, diffSelection: 0 }, viewport),
+      detailViewModel(store, { jobId: 'codex-active-1234567', detailTab, now: NOW, follow: false, transcriptSelection: 1, eventSelection: 1, diffSelection: 1 }, viewport)
+    ])
+  ];
+
+  const firstInk = (grid, rect) => Array.from({ length: rect.height }, (_, offset) => {
+    const y = rect.y + offset;
+    for (let x = rect.x; x < rect.x + rect.width; x += 1) if (grid.get(x, y).char !== ' ') return x;
+    return null;
+  });
+  for (const [name, first, second] of pairs) {
+    const firstGrid = paintFrame(first);
+    const secondGrid = paintFrame(second);
+    assert.equal(first.panes.length, second.panes.length, `${name} pane count`);
+    for (let index = 0; index < first.panes.length; index += 1) {
+      const firstRect = paneContentRect(first.panes[index], { scrollbar: ['table', 'log', 'text'].includes(first.panes[index].content?.kind) });
+      const secondRect = paneContentRect(second.panes[index], { scrollbar: ['table', 'log', 'text'].includes(second.panes[index].content?.kind) });
+      assert.deepEqual(firstRect, secondRect, `${name} pane ${index} content rect`);
+      assert.deepEqual(firstInk(firstGrid, firstRect), firstInk(secondGrid, secondRect), `${name} pane ${index} content-left columns`);
+      if (first.panes[index].title) {
+        const titleInk = firstInk(firstGrid, { x: firstRect.x, y: first.panes[index].rect.y, width: firstRect.width, height: 1 })[0];
+        assert.equal(titleInk, firstRect.x, `${name} pane ${index} title aligns with content`);
+      }
+    }
+  }
+
+  const transcript = detailViewModel(store, {
+    jobId: 'codex-active-1234567', detailTab: 0, now: NOW, follow: false, transcriptSelection: 0
+  }, viewport);
+  const transcriptLines = paintFrame(transcript).lines();
+  const userColumn = transcriptLines.find((line) => line.includes('| user'))?.indexOf('user');
+  const bodyColumn = transcriptLines.find((line) => line.includes('Implement it'))?.indexOf('Implement it');
+  assert.equal(userColumn, bodyColumn, 'glyph-prefixed and plain transcript content share one content column');
+
+  const diff = detailViewModel(store, {
+    jobId: 'codex-active-1234567',
+    detailTab: 1,
+    now: NOW,
+    follow: false,
+    diffFile: 'src/a.js',
+    diffWindow: { diff: '+added\n-removed\n context', offset: 0, totalChars: 23 }
+  }, viewport);
+  const diffRect = paneContentRect(diff.panes[0], { scrollbar: true });
+  const diffLines = paintFrame(diff).lines();
+  for (const [line, content] of [['+added', 'added'], ['-removed', 'removed'], [' context', 'context']]) {
+    const rendered = diffLines.find((value) => value.includes(line));
+    assert.ok(rendered, `diff renders ${line}`);
+    assert.equal(rendered.indexOf(content), diffRect.x + SPACE.railGap, `${line[0]} marker owns the reserved diff gutter`);
   }
 });
 

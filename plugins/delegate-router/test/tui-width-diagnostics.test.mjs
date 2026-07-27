@@ -138,6 +138,9 @@ test('width probe covers every elegant chrome family before it may be selected',
       assert.ok(WIDTH_PROBE_GRAPHEMES.includes(glyph), `elegant glyph ${JSON.stringify(glyph)} is measured`);
     }
   }
+  assert.equal(GLYPH_TIERS.elegant.paneRail, '▎');
+  assert.equal(GLYPH_TIERS.safeUnicode.paneRail, '|');
+  assert.equal(GLYPH_TIERS.ascii.paneRail, '|');
 });
 
 test('sparkline glyph tier is selected as one probe-proven family and never mixed', (t) => {

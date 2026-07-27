@@ -124,7 +124,7 @@ test('dashboard trend model uses sparse placeholders, flat baselines, and actual
   assert.deepEqual(normal.levels, [0, 7, 4]);
 });
 
-test('scrollable and static panes share border chrome while track and thumb stay inside joins', () => {
+test('scrollable and static panes share tinted surfaces while track and thumb stay inside padding', () => {
   const expectedPalette = createPalette(process.env);
   assert.deepEqual(uiPalette.border, expectedPalette.border, 'renderer and expectation share the isolated palette');
   const frame = {
@@ -136,12 +136,16 @@ test('scrollable and static panes share border chrome while track and thumb stay
   };
   const grid = paintFrame(frame);
   const staticStyle = grid.get(23, 1).style;
-  assert.deepEqual(grid.get(49, 1).style, staticStyle, 'top-right join uses the ordinary border style');
-  assert.deepEqual(grid.get(49, 10).style, grid.get(23, 10).style, 'bottom-right join uses the ordinary border style');
+  assert.deepEqual(staticStyle, expectedPalette.surface);
+  assert.deepEqual(grid.get(49, 1).style, staticStyle, 'title-row padding uses the pane surface');
+  assert.deepEqual(grid.get(49, 10).style, grid.get(23, 10).style, 'bottom padding uses the pane surface');
   for (let y = 2; y < 10; y += 1) {
     const style = grid.get(49, y).style;
     assert.ok(
-      [expectedPalette.scrollTrack, expectedPalette.scrollThumb].some((expected) => {
+      [
+        { ...expectedPalette.surface, ...expectedPalette.scrollTrack },
+        { ...expectedPalette.surface, ...expectedPalette.scrollThumb }
+      ].some((expected) => {
         const actualEntries = Object.entries(style);
         const expectedEntries = Object.entries(expected);
         return actualEntries.length === expectedEntries.length

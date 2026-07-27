@@ -141,6 +141,9 @@ test('all six presets self-verify every contrast target and preserve the authore
   }
   assert.equal(CONTRAST_TARGETS.textMuted, 4.5);
   assert.equal(CONTRAST_TARGETS.semantic, 4.5);
+  assert.ok(CONTRAST_TARGETS.borderSubtle < CONTRAST_TARGETS.border);
+  assert.ok(CONTRAST_TARGETS.border < CONTRAST_TARGETS.borderActive);
+  assert.ok(CONTRAST_TARGETS.borderActive < CONTRAST_TARGETS.textMuted, 'the strongest border remains dimmer than muted text');
 });
 
 test('neutral tiers are tinted at the governing OKLCH seed', () => {
@@ -197,16 +200,19 @@ test('custom themes are base plus validated OKLCH overrides', () => {
   assert.equal(Object.hasOwn(custom.tokens, 'unknownToken'), false);
 });
 
-test('theme selection keeps captured palette references live and the track shares pane border chrome', (t) => {
+test('theme selection keeps captured palette references live and exposes all three border weights', (t) => {
   t.after(() => setUiTheme('dark', process.env));
   setUiTheme('dark', {});
   const captured = uiPalette;
   const darkBorder = captured.border;
-  assert.equal(captured.scrollTrack, captured.border, 'ordinary scrollbar track is the pane border style');
+  assert.equal(captured.scrollTrack, captured.borderSubtle, 'resting scrollbar track uses the subtle weight');
+  assert.equal(captured.borderSubtle.fg, captured.tokens.borderSubtle);
+  assert.equal(captured.border.fg, captured.tokens.border);
+  assert.equal(captured.borderActive.fg, captured.tokens.borderActive);
 
   setUiTheme('light', {});
   assert.equal(captured, uiPalette, 'theme selection preserves the exported palette identity');
   assert.equal(captured.theme, 'light', 'a pre-selection capture resolves the new backing palette');
   assert.notEqual(captured.border, darkBorder);
-  assert.equal(captured.scrollTrack, captured.border, 'the border/track identity survives theme selection');
+  assert.equal(captured.scrollTrack, captured.borderSubtle, 'the subtle track identity survives theme selection');
 });
