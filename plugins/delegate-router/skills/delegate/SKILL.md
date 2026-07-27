@@ -2,7 +2,7 @@
 name: delegate
 description: Route bounded work to the best available Claude, Codex, or Cursor agent. Use when the user asks to delegate, consult another model, use Codex, use Cursor, use Grok, use Composer, compare independent solutions, conserve a provider allowance, or when substantial repository work would benefit from a specialized coding agent, independent review, or a fresh context. Avoid delegation for trivial edits and context-heavy tasks whose handoff costs more than doing the work directly.
 argument-hint: '[provider=auto|claude|codex|cursor] [model=auto|fable|opus|sonnet|haiku|sol|terra|luna|grok|composer] [mode=consult|plan|review|implement|verify] [scope=paths] [effort=low|medium|high|xhigh|max|ultra] [approval=auto|force] <task>'
-allowed-tools: Read, Grep, Glob, Agent, Skill, Bash(delegate-route:*), Bash(delegate-health:*), Bash(delegate-cursor:*), Bash(delegate-jobs:*), Bash(delegate-usage:*), mcp__delegate_control__delegate_start, mcp__delegate_control__delegate_inspect, mcp__delegate_control__delegate_list, mcp__delegate_control__delegate_stats, mcp__delegate_control__delegate_events, mcp__delegate_control__delegate_transcript, mcp__delegate_control__delegate_diff, mcp__delegate_control__delegate_files, mcp__delegate_control__delegate_steer, mcp__delegate_control__delegate_cancel, mcp__delegate_control__delegate_release, mcp__delegate_control__delegate_respond, mcp__delegate_control__delegate_resume, mcp__delegate_control__delegate_review_round, mcp__delegate_control__delegate_usage, mcp__delegate_control__delegate_decide, mcp__delegate_codex__codex, mcp__delegate_codex__codex-reply
+allowed-tools: Read, Grep, Glob, Agent, Skill, Bash(delegate-route:*), Bash(delegate-health:*), Bash(delegate-cursor:*), Bash(delegate-jobs:*), Bash(delegate-usage:*), mcp__delegate_control__delegate_start, mcp__delegate_control__delegate_start_trivial, mcp__delegate_control__delegate_inspect, mcp__delegate_control__delegate_list, mcp__delegate_control__delegate_stats, mcp__delegate_control__delegate_events, mcp__delegate_control__delegate_transcript, mcp__delegate_control__delegate_diff, mcp__delegate_control__delegate_files, mcp__delegate_control__delegate_steer, mcp__delegate_control__delegate_interrogate, mcp__delegate_control__delegate_cancel, mcp__delegate_control__delegate_release, mcp__delegate_control__delegate_respond, mcp__delegate_control__delegate_resume, mcp__delegate_control__delegate_review_round, mcp__delegate_control__delegate_usage, mcp__delegate_control__delegate_decide, mcp__delegate_codex__codex, mcp__delegate_codex__codex-reply
 ---
 
 # Delegate Router
@@ -37,6 +37,19 @@ Return: outcome, changed files, verification, risks, blockers, continuation id.
 ```
 
 Pass `allowedPaths` on `delegate_start` for every write-mode job with a known file scope: the broker injects the fence into the worker prompt and records any out-of-scope changed file as `scopeViolations` on the job (plus a `scope.violation` event) — check it before accepting the result. Give retryable starts a caller-stable `idempotencyKey`; a replay in the same cwd returns the original job. Set `maxOutputTokens` when a run needs a hard observed-output ceiling. Use `waitFor: 'session' | 'turn' | 'first-output'` for a bounded start milestone; `waitForSession=true` remains the session alias. Use `dryRun=true` to inspect the resolved options, ingest plan, lint findings, and exact provider packet without launching.
+
+Managed write starts are plan-first by default. The broker runs a read-only plan
+turn, presents predicted files/components plus observed token/duration bands,
+and waits for revisioned `delegate_respond accept=true|false`. Acceptance
+continues the same provider thread/session into write mode; it never launches a
+fresh context. When budget permits, a second cheap plan from another provider
+or model is compared structurally by targets, approach shape, and assumptions.
+Only material structural divergence opens an ambiguity question; inconclusive
+comparison says so and does not gate on a guessed verdict. For a genuinely
+trivial write, use MCP `delegate_start_trivial` or CLI
+`delegate-jobs start --no-plan-first`; add `--no-ambiguity-check` to keep the
+primary confirmation while skipping the second pass. These are explicit
+escape hatches, not routing defaults.
 
 Use `profile` for a reusable packet skeleton, `groupId` for fan-out tracking, and `startPaused=true` plus `delegate_release` when the first prompt must wait behind an external gate. `ingestFiles` stages declared absolute out-of-tree inputs and copies changed content back only after completion; if the source changed meanwhile, the provider version lands at `<source>.delegate-new` and emits `ingest.diverged`. `autoNudge` is read-only and opt-in. `reportSchema` is best-effort: inspect `structuredMissing` and never treat worker JSON as stronger evidence than the mechanical diff and verification fields.
 
@@ -172,6 +185,15 @@ stall detection. `report_progress` and Cursor's native todo/task updates need
 no response. If MCP injection is unavailable, the job uses its previous
 stop-and-report behavior. Cursor coordinator corrections remain restart-only,
 even when the worker reached the coordinator live through this back-channel.
+
+Use `delegate_interrogate` only for a running managed worker whose work item
+has a bounded `maxOutputTokens`. The command payload is exactly a question
+plus request identity: it cannot carry a steer, approval, scope change,
+privilege, or budget change. Codex answers through a no-action `turn/steer`
+frame in the live turn. Cursor queues a separate read-only turn on the same
+session after its active prompt; that is never same-turn steering. The answer
+is findings evidence, not authority, and its observed provider tokens count
+against the work item's existing output budget.
 
 For live write attempts, SessionStart arms a dynamic set containing a private
 refresh signal plus `allowedPaths` roots and files the attempt has already

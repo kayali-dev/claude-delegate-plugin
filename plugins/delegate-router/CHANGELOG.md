@@ -2,6 +2,39 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.40.0 — 2026-07-27
+
+- Write-mode managed starts are now plan-first by default. The first provider
+  turn is read-only and presents a structural plan, predicted file/component
+  blast radius, and observed token/duration bands before any write. Accepting
+  through the revisioned response inbox continues the same Codex thread or
+  Cursor session with write mode enabled; declining stops without writes.
+  Trivial changes have an explicit escape hatch:
+  `delegate-jobs start --no-plan-first` or additive MCP
+  `delegate_start_trivial`. `DELEGATE_PLAN_FIRST=0` is the broker-wide
+  emergency opt-out.
+- Optional ambiguity checking launches one independently budget-capped plan
+  attempt using another enabled provider or model. Plans are compared only by
+  structural targets, ordered approach shape, and declared assumptions.
+  Material divergence becomes the confirmation question; convergence opens no
+  ambiguity question; missing comparable structure is reported as
+  `inconclusive` and never promoted to a verdict. Use
+  `--no-ambiguity-check` or `DELEGATE_AMBIGUITY_CHECK=0` to skip the second
+  pass.
+- Added additive MCP `delegate_interrogate` and CLI
+  `delegate-jobs interrogate` for read-only questions to a running worker.
+  Codex uses explicit no-action `turn/steer` framing; Cursor queues a separate
+  read-only turn and remains explicitly non-same-turn. Questions cannot carry
+  scope, privilege, network, sandbox, timeout, or budget changes; answers are
+  evidence only, attach as WorkItem findings, and surface observed provider
+  token cost inside the existing `maxOutputTokens` budget.
+- Every new interaction degrades independently. Invalid/unavailable plan
+  output falls back to the explicitly requested legacy write launch and records
+  why; a missing second planner yields a non-gating inconclusive comparison;
+  an unavailable interrogation retains the existing job and journal evidence.
+  No plan is auto-accepted, and no write begins from a successful plan without
+  an explicit revisioned confirmation.
+
 ## 0.39.0 — 2026-07-27
 
 - Added P4.5 conversational delegation through a separate broker-owned MCP

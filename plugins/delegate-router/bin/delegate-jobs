@@ -32,7 +32,7 @@ import { readProjectedWorkItems } from './lib/work-read.mjs';
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <objective> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--no-plan-first] [--no-ambiguity-check] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
   delegate-jobs work [--json] [--id <job-or-work-id>]
   delegate-jobs group <id> [--json]
@@ -45,6 +45,7 @@ function usage() {
   delegate-jobs diff <job-id> [--stat] [--offset N] [--max-chars N] [--paths a,b]
   delegate-jobs files <job-id> [--json]
   delegate-jobs steer <job-id> --expected-revision N --prompt <correction> [--strategy auto|same-turn|restart|next-turn]
+  delegate-jobs interrogate <job-id> --expected-revision N --question <read-only evidence question> [--command-id id]
   delegate-jobs cancel <job-id> [--expected-revision N]
   delegate-jobs release <job-id> [--expected-revision N]
   delegate-jobs respond <job-id> --expected-revision N [--request-id id] [--answer text|--accept|--reject|--response-json json] [--command-id id]
@@ -170,6 +171,8 @@ try {
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
       allowSensitive: args.includes('--allow-sensitive'), overrideLimit: args.includes('--override-limit'),
       overrideWriter: args.includes('--override-writer'), overrideLane: args.includes('--override-lane'),
+      planFirst: args.includes('--no-plan-first') ? false : undefined,
+      ambiguityCheck: args.includes('--no-ambiguity-check') ? false : undefined,
       dryRun: args.includes('--dry-run')
     });
     const waitFor = value(args, '--wait-for') ?? (args.includes('--wait-for-session') ? 'session' : null);
@@ -329,6 +332,13 @@ try {
       type: 'steer', correctionId: value(args, '--correction-id'), strategy: value(args, '--strategy', 'auto'),
       expectedTurnId: value(args, '--expected-turn'), text: prompt(args)
     }, expectedRevision));
+  } else if (command === 'interrogate') {
+    const rawRevision = value(args, '--expected-revision');
+    json(submitControl(args[0], {
+      type: 'interrogate',
+      commandId: value(args, '--command-id'),
+      question: value(args, '--question')
+    }, rawRevision == null ? null : Number(rawRevision)));
   } else if (command === 'cancel') {
     const job = requireJob(args[0]);
     if (job.managedBy === 'delegate-control') {

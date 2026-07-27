@@ -87,6 +87,24 @@ Managed control commands use optimistic concurrency. Read the current job revisi
 
 `startPaused=true` opens the provider thread/session and sets phase `paused` before any prompt. Release it with `delegate_release` (or `delegate-jobs release`) at the current revision; cancellation works while paused, `waitFor='session'` (and the `waitForSession` alias) returns as soon as the paused session exists, and `timeoutSeconds` continues counting during the pause. `waitFor='turn'` and `waitFor='first-output'` use the same bounded journal-cursor poller.
 
+Write launches are plan-first by default. The broker runs a bounded read-only
+plan turn, presents its structural blast radius and observed-band estimates,
+then waits for the coordinator to confirm or decline. Confirmation continues
+the same provider thread/session into write mode. Use
+`delegate_start_trivial` or `delegate-jobs start --no-plan-first` only for an
+explicitly trivial change; `--no-ambiguity-check` skips only the independent
+comparison pass. A missing plan capability or comparison candidate degrades to
+the legacy explicitly requested launch and records why; no plan pass may
+accept itself or start write work.
+
+When enabled, ambiguity detection sends the same WorkSpec to an independent
+cheap plan pass using a different provider or model. It compares only parsed
+target files, components, ordered approach shape, and declared assumptions.
+Material divergence becomes a revisioned coordinator question before write
+work. Convergence proceeds after the ordinary plan confirmation. Invalid or
+unavailable structural evidence is reported as inconclusive and never
+converted into a guessed ambiguity verdict.
+
 A steer that reduces the remaining work can finish the job before any follow-up command arrives. Do not design a steer-then-cancel sequence around a shrinking task; cancel first if termination is the goal.
 
 - Codex can accept a genuine same-turn correction through app-server `turn/steer`.
@@ -112,6 +130,17 @@ wins. Both directions pass through the ordinary redactor and size caps.
 continuation, records `stopReason: input-timeout`, and never invents a default
 answer. Waiting remains inside the job's original wall-clock deadline, is
 attributed on its attempt lease, and does not count as a stall.
+
+`delegate_interrogate` / `delegate-jobs interrogate` asks a running managed
+worker one read-only question. The strict command accepts only the expected
+revision, request identity, and question; the work item must already have a
+bounded output-token budget. Codex uses a no-action `turn/steer` frame; Cursor
+queues a separate plan-mode turn on the same session after the current prompt
+and is explicitly not same-turn steering. The reply is appended to `findings`
+as evidence with its provider, session, request ID, and observed token cost.
+That cost consumes the original work-item budget. The answer can explain
+evidence but cannot authorize, approve, steer, widen scope, alter privileges,
+or increase any budget.
 
 For managed runs, store the job ID and use the `delegate_control` inspection and control tools. Direct Codex MCP calls and Cursor foreground/background CLI runs create observable shadow jobs (`direct-mcp` and `direct-cli`) in the same store, event journal, transcript, diff/files, usage, audit/stats, orphan-reconciliation, and terminal-sentinel pipeline. They remain unmanaged provider loops: steer, cancel, release, respond, resume, review round, and revert return `DIRECT_TRANSPORT`, while inspect, list, events, transcript, diff, files, and usage stay available. Official Codex plugin jobs retain their own independent lifecycle commands. Never describe a direct or external-plugin job as a managed control-plane job.
 

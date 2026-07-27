@@ -21,6 +21,9 @@ let timer = null;
 let turnCount = 0;
 let backchannel = null;
 let backchannelReply = null;
+let activePrompt = '';
+let threadModel = null;
+let interrogationQuestion = null;
 
 function send(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
 function sendUsage(turnId, outputTokens) {
@@ -38,22 +41,50 @@ function complete() {
   if (!activeTurn) return;
   const turnId = activeTurn;
   activeTurn = null;
-  const reply = process.env.FAKE_CODEX_NUDGE === '1'
+  const planPass = activePrompt.includes('PLAN PASS ONLY');
+  const variant = process.env.FAKE_CODEX_DIVERGENT_MODEL && String(threadModel).includes(process.env.FAKE_CODEX_DIVERGENT_MODEL)
+    ? 'divergent'
+    : 'convergent';
+  const structuralPlan = variant === 'divergent'
+    ? {
+        targets: { files: ['src/alternate.js'], components: ['alternate-engine'] },
+        approach: [{ kind: 'refactor', component: 'alternate-engine' }, { kind: 'test', component: 'alternate-engine' }],
+        assumptions: [{ topic: 'ownership', choice: 'replace the alternate engine' }],
+        risks: ['alternate path']
+      }
+    : {
+        targets: { files: ['a.js', 'test/a.test.js'], components: ['core-engine'] },
+        approach: [{ kind: 'edit', component: 'core-engine' }, { kind: 'test', component: 'core-engine' }],
+        assumptions: [{ topic: 'ownership', choice: 'extend the core engine' }],
+        risks: ['shared state']
+      };
+  const reply = interrogationQuestion
+    ? `INTERROGATION ${interrogationQuestion.id}: the failing check said expected 2 but received 3; no action was taken.`
+    : planPass && process.env.FAKE_CODEX_INCONCLUSIVE_MODEL && String(threadModel).includes(process.env.FAKE_CODEX_INCONCLUSIVE_MODEL)
+      ? 'I need more context before I can produce a structural plan.'
+      : planPass
+        ? `\`\`\`json\n${JSON.stringify(structuralPlan)}\n\`\`\``
+        : process.env.FAKE_CODEX_NUDGE === '1'
     ? turnCount === 1 ? 'I prepared the requested deliverable.' : `Complete findings inline: ${'evidence '.repeat(30)}`
     : backchannelReply || process.env.FAKE_CODEX_REPLY || 'done';
   send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-fake', turnId, itemId: 'message-1', delta: reply } });
   send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId, item: { type: 'agentMessage', id: 'message-1', text: reply, phase: 'final_answer', memoryCitation: null }, completedAtMs: Date.now() } });
   send({ jsonrpc: '2.0', method: 'turn/diff/updated', params: { threadId: 'thread-fake', turnId, diff: 'diff --git a/a.js b/a.js' } });
-  sendUsage(turnId, 2);
+  sendUsage(turnId, Math.max(2, turnCount * 10 + (interrogationQuestion ? 4 : 0)));
   send({ jsonrpc: '2.0', method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 41, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, secondary: { usedPercent: 7, resetsAt: Math.floor(Date.now() / 1000) + 604800 } } } });
   send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-fake', turn: { id: turnId, status: 'completed', items: [], itemsView: 'full', error: null, startedAt: 1, completedAt: 2, durationMs: 100 } } });
+  interrogationQuestion = null;
 }
 
 lines.on('line', async (line) => {
   const request = JSON.parse(line);
+  if (process.env.FAKE_CODEX_REQUEST_LOG && request.id != null) {
+    fs.appendFileSync(process.env.FAKE_CODEX_REQUEST_LOG, `${JSON.stringify({ method: request.method, params: request.params })}\n`);
+  }
   if (request.id == null) return;
   if (request.method === 'initialize') send({ jsonrpc: '2.0', id: request.id, result: { userAgent: 'fake' } });
   else if (request.method === 'thread/start' || request.method === 'thread/resume') {
+    threadModel = request.params?.model || threadModel;
     backchannel = request.params?.config?.mcp_servers?.delegate_backchannel || null;
     if (process.env.FAKE_CODEX_REJECT_BACKCHANNEL === '1' && backchannel) {
       send({ jsonrpc: '2.0', id: request.id, error: { code: -32602, message: 'fake rejected MCP config' } });
@@ -62,6 +93,7 @@ lines.on('line', async (line) => {
     send({ jsonrpc: '2.0', id: request.id, result: { thread: { id: 'thread-fake' }, model: 'fake', cwd: process.cwd() } });
   } else if (request.method === 'turn/start') {
     turnCount += 1;
+    activePrompt = request.params?.input?.map((item) => item.text || '').join('\n') || '';
     activeTurn = `turn-${Date.now()}`;
     send({ jsonrpc: '2.0', id: request.id, result: { turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
     send({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-fake', turn: { id: activeTurn, status: 'inProgress', items: [], itemsView: 'full', error: null } } });
@@ -70,7 +102,9 @@ lines.on('line', async (line) => {
       send({ jsonrpc: '2.0', method: 'item/started', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'contextCompaction', id: 'compaction-1' } } });
     }
     send({ jsonrpc: '2.0', method: 'turn/plan/updated', params: { threadId: 'thread-fake', turnId: activeTurn, explanation: null, plan: [{ step: 'test', status: 'inProgress' }] } });
-    const fileChanges = Math.max(0, Number(process.env.FAKE_CODEX_FILE_CHANGES ?? 1));
+    const fileChanges = activePrompt.includes('PLAN PASS ONLY')
+      ? 0
+      : Math.max(0, Number(process.env.FAKE_CODEX_FILE_CHANGES ?? 1));
     for (let index = 0; index < fileChanges; index += 1) {
       const changedPath = index === 0 ? 'a.js' : `file-${index}.js`;
       send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId: activeTurn, item: { type: 'fileChange', id: `file-${index}`, changes: [{ path: changedPath, kind: 'update' }], status: 'completed' }, completedAtMs: Date.now() } });
@@ -141,6 +175,9 @@ lines.on('line', async (line) => {
       timer = setTimeout(complete, 500);
     } else timer = setTimeout(complete, 500);
   } else if (request.method === 'turn/steer') {
+    const text = request.params?.input?.map((item) => item.text || '').join('\n') || '';
+    const match = text.match(/READ-ONLY INTERROGATION ([A-Za-z0-9_-]+)/);
+    if (match) interrogationQuestion = { id: match[1], text };
     send({ jsonrpc: '2.0', id: request.id, result: { turnId: activeTurn } });
   } else if (request.method === 'turn/interrupt') {
     clearTimeout(timer);

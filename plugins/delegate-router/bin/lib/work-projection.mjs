@@ -171,8 +171,11 @@ function projectedDecision(job) {
 }
 
 function projectedFindings(job, workId, runIndex) {
-  const values = job?.result?.structured?.findings;
-  if (!Array.isArray(values)) return [];
+  const structured = Array.isArray(job?.result?.structured?.findings)
+    ? job.result.structured.findings
+    : [];
+  const evidence = Array.isArray(job?.findings) ? job.findings : [];
+  const values = [...structured, ...evidence];
   return values.map((finding, findingIndex) => {
     const source = isRecord(finding) ? finding : {};
     return {
@@ -182,7 +185,8 @@ function projectedFindings(job, workId, runIndex) {
       criterion: stringOrNull(source.criterion) || stringOrNull(source.acceptanceCriterion),
       status: ['open', 'resolved', 'regressed'].includes(source.status) ? source.status : null,
       introducedBy: stringOrNull(source.introducedBy),
-      resolvedBy: stringOrNull(source.resolvedBy)
+      resolvedBy: stringOrNull(source.resolvedBy),
+      ...(source.evidence == null ? {} : { evidence: copy(source.evidence) })
     };
   });
 }

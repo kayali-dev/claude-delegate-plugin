@@ -2,7 +2,27 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendJobEvent, claimCommands, completeCommand, completeIngestedFiles, DeltaRedactor, diffStat, hashWorkingFile, inspectJob, jobFiles, pathMatchesScope, redact, resumeManagedJob, settleQueuedControl, updateManagedJob, usageTotals } from './control.mjs';
+import {
+  appendJobEvent,
+  attributeInterrogationUsage,
+  awaitAmbiguityProbe,
+  claimCommands,
+  completeCommand,
+  completeIngestedFiles,
+  DeltaRedactor,
+  diffStat,
+  hashWorkingFile,
+  inspectJob,
+  jobFiles,
+  pathMatchesScope,
+  recordInterrogationAnswer,
+  redact,
+  resumeManagedJob,
+  settleQueuedControl,
+  startAmbiguityProbe,
+  updateManagedJob,
+  usageTotals
+} from './control.mjs';
 import {
   availableModelIds,
   buildCursorArgs,
@@ -37,6 +57,16 @@ import {
   normalizeCoordinatorQuestion,
   resolveCoordinatorQuestion
 } from './backchannel.mjs';
+import {
+  compareStructuralPlans,
+  IMPLEMENT_CONFIRMED_PROMPT,
+  interrogationPrompt,
+  observedPlanEstimate,
+  parseStructuralPlan,
+  planPrompt,
+  planRequestId,
+  planReviewPresentation
+} from './planning.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
@@ -165,6 +195,168 @@ export const MIN_VERSIONS = Object.freeze({ codex: '0.144.0', cursor: '2026.7.0'
 
 function promptFor(job) {
   return assembleProviderPrompt(job, fs.readFileSync(job.promptPath, 'utf8'));
+}
+
+function planningActive(job) {
+  return job.planFirst === true && !['confirmed', 'declined', 'degraded'].includes(job.planning?.state);
+}
+
+function planConfirmationTimeout(job) {
+  const seconds = Number(process.env.DELEGATE_PLAN_CONFIRM_TIMEOUT_SECONDS ?? 3600);
+  const configured = (Number.isFinite(seconds) ? Math.min(Math.max(seconds, 10), 86400) : 3600) * 1000;
+  if (!job.timeoutSeconds || !job.createdAt) return configured;
+  return Math.max(1, Math.min(configured, job.createdAt * 1000 + job.timeoutSeconds * 1000 - Date.now()));
+}
+
+async function presentPlanForConfirmation(jobId, primaryText) {
+  const job = inspectJob(jobId);
+  const primary = parseStructuralPlan(primaryText);
+  if (!primary.ok) {
+    updateManagedJob(jobId, (current) => {
+      current.planning = {
+        ...current.planning,
+        state: 'degraded',
+        confirmationRequired: false,
+        reason: `primary-plan-${primary.reason}`
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(jobId, 'plan.degraded', {
+      stage: 'primary-plan',
+      reason: primary.reason,
+      fallback: 'explicitly-requested-direct-write'
+    });
+    return { action: 'fallback', reason: primary.reason };
+  }
+  const probe = await awaitAmbiguityProbe(jobId);
+  let comparison;
+  if (job.ambiguityCheck !== true) {
+    comparison = {
+      verdict: 'inconclusive',
+      reason: 'ambiguity-check-skipped',
+      comparedDimensions: [],
+      differences: []
+    };
+  } else if (!probe || probe.status !== 'completed') {
+    comparison = {
+      verdict: 'inconclusive',
+      reason: inspectJob(jobId).planning?.ambiguity?.reason || 'independent-plan-unavailable',
+      comparedDimensions: [],
+      differences: []
+    };
+  } else {
+    comparison = compareStructuralPlans(primary, parseStructuralPlan(probe.result?.plan || probe.resultText || probe.result));
+  }
+  const estimate = observedPlanEstimate(job);
+  const presentation = planReviewPresentation(primary, comparison, estimate);
+  const requestedAt = Date.now();
+  const timeoutMs = planConfirmationTimeout(job);
+  const question = {
+    requestId: planRequestId(jobId),
+    kind: 'plan-confirmation',
+    question: presentation.question,
+    options: ['accept-plan', 'decline-plan'],
+    urgency: comparison.verdict === 'divergent' ? 'blocking' : 'normal',
+    context: {
+      stuckOn: presentation.ambiguityQuestion || 'plan confirmation',
+      diffSoFar: '',
+      optionsConsidered: ['accept-plan', 'decline-plan'],
+      predictedBlastRadius: presentation.predictedBlastRadius,
+      estimate,
+      comparison
+    },
+    requestedAt,
+    timeoutMs,
+    expiresAt: requestedAt + timeoutMs,
+    defaultAction: 'reject'
+  };
+  beginCoordinatorQuestion(jobId, question, 'plan-first');
+  updateManagedJob(jobId, (current) => {
+    current.planning = {
+      ...current.planning,
+      state: 'awaiting-confirmation',
+      primary: primary.plan,
+      presentation,
+      comparison,
+      confirmationRequestId: question.requestId
+    };
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, 'plan.presented', {
+    requestId: question.requestId,
+    predictedBlastRadius: presentation.predictedBlastRadius,
+    estimate,
+    comparison,
+    ambiguityQuestion: presentation.ambiguityQuestion
+  });
+  appendJobEvent(jobId, 'input.requested', question);
+  return { action: 'await-confirmation', question, presentation };
+}
+
+function answerPlanCommand(jobId, claimed) {
+  const command = claimed.command;
+  const job = inspectJob(jobId);
+  const pending = job.pendingInput;
+  if (pending?.origin !== 'plan-first' || pending.kind !== 'plan-confirmation') return null;
+  if (command.type !== 'respond') return null;
+  if (command.requestId && command.requestId !== pending.requestId) {
+    completeCommand(jobId, claimed, { ok: false, error: `response targets ${command.requestId}; pending request is ${pending.requestId}` });
+    return { decision: 'invalid' };
+  }
+  if (typeof command.accept !== 'boolean') {
+    completeCommand(jobId, claimed, { ok: false, error: 'plan confirmation requires accept=true or accept=false' });
+    return { decision: 'invalid' };
+  }
+  resolveCoordinatorQuestion(jobId, pending, 'answered', 'plan-first');
+  const decision = command.accept ? 'confirmed' : 'declined';
+  updateManagedJob(jobId, (current) => {
+    current.planning = {
+      ...current.planning,
+      state: decision,
+      confirmationRequired: false,
+      confirmedAt: command.accept ? Date.now() : null,
+      declinedAt: command.accept ? null : Date.now()
+    };
+    current.phase = command.accept ? 'prompting' : 'plan-declined';
+    current.stopReason = command.accept ? null : 'plan-declined';
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, command.accept ? 'plan.confirmed' : 'plan.declined', {
+    requestId: pending.requestId,
+    sameProviderSession: true,
+    writeStarted: false
+  });
+  appendJobEvent(jobId, 'input.resolved', {
+    requestId: pending.requestId,
+    outcome: command.accept ? 'accepted' : 'declined',
+    defaultAction: 'reject'
+  });
+  completeCommand(jobId, claimed, {
+    ok: true,
+    appliedAs: command.accept ? 'same-session-plan-confirmation' : 'plan-declined',
+    requestId: pending.requestId
+  });
+  return { decision };
+}
+
+function recordInterrogationUnavailable(jobId, command, error, transport, claimed = null) {
+  const reason = String(redact(error?.message || error || 'provider interrogation unavailable', '', 2_000));
+  updateManagedJob(jobId, (current) => {
+    const entry = (current.interrogations || []).find((item) => item.id === command.commandId);
+    if (entry) Object.assign(entry, {
+      state: 'unavailable',
+      reason,
+      transport,
+      authority: 'evidence-only',
+      constraintsUnchanged: true
+    });
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, 'interrogation.unavailable', {
+    commandId: command.commandId,
+    reason,
+    transport,
+    fallback: 'existing-journal-and-pull-evidence',
+    constraintsUnchanged: true
+  });
+  if (claimed) completeCommand(jobId, claimed, { ok: false, error: reason, degraded: true });
+  else settleQueuedControl(jobId, command.commandId, { ok: false, error: reason, degraded: true });
 }
 
 function codexModel(model) {
@@ -755,13 +947,28 @@ export function assertProviderVersion(provider, binary) {
 export function recordUsage(job, usage, options = {}) {
   appendJobEvent(job.id, 'usage.updated', usage, options);
   updateManagedJob(job.id, (current) => { current.usage = usage; }, { incrementRevision: false });
+  attributeInterrogationUsage(job.id, usage);
   const totals = usageTotals(usage);
-  if (!job.maxOutputTokens || !totals || totals.outputTokens <= job.maxOutputTokens) return null;
-  return brokerError('BUDGET_EXCEEDED', `output token usage ${totals.outputTokens} exceeded maxOutputTokens ${job.maxOutputTokens}`, {
-    provider: job.provider,
-    maxOutputTokens: job.maxOutputTokens,
-    observedOutputTokens: totals.outputTokens
-  });
+  const current = loadJob(job.id) || job;
+  const external = Number(current.planning?.externalOutputTokensReserved || 0);
+  const attributedOutputTokens = totals ? totals.outputTokens + external : null;
+  if (current.maxOutputTokens && totals && attributedOutputTokens > current.maxOutputTokens) {
+    return brokerError('BUDGET_EXCEEDED', `attributed output token usage ${attributedOutputTokens} exceeded maxOutputTokens ${current.maxOutputTokens}`, {
+      provider: job.provider,
+      maxOutputTokens: current.maxOutputTokens,
+      observedOutputTokens: attributedOutputTokens
+    });
+  }
+  const planLimit = Number(current.planning?.planOutputTokenLimit);
+  if (current.planning?.state === 'running' && Number.isFinite(planLimit) && totals?.outputTokens > planLimit) {
+    return brokerError('BUDGET_EXCEEDED', `plan pass output token usage ${totals.outputTokens} exceeded its ${planLimit} token sub-budget`, {
+      provider: job.provider,
+      maxOutputTokens: planLimit,
+      observedOutputTokens: totals.outputTokens,
+      planPass: true
+    });
+  }
+  return null;
 }
 
 function recordBudgetExceeded(job, error, options = {}) {
@@ -1265,8 +1472,12 @@ async function runCodex(job) {
   const deltas = new DeltaRedactor();
   const activity = new ActivityTransitionEmitter(job.id);
   let budgetError = null;
+  let planPassError = null;
   let largeWriteError = null;
   const liveChangedPaths = new Set();
+  const pendingInterrogations = [];
+  let planPhase = planningActive(job) ? 'planning' : 'disabled';
+  let planDeclined = false;
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CODEX_TIMEOUT_SECONDS', 3600);
   const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const binary = process.env.DELEGATE_CODEX_BIN || 'codex';
@@ -1304,6 +1515,23 @@ async function runCodex(job) {
       } else if (method === 'item/started' || method === 'item/completed') {
         const phase = method === 'item/started' ? 'started' : 'completed';
         mapCodexItem(job.id, phase, params, activity);
+        if (phase === 'completed' && params.item?.type === 'agentMessage' && pendingInterrogations.length) {
+          const interrogation = pendingInterrogations.shift();
+          try {
+            recordInterrogationAnswer(job.id, interrogation.command, params.item.text, {
+              baselineOutputTokens: interrogation.baselineOutputTokens,
+              transport: 'app-server',
+              appliedAs: 'same-turn-read-only-question'
+            });
+            settleQueuedControl(job.id, interrogation.command.commandId, {
+              ok: true,
+              appliedAs: 'same-turn-read-only-question',
+              evidenceRecorded: true
+            });
+          } catch (error) {
+            settleQueuedControl(job.id, interrogation.command.commandId, { ok: false, error: error.message });
+          }
+        }
         for (const file of codexChangedPaths(params.item)) liveChangedPaths.add(file);
         const limit = largeWriteLimit();
         if (liveChangedPaths.size > limit && !largeWriteError) {
@@ -1332,7 +1560,21 @@ async function runCodex(job) {
       else if (method === 'turn/diff/updated') appendJobEvent(job.id, 'diff.updated', { diff: params.diff }, options);
       else if (method === 'thread/tokenUsage/updated') {
         const exceeded = recordUsage(job, params.tokenUsage, options);
-        if (exceeded && !budgetError) {
+        if (exceeded?.planPass && !planPassError) {
+          planPassError = exceeded;
+          appendJobEvent(job.id, 'plan.degraded', {
+            stage: 'primary-plan',
+            reason: 'plan-output-token-sub-budget-exceeded',
+            observedOutputTokens: exceeded.observedOutputTokens,
+            maxOutputTokens: exceeded.maxOutputTokens,
+            fallback: 'explicitly-requested-direct-write'
+          }, options);
+          const turnId = params.turnId || inspectJob(job.id).providerTurnId;
+          if (turnId) {
+            try { await rpc.request('turn/interrupt', { threadId: params.threadId || job.providerSessionId, turnId }); }
+            catch {}
+          }
+        } else if (exceeded && !budgetError) {
           budgetError = exceeded;
           recordBudgetExceeded(job, exceeded, options);
           const turnId = params.turnId || inspectJob(job.id).providerTurnId;
@@ -1372,7 +1614,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.39.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.40.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1413,7 +1655,7 @@ async function runCodex(job) {
       updateManagedJob(job.id, (current) => { current.resolvedModel = thread.model; }, { incrementRevision: false });
     }
 
-    const startTurn = async (text) => {
+    const startTurn = async (text, sandbox = codexSandboxMode(loadJob(job.id))) => {
       turnDone = new Promise((resolve) => { turnResolve = resolve; });
       let result;
       try {
@@ -1423,7 +1665,8 @@ async function runCodex(job) {
           cwd: job.cwd,
           approvalPolicy: 'on-request',
           approvalsReviewer: 'auto_review',
-          model
+          model,
+          sandbox
         });
       } catch (error) {
         throw mapCodexResumeError(error, Boolean(job.providerSessionId));
@@ -1433,7 +1676,16 @@ async function runCodex(job) {
     };
 
     if (!await holdBeforeFirstTurn(loadJob(job.id), deadline)) return;
-    await startTurn(promptFor(loadJob(job.id)));
+    if (planPhase === 'planning') {
+      updateManagedJob(job.id, (current) => {
+        current.planning = { ...current.planning, state: 'running', startedAt: Date.now(), sandbox: 'read-only' };
+        current.phase = 'planning';
+      }, { incrementRevision: false });
+      startAmbiguityProbe(job.id);
+      await startTurn(planPrompt(promptFor(loadJob(job.id))), 'read-only');
+    } else {
+      await startTurn(promptFor(loadJob(job.id)));
+    }
     while (true) {
       const inputTimeout = backchannelTimedOut(job.id);
       if (inputTimeout) {
@@ -1469,7 +1721,20 @@ async function runCodex(job) {
         const command = claimed.command;
         try {
           const current = inspectJob(job.id);
-          if (command.type === 'cancel') {
+          const planAnswer = answerPlanCommand(job.id, claimed);
+          if (planAnswer?.decision === 'confirmed') {
+            planPhase = 'implementing';
+            await startTurn(IMPLEMENT_CONFIRMED_PROMPT, codexSandboxMode(loadJob(job.id)));
+          } else if (planAnswer?.decision === 'declined') {
+            planDeclined = true;
+            terminal(loadJob(job.id), 'cancelled', 'plan-declined', {
+              stoppedReason: 'plan-declined',
+              result: loadJob(job.id).result
+            });
+          } else if (planAnswer) {
+            // Invalid plan responses are settled by answerPlanCommand and the
+            // job remains safely paused at the confirmation boundary.
+          } else if (command.type === 'cancel') {
             for (const queued of queuedPrompts) {
               appendJobEvent(job.id, 'correction.rejected', { commandId: queued.commandId, reason: 'job cancelled' });
               settleQueuedControl(job.id, queued.commandId, { ok: false, error: 'job cancelled before correction started' });
@@ -1483,6 +1748,34 @@ async function runCodex(job) {
                 .catch((error) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'cancel-interrupt-error', error: error.message }));
             }
             completeCommand(job.id, claimed, { ok: true, appliedAs: 'interrupt' });
+          } else if (command.type === 'interrogate') {
+            if (!current.providerTurnId) {
+              completeCommand(job.id, claimed, { ok: false, error: 'SESSION_UNAVAILABLE: no active Codex turn to interrogate' });
+              continue;
+            }
+            const baselineOutputTokens = usageTotals(current.usage)?.outputTokens || 0;
+            updateManagedJob(job.id, (next) => {
+              const entry = (next.interrogations || []).find((item) => item.id === command.commandId);
+              if (entry) entry.state = 'active';
+            }, { incrementRevision: false });
+            await rpc.request('turn/steer', {
+              threadId,
+              expectedTurnId: current.providerTurnId,
+              input: [{ type: 'text', text: interrogationPrompt(command.commandId, command.question), text_elements: [] }]
+            });
+            pendingInterrogations.push({ command, baselineOutputTokens });
+            appendJobEvent(job.id, 'interrogation.queued', {
+              commandId: command.commandId,
+              appliedAs: 'same-turn-read-only-question',
+              authority: 'evidence-only',
+              constraintsUnchanged: true
+            });
+            completeCommand(job.id, claimed, {
+              ok: true,
+              state: 'queued',
+              appliedAs: 'same-turn-read-only-question',
+              evidencePending: true
+            });
           } else if (command.type === 'steer') {
             if (cancelled) {
               completeCommand(job.id, claimed, { ok: false, error: 'JOB_CANCELLING: correction rejected' });
@@ -1515,14 +1808,49 @@ async function runCodex(job) {
             }
           } else completeCommand(job.id, claimed, { ok: false, error: `unsupported command: ${command.type}` });
         } catch (error) {
-          completeCommand(job.id, claimed, { ok: false, error: error.message });
+          if (command.type === 'interrogate') {
+            recordInterrogationUnavailable(job.id, command, error, 'app-server', claimed);
+          } else {
+            completeCommand(job.id, claimed, { ok: false, error: error.message });
+          }
         }
       }
+      if (planDeclined) break;
       if (completed) {
         interruptRequested = false;
         if (largeWriteError) throw largeWriteError;
         if (budgetError) throw budgetError;
         if (cancelled) { terminal(job, 'cancelled', 'cancelled'); break; }
+        if (planPhase === 'planning') {
+          if (planPassError || completed.turn.status === 'failed') {
+            updateManagedJob(job.id, (current) => {
+              current.planning = {
+                ...current.planning,
+                state: 'degraded',
+                confirmationRequired: false,
+                reason: planPassError ? 'plan-output-token-sub-budget-exceeded' : 'provider-plan-turn-failed'
+              };
+            }, { incrementRevision: false });
+            appendJobEvent(job.id, 'plan.degraded', {
+              stage: 'primary-plan',
+              reason: planPassError ? 'plan-output-token-sub-budget-exceeded' : 'provider-plan-turn-failed',
+              fallback: 'explicitly-requested-direct-write'
+            });
+            planPhase = 'implementing';
+            await startTurn(IMPLEMENT_CONFIRMED_PROMPT, codexSandboxMode(loadJob(job.id)));
+            continue;
+          }
+          const planned = await presentPlanForConfirmation(job.id, loadJob(job.id).resultText || loadJob(job.id).result || '');
+          if (planned.action === 'fallback') {
+            planPhase = 'implementing';
+            await startTurn(IMPLEMENT_CONFIRMED_PROMPT, codexSandboxMode(loadJob(job.id)));
+          } else {
+            planPhase = 'awaiting-confirmation';
+            turnDone = new Promise(() => {});
+            turnResolve = null;
+          }
+          continue;
+        }
         if (queuedPrompts.length) {
           const next = queuedPrompts.shift();
           settleQueuedControl(job.id, next.commandId, { ok: true, appliedAs: next.appliedAs });
@@ -2129,6 +2457,12 @@ async function runCursorAcpTransport(job) {
   let pendingInput = null;
   let blockingInputError = null;
   let projectConfigError = null;
+  let planPassError = null;
+  const pendingInterrogations = [];
+  let activeInterrogation = null;
+  let resultBeforeInterrogation = null;
+  let planPhase = planningActive(job) ? 'planning' : 'disabled';
+  let planDeclined = false;
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
   const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const rpc = new JsonRpcProcess(launch.command, launch.args, {
@@ -2208,7 +2542,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.39.0' }
+      clientInfo: { name: 'delegate-router', version: '0.40.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -2305,11 +2639,17 @@ async function runCursorAcpTransport(job) {
         current.resolvedModel = resolvedModel;
       }, { incrementRevision: false });
     }
-    if (modeOption) {
-      const resolvedMode = job.network === true && readOnly(job) ? 'agent' : readOnly(job) ? (job.mode === 'consult' ? 'ask' : 'plan') : 'agent';
+    const setSessionMode = async (resolvedMode, requested = job.mode) => {
+      if (!modeOption) return;
       await rpc.request('session/set_config_option', { sessionId, configId: 'mode', value: resolvedMode });
-      appendJobEvent(job.id, 'mode.updated', { requested: job.mode, mode: resolvedMode }, { sessionId });
+      appendJobEvent(job.id, 'mode.updated', { requested, mode: resolvedMode }, { sessionId });
       updateManagedJob(job.id, (current) => { current.cursorMode = resolvedMode; }, { incrementRevision: false });
+    };
+    if (modeOption) {
+      const resolvedMode = planPhase === 'planning'
+        ? 'plan'
+        : job.network === true && readOnly(job) ? 'agent' : readOnly(job) ? (job.mode === 'consult' ? 'ask' : 'plan') : 'agent';
+      await setSessionMode(resolvedMode, planPhase === 'planning' ? 'plan-first' : job.mode);
     }
 
     if (!await holdBeforeFirstTurn(loadJob(job.id), deadline)) return;
@@ -2320,7 +2660,16 @@ async function runCursorAcpTransport(job) {
       appendJobEvent(job.id, 'turn.started', { transport: 'acp' }, { sessionId });
       promptPromise = rpc.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: cursorPrompt(loadJob(job.id), text) }] }, Math.max(1, deadline - Date.now()));
     };
-    startPrompt(promptFor(loadJob(job.id)));
+    if (planPhase === 'planning') {
+      updateManagedJob(job.id, (current) => {
+        current.planning = { ...current.planning, state: 'running', startedAt: Date.now(), sandbox: 'read-only' };
+        current.phase = 'planning';
+      }, { incrementRevision: false });
+      startAmbiguityProbe(job.id);
+      startPrompt(planPrompt(promptFor(loadJob(job.id))));
+    } else {
+      startPrompt(promptFor(loadJob(job.id)));
+    }
 
     while (true) {
       if (blockingInputError) throw blockingInputError;
@@ -2339,7 +2688,21 @@ async function runCursorAcpTransport(job) {
       ]);
       for (const claimed of claimProviderCommands(job.id)) {
         const command = claimed.command;
-        if (command.type === 'cancel') {
+        const planAnswer = answerPlanCommand(job.id, claimed);
+        if (planAnswer?.decision === 'confirmed') {
+          planPhase = 'implementing';
+          await setSessionMode('agent', job.mode);
+          startPrompt(IMPLEMENT_CONFIRMED_PROMPT);
+        } else if (planAnswer?.decision === 'declined') {
+          planDeclined = true;
+          terminal(loadJob(job.id), 'cancelled', 'plan-declined', {
+            stoppedReason: 'plan-declined',
+            result: loadJob(job.id).result
+          });
+        } else if (planAnswer) {
+          // Invalid plan responses leave the explicit confirmation boundary in
+          // place and are already settled as rejected.
+        } else if (command.type === 'cancel') {
           cancelRequested = true;
           if (pendingInput) {
             clearTimeout(pendingInput.timer);
@@ -2375,6 +2738,31 @@ async function runCursorAcpTransport(job) {
             completeCommand(job.id, claimed, { ok: true, appliedAs: 'input-response', requestId });
             resolve(response);
           }
+        } else if (command.type === 'interrogate') {
+          if (planPhase === 'awaiting-confirmation') {
+            completeCommand(job.id, claimed, { ok: false, error: 'SESSION_UNAVAILABLE: the Cursor session is waiting for plan confirmation' });
+          } else {
+            const baselineOutputTokens = usageTotals(inspectJob(job.id).usage)?.outputTokens || 0;
+            pendingInterrogations.push({ command, baselineOutputTokens });
+            updateManagedJob(job.id, (current) => {
+              const entry = (current.interrogations || []).find((item) => item.id === command.commandId);
+              if (entry) entry.state = 'active';
+            }, { incrementRevision: false });
+            appendJobEvent(job.id, 'interrogation.queued', {
+              commandId: command.commandId,
+              appliedAs: 'queued-next-turn',
+              cursorSameTurn: false,
+              authority: 'evidence-only',
+              constraintsUnchanged: true
+            }, { sessionId });
+            completeCommand(job.id, claimed, {
+              ok: true,
+              state: 'queued',
+              appliedAs: 'queued-next-turn',
+              cursorSameTurn: false,
+              evidencePending: true
+            });
+          }
         } else if (command.type === 'steer') {
           if (cancelRequested) {
             completeCommand(job.id, claimed, { ok: false, error: 'JOB_CANCELLING: correction rejected' });
@@ -2388,9 +2776,20 @@ async function runCursorAcpTransport(job) {
           }
         } else completeCommand(job.id, claimed, { ok: false, error: `unsupported command: ${command.type}` });
       }
+      if (planDeclined) break;
       if (!completed) continue;
       if (blockingInputError) throw blockingInputError;
       if (completed.error) {
+        if (activeInterrogation) {
+          recordInterrogationUnavailable(job.id, activeInterrogation.command, completed.error, 'acp');
+          activeInterrogation = null;
+          recordGitState(job, sessionId);
+          terminal(job, 'completed', 'completed', {
+            result: resultBeforeInterrogation,
+            session: sessionId
+          });
+          break;
+        }
         if (projectConfigError) throw cursorProjectBrokerError(projectConfigError, job.provider);
         throw completed.error;
       }
@@ -2399,7 +2798,16 @@ async function runCursorAcpTransport(job) {
       if (messageParts.length) appendJobEvent(job.id, 'message.completed', { text: messageParts.join('') }, { sessionId });
       if (completed.response.usage && usageTotals(completed.response.usage)) {
         const exceeded = recordUsage(job, completed.response.usage, { sessionId });
-        if (exceeded && !budgetError) {
+        if (exceeded?.planPass && !planPassError) {
+          planPassError = exceeded;
+          appendJobEvent(job.id, 'plan.degraded', {
+            stage: 'primary-plan',
+            reason: 'plan-output-token-sub-budget-exceeded',
+            observedOutputTokens: exceeded.observedOutputTokens,
+            maxOutputTokens: exceeded.maxOutputTokens,
+            fallback: 'explicitly-requested-direct-write'
+          }, { sessionId });
+        } else if (exceeded && !budgetError) {
           budgetError = exceeded;
           recordBudgetExceeded(job, exceeded, { sessionId });
         }
@@ -2409,6 +2817,58 @@ async function runCursorAcpTransport(job) {
         throw budgetError;
       }
       if (cancelRequested) { terminal(job, 'cancelled', 'cancelled'); break; }
+      if (planPhase === 'planning') {
+        if (planPassError) {
+          updateManagedJob(job.id, (current) => {
+            current.planning = {
+              ...current.planning,
+              state: 'degraded',
+              confirmationRequired: false,
+              reason: 'plan-output-token-sub-budget-exceeded'
+            };
+          }, { incrementRevision: false });
+          planPhase = 'implementing';
+          await setSessionMode('agent', job.mode);
+          startPrompt(IMPLEMENT_CONFIRMED_PROMPT);
+          continue;
+        }
+        const planText = [planEntriesText(planHolder.entries), messageParts.join('')].filter(Boolean).join('\n');
+        const planned = await presentPlanForConfirmation(job.id, planText);
+        if (planned.action === 'fallback') {
+          planPhase = 'implementing';
+          await setSessionMode('agent', job.mode);
+          startPrompt(IMPLEMENT_CONFIRMED_PROMPT);
+        } else {
+          planPhase = 'awaiting-confirmation';
+          promptPromise = new Promise(() => {});
+        }
+        continue;
+      }
+      if (activeInterrogation) {
+        try {
+          recordInterrogationAnswer(job.id, activeInterrogation.command, messageParts.join(''), {
+            baselineOutputTokens: activeInterrogation.baselineOutputTokens,
+            transport: 'acp',
+            appliedAs: 'queued-next-turn'
+          });
+          if (completed.response.usage) attributeInterrogationUsage(job.id, completed.response.usage);
+          settleQueuedControl(job.id, activeInterrogation.command.commandId, {
+            ok: true,
+            appliedAs: 'queued-next-turn',
+            cursorSameTurn: false,
+            evidenceRecorded: true
+          });
+        } catch (error) {
+          settleQueuedControl(job.id, activeInterrogation.command.commandId, { ok: false, error: error.message });
+        }
+        activeInterrogation = null;
+        recordGitState(job, sessionId);
+        terminal(job, 'completed', 'completed', {
+          result: resultBeforeInterrogation,
+          session: sessionId
+        });
+        break;
+      }
       if (pendingCorrections.length) {
         const next = pendingCorrections.shift();
         settleQueuedControl(job.id, next.commandId, { ok: true, appliedAs: 'restart' });
@@ -2422,6 +2882,14 @@ async function runCursorAcpTransport(job) {
         ...(planText ? { plan: planText } : {}),
         stopReason: completed.response.stopReason
       };
+      if (pendingInterrogations.length) {
+        resultBeforeInterrogation = result;
+        activeInterrogation = pendingInterrogations.shift();
+        activeInterrogation.baselineOutputTokens = usageTotals(inspectJob(job.id).usage)?.outputTokens || activeInterrogation.baselineOutputTokens;
+        await setSessionMode('plan', 'interrogation');
+        startPrompt(interrogationPrompt(activeInterrogation.command.commandId, activeInterrogation.command.question));
+        continue;
+      }
       if (prepareAutoNudge(job.id, result)) {
         startPrompt(AUTO_NUDGE_PROMPT);
         continue;
@@ -2557,11 +3025,14 @@ async function runCursorHeadlessTransport(job) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   assertProviderVersion('cursor', binary);
+  const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
+  const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const ids = process.platform === 'darwin' && process.env.DELEGATE_CURSOR_LOGIN_SHELL !== '0'
     ? []
     : availableModelIds(binary);
   const model = resolveCursorModel(job.model, ids);
   let resume = job.providerSessionId;
+  let planPhase = planningActive(job) ? 'planning' : 'disabled';
   if (!resume) {
     const created = createCursorChat(binary, job);
     if (created.sessionId) {
@@ -2572,13 +3043,34 @@ async function runCursorHeadlessTransport(job) {
       appendJobEvent(job.id, 'provider.event', { providerEvent: 'cursor:create-chat-fallback', reason: created.fallback });
     }
   }
-  let text = promptFor(job);
+  if (planPhase === 'planning' && !resume) {
+    updateManagedJob(job.id, (current) => {
+      current.planning = {
+        ...current.planning,
+        state: 'degraded',
+        confirmationRequired: false,
+        reason: 'headless-session-precreation-unavailable'
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(job.id, 'plan.degraded', {
+      stage: 'primary-plan',
+      reason: 'headless-session-precreation-unavailable',
+      fallback: 'explicitly-requested-direct-write'
+    });
+    planPhase = 'implementing';
+  }
+  let text = planPhase === 'planning' ? planPrompt(promptFor(job)) : promptFor(job);
+  let currentMode = planPhase === 'planning' ? 'plan' : job.mode;
   let cancelRequested = false;
   const pendingCorrections = [];
+  const pendingInterrogations = [];
+  let activeInterrogation = null;
+  let resultBeforeInterrogation = null;
   const deltas = new DeltaRedactor();
   const activity = new ActivityTransitionEmitter(job.id);
   const ephemeral = new EphemeralCursorActivity(activity);
   let budgetError = null;
+  let planPassError = null;
   let budgetTermination = null;
   let backchannelPlugin = null;
   let backchannelFallbackUsed = false;
@@ -2593,12 +3085,19 @@ async function runCursorHeadlessTransport(job) {
   }
 
   try {
+    if (planPhase === 'planning') {
+      updateManagedJob(job.id, (current) => {
+        current.planning = { ...current.planning, state: 'running', startedAt: Date.now(), sandbox: 'read-only' };
+        current.phase = 'planning';
+      }, { incrementRevision: false });
+      startAmbiguityProbe(job.id);
+    }
     while (true) {
     let activeChild = null;
     const assistantParts = [];
     appendJobEvent(job.id, 'turn.started', { transport: 'headless', resume }, { sessionId: resume });
     const headless = cursorLaunchCommand(binary, buildCursorArgs({
-      mode: job.mode,
+      mode: currentMode,
       model,
       cwd: job.cwd,
       approval: job.approval,
@@ -2620,7 +3119,16 @@ async function runCursorHeadlessTransport(job) {
       onChild: (child) => { activeChild = child; },
       onEvent: (event) => {
         const exceeded = mapCursorHeadlessEvent(job, event, { deltas, assistantParts, ephemeral });
-        if (exceeded && !budgetError) {
+        if (exceeded?.planPass && !planPassError) {
+          planPassError = exceeded;
+          appendJobEvent(job.id, 'plan.degraded', {
+            stage: 'primary-plan',
+            reason: 'plan-output-token-sub-budget-exceeded',
+            observedOutputTokens: exceeded.observedOutputTokens,
+            maxOutputTokens: exceeded.maxOutputTokens,
+            fallback: 'explicitly-requested-direct-write'
+          }, { sessionId: resume });
+        } else if (exceeded && !budgetError) {
           budgetError = exceeded;
           recordBudgetExceeded(job, exceeded, { sessionId: resume });
           if (activeChild) budgetTermination = terminateProcessTree(activeChild);
@@ -2646,6 +3154,27 @@ async function runCursorHeadlessTransport(job) {
           pendingCorrections.length = 0;
           if (activeChild) await terminateProcessTree(activeChild);
           completeCommand(job.id, claimed, { ok: true, appliedAs: 'process-tree-termination' });
+        } else if (command.type === 'interrogate') {
+          const baselineOutputTokens = usageTotals(inspectJob(job.id).usage)?.outputTokens || 0;
+          pendingInterrogations.push({ command, baselineOutputTokens });
+          updateManagedJob(job.id, (current) => {
+            const entry = (current.interrogations || []).find((item) => item.id === command.commandId);
+            if (entry) entry.state = 'active';
+          }, { incrementRevision: false });
+          appendJobEvent(job.id, 'interrogation.queued', {
+            commandId: command.commandId,
+            appliedAs: 'queued-next-turn',
+            cursorSameTurn: false,
+            authority: 'evidence-only',
+            constraintsUnchanged: true
+          }, { sessionId: resume });
+          completeCommand(job.id, claimed, {
+            ok: true,
+            state: 'queued',
+            appliedAs: 'queued-next-turn',
+            cursorSameTurn: false,
+            evidencePending: true
+          });
         } else if (command.type === 'steer') {
           if (cancelRequested) {
             completeCommand(job.id, claimed, { ok: false, error: 'JOB_CANCELLING: correction rejected' });
@@ -2685,6 +3214,97 @@ async function runCursorHeadlessTransport(job) {
       throw budgetError;
     }
     if (cancelRequested) { terminal(job, 'cancelled', 'cancelled'); return; }
+    if (planPhase === 'planning') {
+      if (planPassError) {
+        updateManagedJob(job.id, (current) => {
+          current.planning = {
+            ...current.planning,
+            state: 'degraded',
+            confirmationRequired: false,
+            reason: 'plan-output-token-sub-budget-exceeded'
+          };
+        }, { incrementRevision: false });
+        planPhase = 'implementing';
+        currentMode = job.mode;
+        text = IMPLEMENT_CONFIRMED_PROMPT;
+        continue;
+      }
+      const planned = await presentPlanForConfirmation(job.id, resultText(outcome.payload) || '');
+      if (planned.action === 'fallback') {
+        planPhase = 'implementing';
+        currentMode = job.mode;
+        text = IMPLEMENT_CONFIRMED_PROMPT;
+        continue;
+      }
+      planPhase = 'awaiting-confirmation';
+      let decided = false;
+      while (!decided) {
+        if (Date.now() >= Math.min(deadline, planned.question.expiresAt)) {
+          resolveCoordinatorQuestion(job.id, planned.question, 'timeout', 'plan-first');
+          appendJobEvent(job.id, 'input.resolved', {
+            requestId: planned.question.requestId,
+            outcome: 'timeout',
+            defaultAction: 'reject',
+            stopReason: 'input-timeout'
+          });
+          throw brokerError('USER_INPUT_REQUIRED', 'plan confirmation timed out; default action rejected implementation', {
+            provider: job.provider,
+            stopReason: 'input-timeout'
+          });
+        }
+        for (const claimed of claimProviderCommands(job.id)) {
+          const answer = answerPlanCommand(job.id, claimed);
+          if (answer?.decision === 'confirmed') {
+            planPhase = 'implementing';
+            currentMode = job.mode;
+            text = IMPLEMENT_CONFIRMED_PROMPT;
+            decided = true;
+          } else if (answer?.decision === 'declined') {
+            terminal(loadJob(job.id), 'cancelled', 'plan-declined', {
+              stoppedReason: 'plan-declined',
+              result: loadJob(job.id).result
+            });
+            return;
+          } else if (!answer && claimed.command.type === 'cancel') {
+            completeCommand(job.id, claimed, { ok: true, appliedAs: 'cancel' });
+            terminal(loadJob(job.id), 'cancelled', 'cancelled');
+            return;
+          } else if (!answer) {
+            completeCommand(job.id, claimed, {
+              ok: false,
+              error: `job is waiting for plan confirmation; ${claimed.command.type} is unavailable`
+            });
+          }
+        }
+        if (!decided) await delay(100);
+      }
+      continue;
+    }
+    if (activeInterrogation) {
+      if (outcome.status !== 0) {
+        recordInterrogationUnavailable(job.id, activeInterrogation.command, outcome.error || outcome.stderr || 'headless interrogation failed', 'headless');
+      } else {
+        try {
+          recordInterrogationAnswer(job.id, activeInterrogation.command, resultText(outcome.payload), {
+            baselineOutputTokens: activeInterrogation.baselineOutputTokens,
+            transport: 'headless',
+            appliedAs: 'queued-next-turn'
+          });
+          if (outcome.payload?.usage) attributeInterrogationUsage(job.id, outcome.payload.usage);
+          settleQueuedControl(job.id, activeInterrogation.command.commandId, {
+            ok: true,
+            appliedAs: 'queued-next-turn',
+            cursorSameTurn: false,
+            evidenceRecorded: true
+          });
+        } catch (error) {
+          recordInterrogationUnavailable(job.id, activeInterrogation.command, error, 'headless');
+        }
+      }
+      recordGitState(job, resume);
+      terminal(job, 'completed', 'completed', { result: resultBeforeInterrogation, session: resume });
+      return;
+    }
     if (pendingCorrections.length) {
       const next = pendingCorrections.shift();
       settleQueuedControl(job.id, next.commandId, { ok: true, appliedAs: 'restart' });
@@ -2701,6 +3321,28 @@ async function runCursorHeadlessTransport(job) {
     }
     const sessionId = findValue(outcome.payload, ['session_id', 'sessionId', 'chat_id', 'chatId']);
     if (sessionId) recordSession(job.id, sessionId, null);
+    if (pendingInterrogations.length) {
+      resultBeforeInterrogation = redact(outcome.payload);
+      activeInterrogation = pendingInterrogations.shift();
+      activeInterrogation.baselineOutputTokens = usageTotals(inspectJob(job.id).usage)?.outputTokens || activeInterrogation.baselineOutputTokens;
+      resume = sessionId || resume;
+      if (!resume) {
+        appendJobEvent(job.id, 'interrogation.unavailable', {
+          commandId: activeInterrogation.command.commandId,
+          reason: 'headless-session-id-unavailable',
+          fallback: 'journal-only-evidence'
+        });
+        settleQueuedControl(job.id, activeInterrogation.command.commandId, {
+          ok: false,
+          error: 'SESSION_UNAVAILABLE: Cursor headless did not expose a resumable session id'
+        });
+        activeInterrogation = null;
+      } else {
+        currentMode = 'plan';
+        text = interrogationPrompt(activeInterrogation.command.commandId, activeInterrogation.command.question);
+        continue;
+      }
+    }
     if (sessionId && prepareAutoNudge(job.id, outcome.payload)) {
       resume = sessionId;
       text = AUTO_NUDGE_PROMPT;
@@ -2953,7 +3595,7 @@ function recordAutoFixStop(job, decision) {
 
 function remainingOutputBudget(job) {
   if (!job.maxOutputTokens) return null;
-  const used = usageTotals(job.usage)?.outputTokens || 0;
+  const used = (usageTotals(job.usage)?.outputTokens || 0) + Number(job.planning?.externalOutputTokensReserved || 0);
   return Math.max(0, job.maxOutputTokens - used);
 }
 
@@ -2981,6 +3623,8 @@ function maybeLaunchAutoFix(job) {
       prompt: autoFixPrompt(job, decision),
       timeoutSeconds: timeoutSeconds || job.timeoutSeconds,
       maxOutputTokens: maxOutputTokens || job.maxOutputTokens,
+      planFirst: false,
+      ambiguityCheck: false,
       autoFix: {
         maxRounds: decision.maxRounds,
         _state: {

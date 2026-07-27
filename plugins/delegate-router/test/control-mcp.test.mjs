@@ -25,10 +25,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage',
-    'delegate_work', 'delegate_decide'
+    'delegate_work', 'delegate_decide', 'delegate_start_trivial', 'delegate_interrogate'
   ]);
   const legacySchemas = responses[1].result.tools
-    .filter((tool) => !['delegate_work', 'delegate_decide'].includes(tool.name))
+    .filter((tool) => !['delegate_work', 'delegate_decide', 'delegate_start_trivial', 'delegate_interrogate'].includes(tool.name))
     .map(({ name, inputSchema }) => ({ name, inputSchema }));
   assert.equal(
     createHash('sha256').update(JSON.stringify(legacySchemas)).digest('hex'),
@@ -42,6 +42,8 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   const stats = responses[1].result.tools.find((tool) => tool.name === 'delegate_stats');
   const work = responses[1].result.tools.find((tool) => tool.name === 'delegate_work');
   const decide = responses[1].result.tools.find((tool) => tool.name === 'delegate_decide');
+  const trivial = responses[1].result.tools.find((tool) => tool.name === 'delegate_start_trivial');
+  const interrogate = responses[1].result.tools.find((tool) => tool.name === 'delegate_interrogate');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
   assert.ok(start.inputSchema.properties.retryPolicy);
@@ -70,6 +72,9 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(Object.keys(work.inputSchema.properties), ['id', 'limit']);
   assert.equal(decide.inputSchema.additionalProperties, false);
   assert.deepEqual(decide.inputSchema.required, ['jobId', 'decision']);
+  assert.deepEqual(trivial.inputSchema, start.inputSchema);
+  assert.deepEqual(interrogate.inputSchema.required, ['jobId', 'expectedRevision', 'question']);
+  assert.equal(interrogate.inputSchema.additionalProperties, false);
 });
 
 test('control MCP adds bounded resources and common-flow prompts without changing tools', async (t) => {
@@ -165,7 +170,7 @@ test('control MCP adds bounded resources and common-flow prompts without changin
     resources: { listChanged: false },
     prompts: { listChanged: false }
   });
-  assert.equal(byId.get(2).result.tools.length, 17);
+  assert.equal(byId.get(2).result.tools.length, 19);
   assert.deepEqual(byId.get(3).result.resources.map((resource) => resource.uri), [
     'delegate://work/active',
     'delegate://repo/profile'
@@ -204,7 +209,7 @@ test('native MCP opt-out hides only resources and prompts while preserving every
   assert.equal(result.status, 0, result.stderr);
   const responses = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
   assert.deepEqual(responses[0].result.capabilities, { tools: { listChanged: false } });
-  assert.equal(responses[1].result.tools.length, 17);
+  assert.equal(responses[1].result.tools.length, 19);
   assert.equal(responses[2].error.code, -32601);
 });
 

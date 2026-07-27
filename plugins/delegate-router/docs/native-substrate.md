@@ -5,6 +5,14 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P4.6 plan-first dispatch and structural ambiguity detection and P4.7
+  read-only worker interrogation are implemented additively. Write launches
+  now begin with a bounded plan turn and revisioned confirmation before the
+  same provider session enters write mode; the trivial-change escape hatch is
+  explicit. Independent plan evidence is compared structurally and can report
+  divergent, convergent, or inconclusive without guessing. Interrogation
+  reuses the P4.5 inbox in reverse, records answers as findings evidence, and
+  attributes provider tokens to the original work-item budget.
 - P4 native session integration is implemented additively. The existing
   status-line wrapper now composes a five-second-refresh work chip before the
   user's original command; SessionStart and PostCompact share one bounded,
@@ -421,6 +429,15 @@ confident-sounding guess about ambiguity.
 
 Both are budget-bounded and skippable; neither may auto-launch write work.
 
+Implementation progress (2026-07-27): complete. Managed write launches default
+to a read-only plan turn with an explicit coordinator confirmation; confirmed
+Codex, Cursor ACP, and supported Cursor headless paths continue the same
+provider session into write mode. The independent pass uses a different
+provider or model and a strict structural schema. Missing capabilities degrade
+with a recorded reason, while invalid evidence is reported as inconclusive.
+`delegate_start_trivial` and `delegate-jobs start --no-plan-first` are the
+announced escape hatches.
+
 ### P4.7 — Worker interrogation (read-only, mid-flight)
 
 Ask a *running* worker a question without steering it: "why this approach?",
@@ -440,6 +457,14 @@ item as findings evidence.
 
 Cost note: an interrogation consumes provider turn tokens. It is bounded by the
 work item's budget and counted against it like any other turn.
+
+Implementation progress (2026-07-27): complete. `delegate_interrogate` and
+`delegate-jobs interrogate` add a strict question-only control record to the
+existing revisioned inbox. Codex answers from its active turn through a
+no-action `turn/steer` frame. Cursor queues a separate read-only turn on the
+same session and is not described as same-turn steering. Answers become
+findings evidence with observed usage attribution; they can never mutate or
+widen the stored contract.
 
 ### P5 — Intent→spec compiler
 Accept a sentence, a diff, a failing test, a TODO, or a task record; derive a

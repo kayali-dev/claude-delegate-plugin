@@ -17,6 +17,14 @@ import {
   deriveVerificationProfile,
   verificationRepositoryRevision
 } from './verification-profile.mjs';
+import {
+  ambiguityDefault,
+  contractDigest,
+  interrogationOutputTokenLimit,
+  planFirstDefault,
+  planOutputTokenLimit,
+  planPrompt
+} from './planning.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -1462,6 +1470,104 @@ export function usageTotals(usage) {
   return { inputTokens: inputTokens || 0, outputTokens: outputTokens || 0, totalTokens: totalTokens || 0 };
 }
 
+export function recordInterrogationAnswer(id, command, answer, options = {}) {
+  const safeAnswer = String(redact(String(answer || '').trim(), '', 32_000));
+  if (!safeAnswer) throw brokerError('INVALID_REQUEST', 'interrogation answer is empty');
+  const answeredAt = Date.now();
+  const baselineOutputTokens = Number(options.baselineOutputTokens || 0);
+  updateManagedJob(id, (current) => {
+    if (contractDigest(current) !== command.contractDigest) {
+      throw brokerError('INVALID_REQUEST', 'the work contract changed while interrogation was pending; evidence was not attached', {
+        provider: current.provider
+      });
+    }
+    current.interrogations ||= [];
+    const entry = current.interrogations.find((item) => item.id === command.commandId);
+    if (!entry) throw brokerError('INVALID_REQUEST', `interrogation record is missing: ${command.commandId}`, { provider: current.provider });
+    Object.assign(entry, {
+      state: 'answered',
+      answer: safeAnswer,
+      answeredAt,
+      transport: options.transport || current.transport,
+      appliedAs: options.appliedAs,
+      authority: 'evidence-only',
+      constraintsUnchanged: true,
+      cost: {
+        state: 'pending-provider-usage',
+        baselineOutputTokens,
+        outputTokenLimit: command.outputTokenLimit
+      }
+    });
+    current.findings ||= [];
+    current.findings.push({
+      id: `interrogation-${command.commandId}`,
+      severity: 'informational',
+      criterion: `Worker interrogation: ${String(command.question).slice(0, 512)}`,
+      status: 'open',
+      introducedBy: current.id,
+      evidence: {
+        kind: 'worker-interrogation',
+        interrogationId: command.commandId,
+        question: command.question,
+        answer: safeAnswer,
+        authority: 'evidence-only',
+        constraintsUnchanged: true,
+        cost: entry.cost
+      }
+    });
+  }, { incrementRevision: false });
+  appendJobEvent(id, 'interrogation.answered', {
+    commandId: command.commandId,
+    question: command.question,
+    answer: safeAnswer,
+    authority: 'evidence-only',
+    constraintsUnchanged: true,
+    cost: {
+      state: 'pending-provider-usage',
+      baselineOutputTokens,
+      outputTokenLimit: command.outputTokenLimit
+    },
+    transport: options.transport,
+    appliedAs: options.appliedAs
+  });
+  appendJobEvent(id, 'finding.recorded', {
+    findingId: `interrogation-${command.commandId}`,
+    kind: 'worker-interrogation',
+    evidenceOnly: true
+  });
+  return inspectJob(id).interrogations.find((entry) => entry.id === command.commandId);
+}
+
+export function attributeInterrogationUsage(id, usage) {
+  const currentOutputTokens = usageTotals(usage)?.outputTokens;
+  if (!Number.isFinite(currentOutputTokens)) return 0;
+  let attributed = 0;
+  updateManagedJob(id, (current) => {
+    for (const entry of current.interrogations || []) {
+      if (entry.state !== 'answered' || entry.cost?.state !== 'pending-provider-usage') continue;
+      const outputTokens = Math.max(0, currentOutputTokens - Number(entry.cost.baselineOutputTokens || 0));
+      entry.cost = {
+        ...entry.cost,
+        state: 'observed',
+        outputTokens,
+        observedOutputTokens: currentOutputTokens,
+        attributedAt: Date.now()
+      };
+      const finding = (current.findings || []).find((item) => item.id === `interrogation-${entry.id}`);
+      if (finding?.evidence) finding.evidence.cost = { ...entry.cost };
+      attributed += 1;
+    }
+  }, { incrementRevision: false });
+  if (attributed) {
+    appendJobEvent(id, 'interrogation.cost', {
+      state: 'observed',
+      observedOutputTokens: currentOutputTokens,
+      attributedCount: attributed
+    });
+  }
+  return attributed;
+}
+
 function observedUsage(job) {
   const events = readRawEvents(job.id).filter((event) => event.type === 'usage.updated');
   return events.at(-1)?.data || job.usage || null;
@@ -2157,6 +2263,8 @@ function resolveManagedJobOptions(options, id) {
   const groupId = validatedGroupId(options.groupId);
   const retryPolicy = validatedRetryPolicy(options.retryPolicy);
   const mode = options.mode || 'consult';
+  const planFirst = options.planFirst === true && WRITE_MODES.has(mode);
+  const ambiguityCheck = planFirst && ambiguityDefault(options);
   if (options.autoNudge === true && !READ_MODES.has(mode)) throw brokerError('INVALID_REQUEST', 'autoNudge is available only for read modes');
   const reportSchema = validatedReportSchema(options.reportSchema);
   const cwd = path.resolve(options.cwd || process.cwd());
@@ -2196,6 +2304,8 @@ function resolveManagedJobOptions(options, id) {
     groupId,
     retryPolicy,
     mode,
+    planFirst,
+    ambiguityCheck,
     verify,
     verification,
     verificationProfile,
@@ -2218,6 +2328,8 @@ function resolveManagedJobOptions(options, id) {
 
 export function previewManagedJob(options) {
   const prepared = prepareManagedOptions(options, { reportLint: false });
+  prepared.planFirst = planFirstDefault(prepared.mode || 'consult', prepared);
+  prepared.ambiguityCheck = prepared.planFirst && ambiguityDefault(prepared);
   const provider = validateProvider(prepared.provider);
   const resolved = resolveManagedJobOptions(prepared, jobId(provider));
   const packetJob = {
@@ -2232,6 +2344,8 @@ export function previewManagedJob(options) {
     profile: prepared.profile || null,
     model: prepared.model || 'auto',
     mode: resolved.mode,
+    planFirst: resolved.planFirst,
+    ambiguityCheck: resolved.ambiguityCheck,
     effort: resolved.effort,
     approval: prepared.approval || 'auto',
     transport: resolved.transport,
@@ -2275,7 +2389,7 @@ export function createManagedJob(options) {
   const resolved = resolveManagedJobOptions(options, id);
   const {
     sensitivePromptDetected, timeoutSeconds, maxOutputTokens, idempotencyKey, groupId, retryPolicy,
-    mode, verify, verification, verificationProfile, autoFix, reportSchema, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
+    mode, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, cwd, transport, originalAllowedPaths, allowedPaths, effort, sandbox,
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
@@ -2308,6 +2422,18 @@ export function createManagedJob(options) {
     requestedModel: options.model || 'auto',
     model: options.model || 'auto',
     mode,
+    planFirst,
+    ambiguityCheck,
+    planning: planFirst ? {
+      state: 'pending',
+      confirmationRequired: true,
+      ambiguity: {
+        enabled: ambiguityCheck,
+        state: ambiguityCheck ? 'pending' : 'skipped',
+        ...(ambiguityCheck ? {} : { reason: 'explicitly-disabled' })
+      },
+      planOutputTokenLimit: Math.min(planOutputTokenLimit(), maxOutputTokens || planOutputTokenLimit())
+    } : null,
     approval: options.approval || 'auto',
     effort,
     timeoutSeconds,
@@ -2354,6 +2480,7 @@ export function createManagedJob(options) {
     finishedPath: p.finished,
     providerSessionId: options.providerSessionId || null,
     parentJobId: options.parentJobId || null,
+    planningFor: options.planningFor || null,
     createdAt: now,
     updatedAt: now,
     isolation: options.isolation || 'shared',
@@ -2365,6 +2492,7 @@ export function createManagedJob(options) {
   saveJob(job);
   appendJobEvent(id, 'job.created', {
     provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, groupId, startPaused: job.startPaused,
+    planFirst: job.planFirst, ambiguityCheck: job.ambiguityCheck,
     network: job.network, networkAllow: job.networkAllow, addDirs: job.addDirs, approveMcps: job.approveMcps,
     cursorWorktree: job.cursorWorktree, cursorWorktreeBase: job.cursorWorktreeBase,
     verification: job.verification,
@@ -2389,6 +2517,159 @@ export function createManagedJob(options) {
     recordCollisionWatchDegradation([id], { reason: 'watch-refresh-signal-unavailable' });
   }
   return inspectJob(id);
+}
+
+function ambiguityCandidate(parent) {
+  const otherProvider = parent.provider === 'codex' ? 'cursor' : 'codex';
+  if (providerEnabled(otherProvider)) {
+    return {
+      provider: otherProvider,
+      model: otherProvider === 'codex' ? 'luna' : 'composer',
+      independentBy: 'provider'
+    };
+  }
+  if (parent.provider === 'codex') {
+    return {
+      provider: 'codex',
+      model: ['luna', 'gpt-5.6-luna'].includes(parent.requestedModel || parent.model) ? 'terra' : 'luna',
+      independentBy: 'model'
+    };
+  }
+  return {
+    provider: 'cursor',
+    model: String(parent.requestedModel || parent.model).startsWith('grok') ? 'composer' : 'grok',
+    independentBy: 'model'
+  };
+}
+
+export function startAmbiguityProbe(id) {
+  const parent = loadJob(id);
+  if (!parent) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+  if (!parent.planFirst || parent.ambiguityCheck !== true) return null;
+  if (parent.planning?.ambiguity?.jobId) return inspectJob(parent.planning.ambiguity.jobId);
+  const configuredLimit = planOutputTokenLimit();
+  const budget = parent.maxOutputTokens
+    ? Math.min(configuredLimit, Math.floor(parent.maxOutputTokens * 0.2))
+    : configuredLimit;
+  if (budget < 128) {
+    updateManagedJob(id, (current) => {
+      current.planning.ambiguity = {
+        enabled: true,
+        state: 'skipped',
+        reason: 'insufficient-output-token-budget'
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(id, 'plan.degraded', {
+      stage: 'ambiguity-pass',
+      reason: 'insufficient-output-token-budget',
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
+  const candidate = ambiguityCandidate(parent);
+  let originalPrompt;
+  try { originalPrompt = fs.readFileSync(parent.promptPath, 'utf8'); }
+  catch (error) {
+    updateManagedJob(id, (current) => {
+      current.planning.ambiguity = { enabled: true, state: 'skipped', reason: 'prompt-unavailable' };
+    }, { incrementRevision: false });
+    appendJobEvent(id, 'plan.degraded', {
+      stage: 'ambiguity-pass',
+      reason: `prompt-unavailable: ${redact(error.message)}`,
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
+  try {
+    const child = launchManagedJob({
+      provider: candidate.provider,
+      model: candidate.model,
+      mode: 'plan',
+      effort: 'low',
+      approval: 'auto',
+      cwd: parent.cwd,
+      prompt: planPrompt(originalPrompt),
+      allowSensitive: parent.allowSensitive === true,
+      timeoutSeconds: Math.max(60, Math.min(parent.timeoutSeconds || 120, 120)),
+      maxOutputTokens: budget,
+      idempotencyKey: `ambiguity-${parent.id}`,
+      groupId: `ambiguity-${parent.id}`,
+      planningFor: parent.id,
+      planFirst: false,
+      ambiguityCheck: false,
+      reportLint: false
+    });
+    updateManagedJob(id, (current) => {
+      current.planning.externalOutputTokensReserved = budget;
+      current.planning.ambiguity = {
+        enabled: true,
+        state: 'running',
+        jobId: child.id,
+        provider: candidate.provider,
+        model: candidate.model,
+        independentBy: candidate.independentBy,
+        outputTokenLimit: budget
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(id, 'plan.ambiguity.started', {
+      jobId: child.id,
+      provider: candidate.provider,
+      model: candidate.model,
+      independentBy: candidate.independentBy,
+      outputTokenLimit: budget
+    });
+    return child;
+  } catch (error) {
+    updateManagedJob(id, (current) => {
+      current.planning.externalOutputTokensReserved = 0;
+      current.planning.ambiguity = {
+        enabled: true,
+        state: 'skipped',
+        reason: redact(error.message)
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(id, 'plan.degraded', {
+      stage: 'ambiguity-pass',
+      reason: redact(error.message),
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
+}
+
+export async function awaitAmbiguityProbe(id, options = {}) {
+  const parent = inspectJob(id);
+  const probeId = parent.planning?.ambiguity?.jobId;
+  if (!probeId) return null;
+  const waitMs = Math.min(Math.max(Number(options.waitMs ?? 30_000), 0), 120_000);
+  const deadline = Date.now() + waitMs;
+  let probe = inspectJob(probeId);
+  while (!TERMINAL_STATUSES.has(probe.status) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+    probe = inspectJob(probeId);
+  }
+  const totals = usageTotals(probe.usage);
+  const reserved = parent.planning?.ambiguity?.outputTokenLimit || 0;
+  const attributed = totals?.outputTokens ?? reserved;
+  updateManagedJob(id, (current) => {
+    current.planning.externalOutputTokensReserved = attributed;
+    current.planning.ambiguity = {
+      ...current.planning.ambiguity,
+      state: TERMINAL_STATUSES.has(probe.status) ? 'completed' : 'inconclusive',
+      probeStatus: probe.status,
+      outputTokens: totals?.outputTokens ?? null,
+      costBasis: totals ? 'observed' : 'reserved-cap',
+      ...(TERMINAL_STATUSES.has(probe.status) ? {} : { reason: 'comparison-pass-wait-timeout' })
+    };
+  }, { incrementRevision: false });
+  if (!TERMINAL_STATUSES.has(probe.status)) {
+    appendJobEvent(id, 'plan.degraded', {
+      stage: 'ambiguity-comparison',
+      reason: 'comparison-pass-wait-timeout',
+      fallback: 'inconclusive-non-gating-comparison'
+    });
+  }
+  return TERMINAL_STATUSES.has(probe.status) ? probe : null;
 }
 
 export function isDirectTransport(value) {
@@ -2571,6 +2852,8 @@ function writerLockPath(options) {
 export function launchManagedJob(options) {
   if (options.dryRun === true) return previewManagedJob(options);
   const prepared = prepareManagedOptions(options, { reportLint: options.reportLint });
+  prepared.planFirst = planFirstDefault(prepared.mode || 'consult', prepared);
+  prepared.ambiguityCheck = prepared.planFirst && ambiguityDefault(prepared);
   const provider = validateProvider(prepared.provider);
   const launchOptions = {
     ...prepared,
@@ -2664,7 +2947,7 @@ export function launchManagedJob(options) {
 export function submitControl(id, command, expectedRevision) {
   assertJobId(id);
   if (!command?.type) throw brokerError('INVALID_REQUEST', 'control command type is required');
-  if (!['steer', 'cancel', 'release', 'respond'].includes(command.type)) throw brokerError('INVALID_REQUEST', `unsupported control command: ${command.type}`);
+  if (!['steer', 'cancel', 'release', 'respond', 'interrogate'].includes(command.type)) throw brokerError('INVALID_REQUEST', `unsupported control command: ${command.type}`);
   return withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
@@ -2693,6 +2976,36 @@ export function submitControl(id, command, expectedRevision) {
       });
     }
     if (command.type === 'steer' && !command.text?.trim()) throw brokerError('INVALID_REQUEST', 'steering text is required', { provider: job.provider });
+    if (command.type === 'interrogate') {
+      const unknown = Object.keys(command).filter((key) => !['type', 'question', 'commandId'].includes(key));
+      if (unknown.length) {
+        throw brokerError('INVALID_REQUEST', `interrogation carries a question only; rejected fields: ${unknown.join(', ')}`, { provider: job.provider });
+      }
+      if (typeof command.question !== 'string' || !command.question.trim()) {
+        throw brokerError('INVALID_REQUEST', 'interrogation question is required', { provider: job.provider });
+      }
+      if (command.question.length > 8_192) {
+        throw brokerError('INVALID_REQUEST', 'interrogation question exceeds 8192 characters', { provider: job.provider });
+      }
+      if (!job.providerSessionId) {
+        throw brokerError('SESSION_UNAVAILABLE', 'interrogation requires a live provider session', { provider: job.provider });
+      }
+      if (!job.maxOutputTokens) {
+        throw brokerError('BUDGET_EXCEEDED', 'interrogation requires maxOutputTokens so its provider-turn cost is bounded', { provider: job.provider });
+      }
+      if ((job.interrogations || []).some((entry) => ['queued', 'active'].includes(entry.state))) {
+        throw brokerError('USER_INPUT_REQUIRED', 'another interrogation is already queued or active', { provider: job.provider });
+      }
+      const used = (usageTotals(job.usage)?.outputTokens || 0) + Number(job.planning?.externalOutputTokensReserved || 0);
+      const remaining = Math.max(0, job.maxOutputTokens - used);
+      if (remaining < Math.min(128, interrogationOutputTokenLimit())) {
+        throw brokerError('BUDGET_EXCEEDED', `interrogation has only ${remaining} output tokens remaining in the work-item budget`, {
+          provider: job.provider,
+          maxOutputTokens: job.maxOutputTokens,
+          observedOutputTokens: used
+        });
+      }
+    }
     if (command.type === 'respond') {
       if (!job.pendingInput) throw brokerError('INVALID_REQUEST', 'the job has no pending worker question or plan request', { provider: job.provider });
       if (command.requestId && command.requestId !== job.pendingInput.requestId) {
@@ -2713,7 +3026,20 @@ export function submitControl(id, command, expectedRevision) {
     }
     const record = command.type === 'respond'
       ? redact({ ...command, requestId: command.requestId || job.pendingInput.requestId, commandId, expectedRevision, requestedAt: Date.now() })
-      : { ...command, commandId, expectedRevision, requestedAt: Date.now() };
+      : command.type === 'interrogate'
+        ? redact({
+            type: 'interrogate',
+            question: command.question.trim(),
+            commandId,
+            expectedRevision,
+            requestedAt: Date.now(),
+            contractDigest: contractDigest(job),
+            outputTokenLimit: Math.min(
+              interrogationOutputTokenLimit(),
+              Math.max(0, job.maxOutputTokens - (usageTotals(job.usage)?.outputTokens || 0) - Number(job.planning?.externalOutputTokensReserved || 0))
+            )
+          })
+        : { ...command, commandId, expectedRevision, requestedAt: Date.now() };
     fs.mkdirSync(paths(id).commands, { recursive: true, mode: 0o700 });
     writePrivate(path.join(paths(id).commands, `${commandId}.json`), `${JSON.stringify(record, null, 2)}\n`);
     job.controls[commandId] = { type: command.type, state: 'queued', requestedAt: record.requestedAt };
@@ -2721,12 +3047,33 @@ export function submitControl(id, command, expectedRevision) {
     if (command.type === 'cancel') job.phase = 'cancelling';
     if (command.type === 'release') job.phase = 'releasing';
     if (command.type === 'respond') job.phase = 'responding';
+    if (command.type === 'interrogate') {
+      job.interrogations ||= [];
+      job.interrogations.push({
+        id: commandId,
+        question: record.question,
+        state: 'queued',
+        requestedAt: record.requestedAt,
+        contractDigest: record.contractDigest,
+        outputTokenLimit: record.outputTokenLimit,
+        authority: 'evidence-only'
+      });
+    }
     const type = command.type === 'steer' ? 'correction.requested'
       : command.type === 'cancel' ? 'job.cancel.requested'
-        : command.type === 'release' ? 'job.release.requested' : 'input.response.requested';
+        : command.type === 'release' ? 'job.release.requested'
+          : command.type === 'interrogate' ? 'interrogation.requested' : 'input.response.requested';
     appendUnlocked(job, type, command.type === 'respond'
       ? { commandId, requestId: record.requestId, answer: record.answer, accept: record.accept, response: record.response }
-      : { commandId, strategy: command.strategy || null, text: command.text || null });
+      : command.type === 'interrogate'
+        ? {
+            commandId,
+            question: record.question,
+            outputTokenLimit: record.outputTokenLimit,
+            authority: 'evidence-only',
+            constraintsUnchanged: true
+          }
+        : { commandId, strategy: command.strategy || null, text: command.text || null });
     saveJob(job);
     return { accepted: true, commandId, revision: job.revision, phase: job.phase };
   });
@@ -2837,6 +3184,8 @@ export function resumeManagedJob(id, options) {
     cursorWorktreeBase: options.cursorWorktreeBase ?? parent.cursorWorktreeBase ?? null,
     sandbox: options.sandbox ?? parent.sandbox ?? null,
     allowedPaths: options.allowedPaths ?? parent.originalAllowedPaths ?? parent.allowedPaths ?? null,
+    planFirst: options.planFirst,
+    ambiguityCheck: options.ambiguityCheck,
     autoNudge: options.autoNudge ?? parent.autoNudge ?? false,
     autoFix: options.autoFix ?? (parent.autoFix ? {
       maxRounds: parent.autoFix.maxRounds,
