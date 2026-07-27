@@ -5,6 +5,10 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { brokerError, normalizeBrokerError } from './errors.mjs';
+import {
+  legacyProviderCapabilities,
+  scheduleAttemptWorkflow
+} from './attempt-driver.mjs';
 import { auditLogPath, avoidPercentFor, dataDir, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerConfigPath, providerEnabled, saveJob, statePath, validateProvider } from './state.mjs';
 import { isProcessAlive } from './process.mjs';
 import { withFileLock } from './lock.mjs';
@@ -1900,24 +1904,6 @@ function jobId(provider) {
   return `${provider}-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
 }
 
-function providerCapabilities(provider, transport) {
-  const codex = provider === 'codex';
-  return {
-    events: true,
-    transcript: 'live',
-    diff: codex ? 'provider' : 'best-effort',
-    files: codex ? 'provider' : 'best-effort',
-    correction: codex ? 'same-turn' : transport === 'acp' ? 'cancel-resume' : 'cancel-resume',
-    cancel: true,
-    resume: true,
-    usage: true,
-    // Codex app-server loads trusted-project docs/hooks (CLAUDE.md fallback)
-    // into the worker itself; Cursor workers do not, so orchestrators must
-    // post-review or pre-authorize instead of relying on in-worker gates.
-    selfEnforcesProjectHooks: codex
-  };
-}
-
 const BASELINE_HASH_MAX_BYTES = 10 * 1024 * 1024;
 
 // Content fingerprint of a working-tree file for baseline comparison. 'absent'
@@ -2578,9 +2564,6 @@ function resolveManagedJobOptions(options, id) {
   const { verify, verification, verificationProfile } = resolvedVerification(options.verify, mode, cwd);
   const autoFix = validatedAutoFix(options.autoFix, mode);
   const sandbox = validatedSandbox(options.sandbox);
-  if (provider === 'cursor' && options.transport === 'headless' && options.startPaused === true) {
-    throw brokerError('INVALID_REQUEST', 'startPaused requires Cursor ACP; headless cannot establish a session before its first prompt', { provider });
-  }
   const networkAllow = validatedNetworkAllow(options.networkAllow);
   if (networkAllow != null && options.network !== true) throw brokerError('INVALID_REQUEST', 'networkAllow requires network=true', { provider });
   const addDirs = validatedAddDirs(options.addDirs, cwd);
@@ -2595,6 +2578,16 @@ function resolveManagedJobOptions(options, id) {
   const transport = provider === 'cursor' ? (options.transport || 'acp') : 'app-server';
   if (provider === 'cursor' && !['acp', 'headless'].includes(transport)) throw brokerError('INVALID_REQUEST', `Invalid Cursor transport: ${transport}`, { provider });
   if (provider === 'codex' && options.transport && options.transport !== 'app-server') throw brokerError('INVALID_REQUEST', `Invalid Codex transport: ${options.transport}`, { provider });
+  if (options.startPaused === true) {
+    scheduleAttemptWorkflow({ provider, transport }, 'pre-prompt-pause', {
+      preserveError: {
+        code: 'INVALID_REQUEST',
+        message: 'startPaused requires Cursor ACP; headless cannot establish a session before its first prompt'
+      }
+    });
+  }
+  if (planFirst) scheduleAttemptWorkflow({ provider, transport }, 'plan-first');
+  if (isolation === 'worktree') scheduleAttemptWorkflow({ provider, transport }, 'contained-worktree');
   const originalAllowedPaths = validatedAllowedPaths(options.allowedPaths);
   const ingestPlan = planIngestFiles(id, ingestFiles);
   const allowedPaths = validatedAllowedPaths(originalAllowedPaths == null
@@ -2838,7 +2831,7 @@ export function createManagedJob(options) {
     origin,
     transport,
     managedBy: 'delegate-control',
-    capabilities: providerCapabilities(provider, transport),
+    capabilities: legacyProviderCapabilities(provider, transport),
     promptPath: p.prompt,
     verifyCommandPath: runnableVerify ? p.verifyCommand : null,
     stdoutPath: p.stdout,
@@ -3455,8 +3448,13 @@ export function submitControl(id, command, expectedRevision) {
       }
     }
     if (command.type === 'release' && !job.startPaused) throw brokerError('INVALID_REQUEST', 'release is available only for startPaused jobs', { provider: job.provider });
-    if (command.type === 'steer' && command.strategy === 'same-turn' && job.provider === 'cursor') {
-      throw brokerError('UNSUPPORTED_STRATEGY', 'Cursor ACP has no same-turn steering; use strategy=auto or restart (applied as a cancel-and-resume restart)', { provider: job.provider });
+    if (command.type === 'steer' && command.strategy === 'same-turn') {
+      scheduleAttemptWorkflow(job, 'same-turn-steering', {
+        preserveError: {
+          code: 'UNSUPPORTED_STRATEGY',
+          message: 'Cursor ACP has no same-turn steering; use strategy=auto or restart (applied as a cancel-and-resume restart)'
+        }
+      });
     }
     const record = command.type === 'respond'
       ? redact({ ...command, requestId: command.requestId || job.pendingInput.requestId, commandId, expectedRevision, requestedAt: Date.now() })

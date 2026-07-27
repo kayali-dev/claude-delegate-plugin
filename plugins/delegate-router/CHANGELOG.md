@@ -2,6 +2,29 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.45.0 — 2026-07-27
+
+- Completed P9 with a formal provider attempt-driver contract for Codex
+  app-server, Cursor ACP, and Cursor headless. Each lane implements the common
+  `start`, `resume`, `prompt`, `steer`, `cancel`, and `close` lifecycle and
+  negotiates explicit capabilities instead of spreading provider-name
+  conditionals through managed-attempt selection.
+- Capability negotiation records honest non-parity for same-turn steering,
+  live shell stdout, mid-turn token totals, context occupancy, plan mode, MCP
+  injection, broker-worktree containment, and pre-prompt pause. Scheduling
+  profiles distinguish workflow, budget, checkpoint, and containment
+  guarantees; a workflow that needs an absent capability is refused with the
+  capability and lane named.
+- Added read-only `delegate-health --capabilities` output. It performs no model
+  turn, marks installed-build handshake/help observations as `probed`, and
+  marks claims that cannot be established without a provider turn as
+  `declared-from-documentation`. `DELEGATE_ENABLED_PROVIDERS` may temporarily
+  include Cursor for this inspection without editing live provider
+  configuration.
+- This is a behavior-preserving refactor: legacy job capability records,
+  transport events and ordering, errors, retries, ACP-to-headless fallback, MCP
+  tool schemas, and CLI flags remain unchanged. No version was bumped.
+
 ## 0.44.0 — 2026-07-27
 
 - Added the P7 WorkItem cockpit as a new `g w` TUI surface without replacing

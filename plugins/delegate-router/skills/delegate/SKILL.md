@@ -136,6 +136,43 @@ ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|
 
 Known Grok-via-Cursor pattern (observed repeatedly on review work, both transports): the first turn can end with narration about filing or preparing the report without pasting the findings themselves — the broker flags this as `resultSuspect` on the record. Mitigate in the task packet — "End your final message with the complete findings inline; a description of the report is not the report" — and either set read-mode `autoNudge=true` for one automatic same-session correction or resume manually.
 
+## Match Workflow Requirements To The Attempt Lane
+
+Managed Codex app-server, Cursor ACP, and Cursor headless implement one formal
+attempt-driver lifecycle: `start`, `resume`, `prompt`, `steer`, `cancel`, and
+`close`. Do not infer parity from that common surface. The negotiated
+capabilities separately cover same-turn steering, live shell stdout, mid-turn
+token totals, context occupancy, plan mode, MCP injection, broker-worktree
+support, and pre-prompt pause.
+
+Run `delegate-health --capabilities` when a workflow depends on one of those
+properties. It sends no model prompt. Installed-build handshake/help facts are
+marked `probed`; facts that cannot be established without a provider turn are
+marked `declared-from-documentation`. To inspect a disabled Cursor installation
+without changing live configuration, use
+`DELEGATE_ENABLED_PROVIDERS=codex,cursor delegate-health --quick --capabilities
+--json`; the environment override is read-only and `providers.json` remains
+authoritative after the command.
+
+Schedule against the named guarantee:
+
+- Codex supports true same-turn steering, live shell-output deltas, and
+  mid-turn token totals, but does not expose a distinct context-occupancy
+  measurement.
+- Cursor ACP is restart-only, shell-output-completion-only, and has no
+  mid-turn token totals; it does expose context occupancy.
+- Cursor headless is restart-only, shell-output-completion-only, reports token
+  use only on the terminal result, exposes no context occupancy, and cannot
+  pause before its first prompt.
+- All three support plan-first, broker back-channel injection, and explicit
+  broker-owned worktrees on the currently supported builds, though their
+  mechanisms differ.
+
+A workflow that requires an absent capability is refused with the lane and
+capability named. Do not convert that refusal into a weaker workflow. Ordinary
+completion-only output accounting remains valid where documented; it is not a
+mid-turn budget guarantee.
+
 ## Choose The External Model And Effort
 
 **Codex GPT-5.6** (`luna` / `terra` / `sol`):

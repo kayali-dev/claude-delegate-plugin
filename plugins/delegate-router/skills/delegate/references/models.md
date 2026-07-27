@@ -68,3 +68,18 @@ Provider benchmark numbers are not directly interchangeable: the harness, tools,
 The adapter retains ACP initialize capabilities, modes, models, and the session config-option catalogs on the job. When the model option exposes Cursor's `parameterizedModelPicker`, its values are preferred over hand-constructed bracketed IDs; the structural bracket/suffix matcher remains the compatibility fallback. Negotiated and provider-reported model/mode changes emit `model.updated` and `mode.updated` rather than silently mutating the record.
 
 `delegate-health` includes a versioned no-turn ACP probe. It advertises terminal and fs client capabilities only inside the probe and reports whether the installed build actually sends `terminal/*` or `fs/*` requests. Production initialize continues to advertise all three capabilities as false until a build demonstrably honors them.
+
+## Model choice does not erase lane limits
+
+A stronger model cannot supply a transport capability the lane lacks. Codex
+app-server is the only managed lane with true same-turn steering, live shell
+stdout, and mid-turn token totals. Cursor ACP instead exposes context occupancy
+and restart-only correction; Cursor headless exposes terminal-result usage and
+restart-only correction, without context occupancy or pre-prompt pause.
+
+Plan mode, MCP injection, and broker-owned worktrees are supported on all three
+current lanes through different mechanisms. Verify the installed build with
+`delegate-health --capabilities` before selecting a model for a workflow whose
+acceptance depends on one of those mechanisms. A capability refusal is not a
+reason to choose a larger model on the same lane; route to a capable lane or
+change the workflow explicitly.

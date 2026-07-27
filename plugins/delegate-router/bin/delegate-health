@@ -6,7 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { inspectJob, launchManagedJob } from './lib/control.mjs';
 import { normalizeBrokerError } from './lib/errors.mjs';
 import { availableModelIds, cursorLaunchCommand, executableOnPath, inspectCursorProjectConfig, resolveCursorBinary } from './lib/cursor.mjs';
-import { probeCursorAcpCapabilities } from './lib/providers.mjs';
+import {
+  probeCodexAppServerCapabilities,
+  probeCursorAcpCapabilities,
+  probeCursorHeadlessCapabilities
+} from './lib/providers.mjs';
+import { resolveAttemptDriverMatrix } from './lib/attempt-driver.mjs';
 import { auditLogPath, effectiveUsage, enabledProviders, loadState, mutateState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
@@ -26,6 +31,7 @@ function runCursor(binary, args, timeout = 12000, maxOutput = 2000, interactive 
 const args = process.argv.slice(2);
 const quick = args.includes('--quick');
 const deep = args.includes('--deep');
+const capabilities = args.includes('--capabilities');
 const state = loadState();
 const cursorBinary = resolveCursorBinary();
 const codexBinary = process.env.DELEGATE_CODEX_BIN || executableOnPath('codex');
@@ -79,6 +85,30 @@ if (report.cursor.enabled && cursorBinary) {
       grok: models.filter((id) => /^grok-/.test(id))
     };
   }
+}
+if (capabilities) {
+  const probes = {};
+  if (report.codex.enabled && codexBinary) {
+    probes['codex-app-server'] = await probeCodexAppServerCapabilities({
+      binary: codexBinary,
+      cwd: process.cwd(),
+      timeoutMs: 10000
+    });
+  }
+  if (report.cursor.enabled && cursorBinary) {
+    probes['cursor-acp'] = report.cursor.capabilityProbe
+      || await probeCursorAcpCapabilities({ binary: cursorBinary, cwd: process.cwd(), timeoutMs: 10000 });
+    probes['cursor-headless'] = probeCursorHeadlessCapabilities({
+      binary: cursorBinary,
+      cwd: process.cwd(),
+      timeoutMs: 10000
+    });
+  }
+  report.attemptDrivers = resolveAttemptDriverMatrix(probes);
+  report.attemptDriverProbe = {
+    noModelTurns: true,
+    enabledProvidersOverrideHonored: Boolean(process.env.DELEGATE_ENABLED_PROVIDERS)
+  };
 }
 if (claudeBinary && !quick) {
   const plugins = run(claudeBinary, ['plugin', 'list', '--json'], 15000, 200000);
@@ -167,6 +197,12 @@ else {
     console.log(`Cursor client capabilities: terminal=${honored.terminal} fsRead=${honored.fsRead} fsWrite=${honored.fsWrite} (probe v${report.cursor.capabilityProbe.probeVersion}, no turn)`);
   }
   if (report.cursor.models) console.log(`Cursor models: ${report.cursor.models.count}`);
+  for (const lane of Object.values(report.attemptDrivers || {})) {
+    const matrix = Object.entries(lane.capabilities)
+      .map(([name, entry]) => `${name}=${entry.supported ? entry.mode : `no:${entry.mode}`}[${entry.evidence.source}]`)
+      .join(' ');
+    console.log(`${lane.id}: ${matrix}`);
+  }
   for (const entry of report.lastVerified || []) console.log(`${entry.provider} live probe: ${entry.ok ? 'ok' : `failed (${entry.errorCode})`} in ${entry.durationMs}ms, CLI ${entry.cliVersion || 'unknown'}`);
   for (const name of providerNames()) {
     const current = report.usage[name];

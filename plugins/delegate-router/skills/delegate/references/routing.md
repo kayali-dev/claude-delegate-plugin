@@ -72,3 +72,26 @@ Do not delegate the same question to several expensive models by default. Multip
 Prefer ACP when its session catalog contains the requested tier; prefer the existing explicit headless transport or the automatic `cursor:acp-tier-fallback` only when ACP cannot honor the tier/start contract. Both transports now expose live assistant/thinking/tool structure, but their remaining limits matter when routing: Cursor has no same-turn steer, no live shell stdout, no mid-turn token usage, and no rate-limit/allowance feed. Route work that depends on any of those properties to Codex app-server.
 
 `network=true` is a privilege decision, not a routing hint. Cursor ask/plan cannot use network, so networked consult/plan/review elevates the provider to agent mode under an injected strict read-only preamble. Sandboxed egress uses the temporary merged `networkAllow` policy; sandbox-off egress necessarily uses force and therefore also auto-approves actions beyond networking. Require explicit sandbox-off-level authorization for that combination.
+
+## Capability-gated scheduling
+
+Provider/model fit chooses a candidate; the attempt-driver contract then checks
+whether that lane can honor the workflow. This is a separate decision from
+quality scoring and allowance headroom. The scheduler currently names these
+guarantees: `sameTurnSteering`, `liveShellStdout`, `midTurnTokenUsage`,
+`contextOccupancyUsage`, `planMode`, `mcpInjection`, `worktreeSupport`, and
+`startBeforePrompt`.
+
+The resulting scheduling profile has four independent dimensions:
+
+- workflows: plan-first, same-turn steering, and coordinator back-channel;
+- budgets: mid-turn, completion-only, or unavailable output-token accounting,
+  plus separate context occupancy;
+- checkpoints: live shell output and context occupancy;
+- containment: broker-owned worktree support.
+
+An absent required capability makes the workflow ineligible and returns a
+reason naming both the capability and lane. It never lowers the workflow to a
+weaker checkpoint or budget. `delegate-health --capabilities` resolves the
+installed three-lane matrix without a model turn and marks each capability
+entry `probed` or `declared-from-documentation`.

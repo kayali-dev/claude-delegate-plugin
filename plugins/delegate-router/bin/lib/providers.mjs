@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -69,6 +70,10 @@ import {
   planReviewPresentation
 } from './planning.mjs';
 import { recordProviderCliVersion } from './outcome-ledger.mjs';
+import {
+  attemptLane,
+  createAttemptDriver
+} from './attempt-driver.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
@@ -1559,7 +1564,7 @@ export function codexSpawnArgs(job) {
   ];
 }
 
-async function runCodex(job) {
+async function runCodex(job, driver) {
   let turnDone = null;
   let turnResolve;
   let cancelled = false;
@@ -1712,7 +1717,7 @@ async function runCodex(job) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.44.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.45.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1757,7 +1762,7 @@ async function runCodex(job) {
       turnDone = new Promise((resolve) => { turnResolve = resolve; });
       let result;
       try {
-        result = await rpc.request('turn/start', {
+        result = await driver.prompt(() => rpc.request('turn/start', {
           threadId,
           input: [{ type: 'text', text, text_elements: [] }],
           cwd: job.cwd,
@@ -1765,7 +1770,7 @@ async function runCodex(job) {
           approvalsReviewer: 'auto_review',
           model,
           sandbox
-        });
+        }));
       } catch (error) {
         throw mapCodexResumeError(error, Boolean(job.providerSessionId));
       }
@@ -1842,7 +1847,7 @@ async function runCodex(job) {
             const graceMs = drainGraceMs();
             cancelDrainDeadline = Date.now() + graceMs;
             if (current.providerTurnId) {
-              await rpc.request('turn/interrupt', { threadId, turnId: current.providerTurnId }, Math.max(graceMs, 1))
+              await driver.cancel(() => rpc.request('turn/interrupt', { threadId, turnId: current.providerTurnId }, Math.max(graceMs, 1)))
                 .catch((error) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'cancel-interrupt-error', error: error.message }));
             }
             completeCommand(job.id, claimed, { ok: true, appliedAs: 'interrupt' });
@@ -1856,11 +1861,11 @@ async function runCodex(job) {
               const entry = (next.interrogations || []).find((item) => item.id === command.commandId);
               if (entry) entry.state = 'active';
             }, { incrementRevision: false });
-            await rpc.request('turn/steer', {
+            await driver.steer(() => rpc.request('turn/steer', {
               threadId,
               expectedTurnId: current.providerTurnId,
               input: [{ type: 'text', text: interrogationPrompt(command.commandId, command.question), text_elements: [] }]
-            });
+            }));
             pendingInterrogations.push({ command, baselineOutputTokens });
             appendJobEvent(job.id, 'interrogation.queued', {
               commandId: command.commandId,
@@ -1882,11 +1887,11 @@ async function runCodex(job) {
             const strategy = command.strategy || 'auto';
             if ((strategy === 'auto' || strategy === 'same-turn') && current.providerTurnId) {
               try {
-                await rpc.request('turn/steer', {
+                await driver.steer(() => rpc.request('turn/steer', {
                   threadId,
                   expectedTurnId: command.expectedTurnId || current.providerTurnId,
                   input: [{ type: 'text', text: command.text, text_elements: [] }]
-                });
+                }));
                 appendJobEvent(job.id, 'correction.applied', { commandId: command.commandId, appliedAs: 'same-turn' });
                 completeCommand(job.id, claimed, { ok: true, appliedAs: 'same-turn' });
               } catch (error) {
@@ -1899,7 +1904,7 @@ async function runCodex(job) {
               queuedPrompts.push({ text: command.text, commandId: command.commandId, appliedAs: strategy === 'restart' ? 'restart' : 'next-turn' });
               if (strategy === 'restart' && current.providerTurnId && !interruptRequested) {
                 interruptRequested = true;
-                await rpc.request('turn/interrupt', { threadId, turnId: current.providerTurnId });
+                await driver.cancel(() => rpc.request('turn/interrupt', { threadId, turnId: current.providerTurnId }));
               }
               appendJobEvent(job.id, 'correction.queued', { commandId: command.commandId, strategy });
               completeCommand(job.id, claimed, { ok: true, state: 'queued', appliedAs: strategy === 'restart' ? 'restart' : 'next-turn' });
@@ -1967,7 +1972,7 @@ async function runCodex(job) {
     }
   } finally {
     activity.close();
-    await rpc.stop();
+    await driver.close(() => rpc.stop());
   }
 }
 
@@ -2405,6 +2410,90 @@ function cursorAcpArgs(job) {
   return args;
 }
 
+export async function probeCodexAppServerCapabilities(options = {}) {
+  const binary = options.binary || process.env.DELEGATE_CODEX_BIN || 'codex';
+  const cwd = options.cwd || process.cwd();
+  const timeoutMs = Number(options.timeoutMs || 10000);
+  const report = {
+    probeVersion: 1,
+    binary,
+    ok: false,
+    noTurn: true,
+    version: detectProviderCliVersion('codex', binary)
+  };
+  const rpc = new JsonRpcProcess(binary, ['app-server', '--stdio'], {
+    cwd,
+    requestTimeoutMs: timeoutMs,
+    onRequest: async () => ({})
+  });
+  try {
+    await rpc.request('initialize', {
+      clientInfo: { name: 'delegate-router-capability-probe', title: 'Delegate Router capability probe', version: '1' },
+      capabilities: { experimentalApi: true, requestAttestation: false }
+    }, timeoutMs);
+    rpc.notify('initialized', {});
+    report.ok = true;
+    report.initialize = true;
+  } catch (error) {
+    report.errorCode = error.code || 'APP_SERVER_HANDSHAKE_FAILED';
+    report.error = redact(error.message, '', 2000);
+  } finally {
+    await rpc.stop();
+  }
+  let schemaDirectory = null;
+  try {
+    schemaDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-codex-schema-'));
+    const generated = spawnSync(binary, ['app-server', 'generate-json-schema', '--experimental', '--out', schemaDirectory], {
+      cwd,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024
+    });
+    if (generated.status === 0) {
+      const pending = [schemaDirectory];
+      const chunks = [];
+      let bytes = 0;
+      while (pending.length && bytes < 8 * 1024 * 1024) {
+        const directory = pending.pop();
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+          const file = path.join(directory, entry.name);
+          if (entry.isDirectory()) pending.push(file);
+          else if (entry.isFile() && entry.name.endsWith('.json')) {
+            const text = fs.readFileSync(file, 'utf8');
+            bytes += Buffer.byteLength(text);
+            if (bytes <= 8 * 1024 * 1024) chunks.push(text);
+          }
+        }
+      }
+      const schema = chunks.join('\n');
+      report.protocolSchema = {
+        generated: true,
+        boundedBytes: bytes,
+        sameTurnSteering: /turn[\/._-]?steer|TurnSteer/i.test(schema),
+        liveShellStdout: /commandExecution[\/._-]?outputDelta|CommandExecutionOutputDelta/i.test(schema),
+        midTurnTokenUsage: /thread[\/._-]?tokenUsage[\/._-]?updated|ThreadTokenUsageUpdated/i.test(schema),
+        mcpInjection: /mcp_servers|mcpServers/.test(schema)
+      };
+    } else {
+      report.protocolSchema = {
+        generated: false,
+        errorCode: generated.error?.code || 'SCHEMA_GENERATION_FAILED'
+      };
+    }
+  } catch (error) {
+    report.protocolSchema = {
+      generated: false,
+      errorCode: error.code || 'SCHEMA_GENERATION_FAILED'
+    };
+  } finally {
+    if (schemaDirectory) {
+      try { fs.rmSync(schemaDirectory, { recursive: true, force: true }); } catch {}
+    }
+  }
+  return report;
+}
+
 export async function probeCursorAcpCapabilities(options = {}) {
   const binary = options.binary || resolveCursorBinary();
   const cwd = options.cwd || process.cwd();
@@ -2414,6 +2503,7 @@ export async function probeCursorAcpCapabilities(options = {}) {
     binary: binary || null,
     ok: false,
     noTurn: true,
+    version: binary ? detectProviderCliVersion('cursor', binary) : null,
     observedClientRequests: [],
     honorsClientCapabilities: { terminal: false, fsRead: false, fsWrite: false }
   };
@@ -2447,6 +2537,13 @@ export async function probeCursorAcpCapabilities(options = {}) {
       models: initialized.models || []
     };
     report.configOptionIds = (session.configOptions || []).map((item) => item.id).filter(Boolean);
+    const modeOption = (session.configOptions || []).find((item) => item.id === 'mode');
+    const modeValues = [
+      ...(Array.isArray(initialized.modes) ? initialized.modes : []),
+      ...(Array.isArray(session.modes?.availableModes) ? session.modes.availableModes : []),
+      ...(Array.isArray(modeOption?.options) ? modeOption.options : [])
+    ].map((item) => String(typeof item === 'string' ? item : item?.value || item?.id || '')).filter(Boolean);
+    report.planMode = modeValues.includes('plan');
     if (options.includeCatalog === true) {
       report.session = redact({
         models: session.models || null,
@@ -2466,6 +2563,38 @@ export async function probeCursorAcpCapabilities(options = {}) {
     fsRead: report.observedClientRequests.some((method) => /fs\/read/i.test(method)),
     fsWrite: report.observedClientRequests.some((method) => /fs\/write/i.test(method))
   };
+  return report;
+}
+
+export function probeCursorHeadlessCapabilities(options = {}) {
+  const binary = options.binary || resolveCursorBinary();
+  const timeoutMs = Number(options.timeoutMs || 10000);
+  const report = {
+    probeVersion: 1,
+    binary: binary || null,
+    ok: false,
+    noTurn: true,
+    version: binary ? detectProviderCliVersion('cursor', binary) : null,
+    planMode: false,
+    mcpInjection: false
+  };
+  if (!binary) return { ...report, errorCode: 'CURSOR_NOT_INSTALLED' };
+  const launch = cursorLaunchCommand(binary, ['--help'], false);
+  const result = spawnSync(launch.command, launch.args, {
+    cwd: options.cwd || process.cwd(),
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    windowsHide: true,
+    maxBuffer: 1024 * 1024
+  });
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+  report.ok = result.status === 0;
+  report.planMode = /--mode\b/.test(output) && /\bplan\b/i.test(output);
+  report.mcpInjection = /--plugin-dir\b/.test(output) && /--approve-mcps\b/.test(output);
+  if (!report.ok) {
+    report.errorCode = result.error?.code || 'HEADLESS_HELP_FAILED';
+    report.error = redact(output.trim() || result.error?.message || 'Cursor headless help failed', '', 2000);
+  }
   return report;
 }
 
@@ -2534,7 +2663,7 @@ export function cursorModelCatalog(option) {
   return picker?.options || picker?.values || option?.options || [];
 }
 
-async function runCursorAcpTransport(job) {
+async function runCursorAcpTransport(job, driver) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   persistProviderCliVersion(job.id, assertProviderVersion('cursor', binary));
@@ -2640,7 +2769,7 @@ async function runCursorAcpTransport(job) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.44.0' }
+      clientInfo: { name: 'delegate-router', version: '0.45.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -2756,7 +2885,10 @@ async function runCursorAcpTransport(job) {
       messageParts.length = 0;
       cancelSignalSent = false;
       appendJobEvent(job.id, 'turn.started', { transport: 'acp' }, { sessionId });
-      promptPromise = rpc.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: cursorPrompt(loadJob(job.id), text) }] }, Math.max(1, deadline - Date.now()));
+      promptPromise = driver.prompt(() => rpc.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: cursorPrompt(loadJob(job.id), text) }]
+      }, Math.max(1, deadline - Date.now())));
     };
     if (planPhase === 'planning') {
       updateManagedJob(job.id, (current) => {
@@ -2773,11 +2905,11 @@ async function runCursorAcpTransport(job) {
       if (blockingInputError) throw blockingInputError;
       const inputTimeout = backchannelTimedOut(job.id);
       if (inputTimeout) {
-        if (!cancelSignalSent) rpc.notify('session/cancel', { sessionId });
+        if (!cancelSignalSent) driver.cancel(() => rpc.notify('session/cancel', { sessionId }));
         throw inputTimeout;
       }
       if (Date.now() >= deadline) {
-        if (!cancelSignalSent) rpc.notify('session/cancel', { sessionId });
+        if (!cancelSignalSent) driver.cancel(() => rpc.notify('session/cancel', { sessionId }));
         throw brokerError('TIMEOUT', `Cursor managed job exceeded ${Math.round(timeoutMs / 1000)}s`, { provider: job.provider });
       }
       const completed = await Promise.race([
@@ -2812,7 +2944,10 @@ async function runCursorAcpTransport(job) {
             settleQueuedControl(job.id, queued.commandId, { ok: false, error: 'job cancelled before correction started' });
           }
           pendingCorrections.length = 0;
-          if (!cancelSignalSent) { rpc.notify('session/cancel', { sessionId }); cancelSignalSent = true; }
+          if (!cancelSignalSent) {
+            driver.cancel(() => rpc.notify('session/cancel', { sessionId }));
+            cancelSignalSent = true;
+          }
           completeCommand(job.id, claimed, { ok: true, appliedAs: 'cancel' });
         } else if (command.type === 'respond') {
           if (!pendingInput) {
@@ -2868,7 +3003,10 @@ async function runCursorAcpTransport(job) {
             completeCommand(job.id, claimed, { ok: false, error: 'UNSUPPORTED_STRATEGY: ACP v1 has no same-turn steering' });
           } else {
             pendingCorrections.push({ text: command.text, commandId: command.commandId });
-            if (!cancelSignalSent) { rpc.notify('session/cancel', { sessionId }); cancelSignalSent = true; }
+            if (!cancelSignalSent) {
+              driver.steer(() => rpc.notify('session/cancel', { sessionId }));
+              cancelSignalSent = true;
+            }
             appendJobEvent(job.id, 'correction.queued', { commandId: command.commandId, strategy: 'restart' }, { sessionId });
             completeCommand(job.id, claimed, { ok: true, state: 'queued', appliedAs: 'restart' });
           }
@@ -3012,13 +3150,13 @@ async function runCursorAcpTransport(job) {
       pendingInput = null;
     }
     activity.close();
-    await rpc.stop();
+    await driver.close(() => rpc.stop());
   }
 }
 
-async function runCursorAcp(job) {
+async function runCursorAcp(job, driver) {
   const network = prepareCursorNetwork(job, 'acp');
-  try { return await runCursorAcpTransport(job); }
+  try { return await runCursorAcpTransport(job, driver); }
   finally { network.cleanup(); }
 }
 
@@ -3119,7 +3257,7 @@ function createCursorChat(binary, job) {
   return sessionId ? { sessionId: String(sessionId), fallback: null } : { sessionId: null, fallback: 'create-chat-output-unrecognized' };
 }
 
-async function runCursorHeadlessTransport(job) {
+async function runCursorHeadlessTransport(job, driver) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   persistProviderCliVersion(job.id, assertProviderVersion('cursor', binary));
@@ -3208,7 +3346,7 @@ async function runCursorHeadlessTransport(job) {
       worktree: job.cursorWorktree,
       worktreeBase: job.cursorWorktreeBase
     }), false);
-    const running = runCursor({
+    const running = driver.prompt(() => runCursor({
       binary: headless.command,
       args: headless.args,
       cwd: job.cwd,
@@ -3229,16 +3367,16 @@ async function runCursorHeadlessTransport(job) {
         } else if (exceeded && !budgetError) {
           budgetError = exceeded;
           recordBudgetExceeded(job, exceeded, { sessionId: resume });
-          if (activeChild) budgetTermination = terminateProcessTree(activeChild);
+          if (activeChild) budgetTermination = driver.cancel(() => terminateProcessTree(activeChild));
         }
       }
-    });
+    }));
     let outcome;
     while (!outcome) {
       outcome = await Promise.race([running, delay(150).then(() => null)]);
       const inputTimeout = backchannelTimedOut(job.id);
       if (inputTimeout) {
-        if (activeChild) await terminateProcessTree(activeChild);
+        if (activeChild) await driver.cancel(() => terminateProcessTree(activeChild));
         throw inputTimeout;
       }
       for (const claimed of claimProviderCommands(job.id)) {
@@ -3250,7 +3388,7 @@ async function runCursorHeadlessTransport(job) {
             settleQueuedControl(job.id, queued.commandId, { ok: false, error: 'job cancelled before correction started' });
           }
           pendingCorrections.length = 0;
-          if (activeChild) await terminateProcessTree(activeChild);
+          if (activeChild) await driver.cancel(() => terminateProcessTree(activeChild));
           completeCommand(job.id, claimed, { ok: true, appliedAs: 'process-tree-termination' });
         } else if (command.type === 'interrogate') {
           const baselineOutputTokens = usageTotals(inspectJob(job.id).usage)?.outputTokens || 0;
@@ -3286,7 +3424,7 @@ async function runCursorHeadlessTransport(job) {
               pendingCorrections.push({ text: command.text, commandId: command.commandId });
               resume = current.providerSessionId;
               const first = pendingCorrections.length === 1;
-              if (first && activeChild) await terminateProcessTree(activeChild);
+              if (first && activeChild) await driver.steer(() => terminateProcessTree(activeChild));
               appendJobEvent(job.id, 'correction.queued', { commandId: command.commandId, strategy: 'restart' }, { sessionId: resume });
               completeCommand(job.id, claimed, { ok: true, state: 'queued', appliedAs: 'restart' });
             }
@@ -3451,13 +3589,13 @@ async function runCursorHeadlessTransport(job) {
       return;
     }
   } finally {
-    activity.close();
+    await driver.close(async () => { activity.close(); });
   }
 }
 
-async function runCursorHeadless(job) {
+async function runCursorHeadless(job, driver) {
   const network = prepareCursorNetwork(job, 'headless');
-  try { return await runCursorHeadlessTransport(job); }
+  try { return await runCursorHeadlessTransport(job, driver); }
   finally { network.cleanup(); }
 }
 
@@ -3761,37 +3899,68 @@ function maybeLaunchAutoFix(job) {
   }
 }
 
+async function runCursorAcpWithFallback(job, driver) {
+  try {
+    await runCursorAcp(job, driver);
+  } catch (error) {
+    if (error.code === 'PROVIDER_TOO_OLD') throw error;
+    if (job.startPaused) throw error;
+    const started = inspectJob(job.id).providerSessionId;
+    const tierFallback = error.code === 'ACP_TIER_UNAVAILABLE';
+    if (started && !tierFallback) throw error;
+    appendJobEvent(job.id, 'provider.event', {
+      providerEvent: tierFallback ? 'cursor:acp-tier-fallback' : 'cursor:acp-fallback',
+      error: error.message,
+      ...(error.cliModel ? { cliModel: error.cliModel } : {})
+    });
+    updateManagedJob(job.id, (next) => {
+      next.transport = 'headless';
+      next.capabilities.correction = 'cancel-resume';
+      if (tierFallback) {
+        // The ACP session id is not a headless chat id; the requested model
+        // is honored exactly via the CLI-validated id.
+        next.providerSessionId = null;
+        next.session = null;
+        next.model = error.cliModel;
+        next.resolvedModel = error.cliModel;
+      }
+    });
+    const fallback = managedAttemptDriver(loadJob(job.id));
+    await fallback.start(loadJob(job.id));
+  }
+}
+
+const ATTEMPT_RUNNERS = Object.freeze({
+  'codex-app-server': runCodex,
+  'cursor-acp': runCursorAcpWithFallback,
+  'cursor-headless': runCursorHeadless
+});
+
+function invokeLifecycleOperation(operation, ...args) {
+  if (typeof operation !== 'function') throw new TypeError('attempt-driver lifecycle operation must be a function');
+  return operation(...args);
+}
+
+export function managedAttemptDriver(job) {
+  const lane = attemptLane(job);
+  const runner = ATTEMPT_RUNNERS[lane];
+  let driver;
+  const execute = (attempt = job) => runner(attempt, driver);
+  driver = createAttemptDriver(lane, {
+    start: execute,
+    resume: execute,
+    prompt: invokeLifecycleOperation,
+    steer: invokeLifecycleOperation,
+    cancel: invokeLifecycleOperation,
+    close: invokeLifecycleOperation
+  });
+  return driver;
+}
+
 async function runProviderAttempt(job) {
-  if (job.provider === 'codex') await runCodex(job);
-  else if (job.provider === 'cursor' && job.transport === 'headless') await runCursorHeadless(job);
-  else if (job.provider === 'cursor') {
-    try { await runCursorAcp(job); }
-    catch (error) {
-      if (error.code === 'PROVIDER_TOO_OLD') throw error;
-      if (job.startPaused) throw error;
-      const started = inspectJob(job.id).providerSessionId;
-      const tierFallback = error.code === 'ACP_TIER_UNAVAILABLE';
-      if (started && !tierFallback) throw error;
-      appendJobEvent(job.id, 'provider.event', {
-        providerEvent: tierFallback ? 'cursor:acp-tier-fallback' : 'cursor:acp-fallback',
-        error: error.message,
-        ...(error.cliModel ? { cliModel: error.cliModel } : {})
-      });
-      updateManagedJob(job.id, (next) => {
-        next.transport = 'headless';
-        next.capabilities.correction = 'cancel-resume';
-        if (tierFallback) {
-          // The ACP session id is not a headless chat id; the requested model
-          // is honored exactly via the CLI-validated id.
-          next.providerSessionId = null;
-          next.session = null;
-          next.model = error.cliModel;
-          next.resolvedModel = error.cliModel;
-        }
-      });
-      await runCursorHeadless(loadJob(job.id));
-    }
-  } else throw brokerError('INVALID_REQUEST', `Unsupported managed provider: ${job.provider}`, { provider: job.provider });
+  const driver = managedAttemptDriver(job);
+  if (job.providerSessionId) await driver.resume(job);
+  else await driver.start(job);
 }
 
 function retryClass(error) {

@@ -7,6 +7,10 @@ if (process.argv.includes('--version')) {
   console.log('cursor-agent 2026.07.09-a3815c0');
   process.exit(0);
 }
+if (process.argv.includes('--help')) {
+  console.log('Usage: agent --mode <agent|plan|ask> --plugin-dir <path> --approve-mcps');
+  process.exit(0);
+}
 if (process.argv.includes('models')) {
   console.log('composer-2.5 - Composer');
   process.exit(0);

@@ -7,6 +7,34 @@
 - The broker uses an A2A-inspired durable job lifecycle and an AG-UI-inspired normalized event stream.
 - Claude Code consumes the broker through ordinary MCP tools. MCP Tasks may be negotiated later; the plugin does not require the evolving extension.
 
+## Provider attempt-driver contract
+
+Managed execution selects exactly one lane: `codex-app-server`, `cursor-acp`,
+or `cursor-headless`. Each lane implements `start`, `resume`, `prompt`,
+`steer`, `cancel`, and `close`. The lifecycle surface standardizes broker
+ownership; it does not imply feature parity.
+
+Negotiation returns one entry for each capability:
+`sameTurnSteering`, `liveShellStdout`, `midTurnTokenUsage`,
+`contextOccupancyUsage`, `planMode`, `mcpInjection`, `worktreeSupport`, and
+`startBeforePrompt`. Each entry has `{ supported, mode, evidence }`.
+`evidence.source` is `probed` only for a read-only installed-build observation
+and otherwise `declared-from-documentation`; unsupported properties remain
+first-class entries rather than disappearing.
+
+The scheduler derives separate workflow, budget, checkpoint, and containment
+profiles. A workflow requiring an unsupported entry fails before dispatch with
+the lane and capability attached to the broker error. Existing decisions now
+using that path are plan-first admission, broker-worktree admission,
+pre-prompt pause, and same-turn steering. Completion-only accounting is not
+accepted as `midTurnTokenUsage`, and ACP context occupancy is not accepted as
+billable token usage.
+
+The existing compact `job.capabilities` record is compatibility output and
+keeps its prior keys and values. P9 does not add an event, rewrite a record,
+change a result shape, or alter retry/fallback ordering. In-flight and
+historical jobs therefore stay readable across the extraction.
+
 ## Storage
 
 Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.events.jsonl`. Prompts, logs, commands, and state files are created with user-only permissions. Event values are recursively redacted and size-bounded.
@@ -160,6 +188,11 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 
 `DIRECT_TRANSPORT` means the record is an observability shadow whose original caller owns the provider loop. All mutation controls reject without signalling the provider; read-only inspection, events, transcript, diff, files, usage, and aggregate stats remain available.
 
+Capability refusals retain the existing public error code and message where a
+legacy path already had one. The error also carries closed metadata
+`{ capability, lane, workflow, capabilityReason }`, so schedulers do not need
+to parse prose.
+
 `claude-agent` stubs, external Codex rows, and every federated remote row follow the same read-only control convention. They must never be steered, cancelled, resumed, released, reverted, or used as a route to mutate the source host.
 
 `retryPolicy` is narrower than the taxonomy: only retryable `TRANSPORT_ERROR`, `RPC_TIMEOUT`, or `PROVIDER_ERROR` failures during provider startup/turn execution qualify as `transport`; provider 429/5xx signatures qualify as `rate-limit`. Each retry stays on the same job, reuses a continuation when present, increments `retries`, and emits `job.retry`. The default is no retries. Commands are claimed after backoff and immediately before relaunch: cancel terminals the job without another spawn, and steer is rejected because there is no active attempt.
@@ -170,7 +203,8 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 - Codex `restart`: interrupt, wait for the turn to settle, then start another turn on the same thread.
 - Codex `next-turn`: queue another turn without misrepresenting it as steering.
 - Cursor `auto` or `restart`: send `session/cancel`, wait for the prompt response, then prompt the same ACP session.
-- Cursor `same-turn`: reject as unsupported by ACP v1.
+- Cursor `same-turn`: reject through the attempt-driver requirement
+  `sameTurnSteering`; ACP and headless both advertise restart-only behavior.
 
 Every correction supplies a caller-stable `correctionId`; repeating it returns the existing control record. Every result states how it was applied.
 
@@ -237,6 +271,13 @@ The adapter does not simulate capabilities Cursor lacks:
 - no rate-limit or allowance feed (Cursor allowance remains manual dashboard state).
 
 ACP initialize advertises fs read/write and terminal capabilities as false. A versioned no-turn health probe may advertise them experimentally and reports observed client requests, but production flags remain false until an installed release actually routes a request through the client.
+
+Cursor ACP does expose context occupancy through `usage_update`; that is useful
+for a context checkpoint but never satisfies an output-token budget. Cursor
+headless exposes output-token totals on the terminal result only and no context
+occupancy. Both lanes support plan mode, MCP injection, and broker-owned
+worktrees on the supported installed builds, but headless still cannot satisfy
+pre-prompt pause.
 
 ## Response Bounds
 

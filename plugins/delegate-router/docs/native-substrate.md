@@ -1,10 +1,31 @@
 # Native substrate program
 
-Status: active. Owner-approved 2026-07-26 as a single program.
+Status: complete in source as of 2026-07-27, with the explicit deferrals and
+remaining non-parities recorded below. Owner-approved 2026-07-26 as a single
+program.
 Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P9 provider attempt-driver contract is implemented. Codex app-server, Cursor
+  ACP, and Cursor headless now resolve through one formal lane registry with
+  `start`, `resume`, `prompt`, `steer`, `cancel`, and `close` lifecycle
+  methods. Capability negotiation keeps same-turn steering, live shell stdout,
+  mid-turn token totals, context occupancy, plan mode, MCP injection,
+  broker-worktree support, and pre-prompt pause separate rather than flattening
+  them. The old compact job `capabilities` record remains byte-compatible.
+  Plan-first, contained-worktree, pre-prompt-pause, and same-turn-steering
+  admission use the negotiated contract; an unsupported workflow is refused
+  with the missing capability and lane named. The existing transport loops,
+  events, records, errors, ordering, ACP fallback, and headless fallback are
+  unchanged.
+- `delegate-health --capabilities` prints the resolved three-lane matrix.
+  Codex app-server initialization, Cursor ACP initialize/session creation, and
+  Cursor headless help inspection are no-turn probes. A probed field says
+  `probed`; properties that cannot be established without a paid/provider turn
+  remain `declared-from-documentation`. The command honors
+  `DELEGATE_ENABLED_PROVIDERS` for temporary inspection and never edits
+  `providers.json`.
 - P7 work-item cockpit is implemented as an additive TUI surface over the
   existing total P1 projection. Compose shows P5 provenance/confidence and
   unresolved dispatch blockers; Review combines changed files, immutable base,
@@ -483,8 +504,10 @@ Implementation progress (2026-07-27): complete. Managed write launches default
 to a read-only plan turn with an explicit coordinator confirmation; confirmed
 Codex, Cursor ACP, and supported Cursor headless paths continue the same
 provider session into write mode. The independent pass uses a different
-provider or model and a strict structural schema. Missing capabilities degrade
-with a recorded reason, while invalid evidence is reported as inconclusive.
+provider or model and a strict structural schema. P9 now refuses a lane whose
+negotiated `planMode` capability is absent; an operational plan-turn failure
+after a capable lane starts retains the recorded fallback. Invalid comparison
+evidence is reported as inconclusive.
 `delegate_start_trivial` and `delegate-jobs start --no-plan-first` are the
 announced escape hatches.
 
@@ -642,6 +665,62 @@ into static route selection.
 Extract Codex app-server, Cursor ACP, and Cursor headless behind capability
 negotiation and lifecycle methods. Honest non-parity stays explicit: no
 lowest-common-denominator design.
+
+Implementation progress (2026-07-27): complete in source. The formal driver
+surface has `start`, `resume`, `prompt`, `steer`, `cancel`, and `close`, plus a
+negotiated scheduling profile for workflows, output/context budgets,
+checkpoints, and containment. The broker selects a lane once and calls the
+contract; provider-name branching no longer selects the managed attempt loop.
+Existing Codex and Cursor loop bodies remain the behavioral implementation, so
+their journal types, result shapes, errors, ordering, retries, and fallback
+boundaries do not change.
+
+Capability refusal is a scheduling decision, not a late provider downgrade.
+For example, Cursor ACP refuses the `mid-turn-output-budget` workflow because
+it lacks `midTurnTokenUsage`; its `usage_update` is context occupancy, not
+billable token totals. Completion-only output accounting remains available
+where it already existed, but is not relabeled as a mid-turn guarantee.
+Existing public MCP schemas and CLI flags are unchanged.
+
+## Program completion record
+
+Shipped phases: P1; P2a, P2b, P2.4, and P2.5; P3; P4, P4.5, P4.6, and P4.7;
+P5; the contained-workspace and integration-worktree boundary of P6; the
+Compose/Review/Approve/Compare/Converge cockpit of P7; P8; and P9. Historical
+jobs remain compatibility-projected and no phase rewrites the store.
+
+Deliberately deferred:
+
+- P6 direct owner-tree application. Strict CAS preflight and composition stop
+  at a broker-owned integration worktree because multi-file replacement cannot
+  be made atomic against unmanaged editors with the available primitives.
+- P6 workspace continuation/auto-fix rounds, subdirectory roots, submodules,
+  `ingestFiles`, `addDirs`, sandbox-off, repository-local clean/smudge filters,
+  and native Cursor worktree combinations.
+- P7 replay. The journal still lacks persisted projection checkpoints or a
+  reversible reducer, so arbitrary rewind cannot meet the O(viewport) cockpit
+  requirement.
+- P8 learned routing. Outcome advice remains read-only and confidence-gated
+  until sufficient explicit owner labels exist; it does not replace the static
+  router.
+
+Remaining lane non-parities:
+
+| Capability | Codex app-server | Cursor ACP | Cursor headless |
+| --- | --- | --- | --- |
+| Same-turn steering | yes, `turn/steer` | no, cancel-and-resume restart | no, process termination plus resume |
+| Live shell stdout | yes, output deltas | no, completed tool output | no, completed tool records |
+| Mid-turn token totals | yes | no | no; terminal result only |
+| Context occupancy | no distinct occupancy measure | yes, `usage_update` | no |
+| Plan mode | broker read-only turn | ACP session mode | CLI `--mode plan` |
+| MCP injection | thread config | session MCP servers | launch-scoped plugin |
+| Worktree containment | broker-owned worktree | broker-owned worktree | broker-owned worktree |
+| Pre-prompt pause | yes | yes | no |
+
+These are not a backlog promise. A future provider build may change a row only
+after a read-only probe or updated primary documentation supports the claim.
+Operational MCP-injection failure keeps the documented non-fatal fallback, but
+the unavailable back-channel is never described as present for that attempt.
 
 ## Anti-goals
 

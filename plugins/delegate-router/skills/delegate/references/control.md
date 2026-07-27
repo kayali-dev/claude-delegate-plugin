@@ -37,6 +37,26 @@ the flag cannot resolve an incomplete draft. No intent compilation path
 infers network, sandbox-off, privilege, scope widening, or a budget increase.
 Hand-written `--prompt` packets keep the previous behavior.
 
+## Attempt-lane capability admission
+
+Before selecting a workflow, inspect `delegate-health --capabilities` when the
+workflow needs transport guarantees beyond ordinary completion. The command is
+read-only and sends no model turn. It prints all three formal lanes with
+`probed` or `declared-from-documentation` evidence per capability. Use
+`DELEGATE_ENABLED_PROVIDERS=codex,cursor` only as a temporary environment
+override when Cursor is disabled; never edit `providers.json` for a probe.
+
+The broker schedules same-turn steering, live shell stdout, mid-turn
+output-token usage, context occupancy, plan mode, MCP injection,
+broker-worktree support, and session/thread creation before the first prompt
+as separate guarantees.
+
+Plan-first, contained-worktree, pre-prompt-pause, and same-turn control paths
+call the attempt-driver scheduler. If a selected lane lacks the requirement,
+the broker refuses with `capability`, `lane`, `workflow`, and a human-readable
+`capabilityReason`; it does not silently choose a weaker checkpoint or budget.
+Existing error codes and messages remain stable for established refusal paths.
+
 ## Access Policies
 
 - Codex uses `approval_policy=on-request` with `approvals_reviewer=auto_review`. This is Approve-for-me: Auto-review evaluates escalations rather than bypassing the sandbox.
@@ -184,9 +204,11 @@ then waits for the coordinator to confirm or decline. Confirmation continues
 the same provider thread/session into write mode. Use
 `delegate_start_trivial` or `delegate-jobs start --no-plan-first` only for an
 explicitly trivial change; `--no-ambiguity-check` skips only the independent
-comparison pass. A missing plan capability or comparison candidate degrades to
-the legacy explicitly requested launch and records why; no plan pass may
-accept itself or start write work.
+comparison pass. A lane that lacks negotiated `planMode` is refused before
+dispatch. An operational plan-turn failure after a capable lane has started
+retains the existing recorded fallback to the explicitly requested launch; a
+missing comparison candidate remains non-gating. No plan pass may accept itself
+or start write work.
 
 When enabled, ambiguity detection sends the same WorkSpec to an independent
 cheap plan pass using a different provider or model. It compares only parsed
