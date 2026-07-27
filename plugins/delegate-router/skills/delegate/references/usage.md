@@ -45,9 +45,12 @@ Per-job observed tokens and context occupancy are separate dimensions, neither o
 `DELEGATE_MONITOR_SCOPE=session|workspace|all` filters ambient push only; `off`
 disables push. It never filters usage, stats, `delegate_list`,
 `delegate_inspect`, or TUI data and never gates control operations. The
-SessionStart handshake and any explicit workspace-fallback record live as
-private `0600` metadata under `<state-dir>/monitor-correlation/`; they contain
-identity and scope state, not prompts, results, diffs, credentials, or usage.
+durable SessionStart ancestor marker and each explicit correlation/fallback
+record live as private `0600` metadata under
+`<state-dir>/monitor-correlation/`; they contain PID/start-time identity and
+scope state, not prompts, results, diffs, credentials, or usage. Markers expire
+after 72 hours and are pruned earlier when the recorded coordinator identity is
+gone. The monitor never waits for or spawns a correlation responder.
 
 `unattributed-burn` is deliberately aggregate-only. Between consecutive snapshots of the same named Codex allowance window, an increase in `usedPercent` is marked only when no managed or shadow Codex audit usage and no overlapping active tracked Codex job can account for the interval. The amount is allowance percentage-point movement, labelled approximate; token counts and allowance percentages are never converted into one another. The marker never names, links, or enumerates a thread because the movement may be the owner's personal use. It is best-effort and capture-cadence limited: work that starts and finishes between snapshots, reset-boundary changes, mixed window identities, history pruning, or missing provider pushes can hide a window, and a running tracked job suppresses rather than guesses.
 

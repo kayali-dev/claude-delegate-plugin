@@ -2,6 +2,23 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.36.1 — 2026-07-27
+
+- Fixed P2.4 session correlation by replacing the short-lived
+  SessionStart/request/responder handshake with a private durable marker.
+  Markers retain the session/workspace identity and a bounded coordinator
+  ancestor chain as PID/start-time pairs for 72 hours. Monitors match their own
+  parent chain, prefer the nearest common ancestor, select the newest duplicate
+  marker for one session, and explicitly degrade to workspace scope when
+  process start time is unavailable, no marker matches, or distinct sessions
+  are equally specific. PID reuse cannot correlate.
+- Correlation cleanup now prunes a bounded set of expired markers,
+  dead-coordinator markers, resolution records, and obsolete handshake files on
+  each hook or monitor run. Ambient scope still affects push only:
+  `DELEGATE_MONITOR_SCOPE=session|workspace|all`, origin-less records remain
+  silent except under `all`, every emitted line remains workspace-labeled, and
+  pull/control behavior is unchanged.
+
 ## 0.36.0 — 2026-07-27
 
 - Replaced the TUI's independent footer, help, and documentation key lists with

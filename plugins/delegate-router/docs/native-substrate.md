@@ -9,9 +9,12 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
   the coordinator `sessionId` and realpath-normalized `workspaceId`, with exact
   inheritance across every continuation. Session push is the stricter default;
   `workspace` and `all` are documented widening paths. A private SessionStart
-  marker uses a coordinator/workspace/one-time-request handshake; unavailable,
-  late, dead, or conflicting correlation records and emits workspace fallback
-  instead of guessing. Push scope never gates pull or control.
+  marker now persists for 72 hours and records the coordinator plus a bounded
+  ancestor chain as PID/start-time pairs. The monitor resolves it directly
+  against its own parent chain; missing start times, dead coordinators, absent
+  matches, and equally specific sessions record and emit workspace fallback
+  instead of guessing. The former responder/request handshake is removed. Push
+  scope never gates pull or control.
 - The required P2.4 experiment on Claude Code 2.1.220 found that both a manual
   Git worktree and `claude --worktree` set SessionStart `cwd` and
   `CLAUDE_PROJECT_DIR` to the actual worktree path. The inferred
@@ -175,9 +178,14 @@ than the thing a user thinks of as "my work".
   identity available — worktree path when inside one, project dir otherwise.
   `origin.cwd` is already captured and differs for worktree sessions even when
   the project dir does not.
-- A monitor has no session id of its own, so `SessionStart` writes a correlation
-  marker the monitor resolves at boot; if correlation fails, fall back to
-  workspace scope rather than guessing, and say so in the status line.
+- A monitor has no session id of its own, so `SessionStart` writes a durable
+  correlation marker containing the coordinator's bounded ancestor chain. The
+  monitor matches `(pid, process start time)` identities against its own parent
+  chain, prefers the nearest common ancestor, and uses recency only among
+  duplicate markers for that session. Equally specific distinct sessions are
+  ambiguous. If process start time is unavailable or correlation otherwise
+  fails, fall back to workspace scope rather than guessing, and say so in the
+  status line.
 - Default scope becomes **this session's own work**, with `workspace` and `all`
   as explicit opt-ins. Three honest levels instead of one approximate one.
 - Origin-less legacy records stay silent at every level except `all`.

@@ -120,7 +120,7 @@ review-round, and automatic continuation children.
 The monitor is read-only with respect to jobs and control. It cannot start,
 steer, cancel, respond to, reconcile, or otherwise mutate a job, and it cannot
 invoke a provider or spend allowance. Its only write is private
-`0600` boot-correlation metadata under `<state-dir>/monitor-correlation/`.
+`0600` session-correlation metadata under `<state-dir>/monitor-correlation/`.
 Per-job edge deduplication, a 30-second cooldown, and a six-lines-per-minute
 global ceiling enforce the nagware boundary. The stall threshold defaults to
 ten minutes; configure
@@ -130,11 +130,16 @@ ten minutes; configure
 
 Push defaults to `DELEGATE_MONITOR_SCOPE=session`: only records whose
 `origin.sessionId` matches the SessionStart correlation marker can emit.
-The marker handshake is bound to the coordinator process, workspace, and a
-one-time request ID; simultaneous sessions cannot claim each other's marker,
-and dead or conflicting markers cause no guess. If correlation cannot complete,
-the monitor persists `effectiveScope: "workspace"` plus the reason and emits
-one workspace-labeled degradation line before falling back.
+The private marker lasts 72 hours and records the coordinator plus a bounded
+ancestor chain as `(pid, process start time)` pairs. At boot the monitor walks
+its own parent chain, selects the marker with the nearest common identity, and
+uses the newest marker only when one session has duplicates. Equally specific
+distinct sessions are ambiguous. PID reuse, missing process start times, dead
+coordinators, absent matches, and conflicting markers cause no guess. The
+monitor persists `effectiveScope: "workspace"` plus the reason and emits one
+workspace-labeled degradation line before falling back. Each run prunes a
+bounded set of expired markers, dead-coordinator markers, old resolution
+records, and obsolete request/response handshake debris.
 
 Set scope to `workspace` to include every record whose realpath-normalized
 `origin.workspaceId` (or legacy `origin.projectDir`) equals the current

@@ -6,7 +6,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  cleanupMonitorCorrelation,
   monitorCorrelationDirectory,
+  resolveMonitorSession,
   writeSessionCorrelationMarker
 } from '../bin/lib/monitor-correlation.mjs';
 import {
@@ -417,14 +419,19 @@ test('correlation failure records and visibly degrades session scope to workspac
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(workspace);
-  writeSessionCorrelationMarker({
-    stateDirectory: root,
-    sessionId: 'dead-session',
+  const directory = monitorCorrelationDirectory(root);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(directory, 'session-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.json'), `${JSON.stringify({
+    version: 1,
+    kind: 'session',
+    markerId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    sessionId: 'obsolete-handshake-session',
     coordinatorPid: 999_999_999,
-    projectDir: workspace,
     workspaceId: workspace,
-    responderMs: 1
-  });
+    projectDir: workspace,
+    createdAtMs: NOW,
+    expiresAtMs: NOW + 60_000
+  })}\n`, { mode: 0o600 });
   const output = [];
   const store = {
     directory: path.join(root, 'jobs'),
@@ -436,8 +443,11 @@ test('correlation failure records and visibly degrades session scope to workspac
     env: { DELEGATE_MONITOR_SCOPE: 'session' },
     projectDir: workspace,
     workspaceId: workspace,
-    coordinatorPid: process.pid,
-    correlationWaitMs: 0,
+    parentPid: 401,
+    processTable: [
+      { pid: 401, ppid: 400, startTimeMs: NOW - 2_000 },
+      { pid: 400, ppid: 1, startTimeMs: NOW - 4_000 }
+    ],
     store,
     emit: (line) => output.push(line)
   });
@@ -445,21 +455,206 @@ test('correlation failure records and visibly degrades session scope to workspac
   monitor.stop();
   assert.equal(result.requestedScope, 'session');
   assert.equal(result.effectiveScope, 'workspace');
-  assert.equal(result.degradation.reason, 'correlation-timeout');
+  assert.equal(result.degradation.reason, 'no-matching-session-marker');
   assert.deepEqual(output, [
-    `delegate[${path.basename(workspace)}]: monitor-scope degraded (session correlation correlation-timeout; using workspace scope)`
+    `delegate[${path.basename(workspace)}]: monitor-scope degraded (session correlation no-matching-session-marker; using workspace scope)`
   ]);
-  const records = fs.readdirSync(monitorCorrelationDirectory(root))
-    .filter((name) => name.startsWith('request-'))
+  const records = fs.readdirSync(directory)
+    .filter((name) => name.startsWith('resolution-'))
     .map((name) => JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), name), 'utf8')));
   assert.equal(records.length, 1);
   assert.equal(records[0].status, 'degraded');
   assert.equal(records[0].effectiveScope, 'workspace');
-  assert.equal(records[0].reason, 'correlation-timeout');
-  assert.equal(fs.statSync(path.join(monitorCorrelationDirectory(root), `request-${records[0].requestId}.json`)).mode & 0o777, 0o600);
+  assert.equal(records[0].reason, 'no-matching-session-marker');
+  assert.equal(fs.statSync(path.join(directory, fs.readdirSync(directory).find((name) => name.startsWith('resolution-')))).mode & 0o777, 0o600);
 });
 
-test('SessionStart correlation is race-safe when the monitor starts before or after the hook', async (t) => {
+test('durable ancestor markers choose the nearest session, then its newest marker', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-ancestor-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  fs.mkdirSync(workspace);
+  const processTable = [
+    { pid: 501, ppid: 500, startTimeMs: NOW - 1_000 },
+    { pid: 500, ppid: 400, startTimeMs: NOW - 10_000 },
+    { pid: 400, ppid: 1, startTimeMs: NOW - 20_000 },
+    { pid: 601, ppid: 500, startTimeMs: NOW - 2_000 },
+    { pid: 602, ppid: 400, startTimeMs: NOW - 3_000 }
+  ];
+  const first = writeSessionCorrelationMarker({
+    stateDirectory: root,
+    sessionId: 'session-current',
+    coordinatorPid: 601,
+    ancestorChain: [
+      { pid: 601, startTimeMs: NOW - 2_000 },
+      { pid: 500, startTimeMs: NOW - 10_000 },
+      { pid: 400, startTimeMs: NOW - 20_000 }
+    ],
+    projectDir: workspace,
+    workspaceId: workspace,
+    now: NOW
+  });
+  const newest = writeSessionCorrelationMarker({
+    stateDirectory: root,
+    sessionId: 'session-current',
+    coordinatorPid: 601,
+    ancestorChain: [
+      { pid: 601, startTimeMs: NOW - 2_000 },
+      { pid: 500, startTimeMs: NOW - 10_000 },
+      { pid: 400, startTimeMs: NOW - 20_000 }
+    ],
+    projectDir: workspace,
+    workspaceId: workspace,
+    now: NOW + 1_000
+  });
+  assert.equal(first.ok, true);
+  assert.equal(newest.ok, true);
+  assert.ok(newest.marker.expiresAtMs - newest.marker.createdAtMs >= 60 * 60 * 1000);
+  assert.deepEqual(newest.marker.ancestorChain, [
+    { pid: 601, startTimeMs: NOW - 2_000 },
+    { pid: 500, startTimeMs: NOW - 10_000 },
+    { pid: 400, startTimeMs: NOW - 20_000 }
+  ]);
+  const broader = writeSessionCorrelationMarker({
+    stateDirectory: root,
+    sessionId: 'session-other',
+    coordinatorPid: 602,
+    ancestorChain: [
+      { pid: 602, startTimeMs: NOW - 3_000 },
+      { pid: 400, startTimeMs: NOW - 20_000 }
+    ],
+    projectDir: workspace,
+    workspaceId: workspace,
+    now: NOW + 1_500
+  });
+  assert.equal(broader.ok, true);
+
+  const result = resolveMonitorSession({
+    stateDirectory: root,
+    workspaceId: workspace,
+    parentPid: 501,
+    processTable,
+    now: NOW + 2_000
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.sessionId, 'session-current');
+  assert.equal(result.markerId, newest.marker.markerId);
+  assert.equal(result.matchDepth, 1);
+  assert.deepEqual(result.commonAncestor, { pid: 500, startTimeMs: NOW - 10_000 });
+  assert.equal(result.record.status, 'correlated');
+  assert.equal(result.record.effectiveScope, 'session');
+});
+
+test('equal ancestor matches are ambiguous and PID reuse cannot correlate', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-ambiguous-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  fs.mkdirSync(workspace);
+  const sharedStart = NOW - 10_000;
+  const processTable = [
+    { pid: 701, ppid: 700, startTimeMs: NOW - 1_000 },
+    { pid: 700, ppid: 1, startTimeMs: sharedStart },
+    { pid: 711, ppid: 700, startTimeMs: NOW - 2_000 },
+    { pid: 712, ppid: 700, startTimeMs: NOW - 3_000 }
+  ];
+  for (const [sessionId, coordinatorPid, coordinatorStart] of [
+    ['session-a', 711, NOW - 2_000],
+    ['session-b', 712, NOW - 3_000]
+  ]) {
+    const marker = writeSessionCorrelationMarker({
+      stateDirectory: root,
+      sessionId,
+      coordinatorPid,
+      ancestorChain: [
+        { pid: coordinatorPid, startTimeMs: coordinatorStart },
+        { pid: 700, startTimeMs: sharedStart }
+      ],
+      projectDir: workspace,
+      workspaceId: workspace,
+      now: NOW
+    });
+    assert.equal(marker.ok, true);
+  }
+  const ambiguous = resolveMonitorSession({
+    stateDirectory: root,
+    workspaceId: workspace,
+    parentPid: 701,
+    processTable,
+    now: NOW + 1
+  });
+  assert.equal(ambiguous.ok, false);
+  assert.equal(ambiguous.reason, 'ambiguous-session-markers');
+  assert.equal(ambiguous.record.status, 'degraded');
+  assert.equal(ambiguous.record.effectiveScope, 'workspace');
+
+  const reusedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-reused-'));
+  t.after(() => fs.rmSync(reusedRoot, { recursive: true, force: true }));
+  const reusedWorkspace = path.join(reusedRoot, 'workspace');
+  fs.mkdirSync(reusedWorkspace);
+  const reusedMarker = writeSessionCorrelationMarker({
+    stateDirectory: reusedRoot,
+    sessionId: 'stale-session',
+    coordinatorPid: 812,
+    ancestorChain: [
+      { pid: 812, startTimeMs: NOW - 8_000 },
+      { pid: 800, startTimeMs: sharedStart }
+    ],
+    projectDir: reusedWorkspace,
+    workspaceId: reusedWorkspace,
+    now: NOW
+  });
+  const reused = resolveMonitorSession({
+    stateDirectory: reusedRoot,
+    workspaceId: reusedWorkspace,
+    parentPid: 801,
+    processTable: [
+      { pid: 801, ppid: 800, startTimeMs: NOW - 1_000 },
+      { pid: 800, ppid: 1, startTimeMs: sharedStart },
+      { pid: 812, ppid: 800, startTimeMs: NOW - 500 }
+    ],
+    now: NOW + 1
+  });
+  assert.equal(reused.ok, false);
+  assert.equal(reused.reason, 'no-matching-session-marker');
+  assert.equal(fs.existsSync(reusedMarker.file), false);
+
+  const unavailableRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-unavailable-'));
+  t.after(() => fs.rmSync(unavailableRoot, { recursive: true, force: true }));
+  const unavailable = resolveMonitorSession({
+    stateDirectory: unavailableRoot,
+    workspaceId: workspace,
+    parentPid: 900,
+    processTable: [],
+    now: NOW
+  });
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.reason, 'process-start-time-unavailable');
+  assert.equal(unavailable.record.status, 'degraded');
+  assert.equal(unavailable.record.effectiveScope, 'workspace');
+});
+
+test('correlation garbage collection is bounded and removes expired handshake debris', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-gc-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const directory = monitorCorrelationDirectory(root);
+  fs.mkdirSync(directory, { recursive: true });
+  for (let index = 0; index < 140; index += 1) {
+    const requestId = `${String(index).padStart(16, '0')}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`;
+    fs.writeFileSync(path.join(directory, `request-${requestId}.json`), `${JSON.stringify({
+      version: 1,
+      kind: 'monitor-request',
+      requestId,
+      createdAtMs: NOW - 10_000,
+      expiresAtMs: NOW - 1
+    })}\n`, { mode: 0o600 });
+  }
+  const result = cleanupMonitorCorrelation(root, NOW, { processes: new Map() });
+  assert.equal(result.examined, 128);
+  assert.equal(result.removed, 128);
+  assert.equal(fs.readdirSync(directory).length, 12);
+});
+
+test('SessionStart marker survives hook exit and a later real monitor resolves session scope', async (t) => {
   const monitorBin = path.join(pluginRoot, 'bin', 'delegate-monitor');
   const hookBin = path.join(pluginRoot, 'bin', 'delegate-session-hook');
   const waitFor = async (predicate, timeoutMs = 2500) => {
@@ -471,82 +666,76 @@ test('SessionStart correlation is race-safe when the monitor starts before or af
     }
     return null;
   };
-  const runOrder = async (hookFirst, suffix) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), `delegate-monitor-correlation-${suffix}-`));
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const workspace = path.join(root, 'workspace');
-    fs.mkdirSync(workspace);
-    const stateFile = path.join(root, 'usage.json');
-    const sessionId = `session-${suffix}`;
-    const common = {
-      ...process.env,
-      DELEGATE_STATE_FILE: stateFile,
-      CLAUDE_PROJECT_DIR: workspace,
-      DELEGATE_MONITOR_CORRELATION_RESPONDER_MS: '3000'
-    };
-    const hook = () => {
-      const result = spawnSync(process.execPath, [hookBin], {
-        encoding: 'utf8',
-        input: JSON.stringify({
-          hook_event_name: 'SessionStart',
-          session_id: sessionId,
-          cwd: workspace
-        }),
-        env: { ...common, CLAUDE_CODE_SESSION_ID: sessionId }
-      });
-      assert.equal(result.status, 0, result.stderr);
-    };
-    if (hookFirst) hook();
-    const monitorEnv = {
-      ...common,
-      DELEGATE_MONITOR_SCOPE: 'session',
-      DELEGATE_MONITOR_CORRELATION_WAIT_MS: '1200',
-      DELEGATE_MONITOR_POLL_MS: '60000'
-    };
-    delete monitorEnv.CLAUDE_CODE_SESSION_ID;
-    delete monitorEnv.CLAUDE_SESSION_ID;
-    const child = spawn(process.execPath, [monitorBin], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: monitorEnv
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    try {
-      if (!hookFirst) {
-        const pending = await waitFor(() => {
-          try { return fs.readdirSync(monitorCorrelationDirectory(root)).some((name) => name.startsWith('request-')); }
-          catch { return false; }
-        });
-        assert.equal(pending, true);
-        hook();
-      }
-      const correlated = await waitFor(() => {
-        try {
-          for (const name of fs.readdirSync(monitorCorrelationDirectory(root))) {
-            if (!name.startsWith('request-')) continue;
-            const record = JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), name), 'utf8'));
-            if (record.status === 'correlated') return record;
-          }
-        } catch {}
-        return null;
-      });
-      assert.ok(correlated, `correlation did not complete: ${stderr}`);
-      assert.equal(correlated.sessionId, sessionId);
-      assert.equal(correlated.effectiveScope, 'session');
-      assert.doesNotMatch(stdout, /monitor-scope degraded/);
-    } finally {
-      child.kill('SIGTERM');
-      await new Promise((resolve) => {
-        if (child.exitCode != null) resolve();
-        else child.once('exit', resolve);
-      });
-    }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-correlation-live-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  fs.mkdirSync(workspace);
+  const stateFile = path.join(root, 'usage.json');
+  const sessionId = 'session-live-ancestor';
+  const common = {
+    ...process.env,
+    DELEGATE_STATE_FILE: stateFile,
+    CLAUDE_PROJECT_DIR: workspace
   };
+  const hook = spawnSync(process.execPath, [hookBin], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      hook_event_name: 'SessionStart',
+      session_id: sessionId,
+      cwd: workspace
+    }),
+    env: { ...common, CLAUDE_CODE_SESSION_ID: sessionId }
+  });
+  assert.equal(hook.status, 0, hook.stderr);
+  const markerFiles = fs.readdirSync(monitorCorrelationDirectory(root))
+    .filter((name) => name.startsWith('session-'));
+  assert.equal(markerFiles.length, 1);
+  const marker = JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), markerFiles[0]), 'utf8'));
+  assert.equal(marker.version, 2);
+  assert.equal(marker.sessionId, sessionId);
+  assert.ok(marker.ancestorChain.length >= 1);
+  assert.ok(marker.ancestorChain.every((identity) => Number.isSafeInteger(identity.pid) && Number.isSafeInteger(identity.startTimeMs)));
+  assert.equal(fs.readdirSync(monitorCorrelationDirectory(root)).some((name) => /^(?:request|response)-/.test(name)), false);
 
-  await runOrder(false, 'monitor-first');
-  await runOrder(true, 'hook-first');
+  const monitorEnv = {
+    ...common,
+    DELEGATE_MONITOR_SCOPE: 'session',
+    DELEGATE_MONITOR_POLL_MS: '60000'
+  };
+  delete monitorEnv.CLAUDE_CODE_SESSION_ID;
+  delete monitorEnv.CLAUDE_SESSION_ID;
+  const child = spawn(process.execPath, [monitorBin], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: monitorEnv
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  try {
+    const correlated = await waitFor(() => {
+      try {
+        for (const name of fs.readdirSync(monitorCorrelationDirectory(root))) {
+          if (!name.startsWith('resolution-')) continue;
+          const record = JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), name), 'utf8'));
+          if (record.status === 'correlated') return record;
+        }
+      } catch {}
+      return null;
+    });
+    assert.ok(correlated, `correlation did not complete: ${stderr}`);
+    assert.equal(correlated.sessionId, sessionId);
+    assert.equal(correlated.effectiveScope, 'session');
+    assert.ok(correlated.commonAncestor?.pid > 1);
+    assert.ok(correlated.commonAncestor?.startTimeMs > 0);
+    assert.doesNotMatch(stdout, /monitor-scope degraded/);
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode != null) resolve();
+      else child.once('exit', resolve);
+    });
+  }
 });
 
 test('every notification line carries an explicit project label', () => {

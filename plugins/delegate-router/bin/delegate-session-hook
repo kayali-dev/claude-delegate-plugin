@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import {
-  runSessionCorrelationResponder,
-  writeSessionCorrelationMarker
-} from './lib/monitor-correlation.mjs';
+import { writeSessionCorrelationMarker } from './lib/monitor-correlation.mjs';
 import { dataDir } from './lib/state.mjs';
 
 const MAX_INPUT_BYTES = 64 * 1024;
@@ -39,40 +34,23 @@ function warn(reason) {
   process.stderr.write(`delegate-session-hook: monitor session correlation unavailable (${safe}); monitor will report workspace fallback\n`);
 }
 
-function startResponder(markerFile) {
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--respond', markerFile], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env
-  });
-  child.unref();
-}
-
 try {
-  if (process.argv[2] === '--respond') {
-    runSessionCorrelationResponder(process.argv[3]);
-  } else {
-    const payload = readPayload();
-    if (payload?.hook_event_name !== 'SessionStart') throw new Error('expected SessionStart payload');
-    const payloadSessionId = String(payload.session_id || '').trim();
-    const environmentSessionId = String(process.env.CLAUDE_CODE_SESSION_ID || '').trim();
-    if (environmentSessionId && payloadSessionId !== environmentSessionId) {
-      throw new Error('session-id-mismatch');
-    }
-    const projectDir = canonicalDirectory(process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd());
-    const marker = writeSessionCorrelationMarker({
-      stateDirectory: dataDir(),
-      sessionId: payloadSessionId,
-      coordinatorPid: process.ppid,
-      projectDir,
-      workspaceId: projectDir
-    });
-    if (!marker.ok) warn(marker.reason);
-    else {
-      try { startResponder(marker.file); }
-      catch (error) { warn(error?.code || error?.name || 'responder-start-failed'); }
-    }
+  const payload = readPayload();
+  if (payload?.hook_event_name !== 'SessionStart') throw new Error('expected SessionStart payload');
+  const payloadSessionId = String(payload.session_id || '').trim();
+  const environmentSessionId = String(process.env.CLAUDE_CODE_SESSION_ID || '').trim();
+  if (environmentSessionId && payloadSessionId !== environmentSessionId) {
+    throw new Error('session-id-mismatch');
   }
+  const projectDir = canonicalDirectory(process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd());
+  const marker = writeSessionCorrelationMarker({
+    stateDirectory: dataDir(),
+    sessionId: payloadSessionId,
+    coordinatorPid: process.ppid,
+    projectDir,
+    workspaceId: projectDir
+  });
+  if (!marker.ok) warn(marker.reason);
 } catch (error) {
   warn(error?.code || error?.message || error?.name);
 }

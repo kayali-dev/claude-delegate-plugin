@@ -1,26 +1,19 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { isProcessAlive } from './process.mjs';
+import {
+  processIdentityIsAlive,
+  readProcessIdentityTable,
+  walkProcessIdentityChain
+} from './process-identity.mjs';
 
 const MAX_CORRELATION_BYTES = 32 * 1024;
-const DEFAULT_REQUEST_WAIT_MS = 2_000;
-const DEFAULT_RESPONDER_MS = 15_000;
-const MAX_WAIT_MS = 5_000;
-const CORRELATION_RETENTION_MS = 24 * 60 * 60 * 1000;
+const MAX_ANCESTOR_DEPTH = 24;
+const MAX_GC_FILES = 128;
+const MARKER_TTL_MS = 72 * 60 * 60 * 1000;
+const RECORD_RETENTION_MS = 24 * 60 * 60 * 1000;
 const SAFE_ID = /^[a-f0-9-]{16,64}$/;
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
-
-function sleepSync(milliseconds) {
-  if (milliseconds <= 0) return;
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
-
-function boundedMilliseconds(value, fallback, maximum) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) return fallback;
-  return Math.min(Math.floor(number), maximum);
-}
 
 function privateJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -45,219 +38,353 @@ function safeSessionId(value) {
   return SAFE_SESSION_ID.test(sessionId) ? sessionId : null;
 }
 
-function safeCoordinatorPid(value) {
+function safePid(value) {
   const pid = Number(value);
   return Number.isSafeInteger(pid) && pid > 1 ? pid : null;
 }
 
-function listCorrelationFiles(directory, prefix) {
+function safeTime(value) {
+  const milliseconds = Number(value);
+  return Number.isSafeInteger(milliseconds) && milliseconds > 0 ? milliseconds : null;
+}
+
+function normalizedChain(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ANCESTOR_DEPTH) return null;
+  const chain = [];
+  const seen = new Set();
+  for (const entry of value) {
+    const pid = safePid(entry?.pid);
+    const startTimeMs = safeTime(entry?.startTimeMs);
+    if (!pid || !startTimeMs || seen.has(pid)) return null;
+    seen.add(pid);
+    chain.push({ pid, startTimeMs });
+  }
+  return chain;
+}
+
+function canonicalDirectory(value) {
+  return typeof value === 'string' && value ? path.resolve(value) : null;
+}
+
+function timestampName(value) {
+  return String(Math.max(0, Math.floor(Number(value) || 0))).padStart(13, '0');
+}
+
+function listCorrelationFiles(directory) {
   try {
     return fs.readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith('.json'))
-      .map((entry) => path.join(directory, entry.name));
+      .filter((entry) => entry.isFile() && /^(?:session|request|response|resolution)-.+\.json$/.test(entry.name))
+      .map((entry) => path.join(directory, entry.name))
+      .sort();
   } catch (error) {
     if (error.code === 'ENOENT') return [];
     throw error;
   }
 }
 
+function markerFromRecord(record, file) {
+  if (record?.version !== 2 || record.kind !== 'session') return null;
+  if (!SAFE_ID.test(String(record.markerId || ''))) return null;
+  if (!path.basename(file).endsWith(`-${record.markerId}.json`)) return null;
+  const sessionId = safeSessionId(record.sessionId);
+  const coordinatorPid = safePid(record.coordinatorPid);
+  const coordinatorStartTimeMs = safeTime(record.coordinatorStartTimeMs);
+  const workspaceId = canonicalDirectory(record.workspaceId);
+  const projectDir = canonicalDirectory(record.projectDir);
+  const createdAtMs = safeTime(record.createdAtMs);
+  const expiresAtMs = safeTime(record.expiresAtMs);
+  const ancestorChain = normalizedChain(record.ancestorChain);
+  if (!sessionId || !coordinatorPid || !coordinatorStartTimeMs || !workspaceId || !projectDir) return null;
+  if (!createdAtMs || !expiresAtMs || expiresAtMs <= createdAtMs || !ancestorChain) return null;
+  if (ancestorChain[0].pid !== coordinatorPid || ancestorChain[0].startTimeMs !== coordinatorStartTimeMs) return null;
+  return {
+    ...record,
+    sessionId,
+    coordinatorPid,
+    coordinatorStartTimeMs,
+    workspaceId,
+    projectDir,
+    createdAtMs,
+    expiresAtMs,
+    ancestorChain
+  };
+}
+
+function recordExpired(record, file, now) {
+  const explicitExpiry = safeTime(record?.expiresAtMs);
+  if (explicitExpiry) return explicitExpiry <= now;
+  const createdAtMs = safeTime(record?.createdAtMs ?? record?.completedAtMs);
+  if (createdAtMs) return createdAtMs + RECORD_RETENTION_MS <= now;
+  try { return fs.statSync(file).mtimeMs + RECORD_RETENTION_MS <= now; }
+  catch { return true; }
+}
+
 export function monitorCorrelationDirectory(stateDirectory) {
   return path.join(path.resolve(String(stateDirectory)), 'monitor-correlation');
 }
 
-export function cleanupMonitorCorrelation(stateDirectory, now = Date.now()) {
+export function cleanupMonitorCorrelation(stateDirectory, now = Date.now(), options = {}) {
   const directory = monitorCorrelationDirectory(stateDirectory);
-  for (const file of listCorrelationFiles(directory, '')) {
+  let files;
+  try { files = listCorrelationFiles(directory); }
+  catch { return { examined: 0, removed: 0 }; }
+  const table = options.processes instanceof Map
+    ? { ok: options.processes.size > 0, processes: options.processes }
+    : readProcessIdentityTable(options);
+  let examined = 0;
+  let removed = 0;
+  for (const file of files.slice(0, MAX_GC_FILES)) {
+    examined += 1;
+    let record;
+    try { record = readPrivateJson(file); }
+    catch { record = null; }
+    const marker = markerFromRecord(record, file);
+    const obsoleteHandshake = record?.version === 1
+      && ['session', 'monitor-request', 'session-response'].includes(record?.kind);
+    const coordinatorGone = marker && table.ok
+      ? !processIdentityIsAlive({
+          pid: marker.coordinatorPid,
+          startTimeMs: marker.coordinatorStartTimeMs
+        }, table.processes)
+      : false;
+    const remove = recordExpired(record, file, now)
+      || coordinatorGone
+      || (obsoleteHandshake && recordExpired(record, file, now));
+    if (!remove) continue;
     try {
-      if (now - fs.statSync(file).mtimeMs > CORRELATION_RETENTION_MS) fs.rmSync(file, { force: true });
+      fs.rmSync(file, { force: true });
+      removed += 1;
     } catch {}
   }
+  return { examined, removed };
 }
 
 export function writeSessionCorrelationMarker(options = {}) {
   const sessionId = safeSessionId(options.sessionId);
-  const coordinatorPid = safeCoordinatorPid(options.coordinatorPid);
-  const workspaceId = typeof options.workspaceId === 'string' && options.workspaceId ? path.resolve(options.workspaceId) : null;
-  const projectDir = typeof options.projectDir === 'string' && options.projectDir ? path.resolve(options.projectDir) : null;
+  const coordinatorPid = safePid(options.coordinatorPid ?? process.ppid);
+  const workspaceId = canonicalDirectory(options.workspaceId);
+  const projectDir = canonicalDirectory(options.projectDir || options.workspaceId);
   if (!sessionId) return { ok: false, reason: 'missing-session-id' };
   if (!coordinatorPid) return { ok: false, reason: 'missing-coordinator-pid' };
   if (!workspaceId) return { ok: false, reason: 'missing-workspace-id' };
+
+  let chainResult;
+  const injectedChain = normalizedChain(options.ancestorChain);
+  if (options.ancestorChain != null) {
+    chainResult = injectedChain
+      ? {
+          ok: true,
+          reason: null,
+          chain: injectedChain,
+          truncated: options.ancestorChainTruncated === true,
+          processes: options.processes instanceof Map ? options.processes : new Map()
+        }
+      : { ok: false, reason: 'invalid-ancestor-chain', chain: [], processes: new Map() };
+  } else {
+    chainResult = walkProcessIdentityChain(coordinatorPid, options);
+  }
+  if (!chainResult.ok) return { ok: false, reason: chainResult.reason };
+  if (chainResult.chain[0]?.pid !== coordinatorPid) {
+    return { ok: false, reason: 'coordinator-chain-mismatch' };
+  }
+
   const now = Number(options.now ?? Date.now());
-  const responderMs = boundedMilliseconds(
-    options.responderMs ?? process.env.DELEGATE_MONITOR_CORRELATION_RESPONDER_MS,
-    DEFAULT_RESPONDER_MS,
-    60_000
-  );
+  const markerTtlMs = Number(options.markerTtlMs ?? MARKER_TTL_MS);
+  if (!Number.isSafeInteger(now) || now <= 0 || !Number.isSafeInteger(markerTtlMs) || markerTtlMs <= 0) {
+    return { ok: false, reason: 'invalid-marker-time' };
+  }
   const markerId = crypto.randomUUID();
   const directory = monitorCorrelationDirectory(options.stateDirectory);
   const marker = {
-    version: 1,
+    version: 2,
     kind: 'session',
     markerId,
     sessionId,
     coordinatorPid,
+    coordinatorStartTimeMs: chainResult.chain[0].startTimeMs,
+    ancestorChain: chainResult.chain,
+    ancestorChainTruncated: chainResult.truncated === true,
     workspaceId,
-    projectDir: projectDir || workspaceId,
+    projectDir,
     createdAtMs: now,
-    expiresAtMs: now + responderMs
+    expiresAtMs: now + markerTtlMs
   };
-  const file = path.join(directory, `session-${markerId}.json`);
-  cleanupMonitorCorrelation(options.stateDirectory, now);
+  const file = path.join(directory, `session-${timestampName(now)}-${markerId}.json`);
+  cleanupMonitorCorrelation(options.stateDirectory, now, { processes: chainResult.processes });
   privateJson(file, marker);
   return { ok: true, marker, file };
 }
 
-function validRequest(request, marker, now) {
-  return request?.version === 1
-    && request.kind === 'monitor-request'
-    && request.status === 'pending'
-    && SAFE_ID.test(String(request.requestId || ''))
-    && safeCoordinatorPid(request.coordinatorPid) === marker.coordinatorPid
-    && request.workspaceId === marker.workspaceId
-    && Number(request.createdAtMs) <= now
-    && Number(request.expiresAtMs) >= now;
-}
-
-function respondToRequests(marker, markerFile, now = Date.now()) {
-  const directory = path.dirname(markerFile);
-  let written = 0;
-  for (const file of listCorrelationFiles(directory, 'request-')) {
-    let request;
-    try { request = readPrivateJson(file); } catch { continue; }
-    if (!validRequest(request, marker, now)) continue;
-    const response = {
-      version: 1,
-      kind: 'session-response',
-      requestId: request.requestId,
-      markerId: marker.markerId,
-      sessionId: marker.sessionId,
-      coordinatorPid: marker.coordinatorPid,
-      workspaceId: marker.workspaceId,
-      markerCreatedAtMs: marker.createdAtMs,
-      createdAtMs: now
-    };
-    const responseFile = path.join(directory, `response-${request.requestId}-${marker.markerId}.json`);
-    if (fs.existsSync(responseFile)) continue;
-    try {
-      privateJson(responseFile, response);
-      written += 1;
-    } catch {}
-  }
-  return written;
-}
-
-export function runSessionCorrelationResponder(markerFile, options = {}) {
-  let marker;
-  try { marker = readPrivateJson(markerFile); } catch { return { ok: false, reason: 'marker-unreadable' }; }
-  if (marker?.version !== 1 || marker.kind !== 'session' || !SAFE_ID.test(String(marker.markerId || ''))) {
-    return { ok: false, reason: 'marker-invalid' };
-  }
-  if (path.basename(markerFile) !== `session-${marker.markerId}.json`) {
-    return { ok: false, reason: 'marker-path-mismatch' };
-  }
-  const durationMs = boundedMilliseconds(
-    options.responderMs ?? process.env.DELEGATE_MONITOR_CORRELATION_RESPONDER_MS,
-    DEFAULT_RESPONDER_MS,
-    60_000
+function commonAncestor(markerChain, monitorChain) {
+  const markerIdentities = new Map(
+    markerChain.map((identity, depth) => [`${identity.pid}:${identity.startTimeMs}`, depth])
   );
-  const deadline = Math.min(Number(marker.expiresAtMs), Date.now() + durationMs);
-  let written = 0;
-  while (Date.now() <= deadline && isProcessAlive(marker.coordinatorPid)) {
-    written += respondToRequests(marker, markerFile);
-    sleepSync(50);
+  for (let monitorDepth = 0; monitorDepth < monitorChain.length; monitorDepth += 1) {
+    const identity = monitorChain[monitorDepth];
+    const markerDepth = markerIdentities.get(`${identity.pid}:${identity.startTimeMs}`);
+    if (markerDepth != null) return { identity, monitorDepth, markerDepth };
   }
-  return { ok: true, written };
+  return null;
 }
 
-function validResponse(response, request) {
-  return response?.version === 1
-    && response.kind === 'session-response'
-    && response.requestId === request.requestId
-    && SAFE_ID.test(String(response.markerId || ''))
-    && safeSessionId(response.sessionId) != null
-    && safeCoordinatorPid(response.coordinatorPid) === request.coordinatorPid
-    && response.workspaceId === request.workspaceId
-    && Number(response.createdAtMs) >= request.createdAtMs
-    && Number(response.createdAtMs) <= request.expiresAtMs;
+function correlationStateReason(error) {
+  return `correlation-state-${String(error?.code || 'unavailable').toLowerCase()}`;
 }
 
-function correlationResponses(directory, request) {
-  const prefix = `response-${request.requestId}-`;
-  const responses = [];
-  for (const file of listCorrelationFiles(directory, prefix)) {
-    try {
-      const response = readPrivateJson(file);
-      if (validResponse(response, request)) responses.push(response);
-    } catch {}
+function writeResolution(options) {
+  const now = Number(options.now ?? Date.now());
+  const resolutionId = crypto.randomUUID();
+  const record = {
+    version: 2,
+    kind: 'monitor-resolution',
+    resolutionId,
+    monitorPid: safePid(options.monitorPid),
+    monitorParentPid: safePid(options.monitorParentPid),
+    workspaceId: options.workspaceId,
+    createdAtMs: now,
+    expiresAtMs: now + RECORD_RETENTION_MS,
+    status: options.ok ? 'correlated' : 'degraded',
+    effectiveScope: options.ok ? 'session' : 'workspace',
+    sessionId: options.ok ? options.sessionId : null,
+    reason: options.reason || null,
+    markerId: options.markerId || null,
+    commonAncestor: options.commonAncestor || null,
+    matchDepth: options.matchDepth ?? null,
+    candidateCount: Number(options.candidateCount || 0)
+  };
+  const file = path.join(
+    monitorCorrelationDirectory(options.stateDirectory),
+    `resolution-${timestampName(now)}-${resolutionId}.json`
+  );
+  privateJson(file, record);
+  return { record, file };
+}
+
+function resolvedResult(options) {
+  let recorded = true;
+  let resolutionFile = null;
+  let record = null;
+  try {
+    const written = writeResolution(options);
+    resolutionFile = written.file;
+    record = written.record;
+  } catch {
+    recorded = false;
   }
-  return responses;
+  return {
+    ok: options.ok === true,
+    sessionId: options.ok ? options.sessionId : null,
+    reason: options.reason || null,
+    recorded,
+    markerId: options.markerId || null,
+    commonAncestor: options.commonAncestor || null,
+    matchDepth: options.matchDepth ?? null,
+    candidateCount: Number(options.candidateCount || 0),
+    resolutionFile,
+    record
+  };
 }
 
 export function resolveMonitorSession(options = {}) {
-  const workspaceId = typeof options.workspaceId === 'string' && options.workspaceId ? path.resolve(options.workspaceId) : null;
-  const coordinatorPid = safeCoordinatorPid(options.coordinatorPid ?? process.ppid);
-  if (!workspaceId) return { ok: false, sessionId: null, reason: 'missing-workspace-id', recorded: false };
-  if (!coordinatorPid) return { ok: false, sessionId: null, reason: 'missing-coordinator-pid', recorded: false };
+  const workspaceId = canonicalDirectory(options.workspaceId);
+  const monitorPid = safePid(options.monitorPid ?? process.pid);
+  const monitorParentPid = safePid(options.parentPid ?? options.coordinatorPid ?? process.ppid);
   const now = Number(options.now ?? Date.now());
-  const waitMs = boundedMilliseconds(
-    options.waitMs ?? process.env.DELEGATE_MONITOR_CORRELATION_WAIT_MS,
-    DEFAULT_REQUEST_WAIT_MS,
-    MAX_WAIT_MS
-  );
-  const requestId = crypto.randomUUID();
-  const directory = monitorCorrelationDirectory(options.stateDirectory);
-  const requestFile = path.join(directory, `request-${requestId}.json`);
-  const request = {
-    version: 1,
-    kind: 'monitor-request',
-    requestId,
-    status: 'pending',
-    coordinatorPid,
-    workspaceId,
-    createdAtMs: now,
-    expiresAtMs: now + waitMs
-  };
-  try {
-    cleanupMonitorCorrelation(options.stateDirectory, now);
-    privateJson(requestFile, request);
-  } catch (error) {
+  if (!workspaceId) {
+    return { ok: false, sessionId: null, reason: 'missing-workspace-id', recorded: false };
+  }
+  if (!monitorParentPid) {
+    return { ok: false, sessionId: null, reason: 'missing-coordinator-pid', recorded: false };
+  }
+
+  const chainResult = walkProcessIdentityChain(monitorParentPid, options);
+  cleanupMonitorCorrelation(options.stateDirectory, now, { processes: chainResult.processes });
+  if (!chainResult.ok) {
+    return resolvedResult({
+      stateDirectory: options.stateDirectory,
+      now,
+      ok: false,
+      reason: chainResult.reason,
+      workspaceId,
+      monitorPid,
+      monitorParentPid,
+      candidateCount: 0
+    });
+  }
+
+  let files;
+  try { files = listCorrelationFiles(monitorCorrelationDirectory(options.stateDirectory)); }
+  catch (error) {
     return {
       ok: false,
       sessionId: null,
-      reason: `correlation-state-${String(error?.code || 'unavailable').toLowerCase()}`,
+      reason: correlationStateReason(error),
       recorded: false
     };
   }
+  const candidates = [];
+  for (const file of files) {
+    if (!path.basename(file).startsWith('session-')) continue;
+    let marker;
+    try { marker = markerFromRecord(readPrivateJson(file), file); }
+    catch { continue; }
+    if (!marker || marker.expiresAtMs <= now || marker.workspaceId !== workspaceId) continue;
+    if (!processIdentityIsAlive({
+      pid: marker.coordinatorPid,
+      startTimeMs: marker.coordinatorStartTimeMs
+    }, chainResult.processes)) continue;
+    const match = commonAncestor(marker.ancestorChain, chainResult.chain);
+    if (!match) continue;
+    candidates.push({ marker, match });
+  }
 
-  const deadline = now + waitMs;
-  let responses = [];
-  do {
-    responses = correlationResponses(directory, request);
-    if (Date.now() >= deadline) break;
-    sleepSync(Math.min(50, Math.max(1, deadline - Date.now())));
-  } while (true);
-  const sessionIds = [...new Set(responses.map((response) => response.sessionId))];
-  const ok = sessionIds.length === 1;
-  const reason = ok
-    ? null
-    : sessionIds.length > 1 ? 'ambiguous-session-responses' : 'correlation-timeout';
-  const record = {
-    ...request,
-    status: ok ? 'correlated' : 'degraded',
-    effectiveScope: ok ? 'session' : 'workspace',
-    sessionId: ok ? sessionIds[0] : null,
-    reason,
-    responseCount: responses.length,
-    completedAtMs: Date.now()
-  };
-  let recorded = true;
-  try { privateJson(requestFile, record); } catch { recorded = false; }
-  return {
-    ok,
-    sessionId: ok ? sessionIds[0] : null,
-    reason,
-    recorded,
-    requestId,
-    requestFile
-  };
+  if (!candidates.length) {
+    return resolvedResult({
+      stateDirectory: options.stateDirectory,
+      now,
+      ok: false,
+      reason: 'no-matching-session-marker',
+      workspaceId,
+      monitorPid,
+      monitorParentPid,
+      candidateCount: 0
+    });
+  }
+
+  const bestDepth = Math.min(...candidates.map((candidate) => candidate.match.monitorDepth));
+  const nearest = candidates.filter((candidate) => candidate.match.monitorDepth === bestDepth);
+  const sessionIds = [...new Set(nearest.map((candidate) => candidate.marker.sessionId))];
+  if (sessionIds.length !== 1) {
+    return resolvedResult({
+      stateDirectory: options.stateDirectory,
+      now,
+      ok: false,
+      reason: 'ambiguous-session-markers',
+      workspaceId,
+      monitorPid,
+      monitorParentPid,
+      matchDepth: bestDepth,
+      candidateCount: nearest.length
+    });
+  }
+
+  nearest.sort((left, right) => (
+    right.marker.createdAtMs - left.marker.createdAtMs
+    || right.marker.markerId.localeCompare(left.marker.markerId)
+  ));
+  const selected = nearest[0];
+  return resolvedResult({
+    stateDirectory: options.stateDirectory,
+    now,
+    ok: true,
+    reason: null,
+    sessionId: selected.marker.sessionId,
+    markerId: selected.marker.markerId,
+    commonAncestor: selected.match.identity,
+    matchDepth: selected.match.monitorDepth,
+    candidateCount: nearest.length,
+    workspaceId,
+    monitorPid,
+    monitorParentPid
+  });
 }

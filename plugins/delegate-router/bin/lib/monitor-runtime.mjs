@@ -103,8 +103,9 @@ export class DelegateMonitor {
         : resolveMonitorSession({
             stateDirectory: this.store.stateDirectory,
             workspaceId: this.workspaceId,
-            coordinatorPid: options.coordinatorPid,
-            waitMs: options.correlationWaitMs
+            parentPid: options.parentPid ?? options.coordinatorPid,
+            ...(options.processTable ? { processTable: options.processTable } : {}),
+            ...(options.processes ? { processes: options.processes } : {})
           }));
       if (this.correlation.ok && this.correlation.sessionId) {
         this.sessionId = this.correlation.sessionId;
