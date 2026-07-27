@@ -120,6 +120,12 @@ function canonicalOriginDirectory(value, fallback = process.cwd()) {
   }
 }
 
+function coordinatorSessionIdentity(value) {
+  if (value == null || value === '') return null;
+  const sessionId = String(value).trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(sessionId) ? sessionId : null;
+}
+
 // Capture coordinator identity at the launch boundary. This is intentionally
 // separate from job.cwd: coordinators routinely delegate into other trees.
 export function launchOrigin(options = {}) {
@@ -127,12 +133,17 @@ export function launchOrigin(options = {}) {
     return { ...options.origin };
   }
   const launchCwd = canonicalOriginDirectory(options.launchCwd || process.cwd());
+  const projectDir = canonicalOriginDirectory(
+    options.projectDir ?? process.env.CLAUDE_PROJECT_DIR ?? launchCwd,
+    launchCwd
+  );
   return {
-    projectDir: canonicalOriginDirectory(
-      options.projectDir ?? process.env.CLAUDE_PROJECT_DIR ?? launchCwd,
-      launchCwd
-    ),
+    projectDir,
     cwd: launchCwd,
+    sessionId: coordinatorSessionIdentity(
+      options.sessionId ?? process.env.CLAUDE_CODE_SESSION_ID
+    ),
+    workspaceId: canonicalOriginDirectory(options.workspaceId ?? projectDir, projectDir),
     brokerVersion: supervisorBrokerVersion(),
     launchedAtMs: Number(options.launchedAtMs ?? Date.now())
   };
@@ -2001,6 +2012,8 @@ export function createManagedJob(options) {
     origin: options.origin,
     projectDir: options.originProjectDir,
     launchCwd: options.originCwd,
+    sessionId: options.originSessionId,
+    workspaceId: options.originWorkspaceId,
     launchedAtMs: options.originLaunchedAtMs
   });
   const p = paths(id);
@@ -2167,6 +2180,8 @@ export function createShadowJob(options) {
     origin: options.origin,
     projectDir: options.originProjectDir,
     launchCwd: options.originCwd,
+    sessionId: options.originSessionId,
+    workspaceId: options.originWorkspaceId,
     launchedAtMs: createdAtMs
   });
   const prompt = String(options.prompt || '');

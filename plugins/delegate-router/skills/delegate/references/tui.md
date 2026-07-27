@@ -194,11 +194,17 @@ While the TUI is running, terminal transitions, new stalls, recorded scope viola
 Separately, interactive Claude Code sessions can receive the experimental
 plugin push bridge without opening the TUI. `delegate-monitor` emits only
 redacted actionable transitions (breach, input, acceptance-blocked, review-ready, failure, stall)
-and observes the same existing store read-only. `DELEGATE_MONITOR=0` disables
-that bridge; `<state-dir>/monitor.json` with a future `snoozeUntil` suppresses
-non-breach edges. Deduplication, cooldown, and a global rate ceiling are the
-nagware boundary. Unsupported/non-interactive hosts continue to use
-`delegate_inspect`, this TUI, and `finishedPath` exactly as before.
+and observes the same existing store without mutating jobs. Push defaults to
+the launching Claude session via a private SessionStart correlation marker.
+Set `DELEGATE_MONITOR_SCOPE=workspace` to widen to the current
+worktree/project or `all` for a fleet overview. Correlation failure is recorded
+and emitted once before workspace fallback; it never guesses. Scope affects
+push only—Fleet and every detail/control view remain complete.
+`DELEGATE_MONITOR=0` or scope `off` disables that bridge;
+`<state-dir>/monitor.json` with a future `snoozeUntil` suppresses non-breach
+edges. Deduplication, cooldown, and a global rate ceiling are the nagware
+boundary. Unsupported/non-interactive hosts continue to use `delegate_inspect`,
+this TUI, and `finishedPath` exactly as before.
 
 ## Limitations
 

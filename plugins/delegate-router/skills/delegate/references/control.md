@@ -108,27 +108,43 @@ policy breach (scope or budget/allowance), human input or blocked permission,
 ready for review, terminal failure, and stalled running work. It never emits
 progress, deltas, tool activity, usage ticks, or successful intermediate steps.
 Every line is compact, redacted, and carries the job id plus the launch
-workspace basename; inspect that job and its `origin.projectDir` before acting.
+workspace basename; inspect that job and its immutable `origin.sessionId`,
+`origin.workspaceId`, and `origin.projectDir` before acting.
 The origin is captured from `CLAUDE_PROJECT_DIR` at launch (falling back to the
-launching process cwd), remains distinct from the delegated `job.cwd`, and is
-inherited unchanged by resume and review-round children.
+launching process cwd). `workspaceId` resolves the actual worktree/project
+identity through realpath, while `sessionId` comes from the launching Claude
+MCP process and is `null` for a CLI launch outside Claude. Origin remains
+distinct from delegated `job.cwd` and is inherited unchanged by resume,
+review-round, and automatic continuation children.
 
-The monitor is read-only by construction. It cannot start, steer, cancel,
-respond to, reconcile, or otherwise mutate a job, and it cannot invoke a
-provider or spend allowance. Per-job edge deduplication, a 30-second cooldown,
-and a six-lines-per-minute global ceiling enforce the nagware boundary. The
-stall threshold defaults to ten minutes; configure
+The monitor is read-only with respect to jobs and control. It cannot start,
+steer, cancel, respond to, reconcile, or otherwise mutate a job, and it cannot
+invoke a provider or spend allowance. Its only write is private
+`0600` boot-correlation metadata under `<state-dir>/monitor-correlation/`.
+Per-job edge deduplication, a 30-second cooldown, and a six-lines-per-minute
+global ceiling enforce the nagware boundary. The stall threshold defaults to
+ten minutes; configure
 `DELEGATE_MONITOR_STALL_SECONDS`,
 `DELEGATE_MONITOR_COOLDOWN_SECONDS`, and
 `DELEGATE_MONITOR_MAX_LINES_PER_MINUTE` only when the local policy requires it.
 
-Push defaults to `DELEGATE_MONITOR_SCOPE=project`: only records whose
-realpath-normalized `origin.projectDir` equals this session's
-`CLAUDE_PROJECT_DIR` can emit. Different worktrees remain isolated. Historical
-records without origin are silent in this mode but remain visible through all
-pull surfaces. Set scope to `all` only in a deliberate fleet-overview session;
-legacy lines are then explicitly labeled `legacy@<cwd-basename>`. Set it to
-`off` to emit nothing.
+Push defaults to `DELEGATE_MONITOR_SCOPE=session`: only records whose
+`origin.sessionId` matches the SessionStart correlation marker can emit.
+The marker handshake is bound to the coordinator process, workspace, and a
+one-time request ID; simultaneous sessions cannot claim each other's marker,
+and dead or conflicting markers cause no guess. If correlation cannot complete,
+the monitor persists `effectiveScope: "workspace"` plus the reason and emits
+one workspace-labeled degradation line before falling back.
+
+Set scope to `workspace` to include every record whose realpath-normalized
+`origin.workspaceId` (or legacy `origin.projectDir`) equals the current
+worktree/project. The former `project` value remains an alias. Set `all` only
+in a deliberate fleet-overview session; origin-less lines are then explicitly
+labeled `legacy@<cwd-basename>`. Origin-less records are silent under both
+session and workspace scopes. Set `off` to emit nothing. These scopes never
+gate control: `delegate_list`, `delegate_inspect`, the TUI, resume, steer,
+cancel, respond, and every other pull/control path continue to cover the full
+store.
 
 Set `DELEGATE_MONITOR=0` before starting Claude Code to disable the push bridge.
 To snooze non-breach edges, place a future ISO timestamp or epoch in

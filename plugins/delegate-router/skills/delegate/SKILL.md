@@ -141,15 +141,22 @@ actionable edge: policy breach, required human input, acceptance blocked, ready 
 terminal failure, or the ten-minute stall policy. Treat that notification as a
 wake-up signal and inspect the named job; it never replaces acceptance review.
 Progress, deltas, tools, usage ticks, and intermediate successes remain silent.
-Push defaults to the current `CLAUDE_PROJECT_DIR`; every line names the launch
-workspace and unrelated projects, sibling worktrees, and origin-less historical
-jobs remain silent. Use `DELEGATE_MONITOR_SCOPE=all` only for an explicit
-fleet-overview session, or `off` to disable it.
+Push defaults to this Claude session's own launches. New records retain
+`origin.sessionId` plus a realpath-normalized `origin.workspaceId`; continuation
+rounds inherit both. A private SessionStart marker correlates the monitor. If
+that correlation is unavailable or ambiguous, the monitor records the failure,
+emits one workspace-labeled degradation line, and falls back to workspace
+scope rather than guessing a session. Use
+`DELEGATE_MONITOR_SCOPE=workspace` to include sibling sessions in this
+worktree/project, `all` only for an explicit fleet overview, or `off` to disable
+push. Origin-less historical jobs stay silent except under `all`. Scope changes
+push only: `delegate_list`, `delegate_inspect`, the TUI, and control operations
+continue to cover the complete store.
 
 After `delegate_start`, retain the job ID and revision. Use:
 
 - `delegate_list` to rediscover jobs when an ID is no longer in context (after compaction or in a new session). It reconciles orphans and returns compact summaries, newest first; filter by `groupId` or request a group summary for fan-out completion.
-- `delegate_inspect` for lifecycle, capabilities, launch `origin.projectDir` versus delegated `cwd`, execution owner/lease attribution, continuation IDs, `resumable`, `driftReport`, any failure `checkpoint`, the final `result`, verification verdict, and current revision. `resultText` is the provider-independent text of the final message; use `resultWindow` (`find`, `offset`, `maxChars`) or `delegate-jobs result` window flags for long output. A read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. Inline workers retain legacy `ORPHANED` reconciliation; supervisor-owned attempts instead report exact exit/signal/lease attribution.
+- `delegate_inspect` for lifecycle, capabilities, immutable launch `origin.sessionId` / `origin.workspaceId` / `origin.projectDir` versus delegated `cwd`, execution owner/lease attribution, continuation IDs, `resumable`, `driftReport`, any failure `checkpoint`, the final `result`, verification verdict, and current revision. `resultText` is the provider-independent text of the final message; use `resultWindow` (`find`, `offset`, `maxChars`) or `delegate-jobs result` window flags for long output. A read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. Inline workers retain legacy `ORPHANED` reconciliation; supervisor-owned attempts instead report exact exit/signal/lease attribution.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
 - `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.

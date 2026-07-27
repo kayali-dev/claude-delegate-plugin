@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import {
+  monitorCorrelationDirectory,
+  writeSessionCorrelationMarker
+} from '../bin/lib/monitor-correlation.mjs';
 import {
   detectActionableEdges,
   formatEdgeLine,
@@ -13,6 +17,7 @@ import {
 import {
   DelegateMonitor,
   monitorEnabled,
+  monitorScope,
   normalizeMonitorProjectDirectory,
   scopeMonitorSnapshots
 } from '../bin/lib/monitor-runtime.mjs';
@@ -32,6 +37,8 @@ function snapshot(job, events = [], lastEventAt = NOW) {
       origin: {
         projectDir: '/workspace/delegate-router',
         cwd: '/workspace/delegate-router',
+        sessionId: 'session-default',
+        workspaceId: '/workspace/delegate-router',
         brokerVersion: '0.29.0',
         launchedAtMs: NOW
       },
@@ -179,6 +186,10 @@ test('kill switch disables the process and snooze suppresses every non-breach ed
   assert.equal(monitorEnabled({ DELEGATE_MONITOR: '0' }), false);
   assert.equal(monitorEnabled({ DELEGATE_MONITOR_SCOPE: 'off' }), false);
   assert.equal(monitorEnabled({}), true);
+  assert.equal(monitorScope({}), 'session');
+  assert.equal(monitorScope({ DELEGATE_MONITOR_SCOPE: 'workspace' }), 'workspace');
+  assert.equal(monitorScope({ DELEGATE_MONITOR_SCOPE: 'project' }), 'workspace');
+  assert.equal(monitorScope({ DELEGATE_MONITOR_SCOPE: 'all' }), 'all');
   const disabled = spawnSync(process.execPath, [path.join(pluginRoot, 'bin', 'delegate-monitor')], {
     encoding: 'utf8',
     env: { ...process.env, DELEGATE_MONITOR: '0' }
@@ -215,6 +226,8 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
   const origin = {
     projectDir: root,
     cwd: root,
+    sessionId: 'session-edge',
+    workspaceId: root,
     brokerVersion: '0.29.0',
     launchedAtMs: liveNow
   };
@@ -232,6 +245,7 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
   const store = new MonitorStore({ jobsDirectory: jobs, stateDirectory: root });
   const monitor = new DelegateMonitor({
     env: {},
+    scope: 'workspace',
     projectDir: root,
     store,
     emit: (line) => output.push(line),
@@ -261,61 +275,278 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
   ]);
 });
 
-test('project scope isolates projects and worktrees while all retains explicit legacy visibility', (t) => {
+test('session and workspace scopes isolate sibling sessions and real worktree launch paths', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-scope-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const projectA = path.join(root, 'repo-worktree-a');
-  const projectB = path.join(root, 'repo-worktree-b');
+  const manualWorktree = path.join(root, 'manual-worktree');
+  const claudeWorktree = path.join(root, 'repo', '.claude', 'worktrees', 'claude-created');
   const delegatedCwd = path.join(root, 'different-target');
-  fs.mkdirSync(projectA);
-  fs.mkdirSync(projectB);
+  fs.mkdirSync(manualWorktree, { recursive: true });
+  fs.mkdirSync(claudeWorktree, { recursive: true });
   fs.mkdirSync(delegatedCwd);
   const owned = snapshot({
     id: 'owned',
     cwd: delegatedCwd,
-    origin: { projectDir: `${projectA}${path.sep}`, cwd: projectA, brokerVersion: '0.29.0', launchedAtMs: NOW }
-  });
-  const otherWorktree = snapshot({
-    id: 'other-worktree',
-    cwd: projectA,
-    origin: { projectDir: projectB, cwd: projectB, brokerVersion: '0.29.0', launchedAtMs: NOW }
+    origin: {
+      projectDir: `${manualWorktree}${path.sep}`,
+      cwd: manualWorktree,
+      sessionId: 'session-a',
+      workspaceId: manualWorktree,
+      brokerVersion: '0.29.0',
+      launchedAtMs: NOW
+    }
+  }, [], Date.now());
+  const siblingSession = snapshot({
+    id: 'sibling-session',
+    cwd: manualWorktree,
+    origin: {
+      projectDir: manualWorktree,
+      cwd: manualWorktree,
+      sessionId: 'session-b',
+      workspaceId: manualWorktree,
+      brokerVersion: '0.29.0',
+      launchedAtMs: NOW
+    }
+  }, [], Date.now());
+  const claudeCreated = snapshot({
+    id: 'claude-created-worktree',
+    cwd: claudeWorktree,
+    origin: {
+      projectDir: claudeWorktree,
+      cwd: claudeWorktree,
+      sessionId: 'session-c',
+      workspaceId: claudeWorktree,
+      brokerVersion: '0.29.0',
+      launchedAtMs: NOW
+    }
   });
   const legacy = snapshot({ id: 'legacy', cwd: delegatedCwd, origin: undefined });
-  const values = [owned, otherWorktree, legacy];
+  const values = [owned, siblingSession, claudeCreated, legacy];
 
-  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'project', projectDir: projectA }).map((item) => item.job.id), ['owned']);
-  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'project', projectDir: projectB }).map((item) => item.job.id), ['other-worktree']);
-  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'all', projectDir: projectA }).map((item) => item.job.id), ['owned', 'other-worktree', 'legacy']);
-  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'off', projectDir: projectA }), []);
-  assert.equal(normalizeMonitorProjectDirectory(`${projectA}${path.sep}`), normalizeMonitorProjectDirectory(projectA));
+  assert.deepEqual(scopeMonitorSnapshots(values, {
+    scope: 'session',
+    sessionId: 'session-a',
+    workspaceId: manualWorktree
+  }).map((item) => item.job.id), ['owned']);
+  assert.deepEqual(scopeMonitorSnapshots(values, {
+    scope: 'session',
+    sessionId: 'session-b',
+    workspaceId: manualWorktree
+  }).map((item) => item.job.id), ['sibling-session']);
+  assert.deepEqual(scopeMonitorSnapshots(values, {
+    scope: 'workspace',
+    workspaceId: manualWorktree
+  }).map((item) => item.job.id), ['owned', 'sibling-session']);
+  assert.deepEqual(scopeMonitorSnapshots(values, {
+    scope: 'workspace',
+    workspaceId: claudeWorktree
+  }).map((item) => item.job.id), ['claude-created-worktree']);
+  assert.deepEqual(scopeMonitorSnapshots(values, {
+    scope: 'project',
+    projectDir: manualWorktree
+  }).map((item) => item.job.id), ['owned', 'sibling-session']);
+  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'all' }).map((item) => item.job.id), [
+    'owned', 'sibling-session', 'claude-created-worktree', 'legacy'
+  ]);
+  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'off', workspaceId: manualWorktree }), []);
+  assert.deepEqual(scopeMonitorSnapshots([legacy], {
+    scope: 'session',
+    sessionId: 'session-a',
+    workspaceId: manualWorktree
+  }), []);
+  assert.deepEqual(scopeMonitorSnapshots([legacy], {
+    scope: 'workspace',
+    workspaceId: manualWorktree
+  }), []);
+  assert.equal(normalizeMonitorProjectDirectory(`${manualWorktree}${path.sep}`), normalizeMonitorProjectDirectory(manualWorktree));
 
-  const actionable = {
+  const actionableOwned = {
     ...owned,
     job: { ...owned.job, status: 'completed', needsAttention: true, changedFiles: { count: 0 } }
   };
+  const actionableSibling = {
+    ...siblingSession,
+    job: { ...siblingSession.job, status: 'completed', needsAttention: true, changedFiles: { count: 0 } }
+  };
+  let currentSnapshots = [owned, siblingSession];
   const store = {
     directory: root,
     stateDirectory: root,
-    scan: () => [actionable],
+    scan: () => currentSnapshots,
     readPreference: () => null
   };
   const outputA = [];
-  const monitorA = new DelegateMonitor({ env: {}, projectDir: projectA, store, emit: (line) => outputA.push(line) });
+  const monitorA = new DelegateMonitor({
+    env: {},
+    projectDir: manualWorktree,
+    workspaceId: manualWorktree,
+    store,
+    correlation: { ok: true, sessionId: 'session-a', recorded: true },
+    emit: (line) => outputA.push(line)
+  });
   monitorA.scan();
-  monitorA.stop();
-  assert.equal(outputA.length, 1);
-  assert.match(outputA[0], new RegExp(`^delegate\\[${path.basename(projectA)}\\]:`));
   const outputB = [];
-  const monitorB = new DelegateMonitor({ env: {}, projectDir: projectB, store, emit: (line) => outputB.push(line) });
+  const monitorB = new DelegateMonitor({
+    env: {},
+    projectDir: manualWorktree,
+    workspaceId: manualWorktree,
+    store,
+    correlation: { ok: true, sessionId: 'session-b', recorded: true },
+    emit: (line) => outputB.push(line)
+  });
   monitorB.scan();
+  currentSnapshots = [actionableOwned, actionableSibling];
+  monitorA.scan();
+  monitorB.scan();
+  monitorA.stop();
   monitorB.stop();
-  assert.deepEqual(outputB, []);
+  assert.equal(outputA.length, 1);
+  assert.match(outputA[0], new RegExp(`^delegate\\[${path.basename(manualWorktree)}\\]: owned\\b`));
+  assert.equal(outputB.length, 1);
+  assert.match(outputB[0], new RegExp(`^delegate\\[${path.basename(manualWorktree)}\\]: sibling-session\\b`));
 
   const legacyLine = formatEdgeLine(detectActionableEdges({
     ...legacy,
     job: { ...legacy.job, status: 'failed', errorCode: 'ORPHANED' }
   }, { now: NOW })[0]);
   assert.match(legacyLine, new RegExp(`^delegate\\[legacy@${path.basename(delegatedCwd)}\\]:`));
+});
+
+test('correlation failure records and visibly degrades session scope to workspace', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-degraded-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  fs.mkdirSync(workspace);
+  writeSessionCorrelationMarker({
+    stateDirectory: root,
+    sessionId: 'dead-session',
+    coordinatorPid: 999_999_999,
+    projectDir: workspace,
+    workspaceId: workspace,
+    responderMs: 1
+  });
+  const output = [];
+  const store = {
+    directory: path.join(root, 'jobs'),
+    stateDirectory: root,
+    scan: () => [],
+    readPreference: () => null
+  };
+  const monitor = new DelegateMonitor({
+    env: { DELEGATE_MONITOR_SCOPE: 'session' },
+    projectDir: workspace,
+    workspaceId: workspace,
+    coordinatorPid: process.pid,
+    correlationWaitMs: 0,
+    store,
+    emit: (line) => output.push(line)
+  });
+  const result = monitor.start();
+  monitor.stop();
+  assert.equal(result.requestedScope, 'session');
+  assert.equal(result.effectiveScope, 'workspace');
+  assert.equal(result.degradation.reason, 'correlation-timeout');
+  assert.deepEqual(output, [
+    `delegate[${path.basename(workspace)}]: monitor-scope degraded (session correlation correlation-timeout; using workspace scope)`
+  ]);
+  const records = fs.readdirSync(monitorCorrelationDirectory(root))
+    .filter((name) => name.startsWith('request-'))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), name), 'utf8')));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'degraded');
+  assert.equal(records[0].effectiveScope, 'workspace');
+  assert.equal(records[0].reason, 'correlation-timeout');
+  assert.equal(fs.statSync(path.join(monitorCorrelationDirectory(root), `request-${records[0].requestId}.json`)).mode & 0o777, 0o600);
+});
+
+test('SessionStart correlation is race-safe when the monitor starts before or after the hook', async (t) => {
+  const monitorBin = path.join(pluginRoot, 'bin', 'delegate-monitor');
+  const hookBin = path.join(pluginRoot, 'bin', 'delegate-session-hook');
+  const waitFor = async (predicate, timeoutMs = 2500) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const value = predicate();
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return null;
+  };
+  const runOrder = async (hookFirst, suffix) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `delegate-monitor-correlation-${suffix}-`));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const workspace = path.join(root, 'workspace');
+    fs.mkdirSync(workspace);
+    const stateFile = path.join(root, 'usage.json');
+    const sessionId = `session-${suffix}`;
+    const common = {
+      ...process.env,
+      DELEGATE_STATE_FILE: stateFile,
+      CLAUDE_PROJECT_DIR: workspace,
+      DELEGATE_MONITOR_CORRELATION_RESPONDER_MS: '3000'
+    };
+    const hook = () => {
+      const result = spawnSync(process.execPath, [hookBin], {
+        encoding: 'utf8',
+        input: JSON.stringify({
+          hook_event_name: 'SessionStart',
+          session_id: sessionId,
+          cwd: workspace
+        }),
+        env: { ...common, CLAUDE_CODE_SESSION_ID: sessionId }
+      });
+      assert.equal(result.status, 0, result.stderr);
+    };
+    if (hookFirst) hook();
+    const monitorEnv = {
+      ...common,
+      DELEGATE_MONITOR_SCOPE: 'session',
+      DELEGATE_MONITOR_CORRELATION_WAIT_MS: '1200',
+      DELEGATE_MONITOR_POLL_MS: '60000'
+    };
+    delete monitorEnv.CLAUDE_CODE_SESSION_ID;
+    delete monitorEnv.CLAUDE_SESSION_ID;
+    const child = spawn(process.execPath, [monitorBin], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: monitorEnv
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    try {
+      if (!hookFirst) {
+        const pending = await waitFor(() => {
+          try { return fs.readdirSync(monitorCorrelationDirectory(root)).some((name) => name.startsWith('request-')); }
+          catch { return false; }
+        });
+        assert.equal(pending, true);
+        hook();
+      }
+      const correlated = await waitFor(() => {
+        try {
+          for (const name of fs.readdirSync(monitorCorrelationDirectory(root))) {
+            if (!name.startsWith('request-')) continue;
+            const record = JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), name), 'utf8'));
+            if (record.status === 'correlated') return record;
+          }
+        } catch {}
+        return null;
+      });
+      assert.ok(correlated, `correlation did not complete: ${stderr}`);
+      assert.equal(correlated.sessionId, sessionId);
+      assert.equal(correlated.effectiveScope, 'session');
+      assert.doesNotMatch(stdout, /monitor-scope degraded/);
+    } finally {
+      child.kill('SIGTERM');
+      await new Promise((resolve) => {
+        if (child.exitCode != null) resolve();
+        else child.once('exit', resolve);
+      });
+    }
+  };
+
+  await runOrder(false, 'monitor-first');
+  await runOrder(true, 'hook-first');
 });
 
 test('every notification line carries an explicit project label', () => {
@@ -331,6 +562,7 @@ test('every notification line carries an explicit project label', () => {
 test('monitor modules import no broker mutation surface', () => {
   const files = [
     'bin/delegate-monitor',
+    'bin/lib/monitor-correlation.mjs',
     'bin/lib/monitor-policy.mjs',
     'bin/lib/monitor-runtime.mjs',
     'bin/lib/monitor-store.mjs'

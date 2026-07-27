@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import {
+  runSessionCorrelationResponder,
+  writeSessionCorrelationMarker
+} from './lib/monitor-correlation.mjs';
+import { dataDir } from './lib/state.mjs';
+
+const MAX_INPUT_BYTES = 64 * 1024;
+
+function canonicalDirectory(value) {
+  const resolved = path.resolve(String(value || process.cwd()));
+  try {
+    return (fs.realpathSync.native || fs.realpathSync)(resolved);
+  } catch {
+    return path.normalize(resolved);
+  }
+}
+
+function readPayload() {
+  const chunks = [];
+  let used = 0;
+  for (;;) {
+    const buffer = Buffer.allocUnsafe(Math.min(8192, MAX_INPUT_BYTES + 1 - used));
+    const count = fs.readSync(0, buffer, 0, buffer.length, null);
+    if (!count) break;
+    used += count;
+    if (used > MAX_INPUT_BYTES) throw new Error('SessionStart payload exceeds 64 KiB');
+    chunks.push(buffer.subarray(0, count));
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function warn(reason) {
+  const safe = String(reason || 'unavailable').replace(/[^A-Za-z0-9_.:-]/g, '-').slice(0, 120);
+  process.stderr.write(`delegate-session-hook: monitor session correlation unavailable (${safe}); monitor will report workspace fallback\n`);
+}
+
+function startResponder(markerFile) {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--respond', markerFile], {
+    detached: true,
+    stdio: 'ignore',
+    env: process.env
+  });
+  child.unref();
+}
+
+try {
+  if (process.argv[2] === '--respond') {
+    runSessionCorrelationResponder(process.argv[3]);
+  } else {
+    const payload = readPayload();
+    if (payload?.hook_event_name !== 'SessionStart') throw new Error('expected SessionStart payload');
+    const payloadSessionId = String(payload.session_id || '').trim();
+    const environmentSessionId = String(process.env.CLAUDE_CODE_SESSION_ID || '').trim();
+    if (environmentSessionId && payloadSessionId !== environmentSessionId) {
+      throw new Error('session-id-mismatch');
+    }
+    const projectDir = canonicalDirectory(process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd());
+    const marker = writeSessionCorrelationMarker({
+      stateDirectory: dataDir(),
+      sessionId: payloadSessionId,
+      coordinatorPid: process.ppid,
+      projectDir,
+      workspaceId: projectDir
+    });
+    if (!marker.ok) warn(marker.reason);
+    else {
+      try { startResponder(marker.file); }
+      catch (error) { warn(error?.code || error?.name || 'responder-start-failed'); }
+    }
+  }
+} catch (error) {
+  warn(error?.code || error?.message || error?.name);
+}
+
+process.exitCode = 0;

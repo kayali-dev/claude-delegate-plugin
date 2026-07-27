@@ -5,6 +5,18 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P2.4 notification identity is implemented additively. New launch origins add
+  the coordinator `sessionId` and realpath-normalized `workspaceId`, with exact
+  inheritance across every continuation. Session push is the stricter default;
+  `workspace` and `all` are documented widening paths. A private SessionStart
+  marker uses a coordinator/workspace/one-time-request handshake; unavailable,
+  late, dead, or conflicting correlation records and emits workspace fallback
+  instead of guessing. Push scope never gates pull or control.
+- The required P2.4 experiment on Claude Code 2.1.220 found that both a manual
+  Git worktree and `claude --worktree` set SessionStart `cwd` and
+  `CLAUDE_PROJECT_DIR` to the actual worktree path. The inferred
+  parent-directory collision for Claude-created worktrees is false on that
+  build, so P2.4 adds no workaround for it.
 - P3 acceptance-by-default is implemented additively. Write attempts derive and
   cache repository-sourced verification profiles, run broker verification on a
   stable real-tree observation after nonzero changes, and retain every
@@ -29,13 +41,13 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
   leases; otherwise the newer broker leaves it alone and falls back inline.
 - P2a push bridge is implemented additively: the experimental Claude Code
   plugin monitor watches bounded tails of the existing `jobs/` store and emits
-  only redacted actionable edge transitions. Push is scoped by the immutable
-  launch-time `origin.projectDir` by default, so unrelated projects and
-  worktrees do not cross-notify; origin-less historical records are silent
-  unless a fleet session explicitly selects scope `all`. It is read-only,
-  never replays individual historical outcomes at startup, and leaves
-  `delegate_inspect`, `finishedPath`, and the TUI as the universal pull
-  fallback.
+  only redacted actionable edge transitions. P2.4 subsequently narrowed the
+  default from launch-time `origin.projectDir` to session identity, with
+  workspace and fleet widening paths; origin-less historical records are
+  silent unless a fleet session explicitly selects scope `all`. It is
+  read-only with respect to jobs and control, never replays individual
+  historical outcomes at startup, and leaves `delegate_inspect`,
+  `finishedPath`, and the TUI as the universal pull fallback.
 - Claude Agent lifecycle honesty is implemented as part of P2b:
   `SubagentStart`/`SubagentStop` correlate the hook-created record by
   `agent_id`, while a required transcript-quiet backstop terminalizes missing

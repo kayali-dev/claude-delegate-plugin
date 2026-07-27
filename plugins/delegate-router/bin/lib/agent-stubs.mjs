@@ -57,6 +57,7 @@ export function createClaudeAgentStub(options = {}) {
     origin: options.origin,
     projectDir: options.projectDir,
     launchCwd: options.originCwd || options.cwd,
+    sessionId: options.sessionId,
     launchedAtMs: createdAtMs
   });
   const groupId = safeCoordinatorGroup(options.sessionId);

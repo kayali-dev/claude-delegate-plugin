@@ -44,8 +44,10 @@ function safeJobId(job) {
 }
 
 export function monitorProjectLabel(job) {
-  const projectDir = typeof job?.origin?.projectDir === 'string' ? job.origin.projectDir : '';
-  if (projectDir) return field(path.basename(path.normalize(projectDir)), 'project', 64).replace(/[\[\]]/g, '_');
+  const workspaceId = typeof job?.origin?.workspaceId === 'string'
+    ? job.origin.workspaceId
+    : typeof job?.origin?.projectDir === 'string' ? job.origin.projectDir : '';
+  if (workspaceId) return field(path.basename(path.normalize(workspaceId)), 'workspace', 64).replace(/[\[\]]/g, '_');
   const cwd = typeof job?.cwd === 'string' ? job.cwd : '';
   return `legacy@${field(path.basename(path.normalize(cwd)), 'unknown', 56).replace(/[\[\]]/g, '_')}`;
 }

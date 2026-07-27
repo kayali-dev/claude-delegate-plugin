@@ -2,6 +2,30 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.35.0 — 2026-07-27
+
+- **Stricter push default, with an explicit widening path:** Delegate Monitor
+  notifications now default to `DELEGATE_MONITOR_SCOPE=session`, so two Claude
+  sessions launched in the same workspace do not notify each other. Set
+  `DELEGATE_MONITOR_SCOPE=workspace` to see all work launched from the current
+  worktree/project, or `all` for the complete fleet; `off` remains the push kill
+  switch and the former `project` value remains a compatibility alias for
+  `workspace`. These settings affect push only—MCP/CLI inspection, the TUI, and
+  every revision-safe control operation continue to see and manage all jobs.
+- New attempts add immutable `origin.sessionId` and realpath-normalized
+  `origin.workspaceId`; resume, review, and automatic continuation rounds
+  inherit both without replacement. SessionStart writes a private correlation
+  marker so the monitor can bind itself without guessing. Missing, late, dead,
+  or ambiguous correlation persists a degradation record and emits a
+  workspace-labeled status line before falling back to workspace scope.
+  Origin-less records remain silent under session and workspace scopes and are
+  visible only under `all`.
+- A controlled Claude Code 2.1.220 hook experiment found that both a manual Git
+  worktree and `claude --worktree` set the SessionStart `cwd` and
+  `CLAUDE_PROJECT_DIR` to the actual worktree path. The previously inferred
+  parent-directory collision for Claude-created worktrees was not reproduced;
+  no special-case workaround was added.
+
 ## 0.34.0 — 2026-07-27
 
 - Replaced the secondary-screen line-list presentation with purpose-built

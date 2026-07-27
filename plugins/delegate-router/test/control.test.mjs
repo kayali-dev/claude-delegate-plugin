@@ -309,13 +309,25 @@ test('launch origin comes from the coordinator project and continuation rounds n
   fs.mkdirSync(delegatedCwd);
   const previous = {
     project: process.env.CLAUDE_PROJECT_DIR,
+    session: process.env.CLAUDE_CODE_SESSION_ID,
     supervisor: process.env.DELEGATE_SUPERVISOR,
     codex: process.env.DELEGATE_CODEX_BIN
   };
   process.env.CLAUDE_PROJECT_DIR = projectA;
+  delete process.env.CLAUDE_CODE_SESSION_ID;
   process.env.DELEGATE_SUPERVISOR = '0';
   process.env.DELEGATE_CODEX_BIN = '/usr/bin/false';
   try {
+    const cliLaunch = createManagedJob({
+      provider: 'codex',
+      mode: 'review',
+      cwd: delegatedCwd,
+      prompt: 'outside-session cli launch'
+    });
+    assert.equal(cliLaunch.origin.sessionId, null);
+    assert.equal(cliLaunch.origin.workspaceId, fs.realpathSync(projectA));
+
+    process.env.CLAUDE_CODE_SESSION_ID = 'coordinator-session-a';
     const resumeParent = createManagedJob({
       provider: 'codex',
       mode: 'review',
@@ -325,6 +337,8 @@ test('launch origin comes from the coordinator project and continuation rounds n
     assert.equal(resumeParent.origin.projectDir, fs.realpathSync(projectA));
     assert.notEqual(resumeParent.origin.projectDir, resumeParent.cwd);
     assert.equal(resumeParent.origin.cwd, fs.realpathSync(process.cwd()));
+    assert.equal(resumeParent.origin.sessionId, 'coordinator-session-a');
+    assert.equal(resumeParent.origin.workspaceId, fs.realpathSync(projectA));
     assert.equal(resumeParent.origin.brokerVersion, JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
     assert.ok(Number.isFinite(resumeParent.origin.launchedAtMs));
     updateManagedJob(resumeParent.id, (job) => {
@@ -334,6 +348,7 @@ test('launch origin comes from the coordinator project and continuation rounds n
     });
 
     process.env.CLAUDE_PROJECT_DIR = projectB;
+    process.env.CLAUDE_CODE_SESSION_ID = 'coordinator-session-b';
     const resumed = resumeManagedJob(resumeParent.id, { prompt: 'continue' });
     assert.deepEqual(resumed.origin, resumeParent.origin);
 
@@ -354,10 +369,55 @@ test('launch origin comes from the coordinator project and continuation rounds n
   } finally {
     if (previous.project == null) delete process.env.CLAUDE_PROJECT_DIR;
     else process.env.CLAUDE_PROJECT_DIR = previous.project;
+    if (previous.session == null) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = previous.session;
     if (previous.supervisor == null) delete process.env.DELEGATE_SUPERVISOR;
     else process.env.DELEGATE_SUPERVISOR = previous.supervisor;
     if (previous.codex == null) delete process.env.DELEGATE_CODEX_BIN;
     else process.env.DELEGATE_CODEX_BIN = previous.codex;
+  }
+}));
+
+test('monitor scope never gates cross-session control operations', () => isolated((directory) => {
+  const previous = {
+    scope: process.env.DELEGATE_MONITOR_SCOPE,
+    session: process.env.CLAUDE_CODE_SESSION_ID
+  };
+  process.env.DELEGATE_MONITOR_SCOPE = 'session';
+  process.env.CLAUDE_CODE_SESSION_ID = 'coordinator-session-a';
+  try {
+    const workspaceId = fs.realpathSync(directory);
+    const otherSession = createManagedJob({
+      provider: 'codex',
+      mode: 'review',
+      cwd: directory,
+      prompt: 'cross-session managed work',
+      origin: {
+        projectDir: workspaceId,
+        cwd: workspaceId,
+        sessionId: 'coordinator-session-b',
+        workspaceId,
+        brokerVersion: '0.34.0',
+        launchedAtMs: Date.now()
+      }
+    });
+    const running = updateManagedJob(otherSession.id, (job) => {
+      job.status = 'running';
+      job.phase = 'running';
+      job.workerPid = process.pid;
+    });
+    const controlled = submitControl(otherSession.id, {
+      type: 'cancel',
+      commandId: 'cross-session-cancel'
+    }, running.revision);
+    assert.equal(controlled.accepted, true);
+    assert.equal(controlled.commandId, 'cross-session-cancel');
+    assert.equal(inspectJob(otherSession.id).origin.sessionId, 'coordinator-session-b');
+  } finally {
+    if (previous.scope == null) delete process.env.DELEGATE_MONITOR_SCOPE;
+    else process.env.DELEGATE_MONITOR_SCOPE = previous.scope;
+    if (previous.session == null) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = previous.session;
   }
 }));
 
