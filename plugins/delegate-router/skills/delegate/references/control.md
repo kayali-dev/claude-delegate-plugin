@@ -69,7 +69,35 @@ Cursor `cursor/ask_question` and `cursor/create_plan` requests are blocking cont
 
 For managed runs, store the job ID and use the `delegate_control` inspection and control tools. Direct Codex MCP calls and Cursor foreground/background CLI runs create observable shadow jobs (`direct-mcp` and `direct-cli`) in the same store, event journal, transcript, diff/files, usage, audit/stats, orphan-reconciliation, and terminal-sentinel pipeline. They remain unmanaged provider loops: steer, cancel, release, respond, resume, review round, and revert return `DIRECT_TRANSPORT`, while inspect, list, events, transcript, diff, files, and usage stay available. Official Codex plugin jobs retain their own independent lifecycle commands. Never describe a direct or external-plugin job as a managed control-plane job.
 
-Built-in Claude `Agent` and legacy `Task` tool calls are observability-only too. Plugin PreToolUse/PostToolUse hooks correlate the same `tool_use_id`, create one `claude-agent` stub on pre, and append only its create and terminal events; model, agent type, cwd, and prompt summary are redacted and bounded. When the result exposes an agent id or transcript path, the stub retains a pointer to the coordinator session's `subagents/agent-*.jsonl` file for bounded read-only TUI tailing. Every hook exits zero, performs no network access, and swallows store errors after one stderr diagnostic so visibility can never block the Agent call. Set `DELEGATE_AGENT_STUBS=0` before starting Claude Code to disable the hooks. These stubs use coordinator session grouping when available, reject every control-plane mutation, and completed or abandoned records follow `DELEGATE_JOB_RETENTION_DAYS` pruning.
+Managed launch ownership normally belongs to the resident
+`delegate-supervisor`, not the MCP/CLI session. Its private Unix-domain socket
+accepts only local `submit`, `status`, and `drain` requests; attempt leases and
+heartbeats make restarts inspectable and allow a new compatible resident to
+monitor an already-running leased worker. `SIGHUP` persists and continues,
+`SIGTERM`/`SIGINT` stop admission and drain, and
+`DELEGATE_SUPERVISOR_IDLE_MS` controls the lease-free idle exit (default 30
+minutes). `delegate-supervisor start|status|drain` is also available directly.
+If the resident is disabled, unavailable, unresponsive, or incompatible while
+holding leases, launch falls back to the historical detached worker and records
+`executionOwner: "inline-detached"`; this condition never fails a job start.
+Lease-less jobs from an older broker are deliberately outside resident
+reconciliation.
+
+Built-in Claude `Agent` and legacy `Task` tool calls are observability-only too.
+Plugin PreToolUse/PostToolUse hooks still create and correlate a
+`claude-agent` stub by `tool_use_id`; additive `SubagentStart`/`SubagentStop`
+hooks attach and finish it by `agent_id`. Model, agent type, cwd, prompt summary,
+and terminal response are redacted and bounded. When available, the stub retains
+a pointer to the coordinator session's `subagents/agent-*.jsonl` file for
+bounded read-only TUI tailing. Because a session crash can omit every stop
+signal, inspection also reconciles a non-terminal stub whose transcript has
+been quiet past `DELEGATE_AGENT_STUB_QUIET_SECONDS` (default 1800) to failed
+`agentLifecycle: "ended-unknown"` with an explicit no-completion-signal reason.
+Recent transcript growth renders active; quiet within the window renders idle.
+No success is inferred. Every hook exits zero, performs no network access, and
+swallows store errors after one stderr diagnostic so visibility can never block
+the Agent call. `DELEGATE_AGENT_STUBS=0` disables the hooks. These records reject
+all control mutations and obey `DELEGATE_JOB_RETENTION_DAYS` pruning.
 
 ## Ambient Push Bridge
 
@@ -79,8 +107,11 @@ journal tails and pushes only actionable edge transitions, in this order:
 policy breach (scope or budget/allowance), human input or blocked permission,
 ready for review, terminal failure, and stalled running work. It never emits
 progress, deltas, tool activity, usage ticks, or successful intermediate steps.
-Every line is compact, redacted, and carries the job id; inspect that job
-before acting.
+Every line is compact, redacted, and carries the job id plus the launch
+workspace basename; inspect that job and its `origin.projectDir` before acting.
+The origin is captured from `CLAUDE_PROJECT_DIR` at launch (falling back to the
+launching process cwd), remains distinct from the delegated `job.cwd`, and is
+inherited unchanged by resume and review-round children.
 
 The monitor is read-only by construction. It cannot start, steer, cancel,
 respond to, reconcile, or otherwise mutate a job, and it cannot invoke a
@@ -90,6 +121,14 @@ stall threshold defaults to ten minutes; configure
 `DELEGATE_MONITOR_STALL_SECONDS`,
 `DELEGATE_MONITOR_COOLDOWN_SECONDS`, and
 `DELEGATE_MONITOR_MAX_LINES_PER_MINUTE` only when the local policy requires it.
+
+Push defaults to `DELEGATE_MONITOR_SCOPE=project`: only records whose
+realpath-normalized `origin.projectDir` equals this session's
+`CLAUDE_PROJECT_DIR` can emit. Different worktrees remain isolated. Historical
+records without origin are silent in this mode but remain visible through all
+pull surfaces. Set scope to `all` only in a deliberate fleet-overview session;
+legacy lines are then explicitly labeled `legacy@<cwd-basename>`. Set it to
+`off` to emit nothing.
 
 Set `DELEGATE_MONITOR=0` before starting Claude Code to disable the push bridge.
 To snooze non-breach edges, place a future ISO timestamp or epoch in

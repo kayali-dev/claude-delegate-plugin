@@ -117,11 +117,18 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   const signals = activitySignals(events);
   const lastEvent = signals.lastEvent;
   const lastAt = eventAt(lastEvent) || Number(job.lastActivityAt || job.updatedAt * 1000 || job.createdAt * 1000 || now);
+  if (job.transport === 'claude-agent' && job.agentLifecycle === 'ended-unknown') {
+    return result('ended-unknown', 'ended unknown', '?', 0, now, 'failed', {
+      capabilities, transportKey: key, visibilityNote: 'no completion signal; transcript quiet-window reconciliation'
+    });
+  }
   if (job.transport === 'claude-agent' && job.agentLifecycle === 'spawn-returned') {
     const transcriptAt = Number(job.transcriptMtimeMs || job.spawnReturnedAtMs || job.createdAtMs || lastAt);
     const { active } = classifySession(transcriptAt, { now, activeSeconds: DEFAULT_SESSION_ACTIVE_SECONDS });
-    return result(active ? 'active' : 'idle', active ? 'active' : 'idle', active ? '>' : '.', transcriptAt, now, active ? 'body' : 'dim', {
-      capabilities, transportKey: key, visibilityNote: 'background completion is not exposed'
+    const state = job.agentActivityState === 'active' || job.agentActivityState === 'idle'
+      ? job.agentActivityState : active ? 'active' : 'idle';
+    return result(state, state, state === 'active' ? '>' : '.', transcriptAt, now, state === 'active' ? 'body' : 'dim', {
+      capabilities, transportKey: key, visibilityNote: 'completion hook with quiet-window backstop'
     });
   }
   if (job.external || job.transport === 'external') {

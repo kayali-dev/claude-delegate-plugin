@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { appendJobEvent, inspectJob, redact, updateManagedJob } from './control.mjs';
-import { loadJob, saveJob } from './state.mjs';
+import { appendJobEvent, inspectJob, launchOrigin, redact, updateManagedJob } from './control.mjs';
+import { listJobs, loadJob, saveJob } from './state.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const MAX_PROMPT_SUMMARY = 512;
@@ -53,6 +53,12 @@ export function createClaudeAgentStub(options = {}) {
   const createdAtMs = Number(options.now ?? Date.now());
   const createdAt = Math.floor(createdAtMs / 1000);
   const cwd = boundedText(path.resolve(String(options.cwd || process.cwd())), 4096);
+  const origin = launchOrigin({
+    origin: options.origin,
+    projectDir: options.projectDir,
+    launchCwd: options.originCwd || options.cwd,
+    launchedAtMs: createdAtMs
+  });
   const groupId = safeCoordinatorGroup(options.sessionId);
   const job = {
     schemaVersion: 2,
@@ -66,6 +72,7 @@ export function createClaudeAgentStub(options = {}) {
     revision: 0,
     lastSeq: 0,
     cwd,
+    origin,
     transport: 'claude-agent',
     managedBy: 'delegate-agent-hook',
     readOnly: true,
@@ -132,6 +139,7 @@ export function completeClaudeAgentStub(options = {}) {
     job.completedAt = Math.floor(completedAtMs / 1000);
     job.completedAtMs = completedAtMs;
     job.durationMs = Math.max(0, completedAtMs - Number(job.createdAtMs || job.createdAt * 1000 || completedAtMs));
+    if (typeof options.resultText === 'string' && options.resultText.trim()) job.resultText = boundedText(options.resultText, 4096);
     if (options.error) {
       job.error = boundedText(options.error, 1024);
       job.errorCode = 'AGENT_TOOL_ERROR';
@@ -152,6 +160,54 @@ export function completeClaudeAgentStub(options = {}) {
     }, { lifecycle: true });
   }
   return inspectJob(id);
+}
+
+function matchingAgentStubs(options = {}) {
+  const sessionId = boundedText(options.sessionId, 256);
+  const agentId = boundedText(options.agentId, 256);
+  const agentType = boundedText(options.agentType, 128);
+  return listJobs().filter((job) => job.managedBy === 'delegate-agent-hook'
+    && job.transport === 'claude-agent'
+    && (!sessionId || job.coordinatorSessionId === sessionId)
+    && (!agentId || job.agentId === agentId)
+    && (!agentType || !job.agentType || job.agentType === agentType))
+    .sort((left, right) => Number(right.createdAtMs || right.createdAt * 1000 || 0)
+      - Number(left.createdAtMs || left.createdAt * 1000 || 0));
+}
+
+export function correlateClaudeSubagentStart(options = {}) {
+  if (!options.agentId) throw new Error('SubagentStart payload is missing agent_id');
+  const already = matchingAgentStubs(options).find((job) => job.agentId === boundedText(options.agentId, 256));
+  if (already) return inspectJob(already.id);
+  const candidate = matchingAgentStubs({ sessionId: options.sessionId, agentType: options.agentType })
+    .find((job) => !job.agentId && !TERMINAL.has(job.status));
+  if (!candidate) return null;
+  updateManagedJob(candidate.id, (job) => {
+    job.agentId = boundedText(options.agentId, 256);
+    if (options.agentType) job.agentType = boundedText(options.agentType, 128) || job.agentType;
+    if (options.coordinatorSidecarDir && path.isAbsolute(options.coordinatorSidecarDir)) {
+      job.coordinatorSidecarDir = path.normalize(options.coordinatorSidecarDir);
+    }
+  }, { incrementRevision: false });
+  return inspectJob(candidate.id);
+}
+
+export function completeClaudeSubagentByAgentId(options = {}) {
+  if (!options.agentId) throw new Error('SubagentStop payload is missing agent_id');
+  const candidate = matchingAgentStubs(options).find((job) => !TERMINAL.has(job.status))
+    || matchingAgentStubs(options)[0];
+  if (!candidate) return null;
+  return completeClaudeAgentStub({
+    sessionId: candidate.coordinatorSessionId,
+    toolUseId: candidate.toolUseId,
+    status: options.status || 'completed',
+    agentId: options.agentId,
+    coordinatorSidecarDir: options.coordinatorSidecarDir || candidate.coordinatorSidecarDir,
+    transcriptPath: options.transcriptPath,
+    resultText: options.resultText,
+    error: options.error,
+    now: options.now
+  });
 }
 
 function recursiveValue(value, names, depth = 0, visits = { count: 0 }) {

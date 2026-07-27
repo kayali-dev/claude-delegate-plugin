@@ -2,6 +2,32 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.30.0 — 2026-07-26
+
+- Added the resident, user-level `delegate-supervisor`. Managed attempts now run
+  under a single private Unix-domain-socket supervisor with durable
+  PID/PGID/boot leases, heartbeats, clean signal draining, idle exit, boot
+  adoption, and exact exit/signal attribution. Concurrent lazy starts converge
+  on one resident. Incompatible residents drain only when lease-free; otherwise
+  the new launcher uses the unchanged inline-detached fallback. Every supervisor
+  startup or submission failure also falls back and records
+  `executionOwner: "inline-detached"`; lease-less pre-upgrade jobs are never
+  adopted or reclassified.
+- Fixed background Claude Agent stubs remaining `running` forever. Additive
+  `SubagentStart`/`SubagentStop` hooks correlate by `agent_id` and retain the
+  terminal response. A read-time quiet-transcript backstop (30 minutes by
+  default) marks missing-completion records as failed `ended-unknown`, never as
+  successful; Fleet renders recent growth as active, quiet-within-policy as
+  idle, and the terminal uncertainty distinctly. Existing records heal on
+  inspection and ordinary retention prunes them.
+- Fixed cross-project monitor notifications. New attempts retain immutable
+  launch origin `{ projectDir, cwd, brokerVersion, launchedAtMs }`; continuation
+  rounds inherit it. Push defaults to the realpath-normalized origin project,
+  excludes origin-less legacy jobs, distinguishes worktrees, and labels every
+  line with its workspace. `DELEGATE_MONITOR_SCOPE=all` explicitly enables a
+  fleet overview and `off` disables push. Inspection and the TUI detail header
+  expose origin separately from the delegated cwd.
+
 ## 0.29.0 — 2026-07-26
 
 - Added the experimental Claude Code push bridge in `monitors/monitors.json`.

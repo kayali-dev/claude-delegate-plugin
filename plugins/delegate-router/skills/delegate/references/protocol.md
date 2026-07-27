@@ -11,6 +11,13 @@
 
 Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.events.jsonl`. Prompts, logs, commands, and state files are created with user-only permissions. Event values are recursively redacted and size-bounded.
 
+New job/attempt records add an immutable launch identity:
+`origin: { projectDir, cwd, brokerVersion, launchedAtMs }`. `projectDir` is the
+launcher's `CLAUDE_PROJECT_DIR`, with launch cwd as the fallback; `origin.cwd`
+is the launcher's cwd and is intentionally distinct from the provider's
+`job.cwd`. Resume and review-round attempts inherit the complete parent origin.
+Readers accept its absence on historical records.
+
 Schema version 1 of the native work model is available as a compatibility
 layer. `delegate-jobs work [--json] [--id <job-or-work-id>]` and the read-only
 `delegate_work` MCP tool project the existing job store without reconciling,
@@ -37,11 +44,41 @@ Every first transition into a terminal status appends one redacted, private JSON
 
 Direct Codex MCP calls and Cursor foreground/background CLI runs enter the same storage pipeline as shadow jobs with `transport: 'direct-mcp'` or `transport: 'direct-cli'`. Raw caller parameters are recursively redacted and bounded; the prompt is a normal `message.user`. Provider notifications are tee'd through the managed event normalizers without changing caller-visible output. Each call owns a distinct running record, PID/heartbeat-compatible liveness fields, terminal sentinel, and audit entry. A Codex reply creates a child shadow with the same thread ID so cumulative thread usage is delta-attributed across the chain. Shadow creation is atomic: any storage failure removes its partial files, logs once to stderr, and leaves the direct provider call on its legacy path.
 
-Claude built-in Agent visibility uses `transport: 'claude-agent'` and `managedBy: 'delegate-agent-hook'`. PreToolUse/PostToolUse payloads are joined by `tool_use_id`; the pre hook creates one lightweight running record and `job.created`, while post sets duration/terminal status and appends one `job.completed`. Prompt text is never added as a message event. A derivable subagent transcript is retained only as a pointer and read with the same bounded-tail/redaction discipline as coordinator Sessions. Hook failure is fail-open, and the record is read-only and non-resumable.
+Claude built-in Agent visibility uses `transport: 'claude-agent'` and
+`managedBy: 'delegate-agent-hook'`. PreToolUse/PostToolUse payloads are joined
+by `tool_use_id`; the pre hook creates one lightweight running record and
+`job.created`. Foreground post results retain their existing terminal
+semantics, while a background spawn return stays non-terminal.
+`SubagentStart`/`SubagentStop` add `agent_id` lifecycle correlation and the stop
+hook records the terminal response. A derivable subagent transcript is retained
+only as a pointer and read with the same bounded-tail/redaction discipline as
+coordinator Sessions. A non-terminal stub with no transcript growth for the
+configured quiet window becomes failed `ended-unknown` at inspection, with a
+distinct `AGENT_COMPLETION_UNKNOWN` reason rather than fabricated success.
+Recent growth is active, quiet within policy is idle, reconciliation is
+idempotent, hook failure is fail-open, and ordinary job retention applies.
 
 External Codex session rows are not job records and never enter the broker store. The scanner reads at most 200 newest files and only bounded metadata/tail windows from the observed `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl` layout. The first `session_meta` payload carries stable `id`/`session_id`, `cwd`, `originator`, and `source`; token-count events near the tail may carry provider totals. Newest files win and repeated rollout files with the same stable identity collapse to one thread. An id recorded as a managed or shadow provider session is excluded. Proven Claude-adjacent originators or app-server/MCP/subagent sources may surface; interactive `codex-tui`/`cli` and unknown provenance are personal-by-default and excluded. All surfaced strings pass the shared redactor, detail reads are bounded, and every mutation rejects as read-only.
 
-Inspection reconciles liveness: a job recorded as `running` whose worker process no longer exists is transitioned to `failed` with an `ORPHANED` error event before the snapshot is returned. `delegate_list` rediscovers jobs by recency when an ID is no longer in context.
+Managed attempts normally have `executionOwner: "supervisor"`. The resident is
+single-instance per state directory and records a private lock identity
+`{pid, bootId, startedAt, brokerVersion, protocolVersion}` plus one durable
+lease per attempt `{jobId, attemptId, pid, pgid, bootId, heartbeatAt,
+expiresAt}`. Its `0600` Unix-domain socket exposes local request/response
+`submit`, `status`, and `drain` only; there is no network listener. On boot it
+reconciles only lease files it created: a positively identified live worker is
+adopted, a gone worker fails with unavailable-exit-status attribution, and a
+live PID that fails identity is terminal `unknown`. Lease-less records,
+including every pre-upgrade inline job, are never scanned or reclassified.
+Terminal records and audit rows retain exit code, signal, PID/PPID/PGID,
+supervisor and lease boot IDs, final heartbeat/expiry, and attachability.
+
+If resident startup or submission fails for any reason, the unchanged
+detached-spawn behavior runs and records
+`executionOwner: "inline-detached"`. Those inline records retain the legacy
+read-time reconciliation: a running job whose worker process no longer exists
+becomes failed `ORPHANED`. `delegate_list` rediscovers jobs by recency when an
+ID is no longer in context.
 
 Inspect and list rows expose `lastActivityAt` from the last complete non-replay journal line (the ordinary fast path reads only the tail; a replay tail falls back to the newest live event). `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
 

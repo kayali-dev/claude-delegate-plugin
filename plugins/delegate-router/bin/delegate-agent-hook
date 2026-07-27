@@ -2,8 +2,10 @@
 import fs from 'node:fs';
 import {
   agentResultStatus,
+  completeClaudeSubagentByAgentId,
   completeClaudeAgentStub,
   coordinatorSidecarDirectory,
+  correlateClaudeSubagentStart,
   createClaudeAgentStub,
   deriveAgentId,
   deriveAgentTranscriptPath
@@ -35,6 +37,28 @@ function readInput() {
 
 function handle(payload) {
   if (String(process.env.DELEGATE_AGENT_STUBS ?? '1') === '0') return;
+  if (payload?.hook_event_name === 'SubagentStart') {
+    correlateClaudeSubagentStart({
+      sessionId: payload.session_id,
+      agentId: payload.agent_id,
+      agentType: payload.agent_type,
+      cwd: payload.cwd,
+      coordinatorSidecarDir: coordinatorSidecarDirectory(payload.transcript_path)
+    });
+    return;
+  }
+  if (payload?.hook_event_name === 'SubagentStop') {
+    completeClaudeSubagentByAgentId({
+      sessionId: payload.session_id,
+      agentId: payload.agent_id,
+      agentType: payload.agent_type,
+      coordinatorSidecarDir: coordinatorSidecarDirectory(payload.transcript_path),
+      transcriptPath: payload.agent_transcript_path,
+      resultText: payload.last_assistant_message,
+      status: 'completed'
+    });
+    return;
+  }
   if (!['Agent', 'Task'].includes(payload?.tool_name)) return;
   const toolUseId = payload.tool_use_id || payload.toolUseId;
   if (!toolUseId) throw new Error('hook payload is missing correlatable tool_use_id');

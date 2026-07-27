@@ -10,14 +10,36 @@ import {
   formatEdgeLine,
   NotificationPolicy
 } from '../bin/lib/monitor-policy.mjs';
-import { DelegateMonitor, monitorEnabled } from '../bin/lib/monitor-runtime.mjs';
+import {
+  DelegateMonitor,
+  monitorEnabled,
+  normalizeMonitorProjectDirectory,
+  scopeMonitorSnapshots
+} from '../bin/lib/monitor-runtime.mjs';
 import { MonitorStore, parseSnoozeUntil, preferenceSnoozed } from '../bin/lib/monitor-store.mjs';
 
 const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const NOW = Date.parse('2026-07-26T12:00:00.000Z');
 
 function snapshot(job, events = [], lastEventAt = NOW) {
-  return { job: { provider: 'codex', mode: 'implement', status: 'running', phase: 'running', ...job }, events, lastEventAt };
+  return {
+    job: {
+      provider: 'codex',
+      mode: 'implement',
+      status: 'running',
+      phase: 'running',
+      cwd: '/workspace/delegate-router',
+      origin: {
+        projectDir: '/workspace/delegate-router',
+        cwd: '/workspace/delegate-router',
+        brokerVersion: '0.29.0',
+        launchedAtMs: NOW
+      },
+      ...job
+    },
+    events,
+    lastEventAt
+  };
 }
 
 function event(seq, type, data = {}, at = NOW) {
@@ -71,14 +93,14 @@ test('edge policy deduplicates, permits genuine re-entry, and holds per-job cool
   assert.deepEqual(policy.bootstrap([snapshot({ id: 'job-1' })], { now: 0 }), []);
   const ready = snapshot({ id: 'job-1', status: 'completed', changedFiles: { count: 1 } }, [], 1000);
   assert.deepEqual(policy.observe([ready], { now: 1000 }), [
-    'delegate: job-1 ready-for-review (implement, 1 file, checks not run)'
+    'delegate[delegate-router]: job-1 ready-for-review (implement, 1 file, checks not run)'
   ]);
   assert.deepEqual(policy.observe([ready], { now: 2000 }), []);
   assert.deepEqual(policy.observe([snapshot({ id: 'job-1' })], { now: 2500 }), []);
   const failed = snapshot({ id: 'job-1', status: 'failed', errorCode: 'PROVIDER_ERROR' }, [], 3000);
   assert.deepEqual(policy.observe([failed], { now: 3000 }), []);
   assert.deepEqual(policy.observe([failed], { now: 11_001 }), [
-    'delegate: job-1 failure (PROVIDER_ERROR)'
+    'delegate[delegate-router]: job-1 failure (PROVIDER_ERROR)'
   ]);
 });
 
@@ -112,11 +134,11 @@ test('global rate ceiling emits one exact suppressed-count summary', () => {
     verification: { exitCode: 0 }
   }));
   assert.deepEqual(policy.observe(jobs, { now: 1 }), [
-    'delegate: one ready-for-review (implement, 1 file, checks passed)',
-    'delegate: two ready-for-review (implement, 1 file, checks passed)'
+    'delegate[delegate-router]: one ready-for-review (implement, 1 file, checks passed)',
+    'delegate[delegate-router]: two ready-for-review (implement, 1 file, checks passed)'
   ]);
   assert.deepEqual(policy.observe(jobs, { now: 60_002 }), [
-    'delegate: 1 actionable notification suppressed (rate limit; inspect delegate_list)'
+    'delegate[delegate-router]: 1 actionable notification suppressed (rate limit; inspect delegate_list)'
   ]);
 });
 
@@ -128,7 +150,7 @@ test('boot baselines history and emits at most one consolidated attention summar
     snapshot({ id: 'ordinary-running' })
   ], { now: NOW });
   assert.deepEqual(lines, [
-    'delegate: 2 existing jobs need attention (1 input, 1 review; inspect delegate_list)'
+    'delegate[delegate-router]: 2 existing jobs need attention (1 input, 1 review; inspect delegate_list)'
   ]);
   assert.deepEqual(policy.observe([
     snapshot({ id: 'old-ready', status: 'completed', changedFiles: { count: 2 } }),
@@ -149,12 +171,13 @@ test('line formatting redacts hostile fields and never includes prompts, diffs, 
     scopeViolations: []
   }), { now: NOW })[0];
   const line = formatEdgeLine(edge);
-  assert.equal(line, 'delegate: codex-safe-123 failure (failed)');
+  assert.equal(line, 'delegate[delegate-router]: codex-safe-123 failure (failed)');
   assert.doesNotMatch(line, /super-secret|hunter2|ABCDEFGHIJKLMNOPQRST|Bearer|password|API_KEY/);
 });
 
 test('kill switch disables the process and snooze suppresses every non-breach edge', () => {
   assert.equal(monitorEnabled({ DELEGATE_MONITOR: '0' }), false);
+  assert.equal(monitorEnabled({ DELEGATE_MONITOR_SCOPE: 'off' }), false);
   assert.equal(monitorEnabled({}), true);
   const disabled = spawnSync(process.execPath, [path.join(pluginRoot, 'bin', 'delegate-monitor')], {
     encoding: 'utf8',
@@ -172,7 +195,7 @@ test('kill switch disables the process and snooze suppresses every non-breach ed
   assert.deepEqual(policy.observe([
     snapshot({ id: 'snoozed', scopeViolations: [{ path: 'outside.js' }] })
   ], { now: NOW + 3, snoozed: true }), [
-    'delegate: snoozed policy-breach (scope violation, 1 path)'
+    'delegate[delegate-router]: snoozed policy-breach (scope violation, 1 path)'
   ]);
 
   assert.equal(parseSnoozeUntil('2026-07-26T13:00:00.000Z'), Date.parse('2026-07-26T13:00:00.000Z'));
@@ -180,24 +203,36 @@ test('kill switch disables the process and snooze suppresses every non-breach ed
 });
 
 test('monitor runtime observes a synthetic store edge without mutating it', (t) => {
+  // Timestamps must be relative to the real clock: this test drives the live
+  // monitor (no injected now), so a frozen fixture date makes the job look
+  // stalled the day after the constant was written.
+  const liveNow = Date.now();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const jobs = path.join(root, 'jobs');
   fs.mkdirSync(jobs, { recursive: true });
   const record = path.join(jobs, 'codex-edge.json');
+  const origin = {
+    projectDir: root,
+    cwd: root,
+    brokerVersion: '0.29.0',
+    launchedAtMs: liveNow
+  };
   fs.writeFileSync(record, `${JSON.stringify({
     id: 'codex-edge',
     provider: 'codex',
     mode: 'implement',
     status: 'running',
     phase: 'running',
-    createdAt: Math.floor(NOW / 1000)
+    createdAt: Math.floor(liveNow / 1000),
+    origin
   })}\n`);
-  fs.writeFileSync(path.join(jobs, 'codex-edge.events.jsonl'), `${JSON.stringify(event(1, 'job.state', { status: 'running' }))}\n`);
+  fs.writeFileSync(path.join(jobs, 'codex-edge.events.jsonl'), `${JSON.stringify(event(1, 'job.state', { status: 'running' }, liveNow))}\n`);
   const output = [];
   const store = new MonitorStore({ jobsDirectory: jobs, stateDirectory: root });
   const monitor = new DelegateMonitor({
     env: {},
+    projectDir: root,
     store,
     emit: (line) => output.push(line),
     pollMs: 60_000,
@@ -215,14 +250,82 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
     phase: 'completed',
     changedFiles: { count: 3 },
     verification: null,
-    createdAt: Math.floor(NOW / 1000),
-    completedAt: Math.floor(NOW / 1000) + 1
+    createdAt: Math.floor(liveNow / 1000),
+    completedAt: Math.floor(NOW / 1000) + 1,
+    origin
   })}\n`);
   fs.appendFileSync(path.join(jobs, 'codex-edge.events.jsonl'), `${JSON.stringify(event(2, 'job.completed', {}, NOW + 1000))}\n`);
   monitor.scan();
   assert.deepEqual(output, [
-    'delegate: codex-edge ready-for-review (implement, 3 files, checks not run)'
+    `delegate[${path.basename(root)}]: codex-edge ready-for-review (implement, 3 files, checks not run)`
   ]);
+});
+
+test('project scope isolates projects and worktrees while all retains explicit legacy visibility', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-scope-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const projectA = path.join(root, 'repo-worktree-a');
+  const projectB = path.join(root, 'repo-worktree-b');
+  const delegatedCwd = path.join(root, 'different-target');
+  fs.mkdirSync(projectA);
+  fs.mkdirSync(projectB);
+  fs.mkdirSync(delegatedCwd);
+  const owned = snapshot({
+    id: 'owned',
+    cwd: delegatedCwd,
+    origin: { projectDir: `${projectA}${path.sep}`, cwd: projectA, brokerVersion: '0.29.0', launchedAtMs: NOW }
+  });
+  const otherWorktree = snapshot({
+    id: 'other-worktree',
+    cwd: projectA,
+    origin: { projectDir: projectB, cwd: projectB, brokerVersion: '0.29.0', launchedAtMs: NOW }
+  });
+  const legacy = snapshot({ id: 'legacy', cwd: delegatedCwd, origin: undefined });
+  const values = [owned, otherWorktree, legacy];
+
+  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'project', projectDir: projectA }).map((item) => item.job.id), ['owned']);
+  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'project', projectDir: projectB }).map((item) => item.job.id), ['other-worktree']);
+  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'all', projectDir: projectA }).map((item) => item.job.id), ['owned', 'other-worktree', 'legacy']);
+  assert.deepEqual(scopeMonitorSnapshots(values, { scope: 'off', projectDir: projectA }), []);
+  assert.equal(normalizeMonitorProjectDirectory(`${projectA}${path.sep}`), normalizeMonitorProjectDirectory(projectA));
+
+  const actionable = {
+    ...owned,
+    job: { ...owned.job, status: 'completed', needsAttention: true, changedFiles: { count: 0 } }
+  };
+  const store = {
+    directory: root,
+    stateDirectory: root,
+    scan: () => [actionable],
+    readPreference: () => null
+  };
+  const outputA = [];
+  const monitorA = new DelegateMonitor({ env: {}, projectDir: projectA, store, emit: (line) => outputA.push(line) });
+  monitorA.scan();
+  monitorA.stop();
+  assert.equal(outputA.length, 1);
+  assert.match(outputA[0], new RegExp(`^delegate\\[${path.basename(projectA)}\\]:`));
+  const outputB = [];
+  const monitorB = new DelegateMonitor({ env: {}, projectDir: projectB, store, emit: (line) => outputB.push(line) });
+  monitorB.scan();
+  monitorB.stop();
+  assert.deepEqual(outputB, []);
+
+  const legacyLine = formatEdgeLine(detectActionableEdges({
+    ...legacy,
+    job: { ...legacy.job, status: 'failed', errorCode: 'ORPHANED' }
+  }, { now: NOW })[0]);
+  assert.match(legacyLine, new RegExp(`^delegate\\[legacy@${path.basename(delegatedCwd)}\\]:`));
+});
+
+test('every notification line carries an explicit project label', () => {
+  const policy = new NotificationPolicy({ cooldownMs: 0, maxLinesPerMinute: 20 });
+  policy.bootstrap([snapshot({ id: 'running' })], { now: NOW });
+  const lines = policy.observe([
+    snapshot({ id: 'running', status: 'completed', changedFiles: { count: 1 } })
+  ], { now: NOW + 1 });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^delegate\[delegate-router\]:/);
 });
 
 test('monitor modules import no broker mutation surface', () => {

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { NotificationPolicy } from './monitor-policy.mjs';
 import { MonitorStore, preferenceSnoozed } from './monitor-store.mjs';
 
@@ -6,7 +7,34 @@ const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_DEBOUNCE_MS = 75;
 
 export function monitorEnabled(env = process.env) {
-  return String(env.DELEGATE_MONITOR ?? '1') !== '0';
+  return String(env.DELEGATE_MONITOR ?? '1') !== '0' && monitorScope(env) !== 'off';
+}
+
+export function monitorScope(env = process.env) {
+  const value = String(env.DELEGATE_MONITOR_SCOPE || 'project').trim().toLowerCase();
+  return value === 'all' || value === 'off' ? value : 'project';
+}
+
+export function normalizeMonitorProjectDirectory(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const resolved = path.resolve(value);
+  try {
+    return (fs.realpathSync.native || fs.realpathSync)(resolved);
+  } catch {
+    return path.normalize(resolved);
+  }
+}
+
+export function scopeMonitorSnapshots(snapshots, options = {}) {
+  const scope = options.scope || 'project';
+  if (scope === 'off') return [];
+  if (scope === 'all') return snapshots;
+  const projectDir = normalizeMonitorProjectDirectory(options.projectDir);
+  if (!projectDir) return [];
+  return snapshots.filter((snapshot) => {
+    const origin = normalizeMonitorProjectDirectory(snapshot?.job?.origin?.projectDir);
+    return origin != null && origin === projectDir;
+  });
 }
 
 function numericEnv(env, name, fallback, minimum = 0) {
@@ -27,6 +55,10 @@ export function createOnceLogger(write = (line) => process.stderr.write(`${line}
 export class DelegateMonitor {
   constructor(options = {}) {
     this.env = options.env || process.env;
+    this.scope = options.scope || monitorScope(this.env);
+    this.projectDir = normalizeMonitorProjectDirectory(
+      options.projectDir || this.env.CLAUDE_PROJECT_DIR || process.cwd()
+    );
     this.emit = options.emit || ((line) => process.stdout.write(`${line}\n`));
     this.logOnce = options.logOnce || createOnceLogger(options.writeError);
     this.pollMs = Math.max(100, Number(options.pollMs || numericEnv(this.env, 'DELEGATE_MONITOR_POLL_MS', DEFAULT_POLL_MS, 100)));
@@ -53,7 +85,10 @@ export class DelegateMonitor {
     if (this.closed || !monitorEnabled(this.env)) return [];
     try {
       const now = Date.now();
-      const snapshots = this.store.scan();
+      const snapshots = scopeMonitorSnapshots(this.store.scan(), {
+        scope: this.scope,
+        projectDir: this.projectDir
+      });
       const snoozed = preferenceSnoozed(this.store.readPreference(), now);
       const lines = this.started
         ? this.policy.observe(snapshots, { now, snoozed })

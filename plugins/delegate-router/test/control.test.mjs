@@ -24,6 +24,7 @@ import {
   readJobEvents,
   redact,
   revertManagedJob,
+  reviewRoundManagedJob,
   resumeManagedJob,
   submitControl,
   updateManagedJob
@@ -297,6 +298,67 @@ test('resume rejects an active parent session', () => isolated((directory) => {
   const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'task' });
   updateManagedJob(job.id, (current) => { current.providerSessionId = 'thread-active'; current.status = 'running'; current.workerPid = process.pid; });
   assert.throws(() => resumeManagedJob(job.id, { prompt: 'continue' }), /PARENT_ACTIVE/);
+}));
+
+test('launch origin comes from the coordinator project and continuation rounds never overwrite it', () => isolated((directory) => {
+  const projectA = path.join(directory, 'project-a');
+  const projectB = path.join(directory, 'project-b');
+  const delegatedCwd = path.join(directory, 'delegated-target');
+  fs.mkdirSync(projectA);
+  fs.mkdirSync(projectB);
+  fs.mkdirSync(delegatedCwd);
+  const previous = {
+    project: process.env.CLAUDE_PROJECT_DIR,
+    supervisor: process.env.DELEGATE_SUPERVISOR,
+    codex: process.env.DELEGATE_CODEX_BIN
+  };
+  process.env.CLAUDE_PROJECT_DIR = projectA;
+  process.env.DELEGATE_SUPERVISOR = '0';
+  process.env.DELEGATE_CODEX_BIN = '/usr/bin/false';
+  try {
+    const resumeParent = createManagedJob({
+      provider: 'codex',
+      mode: 'review',
+      cwd: delegatedCwd,
+      prompt: 'parent'
+    });
+    assert.equal(resumeParent.origin.projectDir, fs.realpathSync(projectA));
+    assert.notEqual(resumeParent.origin.projectDir, resumeParent.cwd);
+    assert.equal(resumeParent.origin.cwd, fs.realpathSync(process.cwd()));
+    assert.equal(resumeParent.origin.brokerVersion, JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
+    assert.ok(Number.isFinite(resumeParent.origin.launchedAtMs));
+    updateManagedJob(resumeParent.id, (job) => {
+      job.status = 'completed';
+      job.phase = 'completed';
+      job.providerSessionId = 'origin-resume-thread';
+    });
+
+    process.env.CLAUDE_PROJECT_DIR = projectB;
+    const resumed = resumeManagedJob(resumeParent.id, { prompt: 'continue' });
+    assert.deepEqual(resumed.origin, resumeParent.origin);
+
+    const reviewParent = createManagedJob({
+      provider: 'codex',
+      mode: 'review',
+      cwd: delegatedCwd,
+      prompt: 'review parent',
+      origin: resumeParent.origin
+    });
+    updateManagedJob(reviewParent.id, (job) => {
+      job.status = 'completed';
+      job.phase = 'completed';
+      job.providerSessionId = 'origin-review-thread';
+    });
+    const reviewed = reviewRoundManagedJob(reviewParent.id, { prompt: 'Address the finding.' });
+    assert.deepEqual(reviewed.origin, resumeParent.origin);
+  } finally {
+    if (previous.project == null) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previous.project;
+    if (previous.supervisor == null) delete process.env.DELEGATE_SUPERVISOR;
+    else process.env.DELEGATE_SUPERVISOR = previous.supervisor;
+    if (previous.codex == null) delete process.env.DELEGATE_CODEX_BIN;
+    else process.env.DELEGATE_CODEX_BIN = previous.codex;
+  }
 }));
 
 test('inspect reconciles orphaned running jobs to failed with an audit event', () => isolated((directory) => {

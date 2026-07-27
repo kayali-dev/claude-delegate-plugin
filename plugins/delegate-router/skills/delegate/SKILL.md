@@ -139,11 +139,15 @@ actionable edge: policy breach, required human input, ready for review,
 terminal failure, or the ten-minute stall policy. Treat that notification as a
 wake-up signal and inspect the named job; it never replaces acceptance review.
 Progress, deltas, tools, usage ticks, and intermediate successes remain silent.
+Push defaults to the current `CLAUDE_PROJECT_DIR`; every line names the launch
+workspace and unrelated projects, sibling worktrees, and origin-less historical
+jobs remain silent. Use `DELEGATE_MONITOR_SCOPE=all` only for an explicit
+fleet-overview session, or `off` to disable it.
 
 After `delegate_start`, retain the job ID and revision. Use:
 
 - `delegate_list` to rediscover jobs when an ID is no longer in context (after compaction or in a new session). It reconciles orphans and returns compact summaries, newest first; filter by `groupId` or request a group summary for fan-out completion.
-- `delegate_inspect` for lifecycle, capabilities, continuation IDs, `resumable`, `driftReport`, any failure `checkpoint`, the final `result`, verification verdict, and current revision. `resultText` is the provider-independent text of the final message; use `resultWindow` (`find`, `offset`, `maxChars`) or `delegate-jobs result` window flags for long output. A read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. A running job whose worker process died is reconciled to `failed` with an `ORPHANED` error event.
+- `delegate_inspect` for lifecycle, capabilities, launch `origin.projectDir` versus delegated `cwd`, execution owner/lease attribution, continuation IDs, `resumable`, `driftReport`, any failure `checkpoint`, the final `result`, verification verdict, and current revision. `resultText` is the provider-independent text of the final message; use `resultWindow` (`find`, `offset`, `maxChars`) or `delegate-jobs result` window flags for long output. A read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. Inline workers retain legacy `ORPHANED` reconciliation; supervisor-owned attempts instead report exact exit/signal/lease attribution.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
 - `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.
@@ -188,7 +192,16 @@ When the router recommends the highest Claude tier, read that as "opus — or fa
 
 A Claude agent that writes files is an unmanaged writer, invisible to the managed `WRITER_ACTIVE` guard — never run one alongside a managed write job in the same cwd; give parallel Claude write work worktree isolation or coordinate it manually.
 
-The plugin's Agent/legacy Task hooks add a `claude-agent` visibility stub keyed by the hook `tool_use_id`; they do not supervise, authorize, or control the subagent. Stub prompts and transcript tails are bounded and redacted, every mutation stays disabled, and hook failure always yields to the original Agent call. `DELEGATE_AGENT_STUBS=0` disables this visibility layer.
+The plugin's Agent/legacy Task hooks add a `claude-agent` visibility stub keyed
+by the hook `tool_use_id`; they do not supervise, authorize, or control the
+subagent. `SubagentStart`/`SubagentStop` correlate its real lifecycle by
+`agent_id`. If a session crash omits the stop, a transcript quiet window
+(default 30 minutes) ends it honestly as failed `ended-unknown`, never as
+success; recent growth renders active and quiet-within-window renders idle.
+Stub prompts and transcript tails are bounded and redacted, every mutation
+stays disabled, hook failure always yields to the original Agent call, and
+ordinary retention prevents unbounded accumulation.
+`DELEGATE_AGENT_STUBS=0` disables this visibility layer.
 
 ## Verify And Recover
 

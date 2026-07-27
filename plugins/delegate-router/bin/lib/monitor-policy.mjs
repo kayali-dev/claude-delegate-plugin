@@ -1,4 +1,5 @@
 import { redact } from './control.mjs';
+import path from 'node:path';
 
 const WRITE_MODES = new Set(['implement', 'verify']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
@@ -40,6 +41,18 @@ function field(value, fallback, maximum = 80) {
 
 function safeJobId(job) {
   return field(job?.id, 'unknown-job', 96);
+}
+
+export function monitorProjectLabel(job) {
+  const projectDir = typeof job?.origin?.projectDir === 'string' ? job.origin.projectDir : '';
+  if (projectDir) return field(path.basename(path.normalize(projectDir)), 'project', 64).replace(/[\[\]]/g, '_');
+  const cwd = typeof job?.cwd === 'string' ? job.cwd : '';
+  return `legacy@${field(path.basename(path.normalize(cwd)), 'unknown', 56).replace(/[\[\]]/g, '_')}`;
+}
+
+function projectSetLabel(edges) {
+  const labels = [...new Set(edges.map((edge) => monitorProjectLabel(edge.job)))].sort();
+  return field(labels.join('+'), 'unknown', 160);
 }
 
 function safeMode(job) {
@@ -193,27 +206,28 @@ function errorCodeLabel(job) {
 
 export function formatEdgeLine(edge) {
   const id = edge.jobId || safeJobId(edge.job);
+  const prefix = `delegate[${monitorProjectLabel(edge.job)}]:`;
   if (edge.category === 'policy-breach') {
     const detail = edge.breach === 'scope'
       ? `scope violation, ${edge.count} path${edge.count === 1 ? '' : 's'}`
       : 'budget or allowance exceeded';
-    return `delegate: ${id} policy-breach (${detail})`;
+    return `${prefix} ${id} policy-breach (${detail})`;
   }
   if (edge.category === 'needs-input') {
-    return `delegate: ${id} needs-input (${edge.input === 'permission' ? 'permission blocked' : 'human response required'})`;
+    return `${prefix} ${id} needs-input (${edge.input === 'permission' ? 'permission blocked' : 'human response required'})`;
   }
   if (edge.category === 'ready-for-review') {
     if (edge.findings) {
-      return `delegate: ${id} ready-for-review (${safeMode(edge.job)}, ${edge.findings} finding${edge.findings === 1 ? '' : 's'})`;
+      return `${prefix} ${id} ready-for-review (${safeMode(edge.job)}, ${edge.findings} finding${edge.findings === 1 ? '' : 's'})`;
     }
-    return `delegate: ${id} ready-for-review (${safeMode(edge.job)}, ${changedFilesLabel(edge.job)}, ${checkLabel(edge.job)})`;
+    return `${prefix} ${id} ready-for-review (${safeMode(edge.job)}, ${changedFilesLabel(edge.job)}, ${checkLabel(edge.job)})`;
   }
   if (edge.category === 'failure') {
     const code = errorCodeLabel(edge.job);
-    return `delegate: ${id} failure (${code || field(edge.job?.status, 'failed', 24)})`;
+    return `${prefix} ${id} failure (${code || field(edge.job?.status, 'failed', 24)})`;
   }
   const minutes = Math.max(1, Math.floor(Number(edge.idleMs || 0) / 60_000));
-  return `delegate: ${id} stalled (no journal progress for ${minutes}m)`;
+  return `${prefix} ${id} stalled (no journal progress for ${minutes}m)`;
 }
 
 export function formatStartupSummary(edges) {
@@ -226,11 +240,11 @@ export function formatStartupSummary(edges) {
     ['failure', 'failure'],
     ['stalled', 'stalled']
   ].flatMap(([key, label]) => counts.has(key) ? [`${counts.get(key)} ${label}`] : []);
-  return `delegate: ${edges.length} existing job${edges.length === 1 ? '' : 's'} need attention (${labels.join(', ')}; inspect delegate_list)`;
+  return `delegate[${projectSetLabel(edges)}]: ${edges.length} existing job${edges.length === 1 ? ' needs' : 's need'} attention (${labels.join(', ')}; inspect delegate_list)`;
 }
 
-export function formatSuppressionSummary(count) {
-  return `delegate: ${count} actionable notification${count === 1 ? '' : 's'} suppressed (rate limit; inspect delegate_list)`;
+export function formatSuppressionSummary(count, projects = ['unknown']) {
+  return `delegate[${field([...projects].sort().join('+'), 'unknown', 160)}]: ${count} actionable notification${count === 1 ? '' : 's'} suppressed (rate limit; inspect delegate_list)`;
 }
 
 export class FixedWindowRateLimiter {
@@ -240,33 +254,38 @@ export class FixedWindowRateLimiter {
     this.windowStart = null;
     this.emitted = 0;
     this.suppressed = 0;
+    this.suppressedProjects = new Set();
   }
 
   rotate(now) {
     if (this.windowStart == null) this.windowStart = now;
     if (now - this.windowStart < this.windowMs) return [];
     const suppressed = this.suppressed;
+    const projects = new Set(this.suppressedProjects);
     this.windowStart = now;
     this.emitted = 0;
     this.suppressed = 0;
+    this.suppressedProjects.clear();
     if (!suppressed) return [];
     this.emitted = 1;
-    return [formatSuppressionSummary(suppressed)];
+    return [formatSuppressionSummary(suppressed, projects)];
   }
 
-  offer(line, now) {
+  offer(line, now, project = 'unknown') {
     const output = this.rotate(now);
     if (this.emitted < this.maximum) {
       output.push(line);
       this.emitted += 1;
     } else {
       this.suppressed += 1;
+      this.suppressedProjects.add(project);
     }
     return output;
   }
 
   clearSuppressed() {
     this.suppressed = 0;
+    this.suppressedProjects.clear();
   }
 }
 
@@ -312,7 +331,7 @@ export class NotificationPolicy {
     }
     this.bootstrapped = true;
     if (!attention.length) return [];
-    return this.rate.offer(formatStartupSummary(attention), now);
+    return this.rate.offer(formatStartupSummary(attention), now, projectSetLabel(attention));
   }
 
   observe(snapshots = [], options = {}) {
@@ -350,7 +369,8 @@ export class NotificationPolicy {
       if (pending.size) this.pending.set(jobId, pending);
       else this.pending.delete(jobId);
       this.lastEmittedAt.set(jobId, now);
-      output.push(...this.rate.offer(formatEdgeLine(byKey.get(selected.key) || selected), now));
+      const emittedEdge = byKey.get(selected.key) || selected;
+      output.push(...this.rate.offer(formatEdgeLine(emittedEdge), now, monitorProjectLabel(emittedEdge.job)));
     }
     for (const jobId of this.active.keys()) {
       if (seen.has(jobId)) continue;

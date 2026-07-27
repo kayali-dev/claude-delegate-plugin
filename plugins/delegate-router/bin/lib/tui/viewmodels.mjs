@@ -860,6 +860,8 @@ function recordLines(job) {
     error: job.error || '',
     errorCode: job.errorCode || '',
     transport: job.transport || '',
+    origin: job.origin || '',
+    cwd: job.cwd || '',
     coordinatorSessionId: job.coordinatorSessionId || '',
     agentType: job.agentType || '',
     promptSummary: job.promptSummary || '',
@@ -1113,13 +1115,19 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
   const body = detailContent(job, store, { ...ui, viewportWidth: width }, tab, activity);
   const headerActivity = activityIndicator(activity, now);
   const visibility = activity.visibilityNote ? `${CHROME_SEPARATOR}${formatDisplayValue(activity.visibilityNote)}` : '';
+  const originProject = job.origin?.projectDir
+    ? formatDisplayValue(job.origin.projectDir)
+    : 'legacy origin unknown';
+  const originName = job.origin?.projectDir
+    ? formatDisplayValue(path.basename(job.origin.projectDir))
+    : 'legacy unknown';
   if (visibility) {
     headerActivity.text += visibility;
     headerActivity.segments.push({ text: visibility, style: palette.dim });
   }
   const frame = {
     width, height, screen: 'detail',
-    title: { text: joinDisplayParts([job.id, job.provider, job.resolvedModel || job.model || 'auto']), right: headerActivity.text, rightStyle: activityStyle(activity) },
+    title: { text: joinDisplayParts([`origin ${originName}`, job.id, job.provider, job.resolvedModel || job.model || 'auto']), right: headerActivity.text, rightStyle: activityStyle(activity) },
     headerActivity,
     tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: tabs, active: tab },
     panes: [{ rect: { x: 0, y: 3, width, height: Math.max(3, height - 4) }, title: body.title, loading: body.loading, loadingGlyph: body.loadingGlyph, content: body.content }],
@@ -1134,7 +1142,8 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
       chainJobIds: body.chainJobIds || [],
       eventKeys: body.eventKeys || [],
       scrollItemCount: body.scrollItemCount || 0,
-      activity
+      activity,
+      originProject
     }
   };
   return commonOverlay(frame, ui, store);

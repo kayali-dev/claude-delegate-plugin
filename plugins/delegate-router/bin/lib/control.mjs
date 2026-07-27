@@ -10,6 +10,8 @@ import { isProcessAlive } from './process.mjs';
 import { withFileLock } from './lock.mjs';
 import { assembleProviderPrompt } from './packet.mjs';
 import { applyProfile, lintPacket } from './profiles.mjs';
+import { ensureSupervisorReady, submitJobToSupervisor } from './supervisor-client.mjs';
+import { supervisorBrokerVersion } from './supervisor-common.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -104,6 +106,33 @@ function writePrivate(file, value) {
   try { fs.chmodSync(file, 0o600); } catch {}
 }
 
+function canonicalOriginDirectory(value, fallback = process.cwd()) {
+  const resolved = path.resolve(String(value || fallback));
+  try {
+    return (fs.realpathSync.native || fs.realpathSync)(resolved);
+  } catch {
+    return path.normalize(resolved);
+  }
+}
+
+// Capture coordinator identity at the launch boundary. This is intentionally
+// separate from job.cwd: coordinators routinely delegate into other trees.
+export function launchOrigin(options = {}) {
+  if (options.origin && typeof options.origin === 'object' && options.origin.projectDir) {
+    return { ...options.origin };
+  }
+  const launchCwd = canonicalOriginDirectory(options.launchCwd || process.cwd());
+  return {
+    projectDir: canonicalOriginDirectory(
+      options.projectDir ?? process.env.CLAUDE_PROJECT_DIR ?? launchCwd,
+      launchCwd
+    ),
+    cwd: launchCwd,
+    brokerVersion: supervisorBrokerVersion(),
+    launchedAtMs: Number(options.launchedAtMs ?? Date.now())
+  };
+}
+
 export function redact(value, key = '', maxLength = MAX_STRING) {
   const normalizedKey = key.replace(/[_\-\s]/g, '');
   if (SENSITIVE_KEY.test(key)) {
@@ -139,6 +168,10 @@ export function terminalAuditRecord(job, options = {}) {
     mode: job.mode || null,
     effort: job.effort || null,
     transport: job.transport || null,
+    executionOwner: job.executionOwner || null,
+    attemptLease: job.attemptLease || null,
+    executionAttribution: job.executionAttribution || null,
+    failureAttribution: job.failureAttribution || null,
     providerSessionId: job.providerSessionId || job.session || null,
     parentJobId: job.parentJobId || null,
     rootJobId: rootJobIdOf(job) || job.id,
@@ -182,10 +215,32 @@ function appendTerminalAudit(job) {
   appendAuditRecords([terminalAuditRecord(job)]);
 }
 
+function appendTerminalAuditIfMissing(job) {
+  const file = auditLogPath();
+  withFileLock(`${file}.lock`, () => {
+    let found = false;
+    try {
+      for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+        if (!line) continue;
+        try {
+          if (JSON.parse(line)?.jobId === job.id) { found = true; break; }
+        } catch {}
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (!found) appendAuditRecordsUnlocked(file, [terminalAuditRecord(job)]);
+  });
+}
+
 function writeTerminalArtifacts(job, wasTerminal) {
   if (wasTerminal || !TERMINAL_STATUSES.has(job.status)) return;
   const sentinel = paths(job.id).finished;
   if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
+  // The resident owns process-exit telemetry. Delay its audit row until the
+  // lease is finalized, while keeping the ordinary terminal sentinel and
+  // store transition immediate for pull readers and the P2a monitor.
+  if (job.executionOwner === 'supervisor' && job.attemptLease && job.executionAttribution?.finalized !== true) return;
   appendTerminalAudit(job);
 }
 
@@ -555,6 +610,64 @@ export function updateManagedJob(id, mutate, options = {}) {
   });
 }
 
+export function finalizeSupervisorAttempt(id, outcome = {}) {
+  return withLock(id, () => {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    const wasTerminal = TERMINAL_STATUSES.has(job.status);
+    const attribution = redact({
+      outcome: outcome.outcome || 'unknown',
+      exitCode: Number.isInteger(outcome.exitCode) ? outcome.exitCode : null,
+      signal: outcome.signal || null,
+      pid: outcome.pid || job.attemptLease?.pid || job.workerPid || job.pid || null,
+      ppid: outcome.ppid ?? job.attemptLease?.ppid ?? null,
+      pgid: outcome.pgid ?? job.attemptLease?.pgid ?? null,
+      supervisorBootId: outcome.supervisorBootId || null,
+      leaseBootId: outcome.leaseBootId || job.attemptLease?.bootId || null,
+      lastHeartbeat: outcome.lastHeartbeat ?? job.attemptLease?.heartbeatAt ?? null,
+      leaseExpiresAt: outcome.leaseExpiresAt ?? job.attemptLease?.expiresAt ?? null,
+      providerProcessAttachable: outcome.providerProcessAttachable === true,
+      finalized: true,
+      finalizedAt: outcome.finalizedAt || Date.now()
+    });
+    job.executionAttribution = attribution;
+    job.attemptLease = {
+      ...(job.attemptLease || {}),
+      heartbeatAt: attribution.lastHeartbeat,
+      expiresAt: attribution.leaseExpiresAt,
+      finalized: true
+    };
+    if (!wasTerminal) {
+      job.status = 'failed';
+      job.phase = 'failed';
+      job.error = redact(outcome.reason || 'SUPERVISOR_PROCESS_UNKNOWN: worker outcome could not be established');
+      job.errorCode = outcome.errorCode || 'STATE_ERROR';
+      job.errorRetryable = outcome.retryable !== false;
+      job.stoppedReason = outcome.stoppedReason || 'worker-process';
+      job.completedAt = Math.floor(Date.now() / 1000);
+      job.failureAttribution = attribution;
+      job.revision = (job.revision || 0) + 1;
+      appendUnlocked(job, 'error', {
+        code: job.errorCode,
+        message: job.error,
+        stage: 'supervisor',
+        attribution
+      });
+      ensureCheckpoint(job);
+    } else if (job.status === 'failed') {
+      job.failureAttribution = attribution;
+    }
+    job.updatedAt = Math.floor(Date.now() / 1000);
+    saveJob(job);
+    if (TERMINAL_STATUSES.has(job.status)) {
+      const sentinel = paths(job.id).finished;
+      if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
+      appendTerminalAuditIfMissing(job);
+    }
+    return job;
+  });
+}
+
 export function completeShadowJob(id, outcome = {}) {
   const status = ['completed', 'failed', 'cancelled'].includes(outcome.status) ? outcome.status : 'failed';
   const files = jobFiles(id);
@@ -700,8 +813,97 @@ export function readJobEventPage(id, options = {}) {
 
 export const QUEUED_STALE_SECONDS = 600;
 
+function discoverAgentTranscript(job) {
+  const direct = typeof job?.transcriptPath === 'string' && path.isAbsolute(job.transcriptPath)
+    ? path.normalize(job.transcriptPath) : null;
+  try {
+    if (direct && fs.statSync(direct).isFile()) return direct;
+  } catch {}
+  if (!job?.agentId || typeof job.coordinatorSidecarDir !== 'string' || !path.isAbsolute(job.coordinatorSidecarDir)) return direct;
+  const safeId = String(job.agentId).replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safeId) return direct;
+  const directory = path.join(path.normalize(job.coordinatorSidecarDir), 'subagents');
+  try {
+    const candidates = fs.readdirSync(directory, { withFileTypes: true }).slice(0, 200)
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl')
+        && (entry.name === `agent-${safeId}.jsonl` || entry.name.startsWith(`agent-${safeId}-`)))
+      .map((entry) => {
+        const file = path.join(directory, entry.name);
+        return { file, mtimeMs: fs.statSync(file).mtimeMs };
+      })
+      .sort((left, right) => right.mtimeMs - left.mtimeMs || left.file.localeCompare(right.file));
+    return candidates[0]?.file || direct;
+  } catch {
+    return direct;
+  }
+}
+
+export function agentStubActivity(job, options = {}) {
+  if (job?.managedBy !== 'delegate-agent-hook' || job?.transport !== 'claude-agent') return null;
+  const now = Number(options.nowMs ?? Date.now());
+  const quietSeconds = Number(process.env.DELEGATE_AGENT_STUB_QUIET_SECONDS ?? 1800);
+  const activeSeconds = Number(process.env.DELEGATE_AGENT_STUB_ACTIVE_SECONDS ?? 60);
+  const quietMs = (Number.isFinite(quietSeconds) && quietSeconds >= 1 ? quietSeconds : 1800) * 1000;
+  const activeMs = Math.min(quietMs, (Number.isFinite(activeSeconds) && activeSeconds >= 1 ? activeSeconds : 60) * 1000);
+  const transcriptPath = discoverAgentTranscript(job);
+  let transcriptMtimeMs = null;
+  try { transcriptMtimeMs = transcriptPath ? fs.statSync(transcriptPath).mtimeMs : null; } catch {}
+  const lastGrowthAt = Number(transcriptMtimeMs || job.transcriptMtimeMs || job.spawnReturnedAtMs
+    || job.createdAtMs || Number(job.updatedAt || job.createdAt || 0) * 1000 || now);
+  const quietForMs = Math.max(0, now - lastGrowthAt);
+  const state = job.agentLifecycle === 'ended-unknown'
+    ? 'ended-unknown'
+    : quietForMs >= quietMs ? 'ended-unknown'
+      : quietForMs <= activeMs && transcriptMtimeMs != null ? 'active' : 'idle';
+  return { state, lastGrowthAt, quietForMs, quietMs, activeMs, transcriptPath, transcriptMtimeMs };
+}
+
+function reconcileAgentStub(id, original) {
+  const initial = agentStubActivity(original);
+  if (!initial || initial.state !== 'ended-unknown' || TERMINAL_STATUSES.has(original.status)) return original;
+  return withLock(id, () => {
+    const current = loadJob(id);
+    const activity = agentStubActivity(current);
+    if (!current || !activity || activity.state !== 'ended-unknown' || TERMINAL_STATUSES.has(current.status)) return current;
+    const quietMinutes = Math.max(1, Math.floor(activity.quietForMs / 60000));
+    const reason = `AGENT_COMPLETION_UNKNOWN: no completion signal; transcript quiet for ${quietMinutes}m`;
+    current.status = 'failed';
+    current.phase = 'ended-unknown';
+    current.agentLifecycle = 'ended-unknown';
+    current.agentEndedReason = reason;
+    current.error = reason;
+    current.errorCode = 'AGENT_COMPLETION_UNKNOWN';
+    current.errorRetryable = false;
+    current.stoppedReason = 'no-completion-signal';
+    current.completedAt = Math.floor(Date.now() / 1000);
+    current.completedAtMs = Date.now();
+    current.durationMs = Math.max(0, current.completedAtMs - Number(current.createdAtMs || current.createdAt * 1000 || current.completedAtMs));
+    if (activity.transcriptPath) current.transcriptPath = activity.transcriptPath;
+    current.revision = (current.revision || 0) + 1;
+    appendUnlocked(current, 'error', {
+      code: current.errorCode,
+      message: reason,
+      stage: 'agent-reconcile',
+      agentLifecycle: current.agentLifecycle,
+      quietForMs: activity.quietForMs
+    });
+    saveJob(current);
+    writeTerminalArtifacts(current, false);
+    return current;
+  });
+}
+
 export function jobNeedsReconciliation(job, options = {}) {
-  if (job?.transport === 'claude-agent' || job?.managedBy === 'delegate-agent-hook') return false;
+  if (job?.transport === 'claude-agent' || job?.managedBy === 'delegate-agent-hook') {
+    const activity = agentStubActivity(job, {
+      nowMs: Number(options.nowSeconds ?? Date.now() / 1000) * 1000
+    });
+    return Boolean(activity?.state === 'ended-unknown' && !TERMINAL_STATUSES.has(job?.status));
+  }
+  // Supervisor-owned jobs are reconciled exclusively from leases created by
+  // the supervisor. Generic pid reconciliation cannot recover exit telemetry
+  // and must never race the resident into a legacy ORPHANED transition.
+  if (job?.executionOwner === 'supervisor') return false;
   const now = Number(options.nowSeconds ?? Math.floor(Date.now() / 1000));
   const pid = job?.workerPid || job?.pid;
   const workerAlive = Object.hasOwn(options, 'workerAlive') ? options.workerAlive === true : isProcessAlive(pid);
@@ -717,6 +919,7 @@ function isOrphaned(job) {
 export function reconcileJob(id) {
   const job = loadJob(assertJobId(id));
   if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+  if (job.transport === 'claude-agent' || job.managedBy === 'delegate-agent-hook') return reconcileAgentStub(id, job);
   if (!isOrphaned(job)) return job;
   return withLock(id, () => {
     const current = loadJob(id);
@@ -738,6 +941,15 @@ export function reconcileJob(id) {
 }
 
 function activityFields(job) {
+  const agent = agentStubActivity(job);
+  if (agent) {
+    return {
+      lastActivityAt: agent.lastGrowthAt,
+      stalled: false,
+      agentActivityState: agent.state,
+      transcriptMtimeMs: agent.transcriptMtimeMs ?? job.transcriptMtimeMs ?? null
+    };
+  }
   let event = readLastCompleteEvent(eventPath(job.id));
   if (event?.replay === true) event = readRawEvents(job.id).findLast((candidate) => candidate.replay !== true) || null;
   const lastActivityAt = event?.at || (job.createdAt ? job.createdAt * 1000 : null);
@@ -838,6 +1050,7 @@ export function listManagedJobs(options = {}) {
       groupId: job.groupId || null,
       coordinatorSessionId: job.coordinatorSessionId || null,
       agentType: job.agentType || null,
+      agentLifecycle: job.agentLifecycle || null,
       promptSummary: job.promptSummary || null,
       transcriptAvailable: typeof job.transcriptPath === 'string' ? true : undefined,
       providerSessionId: job.providerSessionId || job.session || null,
@@ -1617,6 +1830,12 @@ export function createManagedJob(options) {
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
+  const origin = launchOrigin({
+    origin: options.origin,
+    projectDir: options.originProjectDir,
+    launchCwd: options.originCwd,
+    launchedAtMs: options.originLaunchedAtMs
+  });
   const p = paths(id);
   const staged = stageIngestFiles(cwd, resolved.ingestPlan);
   const baseline = gitBaseline(cwd);
@@ -1665,6 +1884,7 @@ export function createManagedJob(options) {
     revision: 0,
     lastSeq: 0,
     cwd,
+    origin,
     transport,
     managedBy: 'delegate-control',
     capabilities: providerCapabilities(provider, transport),
@@ -1762,6 +1982,12 @@ export function createShadowJob(options) {
   const createdAtMs = Date.now();
   const now = Math.floor(createdAtMs / 1000);
   const cwd = path.resolve(options.cwd || process.cwd());
+  const origin = launchOrigin({
+    origin: options.origin,
+    projectDir: options.originProjectDir,
+    launchCwd: options.originCwd,
+    launchedAtMs: createdAtMs
+  });
   const prompt = String(options.prompt || '');
   const p = paths(id);
   const baseline = gitBaseline(cwd, { excludeSensitive: true });
@@ -1787,6 +2013,7 @@ export function createShadowJob(options) {
     revision: 0,
     lastSeq: 0,
     cwd,
+    origin,
     transport: options.transport,
     managedBy: 'delegate-shadow',
     capabilities: shadowCapabilities(provider),
@@ -1883,6 +2110,10 @@ export function launchManagedJob(options) {
     groupId: validatedGroupId(prepared.groupId)
   };
   try { maybePruneJobs(); } catch {}
+  // Boot reconciliation happens before writer admission, so a dead leased
+  // writer cannot block the first post-restart launch. This call is strictly
+  // best-effort: every error is absorbed by the inline launch fallback.
+  try { ensureSupervisorReady(); } catch {}
 
   const create = () => {
     if (launchOptions.idempotencyKey) {
@@ -1917,6 +2148,11 @@ export function launchManagedJob(options) {
   const launched = needsLock ? withFileLock(writerLockPath(launchOptions), create) : create();
   if (launched.replayed) return launched.job;
   const job = launched.job;
+  let supervised = null;
+  try { supervised = submitJobToSupervisor(job.id); } catch {}
+  if (supervised?.ok && supervised.accepted === true) return inspectJob(job.id);
+  const afterSupervisor = loadJob(job.id);
+  if (afterSupervisor && TERMINAL_STATUSES.has(afterSupervisor.status)) return inspectJob(job.id);
   const p = paths(job.id);
   const stdout = fs.openSync(p.stdout, 'a', 0o600);
   const stderr = fs.openSync(p.stderr, 'a', 0o600);
@@ -1949,6 +2185,7 @@ export function launchManagedJob(options) {
     current.pid = child.pid;
     current.status = 'running';
     current.phase = 'starting';
+    current.executionOwner = 'inline-detached';
   });
   child.unref();
   return inspectJob(job.id);
@@ -2109,6 +2346,7 @@ export function resumeManagedJob(id, options) {
     prompt: options.prompt,
     providerSessionId: parent.providerSessionId,
     parentJobId: parent.id,
+    origin: storedParent.origin || parent.origin || null,
     groupId: options.groupId ?? parent.groupId ?? null,
     transport: parent.transport,
     isolation: parent.isolation,
@@ -2315,7 +2553,9 @@ export function backfillAuditLog() {
       if (error.code !== 'ENOENT') throw error;
     }
     const terminalJobs = listJobs().filter((job) => TERMINAL_STATUSES.has(job.status));
-    const missing = terminalJobs.filter((job) => !audited.has(job.id));
+    const missing = terminalJobs
+      .filter((job) => !audited.has(job.id))
+      .filter((job) => !(job.executionOwner === 'supervisor' && job.attemptLease && job.executionAttribution?.finalized !== true));
     appendAuditRecordsUnlocked(file, missing.map((job) => terminalAuditRecord(job, { backfilled: true })));
     return { scanned: terminalJobs.length, backfilled: missing.length };
   });
@@ -2328,13 +2568,17 @@ export function pruneJobs(options = {}) {
   const pruned = [];
   for (const record of listJobs()) {
     let job = record;
+    const staleAgentStubAtRead = record.transport === 'claude-agent'
+      && (record.updatedAt || record.createdAt || 0) <= cutoff;
     if (!TERMINAL_STATUSES.has(job.status) && jobNeedsReconciliation(job)) {
       try { job = reconcileJob(job.id) || job; } catch {}
     }
-    const staleAgentStub = job.transport === 'claude-agent'
-      && (job.updatedAt || job.createdAt || 0) <= cutoff;
+    const staleAgentStub = staleAgentStubAtRead || (job.transport === 'claude-agent'
+      && (job.updatedAt || job.createdAt || 0) <= cutoff);
     if (!TERMINAL_STATUSES.has(job.status) && !staleAgentStub) continue;
-    const finishedAt = job.completedAt || job.updatedAt || job.createdAt || 0;
+    const finishedAt = staleAgentStubAtRead
+      ? (record.updatedAt || record.createdAt || 0)
+      : (job.completedAt || job.updatedAt || job.createdAt || 0);
     if (finishedAt > cutoff) continue;
     const p = paths(job.id);
     for (const file of [p.events, p.prompt, p.verifyCommand, p.stdout, p.stderr, p.lock, p.finished, path.join(jobsDir(), `${job.id}.json`)]) {

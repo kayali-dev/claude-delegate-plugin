@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   activeWriterLocks,
+  agentStubActivity,
   diffStat,
   eventPath,
   jobNeedsReconciliation,
@@ -341,8 +342,12 @@ export class DelegateDataSource extends EventEmitter {
 
   activityFields(job, cached = null) {
     if (job.transport === 'claude-agent' && job.agentLifecycle === 'spawn-returned') {
-      const lastActivityAt = Number(cached?.transcriptMtimeMs || job.transcriptMtimeMs || job.spawnReturnedAtMs || job.createdAtMs || job.createdAt * 1000 || 0) || null;
-      return { lastActivityAt, stalled: false };
+      const activity = agentStubActivity({
+        ...job,
+        transcriptMtimeMs: cached?.transcriptMtimeMs || job.transcriptMtimeMs
+      });
+      const lastActivityAt = Number(activity?.lastGrowthAt || job.spawnReturnedAtMs || job.createdAtMs || job.createdAt * 1000 || 0) || null;
+      return { lastActivityAt, stalled: false, agentActivityState: activity?.state || 'idle' };
     }
     const recordActivityAt = job.updatedAt || job.createdAt ? (job.updatedAt || job.createdAt) * 1000 : null;
     const lastActivityAt = cached?.lastActivityAt == null
@@ -360,7 +365,10 @@ export class DelegateDataSource extends EventEmitter {
     if (this.closed) return this.getState();
     this.metrics.refreshes += 1;
     try {
-      const rawJobs = listJobs();
+      const rawJobs = listJobs().map((job) => {
+        if (job.managedBy !== 'delegate-agent-hook' || TERMINAL.has(job.status) || !jobNeedsReconciliation(job)) return job;
+        try { return reconcileJob(job.id) || job; } catch { return job; }
+      });
       const allRecords = [...rawJobs, ...this.externalJobs.values()];
       const ids = new Set(allRecords.map((job) => job.id));
       const jobsById = new Map(allRecords.map((job) => [job.id, job]));

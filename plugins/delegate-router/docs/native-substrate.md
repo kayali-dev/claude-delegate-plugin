@@ -5,11 +5,35 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P2b resident ownership is implemented additively. `delegate-supervisor` is a
+  lazily started, single-instance user process reached through a private
+  `0600` Unix-domain socket. It owns worker process groups, persists attempt
+  leases and heartbeats, adopts only positively identified leased workers,
+  drains on termination, survives coordinator-session teardown, and exits
+  after a configurable idle window. Process exit/signal and lease attribution
+  are written to the ordinary job and terminal audit records. Any start,
+  protocol-skew, or submission failure retains the pre-existing
+  inline-detached launch path.
+- Invariant 4 is explicit in the implementation: supervisor reconciliation
+  enumerates only lease files the supervisor created. Existing inline jobs have
+  no lease and are never scanned, adopted, reclassified, or orphaned by a
+  supervisor boot. An older incompatible resident drains only with zero live
+  leases; otherwise the newer broker leaves it alone and falls back inline.
 - P2a push bridge is implemented additively: the experimental Claude Code
   plugin monitor watches bounded tails of the existing `jobs/` store and emits
-  only redacted actionable edge transitions. It is read-only, never replays
-  individual historical outcomes at startup, and leaves `delegate_inspect`,
-  `finishedPath`, and the TUI unchanged as the universal pull fallback.
+  only redacted actionable edge transitions. Push is scoped by the immutable
+  launch-time `origin.projectDir` by default, so unrelated projects and
+  worktrees do not cross-notify; origin-less historical records are silent
+  unless a fleet session explicitly selects scope `all`. It is read-only,
+  never replays individual historical outcomes at startup, and leaves
+  `delegate_inspect`, `finishedPath`, and the TUI as the universal pull
+  fallback.
+- Claude Agent lifecycle honesty is implemented as part of P2b:
+  `SubagentStart`/`SubagentStop` correlate the hook-created record by
+  `agent_id`, while a required transcript-quiet backstop terminalizes missing
+  stop signals as failed `ended-unknown`. Reconciliation runs during reads, so
+  old `spawn-returned` records heal without migration, and retention remains
+  bounded.
 - P1 schema/projection groundwork is implemented additively: versioned
   WorkSpec, WorkItem, Attempt, Finding, ChangeSet, and Decision models; total
   compatibility projections over historical jobs; read-only CLI/MCP views; and

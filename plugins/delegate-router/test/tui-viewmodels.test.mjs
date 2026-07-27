@@ -138,9 +138,19 @@ test('open context compaction animates in both fleet row and detail header inste
 
   const detail = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW }, { width: 100, height: 30 });
   assert.equal(detail.meta.activity.kind, 'compacting');
+  assert.match(detail.title.text, /^origin legacy unknown/);
   assert.match(detail.title.right, /compacting/);
   assert.equal(detail.headerActivity.animated, true);
   assert.match(detail.panes[0].content.entries.map(formatTranscriptBlock).join('\n'), /context compaction/);
+  store.jobs.find((job) => job.id === id).origin = {
+    projectDir: '/workspace/repo-worktree-a',
+    cwd: '/workspace',
+    brokerVersion: '0.29.0',
+    launchedAtMs: NOW
+  };
+  const ownedDetail = detailViewModel(store, { jobId: id, detailTab: 0, now: NOW }, { width: 100, height: 30 });
+  assert.match(ownedDetail.title.text, /^origin repo-worktree-a/);
+  assert.equal(ownedDetail.meta.originProject, '/workspace/repo-worktree-a');
 });
 
 test('an active provider subagent animates in Fleet and detail until its terminal lifecycle event', () => {
