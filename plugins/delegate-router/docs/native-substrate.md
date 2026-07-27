@@ -374,6 +374,25 @@ no self-approval, no control-plane access. `request_scope_expansion`, if it
 ever exists, is an owner-gated question — not a capability. Redaction applies
 in both directions.
 
+Implementation progress (2026-07-27): complete in source. A separate
+`delegate-backchannel-mcp` exposes exactly the two tools above and is injected
+through Codex `thread/start.config.mcp_servers`, ACP
+`session/new|load.mcpServers`, and a private Cursor headless plugin approved
+only for that launch. The installed Codex app-server accepted the per-thread
+config in a read-only ephemeral handshake. Session-establishment injection
+errors retry without the server; headless plugin rejection retries without the
+plugin, so an unreachable channel preserves the previous job behavior.
+
+All transports project the same bounded/redacted pending-question shape:
+question, options, urgency, stuck context, diff so far, options considered,
+expiry, and `defaultAction: reject`. The existing revisioned
+`delegate_respond` inbox supplies the answer; structured answers may contain
+only `answer` and optional `steer`, both guidance within the original
+constraints. Wait time is stored on the attempt lease and counts against the
+unchanged job wall-clock deadline while `user-input-required` is excluded from
+stall detection. The TUI answers with `a`, and monitor output names both that
+key and the revisioned CLI command. Cursor corrections remain restart-only.
+
 ### P4.6 — Plan-first dispatch and ambiguity detection
 
 Two cheap passes that attack the documented failure mode — underspecified

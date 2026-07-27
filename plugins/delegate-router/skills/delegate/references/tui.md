@@ -167,6 +167,7 @@ Direct-shadow detail views otherwise render like managed jobs, including Directo
 | `g t` | go to stats | global |
 | `g l` | go to launcher | global |
 | `s` | steer | detail |
+| `a` | answer worker question | detail |
 | `r` | resume | detail |
 | `R` | release paused start | detail |
 | `w` | review round | detail |
@@ -197,6 +198,13 @@ launcher. `G` is bottom; `F` remains the documented Fleet alias. The first use
 of a moved legacy key reports its replacement in the status line.
 
 Revision conflicts and all other typed broker errors stay in the status line; they do not terminate the TUI. Cancellation is shown as queued until the provider acknowledges or its process exits. Revert can touch only the safe subset reported by the existing broker helper.
+
+When a managed worker is in `user-input-required`, open its detail view and
+press `a` to answer inline. The action re-reads the live revision and pending
+request ID before queuing the response, so a stale detail frame cannot
+overwrite a newer coordinator decision. The question notice shows the same
+normalized redacted text for Codex, Cursor ACP, and Cursor headless; raw Events
+contains its bounded stuck context, diff so far, and considered options.
 
 ## Themes and notifications
 

@@ -357,7 +357,10 @@ export class DelegateDataSource extends EventEmitter {
     const stallSeconds = Number.isFinite(configured) && configured >= 0 ? configured : 300;
     return {
       lastActivityAt,
-      stalled: job.status === 'running' && lastActivityAt != null && Date.now() - lastActivityAt > stallSeconds * 1000
+      stalled: job.status === 'running'
+        && job.phase !== 'user-input-required'
+        && lastActivityAt != null
+        && Date.now() - lastActivityAt > stallSeconds * 1000
     };
   }
 

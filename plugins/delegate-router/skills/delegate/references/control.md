@@ -94,6 +94,25 @@ A steer that reduces the remaining work can finish the job before any follow-up 
 
 Cursor `cursor/ask_question` and `cursor/create_plan` requests are blocking control-inbox items, not provider noise. The job stays running in phase `user-input-required`, persists the redacted request under `pendingInput`, and emits `input.requested`. Inspect the latest revision, then use MCP `delegate_respond` or `delegate-jobs respond <id> --expected-revision N --request-id ... --answer ...` (with `--accept`/`--reject` for plans); retry the same response with the same `commandId`. No answer or plan approval is fabricated. `DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS` (default 300) bounds the wait; expiry rejects the provider request and fails with `stopReason: input-timeout`.
 
+Managed sessions also receive the separate `delegate-backchannel-mcp`.
+Codex and Cursor headless use it for the free-form question path that ACP
+already provides; all three transports render the same `pendingInput`
+question/options/urgency/context/default shape. `ask_coordinator` blocks and
+`report_progress` does not. Press `a` in TUI detail or use the same revisioned
+`delegate_respond`/`delegate-jobs respond` flow. To attach an in-contract steer,
+use `--response-json '{"answer":"...","steer":"..."}'`.
+
+The back-channel is data, never authority. Its server exposes only those two
+tools and rejects extra arguments. Responses accept only `answer` plus optional
+`steer`; neither may widen scope/allowed paths, grant permission or approval,
+raise a budget/timeout, enable network, disable sandboxing, self-approve, or
+invoke cancellation, steering, or resume. The original job contract always
+wins. Both directions pass through the ordinary redactor and size caps.
+`DELEGATE_BACKCHANNEL_INPUT_TIMEOUT_SECONDS` defaults to 300; expiry rejects
+continuation, records `stopReason: input-timeout`, and never invents a default
+answer. Waiting remains inside the job's original wall-clock deadline, is
+attributed on its attempt lease, and does not count as a stall.
+
 For managed runs, store the job ID and use the `delegate_control` inspection and control tools. Direct Codex MCP calls and Cursor foreground/background CLI runs create observable shadow jobs (`direct-mcp` and `direct-cli`) in the same store, event journal, transcript, diff/files, usage, audit/stats, orphan-reconciliation, and terminal-sentinel pipeline. They remain unmanaged provider loops: steer, cancel, release, respond, resume, review round, and revert return `DIRECT_TRANSPORT`, while inspect, list, events, transcript, diff, files, and usage stay available. Official Codex plugin jobs retain their own independent lifecycle commands. Never describe a direct or external-plugin job as a managed control-plane job.
 
 Managed launch ownership normally belongs to the resident

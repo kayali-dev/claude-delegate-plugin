@@ -1045,7 +1045,10 @@ function activityFields(job) {
   const stallSeconds = Number.isFinite(configured) && configured >= 0 ? configured : 300;
   return {
     lastActivityAt,
-    stalled: job.status === 'running' && lastActivityAt != null && Date.now() - lastActivityAt > stallSeconds * 1000
+    stalled: job.status === 'running'
+      && job.phase !== 'user-input-required'
+      && lastActivityAt != null
+      && Date.now() - lastActivityAt > stallSeconds * 1000
   };
 }
 
@@ -2691,7 +2694,7 @@ export function submitControl(id, command, expectedRevision) {
     }
     if (command.type === 'steer' && !command.text?.trim()) throw brokerError('INVALID_REQUEST', 'steering text is required', { provider: job.provider });
     if (command.type === 'respond') {
-      if (!job.pendingInput) throw brokerError('INVALID_REQUEST', 'the job has no pending Cursor question or plan request', { provider: job.provider });
+      if (!job.pendingInput) throw brokerError('INVALID_REQUEST', 'the job has no pending worker question or plan request', { provider: job.provider });
       if (command.requestId && command.requestId !== job.pendingInput.requestId) {
         throw brokerError('REVISION_CONFLICT', `response targets ${command.requestId}, current pending request is ${job.pendingInput.requestId}`, {
           provider: job.provider, currentRevision: job.revision
@@ -2729,17 +2732,20 @@ export function submitControl(id, command, expectedRevision) {
   });
 }
 
-export function claimCommands(id) {
+export function claimCommands(id, options = {}) {
   const p = paths(id);
+  const includeTypes = Array.isArray(options.includeTypes) ? new Set(options.includeTypes) : null;
+  const excludeTypes = new Set(Array.isArray(options.excludeTypes) ? options.excludeTypes : []);
   fs.mkdirSync(p.done, { recursive: true, mode: 0o700 });
   let names = [];
   try {
     names = fs.readdirSync(p.commands).filter((name) => name.endsWith('.json')).map((name) => {
       try {
         const command = JSON.parse(fs.readFileSync(path.join(p.commands, name), 'utf8'));
-        return { name, requestedAt: command.requestedAt || 0 };
+        return { name, requestedAt: command.requestedAt || 0, type: command.type };
       } catch { return { name, requestedAt: 0 }; }
-    }).sort((a, b) => a.requestedAt - b.requestedAt || a.name.localeCompare(b.name)).map((item) => item.name);
+    }).filter((item) => (!includeTypes || includeTypes.has(item.type)) && !excludeTypes.has(item.type))
+      .sort((a, b) => a.requestedAt - b.requestedAt || a.name.localeCompare(b.name)).map((item) => item.name);
   } catch {}
   const claimed = [];
   for (const name of names) {

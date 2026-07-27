@@ -43,6 +43,14 @@ function pausedReason(ctx = {}) {
   return ctx.job.startPaused && ctx.job.phase === 'paused' ? null : 'needs a start-paused job';
 }
 
+function inputReason(ctx = {}) {
+  const unavailable = activeReason(ctx);
+  if (unavailable) return unavailable;
+  return ctx.job.pendingInput && ctx.job.pendingInput.timedOut !== true
+    ? null
+    : 'needs a pending worker question';
+}
+
 function nudgeReason(ctx = {}) {
   const unavailable = terminalReason(ctx);
   if (unavailable) return unavailable;
@@ -121,6 +129,10 @@ export const KEYMAP = Object.freeze([
   entry({
     keys: ['s'], label: 'steer', action: 'detail.steer', scope: ['detail'], class: 'steering', footer: true,
     when: (ctx) => activeReason(ctx) == null, unavailableReason: activeReason
+  }),
+  entry({
+    keys: ['a'], label: 'answer worker question', action: 'detail.answer', scope: ['detail'], class: 'steering', footer: true,
+    when: (ctx) => inputReason(ctx) == null, unavailableReason: inputReason
   }),
   entry({
     keys: ['r'], label: 'resume', action: 'detail.resume', scope: ['detail'], class: 'steering', footer: true,

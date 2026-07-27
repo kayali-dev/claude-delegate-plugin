@@ -690,6 +690,18 @@ function commitInput() {
       const job = liveJob(input.jobId);
       return submitControl(job.id, { type: 'steer', correctionId: crypto.randomUUID(), strategy: 'auto', text: value.trim() }, job.revision);
     }, (result) => `Steer queued at revision ${result.revision}`);
+  } else if (input.action === 'answer') {
+    if (!value.trim()) setStatus('Answer text is required', 'error');
+    else runMutation(() => {
+      const job = liveJob(input.jobId);
+      if (!job.pendingInput || job.pendingInput.timedOut === true) throw new Error('No worker question is pending');
+      return submitControl(job.id, {
+        type: 'respond',
+        requestId: job.pendingInput.requestId,
+        commandId: crypto.randomUUID(),
+        answer: value.trim()
+      }, job.revision);
+    }, (result) => `Answer queued at revision ${result.revision}`);
   } else if (input.action === 'resume') {
     if (!value.trim()) setStatus('Resume text is required', 'error');
     else runMutation(() => resumeManagedJob(input.jobId, { prompt: value.trim(), reportLint: false }), (job) => `Resumed as ${job.id}`);
@@ -929,6 +941,9 @@ function detailAction(key) {
   if (key === 's') {
     if (TERMINAL.has(job.status)) setStatus('Steer is available only while a job is active', 'error');
     else beginInput('steer', 'Steer', '', { jobId: job.id });
+  } else if (key === 'a') {
+    if (!job.pendingInput || job.pendingInput.timedOut === true) setStatus('Answer is available only while a worker question is pending', 'error');
+    else beginInput('answer', 'Answer worker question', '', { jobId: job.id });
   } else if (key === 'r') {
     if (!TERMINAL.has(job.status)) setStatus('Resume is available only after terminal state', 'error');
     else beginInput('resume', 'Resume packet', '', { jobId: job.id });
@@ -1409,6 +1424,7 @@ function actionMenuItems() {
 function dispatchMenuAction(action) {
   ui.actionMenu = null;
   if (action === 'detail.steer') return detailAction('s');
+  if (action === 'detail.answer') return detailAction('a');
   if (action === 'detail.resume') return detailAction('r');
   if (action === 'detail.release') return detailAction('R');
   if (action === 'detail.review') return detailAction('w');
@@ -1748,7 +1764,7 @@ function handleKey(key) {
   }
   if (key === 'left' && ui.detailTab === 1) { pageDiff(-1); return; }
   if (key === 'right' && ui.detailTab === 1) { pageDiff(1); return; }
-  if (['s', 'r', 'R', 'c', 'v', 'w'].includes(key)) detailAction(key);
+  if (['a', 's', 'r', 'R', 'c', 'v', 'w'].includes(key)) detailAction(key);
 }
 
 function onData(buffer) {

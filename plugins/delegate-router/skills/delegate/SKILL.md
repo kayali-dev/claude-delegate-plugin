@@ -2,7 +2,7 @@
 name: delegate
 description: Route bounded work to the best available Claude, Codex, or Cursor agent. Use when the user asks to delegate, consult another model, use Codex, use Cursor, use Grok, use Composer, compare independent solutions, conserve a provider allowance, or when substantial repository work would benefit from a specialized coding agent, independent review, or a fresh context. Avoid delegation for trivial edits and context-heavy tasks whose handoff costs more than doing the work directly.
 argument-hint: '[provider=auto|claude|codex|cursor] [model=auto|fable|opus|sonnet|haiku|sol|terra|luna|grok|composer] [mode=consult|plan|review|implement|verify] [scope=paths] [effort=low|medium|high|xhigh|max|ultra] [approval=auto|force] <task>'
-allowed-tools: Read, Grep, Glob, Agent, Skill, Bash(delegate-route:*), Bash(delegate-health:*), Bash(delegate-cursor:*), Bash(delegate-jobs:*), Bash(delegate-usage:*), mcp__delegate_control__delegate_start, mcp__delegate_control__delegate_inspect, mcp__delegate_control__delegate_list, mcp__delegate_control__delegate_stats, mcp__delegate_control__delegate_events, mcp__delegate_control__delegate_transcript, mcp__delegate_control__delegate_diff, mcp__delegate_control__delegate_files, mcp__delegate_control__delegate_steer, mcp__delegate_control__delegate_cancel, mcp__delegate_control__delegate_release, mcp__delegate_control__delegate_resume, mcp__delegate_control__delegate_review_round, mcp__delegate_control__delegate_usage, mcp__delegate_control__delegate_decide, mcp__delegate_codex__codex, mcp__delegate_codex__codex-reply
+allowed-tools: Read, Grep, Glob, Agent, Skill, Bash(delegate-route:*), Bash(delegate-health:*), Bash(delegate-cursor:*), Bash(delegate-jobs:*), Bash(delegate-usage:*), mcp__delegate_control__delegate_start, mcp__delegate_control__delegate_inspect, mcp__delegate_control__delegate_list, mcp__delegate_control__delegate_stats, mcp__delegate_control__delegate_events, mcp__delegate_control__delegate_transcript, mcp__delegate_control__delegate_diff, mcp__delegate_control__delegate_files, mcp__delegate_control__delegate_steer, mcp__delegate_control__delegate_cancel, mcp__delegate_control__delegate_release, mcp__delegate_control__delegate_respond, mcp__delegate_control__delegate_resume, mcp__delegate_control__delegate_review_round, mcp__delegate_control__delegate_usage, mcp__delegate_control__delegate_decide, mcp__delegate_codex__codex, mcp__delegate_codex__codex-reply
 ---
 
 # Delegate Router
@@ -153,6 +153,25 @@ worktree/project, `all` only for an explicit fleet overview, or `off` to disable
 push. Origin-less historical jobs stay silent except under `all`. Scope changes
 push only: `delegate_list`, `delegate_inspect`, the TUI, and control operations
 continue to cover the complete store.
+
+Managed Codex, Cursor ACP, and Cursor headless workers receive a broker-owned
+question-only back-channel. A worker's `ask_coordinator` call enters
+`user-input-required` with one normalized, redacted question plus bounded
+stuck context, diff so far, and options considered. Inspect the current
+revision and answer with `delegate_respond`, `delegate-jobs respond`, or `a`
+inside the job's TUI detail view. A structured response may contain only
+`{"answer":"...", "steer":"..."}`; the steer is guidance within the original
+task and is never a permission, approval, scope, budget, timeout, network,
+sandbox, or control-plane grant. The monitor line prints the exact revisioned
+CLI form when input is outstanding.
+
+Do not silently let a question expire. The default timeout is 300 seconds and
+the declared default is rejection with `stopReason: input-timeout`; blocked
+time still consumes the original job wall-clock budget but is excluded from
+stall detection. `report_progress` and Cursor's native todo/task updates need
+no response. If MCP injection is unavailable, the job uses its previous
+stop-and-report behavior. Cursor coordinator corrections remain restart-only,
+even when the worker reached the coordinator live through this back-channel.
 
 For live write attempts, SessionStart arms a dynamic set containing a private
 refresh signal plus `allowedPaths` roots and files the attempt has already

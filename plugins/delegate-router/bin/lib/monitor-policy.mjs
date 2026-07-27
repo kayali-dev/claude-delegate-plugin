@@ -174,7 +174,11 @@ export function detectActionableEdges(snapshot, options = {}) {
   if (violations > 0) edges.push(candidate(job, 'policy-breach:scope', 'policy-breach', 1, { breach: 'scope', count: violations }));
   if (budgetExceeded(job, events)) edges.push(candidate(job, 'policy-breach:budget', 'policy-breach', 1, { breach: 'budget' }));
 
-  if (inputOutstanding(job, events)) edges.push(candidate(job, 'needs-input:request', 'needs-input', 2, { input: 'request' }));
+  if (inputOutstanding(job, events)) edges.push(candidate(job, 'needs-input:request', 'needs-input', 2, {
+    input: 'request',
+    requestId: job.pendingInput?.requestId || null,
+    revision: job.revision
+  }));
   if (blockedApproval(events)) edges.push(candidate(job, 'needs-input:permission', 'needs-input', 2, { input: 'permission' }));
 
   if (job.status === 'completed' && WRITE_MODES.has(job.mode) && job.acceptance?.state === 'blocked') {
@@ -238,7 +242,12 @@ export function formatEdgeLine(edge) {
     return `${prefix} ${id} policy-breach (${detail})`;
   }
   if (edge.category === 'needs-input') {
-    return `${prefix} ${id} needs-input (${edge.input === 'permission' ? 'permission blocked' : 'human response required'})`;
+    if (edge.input === 'permission') return `${prefix} ${id} needs-input (permission blocked)`;
+    const revision = Number.isInteger(edge.revision) ? edge.revision : Number(edge.job?.revision || 0);
+    const candidateRequestId = field(edge.requestId, '', 96);
+    const requestId = /^[A-Za-z0-9_.:-]{1,96}$/.test(candidateRequestId) ? candidateRequestId : '';
+    const request = requestId ? ` --request-id ${requestId}` : '';
+    return `${prefix} ${id} needs-input (answer in TUI with a, or: delegate-jobs respond ${id} --expected-revision ${revision}${request} --answer '<answer>')`;
   }
   if (edge.category === 'blocked') {
     const reasons = (edge.blockedBy || []).map((reason) => field(reason, '', 48)).filter(Boolean);

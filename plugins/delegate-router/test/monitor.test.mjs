@@ -89,6 +89,19 @@ test('monitor edge detection covers every actionable class in priority order', (
   }
 });
 
+test('needs-input monitor line gives both inline TUI and revisioned CLI answer paths', () => {
+  const edge = detectActionableEdges(snapshot({
+    id: 'question-job',
+    revision: 7,
+    pendingInput: { requestId: 'question-1' },
+    phase: 'user-input-required'
+  }), { now: NOW })[0];
+  assert.equal(
+    formatEdgeLine(edge),
+    "delegate[delegate-router]: question-job needs-input (answer in TUI with a, or: delegate-jobs respond question-job --expected-revision 7 --request-id question-1 --answer '<answer>')"
+  );
+});
+
 test('progress, deltas, tools, usage, and successful intermediate steps stay silent', () => {
   const events = [
     event(1, 'job.state', { status: 'running', phase: 'running' }),

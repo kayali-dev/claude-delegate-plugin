@@ -593,7 +593,7 @@ function noticeText(event) {
   if (event.type === 'network.mode-elevated') return joinDisplayParts(['! Cursor mode elevated for network', `${data.requestedMode} -> ${data.effectiveMode}`]);
   if (event.type === 'network.policy.materialized') return '~ temporary Cursor network policy installed';
   if (event.type === 'network.policy.restored') return '+ Cursor network policy restored';
-  if (event.type === 'input.requested') return joinDisplayParts(['? coordinator input required', data.method, data.requestId]);
+  if (event.type === 'input.requested') return joinDisplayParts(['? coordinator input required', data.question, data.requestId]);
   if (event.type === 'input.response.requested') return joinDisplayParts(['> coordinator response queued', data.requestId]);
   if (event.type === 'input.resolved') return joinDisplayParts(['+ coordinator input resolved', data.outcome]);
   if (event.type === 'session.updated') return joinDisplayParts(['~ session updated', data.title, data.model]);

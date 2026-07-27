@@ -182,6 +182,7 @@ test('help is a raised centred dialog with theme-tuned scrims and structural key
 
 test('action menu keeps running and terminal unavailable actions visible with reasons', () => {
   const running = actionMenuForContext(runningContext());
+  assert.equal(running.find((item) => item.action === 'detail.answer').unavailable, 'needs a pending worker question');
   assert.equal(running.find((item) => item.action === 'detail.nudge').unavailable, 'needs a terminal job');
   assert.equal(running.find((item) => item.action === 'detail.resume').unavailable, 'needs a terminal job');
   assert.equal(running.find((item) => item.action === 'detail.cancel').unavailable, null);
@@ -193,6 +194,16 @@ test('action menu keeps running and terminal unavailable actions visible with re
   assert.equal(terminal.find((item) => item.action === 'detail.nudge').unavailable, 'needs a read-mode job');
   assert.equal(terminal.find((item) => item.action === 'detail.cancel').unavailable, 'needs a running job');
   assert.equal(terminal.find((item) => item.action === 'detail.revert').unavailable, null);
+
+  const waiting = actionMenuForContext({
+    ...runningContext(),
+    job: {
+      ...runningContext().job,
+      phase: 'user-input-required',
+      pendingInput: { requestId: 'question-1' }
+    }
+  });
+  assert.equal(waiting.find((item) => item.action === 'detail.answer').unavailable, null);
 });
 
 test('every moved binding has a first-press migration hint in the controller', () => {

@@ -2,6 +2,26 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.39.0 — 2026-07-27
+
+- Added P4.5 conversational delegation through a separate broker-owned MCP
+  server injected into managed Codex, Cursor ACP, and Cursor headless sessions.
+  Its hard allowlist exposes exactly blocking `ask_coordinator` and
+  non-blocking `report_progress`; it cannot import or dispatch control-plane
+  mutations. Questions, bounded current diffs, considered options, responses,
+  and optional within-contract steers use the existing private redacted
+  journal and revisioned response inbox.
+- Worker questions now pause in `user-input-required` without becoming stalled,
+  charge wait time to the current attempt lease and original wall-clock
+  timeout, and reject continuation with `stopReason: input-timeout` when the
+  declared default expires. Back-channel injection is fail-open: Codex and ACP
+  retry session establishment without it, while Cursor headless retries without
+  its private MCP plugin if the CLI rejects that plugin.
+- Added `a` for inline TUI answers and made `needs-input` monitor lines include
+  both the TUI action and the exact revisioned `delegate-jobs respond` path.
+  Cursor ACP corrections remain explicitly cancel-and-resume restarts;
+  `cursor/update_todos` and `cursor/task` remain one-way progress signals.
+
 ## 0.38.0 — 2026-07-27
 
 - Added P4 native session integration. `delegate-config statusline enable` now

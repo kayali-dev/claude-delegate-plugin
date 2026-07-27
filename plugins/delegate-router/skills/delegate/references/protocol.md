@@ -110,7 +110,8 @@ tool.started, tool.status, tool.output, tool.completed
 file.changed, diff.updated
 usage.updated, usage.context
 approval.requested, approval.resolved
-input.requested, input.response.requested, input.resolved
+input.requested, input.response.requested, input.resolved, progress.reported
+backchannel.unavailable
 network.preflight, network.mode-elevated, network.policy.materialized, network.policy.restored
 config.updated, mode.updated, model.updated, commands.updated
 subagent.started, subagent.progress, subagent.completed, subagent.errored
@@ -167,7 +168,34 @@ Every correction supplies a caller-stable `correctionId`; repeating it returns t
 
 Direct-transport shadows support none of these correction or continuation operations. A direct `codex-reply` call is journaled as a new caller-owned child shadow rather than a broker resume.
 
-If Codex requests interactive user input, managed v1 records the request and fails explicitly rather than inventing an empty answer. Cursor ACP `cursor/ask_question` and `cursor/create_plan` instead enter the revisioned control inbox: phase becomes `user-input-required`, the redacted payload is inspectable, and MCP `delegate_respond` or CLI `delegate-jobs respond` completes the JSON-RPC request exactly once. Timeout rejects it with `USER_INPUT_REQUIRED` and `stopReason: input-timeout`; plans are never auto-accepted.
+The separate broker-owned back-channel MCP server is injected into managed
+Codex, Cursor ACP, and Cursor headless sessions. It has a hard two-tool
+allowlist: blocking `ask_coordinator(question, options?, urgency)` and
+non-blocking `report_progress(milestone)`. It has no control-plane dispatcher.
+Codex receives it in per-thread `config.mcp_servers`, ACP in
+`session/new|load.mcpServers`, and headless Cursor through a private per-job
+plugin plus `--approve-mcps`. Injection failure emits
+`backchannel.unavailable` and falls back to session establishment without the
+server; it never fails the job.
+
+Back-channel and native Cursor questions share one redacted/bounded
+`pendingInput`: `{ requestId, kind: "question", question, options, urgency,
+context: { stuckOn, diffSoFar, optionsConsidered }, requestedAt, timeoutMs,
+expiresAt, defaultAction: "reject" }`. Phase becomes
+`user-input-required`; `input.requested` carries that shape, and revisioned MCP
+`delegate_respond`, CLI `delegate-jobs respond`, or the TUI `a` action queues
+`input.response.requested`. `input.resolved` journals the redacted answer and
+optional steer. Structured back-channel responses reject every field except
+`answer` and `steer`; the returned tool result explicitly preserves all
+original scope, permission, approval, budget, timeout, network, sandbox, and
+control constraints.
+
+Question waiting time remains inside the original wall-clock deadline and is
+accumulated as `blockedMs` on an existing P2b attempt lease. While phase is
+`user-input-required`, derived activity never reports a stall. Expiry always
+rejects continuation with `USER_INPUT_REQUIRED`, `defaultAction: reject`, and
+`stopReason: input-timeout`; no answer or plan approval is fabricated.
+`cursor/update_todos` and `cursor/task` remain non-round-trip progress inputs.
 
 ACP permissions remain deny-by-default. Force-level jobs choose only an advertised `allow_once`; `allow_always` is never selected. Approval events carry normalized tool kind, repo-relative paths under cwd (plus explicit outside paths), domain, command, and `ambiguous: true` for shell-like requests lacking a structured command.
 

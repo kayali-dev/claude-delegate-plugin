@@ -1,4 +1,4 @@
-const DETAIL_MUTATIONS = new Set(['s', 'r', 'R', 'c', 'v', 'w']);
+const DETAIL_MUTATIONS = new Set(['a', 's', 'r', 'R', 'c', 'v', 'w']);
 const LAUNCHER_MUTATIONS = new Set(['enter', 'left', 'right', 'd', 'e']);
 
 export function remoteActionMessage(ui = {}, key, job = null) {

@@ -285,6 +285,8 @@ test('headless pre-creates chats, falls back on older CLIs, and network read-onl
   const completed = inspectJob(job.id);
   assert.equal(completed.status, 'completed');
   assert.ok(completed.result.argv.includes('--resume'));
+  assert.ok(completed.result.argv.includes('--plugin-dir'));
+  assert.ok(completed.result.argv.includes('--approve-mcps'));
   assert.equal(completed.result.promptHasReadOnlyPreamble, true);
   assert.ok(readJobEvents(job.id).some((event) => event.type === 'session.created'));
   assert.ok(readJobEvents(job.id).some((event) => event.type === 'network.preflight' && event.data.force === true));

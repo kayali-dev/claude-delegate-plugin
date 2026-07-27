@@ -107,6 +107,7 @@ export function buildCursorArgs({
   sandbox = null,
   network = false,
   addDirs = [],
+  pluginDirs = [],
   approveMcps = false,
   worktree = false,
   worktreeBase = null
@@ -117,6 +118,7 @@ export function buildCursorArgs({
   args.push('--model', model, '--workspace', cwd);
   if (resume) args.push('--resume', resume);
   for (const directory of uniqueStrings(addDirs)) args.push('--add-dir', directory);
+  for (const directory of uniqueStrings(pluginDirs)) args.push('--plugin-dir', directory);
   if (approveMcps) args.push('--approve-mcps');
   if (worktree) args.push('--worktree');
   if (worktreeBase) args.push('--worktree-base', worktreeBase);

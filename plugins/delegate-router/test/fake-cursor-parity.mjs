@@ -114,8 +114,16 @@ input.on('line', (line) => {
       models: ['composer-2.5']
     } });
   } else if (message.method === 'session/new') {
+    if (scenario === 'reject-mcp' && message.params.mcpServers?.length) {
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'fake rejected MCP server' } });
+      return;
+    }
     send({ jsonrpc: '2.0', id: message.id, result: sessionResult() });
   } else if (message.method === 'session/load') {
+    if (scenario === 'reject-mcp' && message.params.mcpServers?.length) {
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'fake rejected MCP server' } });
+      return;
+    }
     sessionId = message.params.sessionId;
     send({ jsonrpc: '2.0', method: 'session/update', params: {
       sessionId,
