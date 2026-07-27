@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
 import { brokerError, normalizeBrokerError } from './lib/errors.mjs';
-import { enabledProviders, loadState } from './lib/state.mjs';
+import { enabledProviders, loadJob, loadState } from './lib/state.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
 import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessions.mjs';
+import { buildNativeWorkState, nativeWorkOptions } from './lib/native-session.mjs';
+import { deriveVerificationProfile } from './lib/verification-profile.mjs';
 import { readProjectedWorkItems } from './lib/work-read.mjs';
 import {
   capEventsBySize,
@@ -19,6 +21,7 @@ import {
   launchManagedJob,
   listManagedJobs,
   maybePruneJobs,
+  redact,
   readJobEventPage,
   reviewRoundManagedJob,
   resumeManagedJob,
@@ -84,8 +87,152 @@ const TOOLS = [
   { name: 'delegate_decide', description: 'Record an owner/coordinator acceptance decision against the current broker evidence. This never applies, commits, or reverts code.', inputSchema: { type: 'object', required: ['jobId', 'decision'], additionalProperties: false, properties: { jobId: { type: 'string' }, decision: { enum: ['accepted', 'rejected'] }, reason: { type: 'string', maxLength: 2000 } } } }
 ];
 
+const RESOURCES = [
+  {
+    uri: 'delegate://work/active',
+    name: 'Active delegate work',
+    description: 'Bounded, redacted work state for this coordinator session: active attempts, blockers, review-ready evidence, resumable chains, and allowance.',
+    mimeType: 'application/json'
+  },
+  {
+    uri: 'delegate://repo/profile',
+    name: 'Delegate repository profile',
+    description: 'Read-only repository verification profile derived from current project conventions.',
+    mimeType: 'application/json'
+  }
+];
+
+const RESOURCE_TEMPLATES = [
+  {
+    uriTemplate: 'delegate://job/{id}/diff',
+    name: 'Delegate job diff',
+    description: 'Latest redacted recorded diff for a job, bounded to 60,000 characters.',
+    mimeType: 'text/x-diff'
+  }
+];
+
+const PROMPTS = [
+  {
+    name: 'delegate_start_scoped_review',
+    description: 'Prepare a bounded, read-only independent review packet.',
+    arguments: [
+      { name: 'objective', description: 'What the review must determine.', required: true },
+      { name: 'scope', description: 'Repository paths or components in scope.', required: true },
+      { name: 'acceptanceCriteria', description: 'What a complete review must return.', required: true }
+    ]
+  },
+  {
+    name: 'delegate_resume_with_findings',
+    description: 'Prepare a continuation round that folds concrete findings into the same work chain.',
+    arguments: [
+      { name: 'jobId', description: 'Terminal managed job to continue.', required: true },
+      { name: 'findings', description: 'Verified findings and remaining acceptance gaps.', required: true }
+    ]
+  }
+];
+
 function jobOnly() {
   return { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' } } };
+}
+
+function nativeMcpEnabled() {
+  return String(process.env.DELEGATE_NATIVE_MCP ?? '1') !== '0';
+}
+
+function boundedArgument(args, name, maximum = 4_000) {
+  const value = args?.[name];
+  if (typeof value !== 'string' || !value.trim()) {
+    throw brokerError('INVALID_REQUEST', `prompt argument is required: ${name}`);
+  }
+  return String(redact(value.trim())).slice(0, maximum);
+}
+
+function boundedText(value, maximum) {
+  const text = String(value || '');
+  return text.length <= maximum
+    ? text
+    : `${text.slice(0, maximum)}\n[TRUNCATED ${text.length - maximum} chars]`;
+}
+
+function readResource(uri) {
+  if (uri === 'delegate://work/active') {
+    const workState = buildNativeWorkState(nativeWorkOptions({}, process.env));
+    return {
+      contents: [{
+        uri,
+        mimeType: 'application/json',
+        text: JSON.stringify(workState, null, 2)
+      }]
+    };
+  }
+  if (uri === 'delegate://repo/profile') {
+    const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const profile = redact(deriveVerificationProfile(cwd, { cache: false }));
+    return {
+      contents: [{
+        uri,
+        mimeType: 'application/json',
+        text: boundedText(JSON.stringify(profile, null, 2), 32_000)
+      }]
+    };
+  }
+  const match = String(uri || '').match(/^delegate:\/\/job\/([A-Za-z0-9_-]+)\/diff$/);
+  if (match) {
+    if (!loadJob(match[1])) throw brokerError('NOT_FOUND', `job not found: ${match[1]}`);
+    const window = sliceDiff(jobDiff(match[1]), { maxChars: 60_000 });
+    const suffix = window.nextOffset == null
+      ? ''
+      : `\n[TRUNCATED: ${window.totalChars - window.nextOffset} chars remain; use delegate_diff for windowed pull access]\n`;
+    return {
+      contents: [{
+        uri,
+        mimeType: 'text/x-diff',
+        text: `${window.diff}${suffix}`
+      }]
+    };
+  }
+  throw brokerError('NOT_FOUND', `resource not found: ${uri}`);
+}
+
+function getPrompt(name, args = {}) {
+  if (name === 'delegate_start_scoped_review') {
+    const objective = boundedArgument(args, 'objective');
+    const scope = boundedArgument(args, 'scope');
+    const acceptanceCriteria = boundedArgument(args, 'acceptanceCriteria');
+    return {
+      description: 'A scoped independent review that keeps Claude as final reviewer.',
+      messages: [{
+        role: 'user',
+        content: {
+          type: 'text',
+          text: `Start a managed, read-only independent review with delegate_start.
+Objective: ${objective}
+Allowed scope: ${scope}
+Acceptance criteria: ${acceptanceCriteria}
+Use mode=review, sandbox=auto, no write permissions, and a bounded timeout. Require concrete file:line findings, verification evidence, risks, blockers, and an explicit verdict. Provider completion alone is not acceptance.`
+        }
+      }]
+    };
+  }
+  if (name === 'delegate_resume_with_findings') {
+    const jobId = boundedArgument(args, 'jobId', 128);
+    if (!/^[A-Za-z0-9_-]+$/.test(jobId)) throw brokerError('INVALID_REQUEST', 'jobId must be a valid delegate job id');
+    const findings = boundedArgument(args, 'findings');
+    return {
+      description: 'A continuation packet carrying verified findings into the existing work chain.',
+      messages: [{
+        role: 'user',
+        content: {
+          type: 'text',
+          text: `Inspect ${jobId}, confirm it is terminal and resumable, then continue it with delegate_review_round.
+Findings to fold into the next round:
+${findings}
+Keep the recorded scope, permissions, provider session, and budget boundaries. Resolve the findings, rerun the authoritative verification, and return changed files, remaining risks, blockers, and acceptance evidence.`
+        }
+      }]
+    };
+  }
+  throw brokerError('NOT_FOUND', `prompt not found: ${name}`);
 }
 
 async function dispatch(name, args) {
@@ -162,21 +309,49 @@ lines.on('line', async (line) => {
   if (request.id == null) return;
   try {
     if (request.method === 'initialize') {
+      const native = nativeMcpEnabled();
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion || '2025-11-25',
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-control', version: '0.37.0' }
+        capabilities: {
+          tools: { listChanged: false },
+          ...(native ? {
+            resources: { listChanged: false },
+            prompts: { listChanged: false }
+          } : {})
+        },
+        serverInfo: { name: 'delegate-control', version: '0.38.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {
       const result = await dispatch(request.params?.name, request.params?.arguments || {});
       send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } });
+    } else if (nativeMcpEnabled() && request.method === 'resources/list') {
+      send({ jsonrpc: '2.0', id: request.id, result: { resources: RESOURCES } });
+    } else if (nativeMcpEnabled() && request.method === 'resources/templates/list') {
+      send({ jsonrpc: '2.0', id: request.id, result: { resourceTemplates: RESOURCE_TEMPLATES } });
+    } else if (nativeMcpEnabled() && request.method === 'resources/read') {
+      send({ jsonrpc: '2.0', id: request.id, result: readResource(request.params?.uri) });
+    } else if (nativeMcpEnabled() && request.method === 'prompts/list') {
+      send({ jsonrpc: '2.0', id: request.id, result: { prompts: PROMPTS } });
+    } else if (nativeMcpEnabled() && request.method === 'prompts/get') {
+      send({ jsonrpc: '2.0', id: request.id, result: getPrompt(request.params?.name, request.params?.arguments || {}) });
     } else send({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: `Method not found: ${request.method}` } });
   } catch (error) {
     const typed = normalizeBrokerError(error, {
       provider: request.params?.arguments?.provider,
       defaultCode: 'INTERNAL'
     });
+    if (request.method !== 'tools/call') {
+      send({
+        jsonrpc: '2.0',
+        id: request.id,
+        error: {
+          code: typed.code === 'NOT_FOUND' ? -32002 : typed.code === 'INTERNAL' ? -32603 : -32602,
+          message: typed.message
+        }
+      });
+      return;
+    }
     const payload = { error: typed.message, code: typed.code, retryable: typed.retryable, provider: typed.provider || null };
     if (typed.currentRevision != null) payload.currentRevision = typed.currentRevision;
     if (typed.activeJobId) payload.activeJobId = typed.activeJobId;

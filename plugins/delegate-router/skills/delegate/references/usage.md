@@ -13,7 +13,7 @@ or ~/.local/state/delegate-router/usage.json
 ## Provider Truth
 
 - Codex: `delegate-usage refresh codex` queries the official app-server `account/rateLimits/read` method and stores primary (five-hour) and secondary (weekly) windows. Managed Codex jobs also capture pushed `account/rateLimits/updated` notifications, so the snapshot stays fresh during every job. Both paths append bounded allowance snapshots to history for capture-window comparison.
-- Claude: `delegate-config statusline enable` wraps (or installs) the Claude Code status line so the official `rate_limits.five_hour` and `rate_limits.seven_day` payload flows into usage state on every render; `delegate-config statusline disable` restores the previous configuration. Manual values are also accepted. Anthropic's Consumer Terms prohibit using Claude OAuth tokens in any third-party tool, so this plugin deliberately does not query any usage endpoint directly — the status line is the sanctioned channel.
+- Claude: `delegate-config statusline enable` wraps (or installs) the Claude Code status line so the official `rate_limits.five_hour` and `rate_limits.seven_day` payload flows into usage state on every render. The wrapper prefixes the session-scoped Delegate work chip, then runs the user's original command unchanged; a five-second `refreshInterval` keeps background state current while Claude Code's 300 ms debounce handles bursts. `delegate-config statusline disable` restores the exact previous configuration. Manual values are also accepted. Anthropic's Consumer Terms prohibit using Claude OAuth tokens in any third-party tool, so this plugin deliberately does not query any usage endpoint directly — the status line is the sanctioned channel.
 - Cursor: no stable public quota CLI/API is assumed. Cursor meters two monthly pools; the one Delegate Router consumes is the first-party pool (Auto, Composer, Grok). Enter its dashboard percentage with `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>`; the `--reset` epoch makes the entry expire at the monthly cycle boundary instead of going stale. Invocation history is an estimate and never converted into a fake quota percentage. Local token-counting tools (ccusage, tokscale, TokenTracker) estimate from transcripts and must not be treated as quota truth.
 
 ## Commands
@@ -31,6 +31,7 @@ delegate-health [--quick] [--deep] [--json]
 delegate-config show
 delegate-config providers <codex|cursor|both>
 delegate-config statusline <enable|disable|show>
+delegate-config footer-links <enable|disable|show>
 delegate-jobs start|status|stats|group|inspect|events|transcript|wait|diff|files|steer|cancel|release|respond|accept|reject|resume|usage|result|logs|prune <job-id>
 ```
 
@@ -61,6 +62,18 @@ Paths beyond the cap and known watcher failures record
 Edit/Write and batch hooks remain active, and none of these hooks can block a
 tool or filesystem change. Collision alerts follow the same ambient monitor
 scope as every other edge.
+
+SessionStart and PostCompact also return identical native work
+`additionalContext`, hard-capped at 2,048 UTF-8 bytes and limited to safe IDs,
+closed lifecycle/blocker labels, counts, and allowance state. Prompts, results,
+diffs, repository paths, pending questions, secrets, and free-form errors are
+never read into that context. Overflow keeps higher-priority/newer items and
+reports the omitted count. `DELEGATE_NATIVE_CONTEXT=0` disables only context;
+`DELEGATE_NATIVE_STATUSLINE=0` hides only the `D` chip;
+`DELEGATE_NATIVE_MCP=0` hides only MCP resources/prompts; and
+`DELEGATE_NATIVE_FOOTER_LINKS=0` skips badge installation. The footer rule can
+also be removed independently with `delegate-config footer-links disable`.
+None of these switches changes pull/control behavior.
 
 `unattributed-burn` is deliberately aggregate-only. Between consecutive snapshots of the same named Codex allowance window, an increase in `usedPercent` is marked only when no managed or shadow Codex audit usage and no overlapping active tracked Codex job can account for the interval. The amount is allowance percentage-point movement, labelled approximate; token counts and allowance percentages are never converted into one another. The marker never names, links, or enumerates a thread because the movement may be the owner's personal use. It is best-effort and capture-cadence limited: work that starts and finishes between snapshots, reset-boundary changes, mixed window identities, history pruning, or missing provider pushes can hide a window, and a running tracked job suppresses rather than guesses.
 

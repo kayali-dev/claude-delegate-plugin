@@ -12,7 +12,7 @@ Keep Claude as coordinator, integrator, and final reviewer. Delegate only a boun
 ## Route
 
 1. Parse explicit provider, model, mode, scope, effort, approval, network, background, timeout, idempotency, retry, verification, and output-token budget controls. Explicit user choices win unless unavailable or unsafe.
-2. Run `delegate-health --quick` once per session. Its `enabledProviders` is authoritative: never invoke or recommend a disabled provider, including optional external plugins. Run `delegate-usage refresh codex` only when Codex is enabled and a candidate. Treat missing usage as unknown, not zero. If Claude usage is unknown, suggest `delegate-config statusline enable` once (official status-line capture); never query Claude usage any other way — Anthropic prohibits third-party OAuth-token use.
+2. Run `delegate-health --quick` once per session. Its `enabledProviders` is authoritative: never invoke or recommend a disabled provider, including optional external plugins. Run `delegate-usage refresh codex` only when Codex is enabled and a candidate. Treat missing usage as unknown, not zero. If Claude usage is unknown, suggest `delegate-config statusline enable` once; it captures official usage and composes the native work chip with any existing status line. Never query Claude usage any other way — Anthropic prohibits third-party OAuth-token use.
 3. Call `delegate-route --json --mode <mode> --provider <provider-or-auto> --model <model-or-auto> --task '<bounded summary>'`. Use its eligible primary and fallbacks unless the user explicitly overrides.
 4. Read [routing.md](references/routing.md) when the route is surprising or model fit is ambiguous. Read [models.md](references/models.md) for detailed model strengths.
 5. Keep work in the current Claude session when the route returns Claude. Do not delegate merely because external tools are available.
@@ -164,9 +164,17 @@ record a degradation reason while coordinator-hook and post-hoc detection
 continue. These alerts are early detection only. They do not prevent, contain,
 or isolate writes; use worktree isolation when containment is required.
 
+SessionStart and PostCompact also inject the same small session-owned work
+projection: active attempt IDs, policy/human/acceptance blockers,
+ready-for-review attempts, and resumable chain leaves. Use those IDs directly
+after compaction; the projection is capped and explicitly reports omissions.
+It contains no prompts, diffs, repository paths, results, secrets, or
+free-form errors. The status line keeps aggregate running/review-ready counts
+and one provider allowance visible during idle periods.
+
 After `delegate_start`, retain the job ID and revision. Use:
 
-- `delegate_list` to rediscover jobs when an ID is no longer in context (after compaction or in a new session). It reconciles orphans and returns compact summaries, newest first; filter by `groupId` or request a group summary for fan-out completion.
+- `delegate_list` to discover jobs in a genuinely new session, recover entries omitted by the bounded native context, or browse outside the current session scope. PostCompact already rehydrates retained IDs. The tool reconciles orphans and returns compact summaries, newest first; filter by `groupId` or request a group summary for fan-out completion.
 - `delegate_inspect` for lifecycle, capabilities, immutable launch `origin.sessionId` / `origin.workspaceId` / `origin.projectDir` versus delegated `cwd`, execution owner/lease attribution, continuation IDs, `resumable`, `driftReport`, any failure `checkpoint`, the final `result`, verification verdict, and current revision. `resultText` is the provider-independent text of the final message; use `resultWindow` (`find`, `offset`, `maxChars`) or `delegate-jobs result` window flags for long output. A read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. Inline workers retain legacy `ORPHANED` reconciliation; supervisor-owned attempts instead report exact exit/signal/lease attribution.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
@@ -175,6 +183,9 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `lastActivityAt` comes from the journal tail. `stalled=true` means a running job has been quiet longer than `DELEGATE_STALL_SECONDS` (default 300); it is a diagnostic flag, never an automatic kill.
 - `delegate_stats` for read-only transport-tagged audit aggregates, terminal-status/output-token totals, proven tool-originated external Codex thread totals, and aggregate-only unattributed allowance movement, optionally bounded with `since` such as `24h` or `7d`.
 - `delegate_usage` for observed job usage, chain-cumulative token totals, and provider allowance as separate values.
+- MCP-capable clients may mention `delegate://work/active`,
+  `delegate://repo/profile`, or `delegate://job/{id}/diff` as read-only
+  context. Clients without resources use the unchanged inspection tools.
 - `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
 - When the plugin Monitor is unavailable, disabled, or unsupported, fall back
   to the job's `finishedPath` from `delegate_inspect`/`delegate_list`: the
@@ -187,6 +198,13 @@ After `delegate_start`, retain the job ID and revision. Use:
 - `idempotencyKey` replay returns the existing job even when that job completed without meeting its objective (analysis-only turn, zero changed files, failed verification). A deliberate retry-with-changes is a new request: mint a new key rather than reusing the old one.
 
 `REVISION_CONFLICT` errors carry `currentRevision`; retry once with that value when your command is still appropriate for the newer state, instead of a full re-inspect round-trip.
+
+Ambient attention is deliberately quiet. Only edge transitions may speak, with
+per-item deduplication, cooldown, snooze, and priority policy breach → human
+input → acceptance ready → failure. Never speak after every edit/command,
+repeat a suggestion inside one logical task, announce successful intermediate
+activity, or demand immediate review merely because a provider completed.
+Everything else belongs in the status line or remains available through pull.
 
 For long jobs, do not chain polling turns: run `delegate-jobs wait <job-id>` with the Bash tool's `run_in_background: true` and continue other work — the harness notifies on exit (0 completed, 3 failed, 4 cancelled, 5 no observed changes, 6 verification failed, 75 wait-timeout). Bound the whole job with `timeoutSeconds` on `delegate_start` (60–86400; default 3600, deliberately long because LLM jobs legitimately run long). `maxOutputTokens` stops through the provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and the continuation ID.
 

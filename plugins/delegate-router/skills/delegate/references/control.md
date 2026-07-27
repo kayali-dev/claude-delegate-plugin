@@ -126,6 +126,48 @@ swallows store errors after one stderr diagnostic so visibility can never block
 the Agent call. `DELEGATE_AGENT_STUBS=0` disables the hooks. These records reject
 all control mutations and obey `DELEGATE_JOB_RETENTION_DAYS` pruning.
 
+## Native Session Surfaces
+
+`delegate-config statusline enable` is the opt-in native work row. It saves the
+entire prior `statusLine` object, prefixes a compact Delegate Router chip, then
+runs the original command with its unchanged stdin and shell semantics. It
+sets `refreshInterval: 5`, or preserves a faster existing interval, because
+event-driven refresh can be silent while the coordinator waits; Claude Code
+still applies its documented 300 ms debounce. Disable with
+`delegate-config statusline disable`, or retain official usage capture while
+hiding only the chip with `DELEGATE_NATIVE_STATUSLINE=0`.
+
+SessionStart injects `additionalContext` beside the existing collision
+`watchPaths`; PostCompact injects the byte-identical work projection again.
+It is session-scoped by default and contains only safe attempt/root IDs,
+provider/lifecycle tokens, closed blocker codes, counts, and allowance state.
+It never reads prompts, results, diffs, repository paths, secrets, pending
+questions, or free-form errors. The payload is hard-capped at 2,048 UTF-8
+bytes. When entries exceed the item/byte bounds, policy breach, human input,
+acceptance-ready work, and resumable failure win over lower-priority/older
+state; an omitted count points to `delegate_list`. Set
+`DELEGATE_NATIVE_CONTEXT=0` to suppress injection without disabling P2.5
+watch arming.
+
+The control MCP advertises read-only `delegate://work/active` and
+`delegate://repo/profile` resources, a bounded
+`delegate://job/{id}/diff` template, and the
+`delegate_start_scoped_review` / `delegate_resume_with_findings` prompts.
+Clients that do not implement resources or prompts ignore these capabilities
+and keep the exact existing tool surface. `DELEGATE_NATIVE_MCP=0` hides the
+additive capabilities only.
+
+Status-line enable also appends one linear `footerLinksRegexes` entry for
+managed/direct job IDs. It points at the private job record through an allowed
+editor deep-link scheme and never replaces existing footer rules. The default
+is `vscode`; set `DELEGATE_NATIVE_FOOTER_SCHEME=cursor` before enabling when
+appropriate. `delegate-config footer-links disable` removes only the rule this
+plugin added; `DELEGATE_NATIVE_FOOTER_LINKS=0` skips its installation.
+
+All native surfaces are accelerators. A missing status line, unavailable
+hooks, a client without MCP resources, or a disabled monitor changes no CLI,
+MCP tool, TUI, `finishedPath`, or inspection/control pull behavior.
+
 ## Ambient Push Bridge
 
 Interactive Claude Code sessions with the experimental Monitor surface
@@ -157,6 +199,11 @@ ten minutes; configure
 `DELEGATE_MONITOR_STALL_SECONDS`,
 `DELEGATE_MONITOR_COOLDOWN_SECONDS`, and
 `DELEGATE_MONITOR_MAX_LINES_PER_MINUTE` only when the local policy requires it.
+The priority remains policy breach → human input → acceptance ready → failure.
+Do not emit after every edit or command, repeat a suggestion within one logical
+task, announce successful intermediate activity, or treat provider completion
+alone as a demand for review. Non-actionable state belongs in the native
+status-line chip.
 
 Push defaults to `DELEGATE_MONITOR_SCOPE=session`: only records whose
 `origin.sessionId` matches the SessionStart correlation marker can emit.

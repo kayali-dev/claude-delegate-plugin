@@ -2,6 +2,41 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.38.0 — 2026-07-27
+
+- Added P4 native session integration. `delegate-config statusline enable` now
+  composes a compact `D` work-state chip before the user's existing status-line
+  command, preserves and restores that command exactly, and sets a five-second
+  `refreshInterval` (Claude Code still applies its documented 300 ms debounce).
+  The chip reports session-scoped running/review-ready counts plus one reliable
+  provider allowance percentage. Footer job-ID badges are appended without
+  replacing user badge rules and can be disabled independently.
+- SessionStart now injects bounded live work metadata alongside the existing
+  P2.5 `watchPaths`; PostCompact re-injects the identical state. The payload
+  contains only safe job IDs and closed lifecycle/blocker labels, never prompts,
+  results, diffs, paths, or free-form errors. It is hard-capped at 2,048 UTF-8
+  bytes; policy breaches, human input, review-ready work, and resumable failures
+  win over lower-priority/older entries, and overflow records an omitted count.
+- Added read-only MCP resources for active work and the repository verification
+  profile, a bounded per-job diff resource template, and prompts for scoped
+  review and findings-driven continuation. The existing 17 MCP tools, names,
+  order, input schemas, and SHA-256 compatibility guard are unchanged.
+- Confirmed the existing fail-open Edit/Write and batch collision path remains
+  the sole overlap-invalidation implementation: one deduplicated edge marks
+  covering verification stale and blocks undecided acceptance. No second P4
+  edit observer or event vocabulary was added.
+- Tightened the ambient attention boundary: write-job completion is review
+  actionable only when acceptance evidence is explicitly `ready-for-review`.
+  Historical records with no acceptance state stay silent, so provider
+  completion alone never becomes a review demand.
+- Every P4 ambient surface is optional. Disable the chip with
+  `DELEGATE_NATIVE_STATUSLINE=0`, injected context with
+  `DELEGATE_NATIVE_CONTEXT=0`, MCP resources/prompts with
+  `DELEGATE_NATIVE_MCP=0`, footer badges with
+  `delegate-config footer-links disable`, and monitors with
+  `DELEGATE_MONITOR=0`; existing CLI/MCP tools, sentinels, TUI, and pull paths
+  remain unchanged.
+
 ## 0.37.0 — 2026-07-27
 
 - Added P2.5 live collision detection for managed write attempts. SessionStart

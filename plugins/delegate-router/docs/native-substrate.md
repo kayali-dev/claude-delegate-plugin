@@ -5,6 +5,15 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
 ## Progress
 
+- P4 native session integration is implemented additively. The existing
+  status-line wrapper now composes a five-second-refresh work chip before the
+  user's original command; SessionStart and PostCompact share one bounded,
+  redacted work-state projection; P2.5 remains the sole overlap invalidator;
+  the control MCP advertises read-only resources/templates and two common-flow
+  prompts without changing its tool array; and opt-in footer regexes turn
+  conversation job IDs into editor-deep-link badges. The injected context is
+  capped at 2,048 UTF-8 bytes and contains only safe IDs and closed metadata.
+  Unsupported/disabled ambient surfaces never gate the existing pull paths.
 - P2.5 live collision detection is implemented additively. SessionStart arms a
   bounded dynamic watch set for live write attempts and a private refresh
   signal; FileChanged plus coordinator Edit/Write and batch hooks record one
@@ -278,6 +287,48 @@ approved workflows only, MCP resources and prompts, `footerLinksRegexes`.
 Nagware boundary is a hard requirement, not a preference: edge-triggered only,
 per-item deduplication, cooldowns, snooze; priority order policy breach → human
 input → acceptance ready → failure; everything else stays in the status line.
+
+Implemented behavior:
+
+- `delegate-config statusline enable` retains the user's complete original
+  `statusLine` object for exact restoration, runs its command with the original
+  stdin/shell semantics, and prefixes `D <running> · <needs review> ·
+  <provider allowance>`. A five-second `refreshInterval` keeps background work
+  visible during coordinator idle while Claude Code's native 300 ms debounce
+  still coalesces busy updates. `DELEGATE_NATIVE_STATUSLINE=0` suppresses only
+  the Delegate chip.
+- SessionStart returns the P2.5 `watchPaths` plus `additionalContext`;
+  PostCompact returns the same context projection. It includes current
+  session-owned active attempt IDs, policy/human/acceptance blockers,
+  ready-for-review attempts, and resumable chain leaves. It never reads or
+  emits prompts, result text, diffs, repository paths, secrets, or free-form
+  errors. The hard 2,048-byte cap keeps higher-priority and newer state,
+  records the number omitted, and points overflow/new-session recovery to
+  `delegate_list`. `DELEGATE_NATIVE_CONTEXT=0` leaves watch arming intact.
+- PostToolUse(Edit|Write) and PostToolBatch continue through the single P2.5
+  collision hook. A touched owned path produces one deduplicated collision,
+  stales applicable verification with `inputChanged`, and blocks undecided
+  acceptance; P4 adds no duplicate watcher, event, or notification.
+- The control server advertises fixed `delegate://work/active` and
+  `delegate://repo/profile` resources, a
+  `delegate://job/{id}/diff` resource template, and
+  `delegate_start_scoped_review` / `delegate_resume_with_findings` prompts.
+  The diff is the already-redacted journal artifact and is capped at 60,000
+  characters. Clients without resource/prompt support continue using the
+  unchanged tools; `DELEGATE_NATIVE_MCP=0` removes only these additive
+  capabilities.
+- `delegate-config statusline enable` also appends a linear
+  `footerLinksRegexes` job-ID rule without changing existing rules. It defaults
+  to a `vscode://file` link to the private job record; set
+  `DELEGATE_NATIVE_FOOTER_SCHEME=cursor` before enabling for Cursor. Run
+  `delegate-config footer-links disable` to remove only Delegate Router's rule,
+  or set `DELEGATE_NATIVE_FOOTER_LINKS=0` before status-line enable to skip it.
+- The P2a nagware contract is unchanged: edge-triggered only; per-item/path
+  deduplication; cooldowns; snooze; and priority policy breach → human input →
+  acceptance ready → failure. Successful intermediate activity, every edit or
+  command, provider completion by itself (including historical records without
+  explicit acceptance evidence), and facts already visible in the status line
+  remain silent.
 
 ### P4.5 — Conversational delegation (bidirectional real-time)
 

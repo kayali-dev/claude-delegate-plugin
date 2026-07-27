@@ -1,0 +1,48 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import {
+  buildNativeWorkState,
+  nativeWorkOptions,
+  renderNativeAdditionalContext,
+  renderWorkStateChip
+} from './lib/native-session.mjs';
+
+const MAX_INPUT_BYTES = 256 * 1024;
+
+function readPayload() {
+  const chunks = [];
+  let used = 0;
+  for (;;) {
+    const buffer = Buffer.allocUnsafe(Math.min(16 * 1024, MAX_INPUT_BYTES + 1 - used));
+    const count = fs.readSync(0, buffer, 0, buffer.length, null);
+    if (!count) break;
+    used += count;
+    if (used > MAX_INPUT_BYTES) throw new Error('status-line payload exceeds 256 KiB');
+    chunks.push(buffer.subarray(0, count));
+  }
+  if (!chunks.length) return {};
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+try {
+  const contextMode = process.argv.includes('--context');
+  const jsonMode = process.argv.includes('--json');
+  if (!jsonMode && (
+    (contextMode && String(process.env.DELEGATE_NATIVE_CONTEXT ?? '1') === '0')
+    || (!contextMode && String(process.env.DELEGATE_NATIVE_STATUSLINE ?? '1') === '0')
+  )) {
+    process.exit(0);
+  }
+  const payload = readPayload();
+  const options = nativeWorkOptions(payload, process.env);
+  const workState = buildNativeWorkState(options);
+  if (contextMode) {
+    process.stdout.write(renderNativeAdditionalContext({ workState }));
+  } else if (jsonMode) {
+    process.stdout.write(`${JSON.stringify(workState, null, 2)}\n`);
+  } else {
+    process.stdout.write(renderWorkStateChip({ workState }));
+  }
+} catch {}
+
+process.exitCode = 0;

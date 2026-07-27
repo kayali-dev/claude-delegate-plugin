@@ -66,7 +66,12 @@ test('monitor edge detection covers every actionable class in priority order', (
       event(2, 'approval.resolved', { decision: 'reject' })
     ]), 'needs-input:permission'],
     [snapshot({ id: 'direct', status: 'failed', errorCode: 'DIRECT_TRANSPORT' }), 'needs-input:request'],
-    [snapshot({ id: 'write-review', status: 'completed', changedFiles: { count: 3 } }), 'ready-for-review:write'],
+    [snapshot({
+      id: 'write-review',
+      status: 'completed',
+      changedFiles: { count: 3 },
+      acceptance: { state: 'ready-for-review' }
+    }), 'ready-for-review:write'],
     [snapshot({
       id: 'read-findings',
       mode: 'review',
@@ -97,10 +102,29 @@ test('progress, deltas, tools, usage, and successful intermediate steps stay sil
   assert.deepEqual(detectActionableEdges(snapshot({ id: 'quiet' }, events), { now: NOW }), []);
 });
 
+test('provider completion alone stays silent until acceptance evidence is ready', () => {
+  assert.deepEqual(detectActionableEdges(snapshot({
+    id: 'completed-only',
+    status: 'completed',
+    changedFiles: { count: 2 }
+  }), { now: NOW }), []);
+  assert.equal(detectActionableEdges(snapshot({
+    id: 'acceptance-ready',
+    status: 'completed',
+    changedFiles: { count: 2 },
+    acceptance: { state: 'ready-for-review' }
+  }), { now: NOW })[0]?.key, 'ready-for-review:write');
+});
+
 test('edge policy deduplicates, permits genuine re-entry, and holds per-job cooldown', () => {
   const policy = new NotificationPolicy({ cooldownMs: 10_000, maxLinesPerMinute: 20 });
   assert.deepEqual(policy.bootstrap([snapshot({ id: 'job-1' })], { now: 0 }), []);
-  const ready = snapshot({ id: 'job-1', status: 'completed', changedFiles: { count: 1 } }, [], 1000);
+  const ready = snapshot({
+    id: 'job-1',
+    status: 'completed',
+    changedFiles: { count: 1 },
+    acceptance: { state: 'ready-for-review' }
+  }, [], 1000);
   assert.deepEqual(policy.observe([ready], { now: 1000 }), [
     'delegate[delegate-router]: job-1 ready-for-review (implement, 1 file, checks not run)'
   ]);
@@ -121,7 +145,8 @@ test('simultaneous edges drain in priority order across the per-job cooldown', (
     id: 'multi',
     status: 'completed',
     scopeViolations: 1,
-    changedFiles: { count: 2 }
+    changedFiles: { count: 2 },
+    acceptance: { state: 'ready-for-review' }
   });
   assert.match(policy.observe([actionable], { now: NOW + 1 })[0], /policy-breach/);
   assert.equal(policy.observe([actionable], { now: NOW + 500 }).length, 0);
@@ -140,6 +165,7 @@ test('global rate ceiling emits one exact suppressed-count summary', () => {
     id,
     status: 'completed',
     changedFiles: { count: 1 },
+    acceptance: { state: 'ready-for-review' },
     verification: { exitCode: 0 }
   }));
   assert.deepEqual(policy.observe(jobs, { now: 1 }), [
@@ -154,7 +180,13 @@ test('global rate ceiling emits one exact suppressed-count summary', () => {
 test('boot baselines history and emits at most one consolidated attention summary', () => {
   const policy = new NotificationPolicy({ cooldownMs: 0, maxLinesPerMinute: 20 });
   const lines = policy.bootstrap([
-    snapshot({ id: 'old-ready', status: 'completed', needsAttention: true, changedFiles: { count: 2 } }),
+    snapshot({
+      id: 'old-ready',
+      status: 'completed',
+      needsAttention: true,
+      changedFiles: { count: 2 },
+      acceptance: { state: 'ready-for-review' }
+    }),
     snapshot({ id: 'old-input', pendingInput: { requestId: 'q' }, phase: 'user-input-required' }),
     snapshot({ id: 'ordinary-running' })
   ], { now: NOW });
@@ -162,7 +194,12 @@ test('boot baselines history and emits at most one consolidated attention summar
     'delegate[delegate-router]: 2 existing jobs need attention (1 input, 1 review; inspect delegate_list)'
   ]);
   assert.deepEqual(policy.observe([
-    snapshot({ id: 'old-ready', status: 'completed', changedFiles: { count: 2 } }),
+    snapshot({
+      id: 'old-ready',
+      status: 'completed',
+      changedFiles: { count: 2 },
+      acceptance: { state: 'ready-for-review' }
+    }),
     snapshot({ id: 'old-input', pendingInput: { requestId: 'q' }, phase: 'user-input-required' }),
     snapshot({ id: 'ordinary-running' })
   ], { now: NOW + 1000 }), []);
@@ -202,7 +239,12 @@ test('kill switch disables the process and snooze suppresses every non-breach ed
   const policy = new NotificationPolicy({ cooldownMs: 0, maxLinesPerMinute: 20 });
   policy.bootstrap([snapshot({ id: 'snoozed' })], { now: NOW });
   assert.deepEqual(policy.observe([
-    snapshot({ id: 'snoozed', status: 'completed', changedFiles: { count: 1 } })
+    snapshot({
+      id: 'snoozed',
+      status: 'completed',
+      changedFiles: { count: 1 },
+      acceptance: { state: 'ready-for-review' }
+    })
   ], { now: NOW + 1, snoozed: true }), []);
   policy.observe([snapshot({ id: 'snoozed' })], { now: NOW + 2, snoozed: true });
   assert.deepEqual(policy.observe([
@@ -265,6 +307,7 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
     status: 'completed',
     phase: 'completed',
     changedFiles: { count: 3 },
+    acceptance: { state: 'ready-for-review' },
     verification: null,
     createdAt: Math.floor(liveNow / 1000),
     completedAt: Math.floor(NOW / 1000) + 1,
@@ -364,11 +407,23 @@ test('session and workspace scopes isolate sibling sessions and real worktree la
 
   const actionableOwned = {
     ...owned,
-    job: { ...owned.job, status: 'completed', needsAttention: true, changedFiles: { count: 0 } }
+    job: {
+      ...owned.job,
+      status: 'completed',
+      needsAttention: true,
+      changedFiles: { count: 0 },
+      acceptance: { state: 'ready-for-review' }
+    }
   };
   const actionableSibling = {
     ...siblingSession,
-    job: { ...siblingSession.job, status: 'completed', needsAttention: true, changedFiles: { count: 0 } }
+    job: {
+      ...siblingSession.job,
+      status: 'completed',
+      needsAttention: true,
+      changedFiles: { count: 0 },
+      acceptance: { state: 'ready-for-review' }
+    }
   };
   let currentSnapshots = [owned, siblingSession];
   const store = {
@@ -742,7 +797,12 @@ test('every notification line carries an explicit project label', () => {
   const policy = new NotificationPolicy({ cooldownMs: 0, maxLinesPerMinute: 20 });
   policy.bootstrap([snapshot({ id: 'running' })], { now: NOW });
   const lines = policy.observe([
-    snapshot({ id: 'running', status: 'completed', changedFiles: { count: 1 } })
+    snapshot({
+      id: 'running',
+      status: 'completed',
+      changedFiles: { count: 1 },
+      acceptance: { state: 'ready-for-review' }
+    })
   ], { now: NOW + 1 });
   assert.equal(lines.length, 1);
   assert.match(lines[0], /^delegate\[delegate-router\]:/);

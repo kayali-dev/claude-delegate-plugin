@@ -182,9 +182,7 @@ export function detectActionableEdges(snapshot, options = {}) {
       blockedBy: Array.isArray(job.acceptance.blockedBy) ? job.acceptance.blockedBy : []
     }));
   } else if (job.status === 'completed' && WRITE_MODES.has(job.mode)
-    && (!job.acceptance || job.acceptance.state === 'ready-for-review')) {
-    // Historical records have no acceptance field. Preserve their previous
-    // notification behavior while every P3 record follows acceptance state.
+    && job.acceptance?.state === 'ready-for-review') {
     edges.push(candidate(job, 'ready-for-review:write', 'ready-for-review', 4));
   } else if (job.status === 'completed' && READ_MODES.has(job.mode)) {
     const findings = findingCount(job);

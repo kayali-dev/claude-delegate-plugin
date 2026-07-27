@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 
 const COMMANDS = [
   'delegate-config', 'delegate-route', 'delegate-health', 'delegate-cursor',
-  'delegate-jobs', 'delegate-supervisor', 'delegate-tui', 'delegate-usage', 'delegate-claude-usage'
+  'delegate-jobs', 'delegate-supervisor', 'delegate-tui', 'delegate-usage',
+  'delegate-claude-usage', 'delegate-work-state'
 ];
 
 function installedShim() {

@@ -70,6 +70,7 @@ test('statusline enable wraps an existing command, captures usage, and disable r
   const userBin = path.join(directory, 'bin');
   fs.mkdirSync(userBin, { recursive: true });
   fs.symlinkSync(path.join(plugin, 'bin', 'delegate-claude-usage'), path.join(userBin, 'delegate-claude-usage'));
+  fs.symlinkSync(path.join(plugin, 'bin', 'delegate-work-state'), path.join(userBin, 'delegate-work-state'));
   fs.writeFileSync(settingsFile, `${JSON.stringify({ statusLine: { type: 'command', command: `printf 'original-line'` }, otherSetting: true })}\n`);
   const env = { ...process.env, DELEGATE_CLAUDE_SETTINGS: settingsFile, DELEGATE_USER_BIN: userBin };
 
@@ -80,7 +81,14 @@ test('statusline enable wraps an existing command, captures usage, and disable r
   assert.equal(report.wrappedExisting, true);
   const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
   assert.equal(settings.statusLine.command, report.wrapper);
+  assert.equal(settings.statusLine.refreshInterval, 5);
   assert.equal(settings.otherSetting, true);
+  assert.equal(settings.footerLinksRegexes.length, 1);
+  assert.match(settings.footerLinksRegexes[0].pattern, /codex/);
+  assert.match(settings.footerLinksRegexes[0].url, /^vscode:\/\/file/);
+  const jobBadgePattern = new RegExp(settings.footerLinksRegexes[0].pattern);
+  assert.equal(jobBadgePattern.exec('codex-mabc123-abcdef')?.groups?.job, 'codex-mabc123-abcdef');
+  assert.equal(jobBadgePattern.exec('cursor-mabc123-xyz789')?.groups?.job, 'cursor-mabc123-xyz789');
 
   const payload = JSON.stringify({
     model: { display_name: 'Fable' },
@@ -91,7 +99,14 @@ test('statusline enable wraps an existing command, captures usage, and disable r
   });
   const rendered = spawnSync('bash', [report.wrapper], { input: payload, encoding: 'utf8', env });
   assert.equal(rendered.status, 0, rendered.stderr);
-  assert.equal(rendered.stdout, 'original-line');
+  assert.equal(rendered.stdout, 'D idle · codex ? · original-line');
+  const chipOptOut = spawnSync('bash', [report.wrapper], {
+    input: payload,
+    encoding: 'utf8',
+    env: { ...env, DELEGATE_NATIVE_STATUSLINE: '0' }
+  });
+  assert.equal(chipOptOut.status, 0, chipOptOut.stderr);
+  assert.equal(chipOptOut.stdout, 'original-line');
   const claude = JSON.parse(fs.readFileSync(process.env.DELEGATE_STATE_FILE, 'utf8')).providers.claude;
   assert.equal(claude.windows.five_hour.usedPercent, 42.4);
   assert.equal(claude.windows.seven_day.usedPercent, 9.1);
@@ -103,6 +118,7 @@ test('statusline enable wraps an existing command, captures usage, and disable r
   assert.equal(JSON.parse(disabled.stdout).status, 'disabled');
   const restored = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
   assert.equal(restored.statusLine.command, `printf 'original-line'`);
+  assert.equal(Object.hasOwn(restored, 'footerLinksRegexes'), false);
   assert.ok(!fs.existsSync(report.wrapper));
 }));
 
@@ -112,6 +128,7 @@ test('statusline enable without an existing status line installs the minimal ren
   const userBin = path.join(directory, 'bin');
   fs.mkdirSync(userBin, { recursive: true });
   fs.symlinkSync(path.join(plugin, 'bin', 'delegate-claude-usage'), path.join(userBin, 'delegate-claude-usage'));
+  fs.symlinkSync(path.join(plugin, 'bin', 'delegate-work-state'), path.join(userBin, 'delegate-work-state'));
   const env = { ...process.env, DELEGATE_CLAUDE_SETTINGS: settingsFile, DELEGATE_USER_BIN: userBin };
 
   const enabled = spawnSync(process.execPath, [configBin, 'statusline', 'enable'], { encoding: 'utf8', env });
@@ -121,8 +138,27 @@ test('statusline enable without an existing status line installs the minimal ren
   const payload = JSON.stringify({ model: { display_name: 'Fable' }, rate_limits: { five_hour: { used_percentage: 12 } } });
   const rendered = spawnSync('bash', [report.wrapper], { input: payload, encoding: 'utf8', env });
   assert.equal(rendered.status, 0, rendered.stderr);
-  assert.match(rendered.stdout, /Fable \| 5h 12%/);
+  assert.equal(rendered.stdout, 'D idle · codex ? · Fable | 5h 12%\n');
   const disabled = spawnSync(process.execPath, [configBin, 'statusline', 'disable'], { encoding: 'utf8', env });
   assert.equal(JSON.parse(disabled.stdout).status, 'disabled');
   assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(settingsFile, 'utf8')), 'statusLine'), false);
+}));
+
+test('footer link opt-out removes only the Delegate Router entry and preserves user badges', () => isolated((directory) => {
+  const configBin = path.join(plugin, 'bin', 'delegate-config');
+  const settingsFile = path.join(directory, 'settings.json');
+  const userBadge = {
+    type: 'regex',
+    pattern: '\\b(?<issue>APP-\\d+)\\b',
+    url: 'https://issues.example.test/{issue}',
+    label: '{issue}'
+  };
+  fs.writeFileSync(settingsFile, `${JSON.stringify({ footerLinksRegexes: [userBadge] })}\n`);
+  const env = { ...process.env, DELEGATE_CLAUDE_SETTINGS: settingsFile };
+  const enabled = spawnSync(process.execPath, [configBin, 'footer-links', 'enable'], { encoding: 'utf8', env });
+  assert.equal(enabled.status, 0, enabled.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).footerLinksRegexes.length, 2);
+  const disabled = spawnSync(process.execPath, [configBin, 'footer-links', 'disable'], { encoding: 'utf8', env });
+  assert.equal(disabled.status, 0, disabled.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).footerLinksRegexes, [userBadge]);
 }));

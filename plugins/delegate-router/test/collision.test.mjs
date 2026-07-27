@@ -199,6 +199,21 @@ test('attempt writes self-suppress while a later coordinator Edit on the same pa
   updateManagedJob(job.id, (current) => {
     current.status = 'running';
     current.phase = 'running';
+    current.verification = {
+      state: 'passed',
+      exitCode: 0,
+      inputChanged: false,
+      input: { repoRoot: workspace, digest: 'before' },
+      completedInput: { repoRoot: workspace, digest: 'before' }
+    };
+    current.acceptance = {
+      state: 'ready-for-review',
+      blockedBy: [],
+      evidence: {
+        verification: current.verification,
+        base: { drifted: false, driftPaths: [] }
+      }
+    };
   }, { incrementRevision: false });
   const commonEnv = {
     ...process.env,
@@ -235,7 +250,11 @@ test('attempt writes self-suppress while a later coordinator Edit on the same pa
     tool_response: { filePath: owned, success: true }
   }, commonEnv);
   assert.equal(coordinator.status, 0, coordinator.stderr);
-  assert.deepEqual(loadJob(job.id).collisions.map((entry) => entry.path), ['owned.txt']);
+  const collided = loadJob(job.id);
+  assert.deepEqual(collided.collisions.map((entry) => entry.path), ['owned.txt']);
+  assert.equal(collided.verification.state, 'stale');
+  assert.equal(collided.verification.inputChanged, true);
+  assert.equal(collided.acceptance.state, 'blocked');
 });
 
 test('PostToolBatch deduplicates repeated Write observations and collision alerts retain session scope', (t) => {
@@ -261,6 +280,21 @@ test('PostToolBatch deduplicates repeated Write observations and collision alert
   updateManagedJob(job.id, (current) => {
     current.status = 'running';
     current.phase = 'running';
+    current.verification = {
+      state: 'passed',
+      exitCode: 0,
+      inputChanged: false,
+      input: { repoRoot: workspace, digest: 'before' },
+      completedInput: { repoRoot: workspace, digest: 'before' }
+    };
+    current.acceptance = {
+      state: 'ready-for-review',
+      blockedBy: [],
+      evidence: {
+        verification: current.verification,
+        base: { drifted: false, driftPaths: [] }
+      }
+    };
   }, { incrementRevision: false });
   const result = runHook(collisionHook, {
     hook_event_name: 'PostToolBatch',
@@ -275,6 +309,10 @@ test('PostToolBatch deduplicates repeated Write observations and collision alert
   assert.equal(result.status, 0, result.stderr);
   const collided = loadJob(job.id);
   assert.equal(collided.collisions.length, 1);
+  assert.equal(collided.verification.state, 'stale');
+  assert.equal(collided.verification.inputChanged, true);
+  assert.equal(collided.acceptance.state, 'blocked');
+  assert.deepEqual(collided.baseDriftPaths, ['owned.txt']);
 
   const snapshots = [{
     job: collided,
@@ -371,6 +409,7 @@ test('watch plans cap at 256 paths and record explicit post-hoc degradation', (t
 test('collision hooks are additive, fast-fail open, and exit zero on malformed payloads', () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'hooks', 'hooks.json'), 'utf8')).hooks;
   assert.ok(hooks.FileChanged);
+  assert.ok(hooks.PostCompact);
   assert.ok(hooks.PostToolBatch);
   assert.ok(hooks.PostToolUse.some((group) => group.matcher === '^(Edit|Write)$'));
   const malformedCollision = runHook(collisionHook, '{', { ...process.env });

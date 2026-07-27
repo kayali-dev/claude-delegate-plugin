@@ -83,8 +83,9 @@ If resident startup or submission fails for any reason, the unchanged
 detached-spawn behavior runs and records
 `executionOwner: "inline-detached"`. Those inline records retain the legacy
 read-time reconciliation: a running job whose worker process no longer exists
-becomes failed `ORPHANED`. `delegate_list` rediscovers jobs by recency when an
-ID is no longer in context.
+becomes failed `ORPHANED`. SessionStart and PostCompact rehydrate bounded
+session-owned IDs; `delegate_list` remains the new-session, overflow, and
+cross-scope discovery fallback.
 
 Inspect and list rows expose `lastActivityAt` from the last complete non-replay journal line (the ordinary fast path reads only the tail; a replay tail falls back to the newest live event). `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
 
