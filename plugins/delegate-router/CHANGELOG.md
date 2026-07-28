@@ -2,6 +2,14 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.52.1 — 2026-07-28
+
+- Removed 26,639 lines of verification scratch (fifteen full TAP logs, load
+  samples and latency captures) that a coordinator `git add -A` swept into
+  v0.52.0, and added `test/.gitignore` so a marketplace install can never again
+  carry a worker's test output. Evidence belongs in the job record and the
+  commit message, not in the shipped plugin.
+
 ## 0.52.0 — 2026-07-28
 
 - Completed the TUI count audit. Existing destinations now have registry-owned

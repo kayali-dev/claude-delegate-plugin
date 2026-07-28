@@ -1,0 +1,6 @@
+# Worker/coordinator verification scratch: TAP logs, load samples, latency
+# captures. Evidence belongs in the job record and the commit message, never
+# in the shipped plugin — a marketplace install should not carry test output.
+.verification-current/
+.verification-*/
+*.tap
