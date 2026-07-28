@@ -120,6 +120,17 @@ function escHarness(options = {}) {
   return { input, batches, state, fire: () => scheduled() };
 }
 
+test('unambiguous input schedules the next turn without a display-frame delay', () => {
+  let delay = null;
+  const input = new BufferedInput({
+    schedule(callback, requestedDelay) { delay = requestedDelay; return callback; },
+    cancel() {}
+  });
+  input.push('j');
+  assert.equal(delay, 0);
+  input.close();
+});
+
 test('a lone Escape resolves on its own instead of waiting for the next keypress', () => {
   const h = escHarness();
   h.input.push(ESC_BYTE);

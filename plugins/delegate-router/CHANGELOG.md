@@ -2,6 +2,31 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.49.0 — 2026-07-28
+
+- At real-store scale (141 jobs; largest journal 19,418,996 bytes), reduced
+  median TUI input-to-paint latency from 40.16 ms to 23.86 ms on Fleet and from
+  33.01 ms to 15.03 ms on that job's Detail/Transcript by dispatching
+  unambiguous keys on the next event-loop turn instead of waiting for a 16 ms
+  display-frame batch. Ambiguous escape sequences and bracketed paste keep
+  their independent correctness deadlines. The existing flight recorder now
+  attributes input-to-paint queue, view-model, projection, wrapping, paint,
+  screen diff, diagnostic serialization, terminal write, and clone time, plus
+  datasource refresh/watch triggers and frame causes.
+- Made transcript anomaly totals actionable through the single KEYMAP registry.
+  `A` toggles the exact projected anomaly list counted by the badge, and the
+  Diff action menu opens existing scope-violation evidence in Record.
+- Added registry-enforced confirmation metadata and generic dispatch for every
+  destructive binding. Direct keys and the action menu now both refuse a
+  destructive entry that lacks a declared confirmation gate.
+- Gave detail tab strips the same solid raised-surface owner as the pane they
+  label while retaining accent and underline active cues for color, NO_COLOR,
+  and ASCII rendering.
+- Added a responsive Fleet Changed column using the same latest-activity value
+  as the existing sort and the shared absolute/relative timestamp formatter.
+  Elapsed remains a separate duration, and Changed drops cleanly before narrow
+  local or remote tables can overflow.
+
 ## 0.48.0 — 2026-07-28
 
 - Added local re-verification with `delegate-jobs verify <job-id>` and MCP

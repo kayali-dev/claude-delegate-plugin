@@ -14,7 +14,7 @@ import {
   WrapCache
 } from '../bin/lib/tui/components.mjs';
 import { eventBlocks, formatEventBlock, wrapEventBlock } from '../bin/lib/tui/events.mjs';
-import { createPalette, setUiTheme, uiPalette } from '../bin/lib/tui/palette.mjs';
+import { createPalette, setUiTheme, uiPalette, wcagContrast } from '../bin/lib/tui/palette.mjs';
 import { CHROME_GLYPHS, configureGlyphs, GLYPH_TIERS } from '../bin/lib/tui/glyphs.mjs';
 import { CellGrid } from '../bin/lib/tui/screen.mjs';
 import { advanceSpinnerGrid, SpinnerAnimator } from '../bin/lib/tui/spinner.mjs';
@@ -343,6 +343,39 @@ test('activity mapping animates busy states only and every active surface shares
   const done = job({ status: 'completed', phase: 'completed', completedAt: NOW / 1000 });
   const idleFrame = dashboardViewModel(store({ jobs: [done], eventsByJob: { [done.id]: [] }, activityEventsByJob: { [done.id]: [] } }), { now: NOW }, { width: 100, height: 30 });
   assert.equal(paintFrame(idleFrame).spinnerCells.size, 0, 'no active jobs leaves the animation timer with no marked work');
+});
+
+test('detail tab strip owns the pane surface and keeps a non-color active cue', (t) => {
+  t.after(() => {
+    setUiTheme('dark', process.env);
+    configureGlyphs({ env: process.env, widths: {} });
+  });
+  const state = store();
+  for (const theme of ['dark', 'light']) {
+    setUiTheme(theme, {});
+    const expected = createPalette({}, theme);
+    const frame = detailViewModel(state, {
+      jobId: state.jobs[0].id, detailTab: 1, now: NOW
+    }, { width: 100, height: 30 });
+    const grid = paintFrame(frame);
+    const paneOwner = grid.get(frame.panes[0].rect.x + 20, frame.panes[0].rect.y + 2).style.bg;
+    for (let x = frame.tabs.rect.x; x < frame.tabs.rect.x + frame.tabs.rect.width; x += 1) {
+      assert.deepEqual(grid.get(x, frame.tabs.rect.y).style.bg, paneOwner, `${theme}: tab cell ${x} shares pane background owner`);
+    }
+    assert.ok(wcagContrast(expected.tokens.accent, expected.tokens.surfaceRaised) >= 4.5, `${theme}: active tab contrast`);
+    assert.ok(wcagContrast(expected.tokens.textMuted, expected.tokens.surfaceRaised) >= 4.5, `${theme}: inactive tab contrast`);
+  }
+
+  setUiTheme('dark', { NO_COLOR: '1', TERM: 'dumb' });
+  configureGlyphs({ env: { NO_COLOR: '1', TERM: 'dumb', LANG: 'C', DELEGATE_TUI_ASCII: '1' }, widths: {} });
+  const frame = detailViewModel(state, {
+    jobId: state.jobs[0].id, detailTab: 1, now: NOW
+  }, { width: 100, height: 30 });
+  const grid = paintFrame(frame);
+  const activeLabelX = frame.tabs.rect.x + ' 1 Transcript '.length + 1 + 1;
+  assert.equal(grid.get(activeLabelX, frame.tabs.rect.y).style.underline, true, 'active tab keeps underline with colors off');
+  assert.equal(grid.get(frame.tabs.rect.x + 2, frame.tabs.rect.y).style.underline, undefined, 'inactive tab is structurally distinct');
+  assert.equal(Object.hasOwn(grid.get(activeLabelX, frame.tabs.rect.y).style, 'bg'), false);
 });
 
 test('app-bar painter owns a blank spacer row and all screen content starts below it', () => {

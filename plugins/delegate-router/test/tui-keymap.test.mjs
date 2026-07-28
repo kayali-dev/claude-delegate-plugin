@@ -10,13 +10,15 @@ import { paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
 import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
 import {
   actionMenuForContext,
+  dispatchKeymapBinding,
   footerForContext,
   formatKeyNotation,
   helpPagesForContext,
   KEYMAP,
   KEY_CLASSES,
   KEY_RELATIONS,
-  renderKeysMarkdown
+  renderKeysMarkdown,
+  validateKeymap
 } from '../bin/lib/tui/keymap.mjs';
 import { createPalette, setUiTheme, uiPalette } from '../bin/lib/tui/palette.mjs';
 
@@ -69,6 +71,58 @@ test('KEYMAP structure makes ambiguous notation unrepresentable', () => {
   }
   assert.equal(formatKeyNotation(KEYMAP.find((item) => item.action === 'detail.tab.cycle')), '[ ]');
   assert.equal(formatKeyNotation(KEYMAP.find((item) => item.action === 'diagnostic.mark')), 'Ctrl-G');
+});
+
+test('every destructive KEYMAP entry is forced through its declared confirmation gate', () => {
+  assert.equal(validateKeymap(KEYMAP), true);
+  const destructive = KEYMAP.filter((item) => item.class === 'destructive');
+  assert.ok(destructive.length >= 3);
+  for (const item of destructive) {
+    const calls = [];
+    assert.equal(dispatchKeymapBinding(item, {
+      perform: () => calls.push('performed'),
+      confirm: (gate, binding) => calls.push(`confirmed:${gate}:${binding.action}`),
+      missingConfirmation: () => calls.push('missing')
+    }), true);
+    assert.deepEqual(calls, [`confirmed:job-id-suffix:${item.action}`], item.action);
+  }
+
+  const synthetic = Object.freeze({
+    keys: Object.freeze(['!']),
+    relation: 'single',
+    label: 'synthetic destructive action',
+    action: 'synthetic.unsafe',
+    scope: Object.freeze(['global']),
+    class: 'destructive',
+    confirmationGate: null
+  });
+  assert.throws(
+    () => validateKeymap([...KEYMAP, synthetic]),
+    /synthetic\.unsafe requires confirmationGate/
+  );
+  const calls = [];
+  assert.equal(dispatchKeymapBinding(synthetic, {
+    perform: () => calls.push('performed'),
+    confirm: () => calls.push('confirmed'),
+    missingConfirmation: (binding) => calls.push(`blocked:${binding.action}`)
+  }), false);
+  assert.deepEqual(calls, ['blocked:synthetic.unsafe'], 'the synthetic mutation cannot reach perform');
+
+  const controller = fs.readFileSync(path.join(plugin, 'bin', 'delegate-tui'), 'utf8');
+  assert.match(controller, /binding\?\.class === 'destructive'[\s\S]*dispatchRegisteredBinding\(binding\)/);
+  assert.match(controller, /selected\.class === 'destructive'\) dispatchRegisteredBinding\(selected\)/);
+});
+
+test('anomaly drill-down is one KEYMAP binding shared by footer, help, menu, and docs', () => {
+  const ctx = { ...runningContext(), anomalyCount: 3 };
+  const binding = KEYMAP.find((item) => item.action === 'detail.anomalies');
+  assert.equal(formatKeyNotation(binding), 'A');
+  assert.ok(footerForContext(ctx, 180).groups.flat().some((item) => item.action === binding.action));
+  assert.ok(helpPagesForContext(ctx).flatMap((page) => page.rows).some((item) => item.action === binding.action));
+  assert.equal(actionMenuForContext(ctx).find((item) => item.action === binding.action).unavailable, null);
+  const controller = fs.readFileSync(path.join(plugin, 'bin', 'delegate-tui'), 'utf8');
+  assert.match(controller, /action === 'detail\.anomalies'\) return toggleTranscriptAnomalies\(\)/);
+  assert.match(controller, /key === 'A' && ui\.detailTab === 0\) \{ toggleTranscriptAnomalies\(\)/);
 });
 
 test('footer, contextual help, action menu, and generated docs all derive from KEYMAP', () => {

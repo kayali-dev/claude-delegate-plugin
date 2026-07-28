@@ -167,6 +167,7 @@ function cloneState(state) {
 export class DelegateDataSource extends EventEmitter {
   constructor(options = {}) {
     super();
+    this.diagnostics = options.diagnostics || null;
     this.pollMs = Math.max(100, Number(options.pollMs || 2000));
     this.debounceMs = Math.max(0, Number(options.debounceMs ?? 80));
     this.maxEvents = Math.max(100, Number(options.maxEvents || DEFAULT_MAX_EVENTS));
@@ -229,6 +230,10 @@ export class DelegateDataSource extends EventEmitter {
     };
   }
 
+  trace(kind, details = {}) {
+    this.diagnostics?.recordTimeline?.(`datasource.${kind}`, details);
+  }
+
   getState() {
     return cloneState(this.state);
   }
@@ -250,9 +255,9 @@ export class DelegateDataSource extends EventEmitter {
     this.refreshRecords({ force: true });
     this.metrics.startupMs = performance.now() - started;
     if (this.watchEnabled) this.installWatchers();
-    this.pollTimer = setInterval(() => this.scheduleRefresh('all'), this.pollMs);
+    this.pollTimer = setInterval(() => this.scheduleRefresh('all', 'poll'), this.pollMs);
     this.pollTimer.unref?.();
-    this.sessionPollTimer = setInterval(() => this.scheduleRefresh('sessions'), this.sessionPollMs);
+    this.sessionPollTimer = setInterval(() => this.scheduleRefresh('sessions', 'poll'), this.sessionPollMs);
     this.sessionPollTimer.unref?.();
     void this.yieldTurn().then(() => {
       if (this.closed) return;
@@ -269,9 +274,10 @@ export class DelegateDataSource extends EventEmitter {
       try {
         const watcher = fs.watch(target, { persistent: false, ...watchOptions }, (_event, filename) => {
           if (accept && !accept(String(filename || ''))) return;
-          this.scheduleRefresh(kind);
+          this.trace('watch', { kind });
+          this.scheduleRefresh(kind, 'watch');
         });
-        watcher.on('error', () => this.scheduleRefresh(kind));
+        watcher.on('error', () => this.scheduleRefresh(kind, 'watch-error'));
         this.watchers.push(watcher);
         return true;
       } catch { return false; }
@@ -290,9 +296,10 @@ export class DelegateDataSource extends EventEmitter {
       try {
         const watcher = fs.watch(target, { persistent: false, ...watchOptions }, (_event, filename) => {
           if (accept && !accept(String(filename || ''))) return;
-          this.scheduleRefresh(kind);
+          this.trace('watch', { kind });
+          this.scheduleRefresh(kind, 'watch');
         });
-        watcher.on('error', () => this.scheduleRefresh(kind));
+        watcher.on('error', () => this.scheduleRefresh(kind, 'watch-error'));
         this.watchers.push(watcher);
         return true;
       } catch { return false; }
@@ -302,8 +309,9 @@ export class DelegateDataSource extends EventEmitter {
     return this.sessionWatcherInstalled;
   }
 
-  scheduleRefresh(kind = 'all') {
+  scheduleRefresh(kind = 'all', trigger = 'internal') {
     if (this.closed) return;
+    this.trace('schedule', { kind, trigger, coalesced: Boolean(this.debounceTimer) });
     this.pendingKinds.add(kind);
     if (this.debounceTimer) return;
     this.debounceTimer = setTimeout(() => {
@@ -349,7 +357,9 @@ export class DelegateDataSource extends EventEmitter {
 
   refreshRecords(options = {}) {
     if (this.closed) return this.getState();
+    const started = performance.now();
     this.metrics.refreshes += 1;
+    let changed = false;
     try {
       const rawJobs = listJobs().map((job) => {
         if (job.managedBy !== 'delegate-agent-hook' || TERMINAL.has(job.status) || !jobNeedsReconciliation(job)) return job;
@@ -393,7 +403,7 @@ export class DelegateDataSource extends EventEmitter {
         job.agentId || null, job.agentLifecycle || null, job.coordinatorSidecarDir || null, job.transcriptPath || null,
         job.transcriptMtimeMs || null, job.transcriptSize || null
       ]));
-      const changed = options.force || digest !== this.recordsDigest;
+      changed = options.force || digest !== this.recordsDigest;
       this.recordsDigest = digest;
       this.state = {
         ...this.state,
@@ -417,6 +427,12 @@ export class DelegateDataSource extends EventEmitter {
       this.emit('warning', error);
       if (options.force) this.emit('change', this.getState());
     }
+    this.trace('refresh-records', {
+      durationMs: performance.now() - started,
+      changed,
+      force: options.force === true,
+      jobs: this.state.jobs.length
+    });
     return this.getState();
   }
 

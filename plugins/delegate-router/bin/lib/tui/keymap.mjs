@@ -70,6 +70,7 @@ function entry(source) {
     unavailableReason: source.unavailableReason || (() => null),
     footer: source.footer === true,
     menu: source.menu !== false,
+    confirmationGate: source.confirmationGate || null,
     ...source
   };
   value.keys = Object.freeze([...(source.keys || [])]);
@@ -156,10 +157,12 @@ export const KEYMAP = Object.freeze([
   }),
   entry({
     keys: ['c'], label: 'cancel', action: 'detail.cancel', scope: ['detail'], class: 'destructive', footer: true,
+    confirmationGate: 'job-id-suffix',
     when: (ctx) => activeReason(ctx) == null, unavailableReason: activeReason
   }),
   entry({
     keys: ['v'], label: 'safe revert', action: 'detail.revert', scope: ['detail'], class: 'destructive', footer: true,
+    confirmationGate: 'job-id-suffix',
     when: (ctx) => terminalReason(ctx) == null, unavailableReason: terminalReason
   }),
   entry({
@@ -179,6 +182,7 @@ export const KEYMAP = Object.freeze([
   }),
   entry({
     keys: ['r'], label: 'reject current evidence', action: 'work.reject', scope: ['work'], class: 'destructive', footer: true,
+    confirmationGate: 'job-id-suffix',
     when: (ctx) => ctx.workTab === 2 && Boolean(ctx.workRejectJobId),
     unavailableReason: (ctx) => ctx.workTab !== 2 ? 'open Approve mode' : ctx.workRejectUnavailable || null
   }),
@@ -189,8 +193,24 @@ export const KEYMAP = Object.freeze([
   entry({ keys: ['o'], label: 'cycle Fleet sort', action: 'fleet.sort', scope: ['fleet'], class: 'view', footer: true, footerLabel: 'sort' }),
   entry({ keys: ['z'], label: 'toggle Fleet density', action: 'fleet.density', scope: ['fleet'], class: 'view', footer: true, footerLabel: 'density' }),
   entry({ keys: ['f'], label: 'toggle follow', action: 'detail.follow', scope: ['detail'], class: 'view', footer: true, footerLabel: 'follow', when: (ctx) => [0, 4].includes(Number(ctx.detailTab)) }),
+  entry({
+    keys: ['A'], label: 'toggle transcript anomaly list', action: 'detail.anomalies', scope: ['detail'], class: 'view',
+    footer: true, footerLabel: 'anomalies',
+    when: (ctx) => Number(ctx.detailTab) === 0 && Number(ctx.anomalyCount || 0) > 0,
+    unavailableReason: (ctx) => Number(ctx.detailTab) !== 0
+      ? 'open Transcript'
+      : Number(ctx.anomalyCount || 0) > 0 ? null : 'no transcript anomalies'
+  }),
   entry({ keys: ['E'], label: 'jump to raw Events', action: 'detail.events', scope: ['detail'], class: 'view', footer: false, when: (ctx) => Number(ctx.detailTab) === 0 }),
   entry({ keys: ['d'], label: 'open focused Diff', action: 'detail.diff', scope: ['detail'], class: 'view', footer: false, when: (ctx) => Number(ctx.detailTab) === 0 }),
+  entry({
+    keys: [], label: 'open scope violation evidence', action: 'detail.scope-evidence', scope: ['detail'], class: 'view',
+    footer: false,
+    when: (ctx) => Number(ctx.detailTab) === 1 && Number(ctx.scopeViolationCount || 0) > 0,
+    unavailableReason: (ctx) => Number(ctx.scopeViolationCount || 0) > 0
+      ? Number(ctx.detailTab) === 1 ? null : 'open Diff'
+      : 'no scope violations'
+  }),
   entry({ keys: ['Left', 'Right'], relation: 'pair', label: 'previous / next choice or diff page', action: 'context.horizontal', scope: ['launcher', 'detail'], class: 'view', footer: false }),
   entry({ keys: ['e'], label: 'edit packet body', action: 'launcher.editor', scope: ['launcher'], class: 'view', footer: false }),
   entry({ keys: ['d'], label: 'dry run, then confirm launch', action: 'launcher.dry-run', scope: ['launcher'], class: 'view', footer: true, footerLabel: 'preview' }),
@@ -201,6 +221,31 @@ export const KEYMAP = Object.freeze([
   entry({ keys: ['M'], label: 'status-message history', action: 'diagnostic.status-history', scope: ['global'], class: 'diagnostic', footer: false }),
   entry({ keys: ['Ctrl', 'G'], relation: 'chord', label: 'mark diagnostic frame', action: 'diagnostic.mark', scope: ['global'], class: 'diagnostic', footer: false })
 ]);
+
+export function validateKeymap(entries = KEYMAP) {
+  for (const item of entries || []) {
+    if (item?.class === 'destructive' && !item.confirmationGate) {
+      throw new TypeError(`destructive KEYMAP action ${item.action || '<unknown>'} requires confirmationGate`);
+    }
+  }
+  return true;
+}
+
+export function dispatchKeymapBinding(binding, handlers = {}) {
+  if (!binding) return false;
+  if (binding.class !== 'destructive') {
+    handlers.perform?.(binding.action, binding);
+    return true;
+  }
+  if (!binding.confirmationGate) {
+    handlers.missingConfirmation?.(binding);
+    return false;
+  }
+  handlers.confirm?.(binding.confirmationGate, binding);
+  return true;
+}
+
+validateKeymap(KEYMAP);
 
 function keyParts(entry, options = {}) {
   const ellipsis = options.ellipsis || CHROME_GLYPHS.truncation;
@@ -359,6 +404,7 @@ export function actionMenuForContext(ctx = {}, query = '') {
         keys: Object.freeze(keyParts(candidate, { ellipsis: '\u2026' })),
         notation: formatKeyNotation(candidate, { ellipsis: '\u2026' }),
         label: candidate.label,
+        confirmationGate: candidate.confirmationGate,
         unavailable
       });
     })
@@ -412,6 +458,8 @@ export function keymapContext(frame = {}, ui = {}, store = {}) {
     workIntegrationUnavailable: frame.meta?.integrationUnavailable || null,
     workNextRoundJobId: frame.meta?.nextRoundJobId || null,
     workNextRoundUnavailable: frame.meta?.nextRoundUnavailable || null,
+    anomalyCount: Number(frame.meta?.anomalyCount || 0),
+    scopeViolationCount: Number(frame.meta?.scopeViolationCount || 0),
     job
   });
 }

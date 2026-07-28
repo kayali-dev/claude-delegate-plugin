@@ -13,6 +13,15 @@ const compactionNormalizationCache = new WeakMap();
 const providerItemNormalizationCache = new WeakMap();
 const subagentNormalizationCache = new WeakMap();
 
+export function isTranscriptAnomaly(entry) {
+  return Boolean(entry?.tool?.failed
+    || (entry?.kind === 'notice' && /scope|budget|error/.test(entry.noticeType || '')));
+}
+
+export function transcriptAnomalyEntries(entries = []) {
+  return (entries || []).filter(isTranscriptAnomaly);
+}
+
 function compactionPhase(event) {
   if (event?.type === 'compaction.started') return 'started';
   if (event?.type === 'compaction.completed') return 'completed';
@@ -891,16 +900,20 @@ export class TranscriptProjector {
     this.base = [];
     this.interned = new Map();
     this.rendered = new Map();
+    this.lastMetrics = Object.freeze({ durationMs: 0, visited: 0, changed: 0, baseRebuilt: false });
   }
 
   project(events = [], options = {}) {
+    const started = performance.now();
     const jobTerminal = options.jobTerminal === true;
+    let baseRebuilt = false;
     if (events !== this.events || jobTerminal !== this.jobTerminal) {
       const result = internBlocks(buildDescriptions(events, options), this.interned);
       this.events = events;
       this.jobTerminal = jobTerminal;
       this.base = result.blocks;
       this.interned = result.interned;
+      baseRebuilt = true;
     }
     const expanded = options.expandedTools instanceof Set ? options.expandedTools : new Set(options.expandedTools || []);
     const now = Number(options.now ?? Date.now());
@@ -927,14 +940,22 @@ export class TranscriptProjector {
       });
     }
     const next = new Map();
+    let changed = 0;
     const blocks = descriptions.map((description) => {
       const mark = fingerprint(description);
       const old = this.rendered.get(description.id);
       const block = old?.fingerprint === mark ? old : Object.freeze({ ...description, fingerprint: mark });
+      if (block !== old) changed += 1;
       next.set(description.id, block);
       return block;
     });
     this.rendered = next;
+    this.lastMetrics = Object.freeze({
+      durationMs: performance.now() - started,
+      visited: descriptions.length,
+      changed,
+      baseRebuilt
+    });
     return blocks;
   }
 }

@@ -9,6 +9,11 @@ function monotonicTimestamp() {
   return process.hrtime.bigint().toString();
 }
 
+function elapsedMilliseconds(start, end) {
+  try { return Number(BigInt(end) - BigInt(start)) / 1_000_000; }
+  catch { return null; }
+}
+
 function safeAppend(file, value) {
   fs.appendFileSync(file, value, { mode: 0o600 });
 }
@@ -88,6 +93,36 @@ export class TuiFlightRecorder {
       safeAppend(this.framesFile, `${JSON.stringify(record)}\n`);
       safeAppend(this.bytesFile, Buffer.from(`@${JSON.stringify({ ...record, length: 0 })}\n\n`, 'utf8'));
     } catch (error) { this.onError(error); }
+    return record;
+  }
+
+  recordTimeline(kind, details = {}) {
+    if (this.closed) return null;
+    const record = {
+      ...details,
+      type: 'timeline',
+      kind: String(kind || 'event').slice(0, 80),
+      atNs: monotonicTimestamp()
+    };
+    try { safeAppend(this.framesFile, `${JSON.stringify(record)}\n`); }
+    catch (error) { this.onError(error); }
+    return record;
+  }
+
+  recordTiming(details = {}) {
+    if (this.closed) return null;
+    const atNs = monotonicTimestamp();
+    const record = {
+      type: 'timing',
+      frame: Number(details.frame ?? this.frame),
+      atNs,
+      ...details
+    };
+    if (record.inputAtNs != null && record.inputToPaintMs == null) {
+      record.inputToPaintMs = elapsedMilliseconds(record.inputAtNs, record.paintAtNs || atNs);
+    }
+    try { safeAppend(this.framesFile, `${JSON.stringify(record)}\n`); }
+    catch (error) { this.onError(error); }
     return record;
   }
 
@@ -188,6 +223,67 @@ function suspectByteWindow(records, frame) {
   };
 }
 
+function percentile(values, fraction) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))];
+}
+
+function numberLabel(value) {
+  return Number.isFinite(value) ? value.toFixed(2) : '-';
+}
+
+function timingGroupLabel(record) {
+  if (record.screen !== 'detail') return String(record.screen || 'unknown');
+  const tab = String(record.detailTabLabel || record.detailTab || 'unknown').toLowerCase();
+  return `detail/${tab}`;
+}
+
+function appendTimingAnalysis(lines, records) {
+  const timings = records.filter((record) => record.type === 'timing');
+  if (!timings.length) return;
+  const input = timings.filter((record) => record.cause === 'input' && Number.isFinite(Number(record.inputToPaintMs)));
+  lines.push('input-to-paint latency (stdin receive to terminal frame write return)');
+  const groups = new Map();
+  for (const record of input) {
+    const label = timingGroupLabel(record);
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(record);
+  }
+  for (const [label, group] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
+    const values = group.map((record) => Number(record.inputToPaintMs)).filter(Number.isFinite);
+    lines.push(`  ${label}: n=${values.length} p50=${numberLabel(percentile(values, 0.50))}ms p95=${numberLabel(percentile(values, 0.95))}ms max=${numberLabel(Math.max(...values))}ms`);
+    const stages = [
+      ['queue', 'inputQueueMs'],
+      ['viewmodel', 'viewModelMs'],
+      ['paint', 'paintFrameMs'],
+      ['screen-diff', 'screenDiffMs'],
+      ['diag-frame', 'diagnosticFrameMs'],
+      ['write', 'writeMs'],
+      ['clone', 'cloneMs']
+    ];
+    lines.push(`    p50 breakdown: ${stages.map(([name, key]) => {
+      const valuesForStage = group.map((record) => Number(record[key])).filter(Number.isFinite);
+      return `${name}=${numberLabel(percentile(valuesForStage, 0.50))}ms`;
+    }).join(' ')}`);
+    const projection = group.map((record) => Number(record.projectionMs)).filter(Number.isFinite);
+    const visited = group.map((record) => Number(record.projectionVisited)).filter(Number.isFinite);
+    const wrapMisses = group.map((record) => Number(record.wrapMisses)).filter(Number.isFinite);
+    if (projection.length || visited.length || wrapMisses.length) {
+      lines.push(`    projection p50=${numberLabel(percentile(projection, 0.50))}ms visited p50=${numberLabel(percentile(visited, 0.50))} wrap misses p50=${numberLabel(percentile(wrapMisses, 0.50))}`);
+    }
+  }
+  const causes = new Map();
+  for (const record of timings) causes.set(record.cause || 'unknown', (causes.get(record.cause || 'unknown') || 0) + 1);
+  lines.push(`frame causes: ${[...causes].sort(([left], [right]) => left.localeCompare(right)).map(([kind, count]) => `${kind}=${count}`).join(' ')}`);
+  const timeline = records.filter((record) => record.type === 'timeline');
+  if (timeline.length) {
+    const counts = new Map();
+    for (const record of timeline) counts.set(record.kind, (counts.get(record.kind) || 0) + 1);
+    lines.push(`timeline events: ${[...counts].sort(([left], [right]) => left.localeCompare(right)).map(([kind, count]) => `${kind}=${count}`).join(' ')}`);
+  }
+}
+
 export function analyzeTuiDiagnostics(directory) {
   const root = path.resolve(String(directory));
   const byteRecords = readDiagnosticBytes(path.join(root, 'bytes.log'));
@@ -234,5 +330,6 @@ export function analyzeTuiDiagnostics(directory) {
       }
     }
   }
+  appendTimingAnalysis(lines, jsonRecords);
   return lines.join('\n');
 }

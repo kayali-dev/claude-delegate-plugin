@@ -411,7 +411,10 @@ export function tableRowIndexAt(pane, x, y) {
 }
 
 export function paintTabBar(grid, rect, tabs = [], active = 0) {
-  grid.fill(rect.x, rect.y, rect.width, 1, ' ', palette.body);
+  // The strip labels the pane immediately below it and owns the same tinted
+  // surface. Accent + underline remain the active-state vocabulary; the
+  // background is continuity, not the only selection cue.
+  grid.fill(rect.x, rect.y, rect.width, 1, ' ', palette.surfaceRaised);
   let x = rect.x;
   for (let index = 0; index < tabs.length && x < rect.x + rect.width; index += 1) {
     const label = ` ${index + 1} ${normalizeChromePunctuation(textOf(tabs[index]))} `;

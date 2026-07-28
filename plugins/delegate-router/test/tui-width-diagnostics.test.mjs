@@ -589,7 +589,22 @@ test('flight recorder round-trips bytes and frames, and markers land in both log
   screen.start();
   const grid = new CellGrid(24, 3);
   grid.write(0, 0, 'assistant 🙂 function');
-  screen.render(grid);
+  const inputAtNs = (process.hrtime.bigint() - 25_000_000n).toString();
+  screen.render(grid, {
+    timing: {
+      cause: 'input',
+      screen: 'detail',
+      detailTabLabel: 'Transcript',
+      inputAtNs,
+      inputQueueMs: 16,
+      viewModelMs: 3,
+      paintFrameMs: 2,
+      projectionMs: 1.5,
+      projectionVisited: 200,
+      wrapMisses: 4
+    }
+  });
+  recorder.recordTimeline('datasource.watch', { kind: 'jobs' });
   const marker = screen.markDiagnostic();
   screen.stop();
   assert.equal(marker.frame, 1);
@@ -602,6 +617,10 @@ test('flight recorder round-trips bytes and frames, and markers land in both log
   const report = analyzeTuiDiagnostics(directory);
   assert.match(report, /MARKER frame 1: TERMINAL-SIDE INTERPRETATION verdict/);
   assert.match(report, /earlier width-suspect signature: "🙂"/);
+  assert.match(report, /input-to-paint latency/);
+  assert.match(report, /detail\/transcript: n=1/);
+  assert.match(report, /projection p50=1\.50ms visited p50=200\.00 wrap misses p50=4\.00/);
+  assert.match(report, /timeline events: datasource\.watch=1/);
 });
 
 test('flight analyzer identifies a corrupted emitted byte as a writer bug with a byte window', (t) => {

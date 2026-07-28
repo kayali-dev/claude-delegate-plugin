@@ -124,7 +124,11 @@ export function pendingHoldKind(raw) {
 export class BufferedInput {
   constructor(options = {}) {
     this.onFlush = options.onFlush || (() => {});
-    this.frameMs = Math.max(0, Number(options.frameMs ?? 16));
+    // Unambiguous keys do not need to wait for a display-frame boundary.
+    // A zero-delay timer still batches chunks delivered in the same event-loop
+    // turn, while escape prefixes and bracketed paste retain their independent
+    // correctness deadlines below.
+    this.frameMs = Math.max(0, Number(options.frameMs ?? 0));
     this.escapeTimeoutMs = Math.max(0, Number(options.escapeTimeoutMs ?? ESCAPE_TIMEOUT_MS));
     this.pasteIdleTimeoutMs = Math.max(0, Number(options.pasteIdleTimeoutMs ?? PASTE_IDLE_TIMEOUT_MS));
     this.schedule = options.schedule || ((callback, delay) => setTimeout(callback, delay));

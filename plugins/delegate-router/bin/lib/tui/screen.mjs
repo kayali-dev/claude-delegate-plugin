@@ -247,6 +247,7 @@ export class Screen extends EventEmitter {
     // can neither rewrite nor reorder the byte buffer handed to the terminal.
     this.writeOutput = (value, meta = {}) => {
       const result = this.rawWriteOutput(value);
+      this.lastRawWriteAtNs = process.hrtime.bigint().toString();
       this.diagnostics?.recordBytes(value, { frame: meta.frame ?? this.frameCounter, context: meta.context || 'external' });
       return result;
     };
@@ -311,8 +312,9 @@ export class Screen extends EventEmitter {
     return true;
   }
 
-  render(grid) {
+  render(grid, options = {}) {
     if (!(grid instanceof CellGrid)) throw new TypeError('Screen.render expects a CellGrid');
+    const renderStarted = performance.now();
     grid.confineSuspectStyleBoundaries();
     const full = !this.previous || this.previous.columns !== grid.columns || this.previous.rows !== grid.rows;
     let output = full ? `${sequences.reset}${sequences.clearScreen}` : '';
@@ -386,17 +388,40 @@ export class Screen extends EventEmitter {
         index += 1;
       }
     }
+    const diffFinished = performance.now();
     this.frameCounter += 1;
-    this.diagnostics?.setWidthOverrides(getGraphemeWidthOverrides());
-    this.diagnostics?.nextFrame(grid, { colorMode: this.colorMode });
+    const writeStarted = performance.now();
+    let paintAtNs = process.hrtime.bigint().toString();
     if (output) {
       output += sequences.reset;
       if (this.terminalCapabilities.synchronizedOutput) {
         output = `${sequences.synchronizedOutputBegin}${output}${sequences.synchronizedOutputEnd}`;
       }
       this.writeOutput(output, { frame: this.frameCounter, context: 'frame' });
+      paintAtNs = this.lastRawWriteAtNs || paintAtNs;
     }
+    const writeFinished = performance.now();
+    const diagnosticStarted = performance.now();
+    this.diagnostics?.setWidthOverrides(getGraphemeWidthOverrides());
+    this.diagnostics?.nextFrame(grid, { colorMode: this.colorMode });
+    const diagnosticFinished = performance.now();
     this.previous = grid.clone();
+    const cloneFinished = performance.now();
+    this.diagnostics?.recordTiming({
+      ...(options.timing || {}),
+      frame: this.frameCounter,
+      columns: grid.columns,
+      rows: grid.rows,
+      synchronizedOutput: this.terminalCapabilities.synchronizedOutput,
+      fullRepaint: full,
+      emittedBytes: Buffer.byteLength(output),
+      screenDiffMs: diffFinished - renderStarted,
+      diagnosticFrameMs: diagnosticFinished - diagnosticStarted,
+      writeMs: writeFinished - writeStarted,
+      cloneMs: cloneFinished - diagnosticFinished,
+      screenRenderMs: cloneFinished - renderStarted,
+      paintAtNs
+    });
     return output;
   }
 

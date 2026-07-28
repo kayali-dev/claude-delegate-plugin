@@ -19,6 +19,7 @@ import { normalizeBrokerError } from './lib/errors.mjs';
 import { loadJob } from './lib/state.mjs';
 import {
   compareVirtualPositions,
+  defaultWrapCache,
   invalidateWrapCache,
   keyValueSectionIndexAt,
   paneContentRect,
@@ -45,7 +46,7 @@ import { NotificationDispatcher } from './lib/tui/notifications.mjs';
 import { copyToClipboard } from './lib/tui/clipboard.mjs';
 import { formatDisplayValue } from './lib/tui/display.mjs';
 import { CHROME_SEPARATOR, configureGlyphs } from './lib/tui/glyphs.mjs';
-import { actionMenuForContext, keymapContext, resolveKeymapAction } from './lib/tui/keymap.mjs';
+import { actionMenuForContext, dispatchKeymapBinding, keymapContext, resolveKeymapAction } from './lib/tui/keymap.mjs';
 import { analyzeTuiDiagnostics, TuiFlightRecorder } from './lib/tui/diagnostics.mjs';
 import { setUiTheme } from './lib/tui/palette.mjs';
 import { loadTuiPreferences, saveTuiPreferences } from './lib/tui/preferences.mjs';
@@ -90,7 +91,8 @@ DELEGATE_CONNECT_TOKEN supplies the client token when --token-file is omitted.
 DELEGATE_TUI_THEME=dark|light|dark-daltonized|light-daltonized|dark-ansi|light-ansi selects the palette.
 DELEGATE_TUI_WIDTH_PROBE=off|verbose controls terminal width probing.
 DELEGATE_TUI_ASCII=1 forces the conservative ASCII glyph tier.
-DELEGATE_TUI_DIAG=<path> records replayable terminal bytes and intended frames.`;
+DELEGATE_TUI_DIAG=<path> records replayable terminal bytes, intended frames, and input-to-paint timings.
+DELEGATE_TUI_DIAG_WATCH=off disables local fs.watch only during a diagnostic recording.`;
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
@@ -261,12 +263,13 @@ const outputCapture = new TerminalOutputCapture({
   }
 });
 const screen = new Screen({ outputCapture, diagnostics: diagnosticRecorder });
+const diagnosticWatch = !diagnosticRecorder || String(process.env.DELEGATE_TUI_DIAG_WATCH || '').toLowerCase() !== 'off';
 const source = !remoteTargets.length
-  ? new DelegateDataSource().start()
+  ? new DelegateDataSource({ diagnostics: diagnosticRecorder, watch: diagnosticWatch }).start()
   : remoteTargets.length === 1 && !cli.includeLocal
     ? new RemoteDatasource({ baseUrl: remoteTargets[0].url, token: remoteTargets[0].token, label: remoteTargets[0].label }).start()
     : composeDatasources([
-      ...(cli.includeLocal ? [{ source: new DelegateDataSource(), local: true }] : []),
+      ...(cli.includeLocal ? [{ source: new DelegateDataSource({ diagnostics: diagnosticRecorder, watch: diagnosticWatch }), local: true }] : []),
       ...remoteTargets.map((target) => ({
         source: new RemoteDatasource({ baseUrl: target.url, token: target.token, label: target.label }),
         label: target.label,
@@ -285,6 +288,7 @@ const ui = {
   screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, version: TUI_PACKAGE_VERSION, now: Date.now(), selectedIndex: 0, scroll: 0,
   activeOnly: false, showExternals: true, filter: '', help: false, helpPage: 0, actionMenu: null, input: null, confirm: null,
   status: '', statusKind: 'info', detailTab: 0, detailScroll: 0, transcriptSelection: null,
+  transcriptAnomaliesOnly: false,
   diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', follow: true,
   expandedTools: new Set(), expandedEvents: new Set(), eventSelection: null,
   chainSelection: 0, search: null, detailReturn: initialJobId ? 'dashboard' : 'fleet',
@@ -306,6 +310,8 @@ const ui = {
 };
 let routeAdviceTimer = null;
 let renderedGrid = null;
+let pendingInputAtNs = null;
+let activeInputTiming = null;
 const spinnerAnimator = new SpinnerAnimator({
   onTick(now) {
     if (quitting || !renderedGrid) return;
@@ -315,7 +321,7 @@ const spinnerAnimator = new SpinnerAnimator({
       return;
     }
     renderedGrid = next;
-    screen.render(next);
+    screen.render(next, { timing: { cause: 'animation', screen: ui.screen, detailTab: ui.detailTab } });
   }
 });
 let gPrefixTimer = null;
@@ -328,15 +334,45 @@ function viewModel() {
   return createViewModel(store, ui, viewport());
 }
 
-function draw() {
+function draw(cause = 'state') {
   if (quitting) return;
   if (inputBatch) {
     inputDrawPending = true;
     return;
   }
+  if (activeInputTiming) cause = 'input';
+  const drawStartedNs = process.hrtime.bigint();
+  const drawStarted = performance.now();
+  const wrapBefore = { hits: defaultWrapCache.hits, misses: defaultWrapCache.misses, wrapCalls: defaultWrapCache.wrapCalls };
   const frame = viewModel();
+  const viewModelFinished = performance.now();
   renderedGrid = paintFrame(frame);
-  screen.render(renderedGrid);
+  const paintFinished = performance.now();
+  const projection = frame.meta?.projectionMetrics || null;
+  const inputQueueMs = activeInputTiming?.atNs == null
+    ? null
+    : Number(drawStartedNs - BigInt(activeInputTiming.atNs)) / 1_000_000;
+  screen.render(renderedGrid, {
+    timing: {
+      cause,
+      screen: frame.screen,
+      detailTab: frame.meta?.tab,
+      detailTabLabel: frame.tabs?.items?.[frame.meta?.tab],
+      inputId: activeInputTiming?.id || null,
+      inputAtNs: activeInputTiming?.atNs || null,
+      inputEvents: activeInputTiming?.events || null,
+      inputQueueMs,
+      viewModelMs: viewModelFinished - drawStarted,
+      paintFrameMs: paintFinished - viewModelFinished,
+      projectionMs: projection?.durationMs,
+      projectionVisited: projection?.visited,
+      projectionChanged: projection?.changed,
+      projectionBaseRebuilt: projection?.baseRebuilt,
+      wrapHits: defaultWrapCache.hits - wrapBefore.hits,
+      wrapMisses: defaultWrapCache.misses - wrapBefore.misses,
+      wrapCalls: defaultWrapCache.wrapCalls - wrapBefore.wrapCalls
+    }
+  });
   spinnerAnimator.setActive(ui.terminalFocused && renderedGrid.spinnerCells.size > 0);
   if (!source.readOnly && frame.meta?.reconcileJobIds?.length) void source.reconcileVisibleJobs(frame.meta.reconcileJobIds, { limit: 5 });
 }
@@ -377,7 +413,7 @@ function persistPreferences() {
 
 function refresh() {
   store = source.refresh();
-  draw();
+  draw('refresh');
 }
 
 function quit(code = 0) {
@@ -938,6 +974,7 @@ function openJobDetail(job, returnScreen = ui.screen) {
   ui.detailTab = 0;
   ui.detailScroll = 0;
   ui.transcriptSelection = null;
+  ui.transcriptAnomaliesOnly = false;
   ui.chainSelection = 0;
   ui.diffSelection = 0;
   ui.diffFile = null;
@@ -1070,9 +1107,7 @@ function detailAction(key) {
   } else if (key === 'n') {
     if (!nudgeEligible(job)) setStatus('Nudge requires a terminal read-mode job flagged resultSuspect', 'error');
     else runMutation(() => resumeManagedJob(job.id, { prompt: NUDGE_PROMPT, reportLint: false }), (child) => `Nudge resumed as ${child.id}`);
-  } else if (key === 'c') beginCancel(job);
-  else if (key === 'v') beginRevert(job);
-  else if (key === 'w') beginReviewRound(job);
+  } else if (key === 'w') beginReviewRound(job);
   draw();
 }
 
@@ -1571,6 +1606,32 @@ function toggleTimestamps(migration = false) {
   draw();
 }
 
+function toggleTranscriptAnomalies() {
+  if (ui.screen !== 'detail' || ui.detailTab !== 0) return false;
+  const count = Number(viewModel().meta?.anomalyCount || 0);
+  if (!count) {
+    setStatus('No transcript anomalies to show', 'error');
+    draw();
+    return false;
+  }
+  ui.transcriptAnomaliesOnly = !ui.transcriptAnomaliesOnly;
+  ui.follow = false;
+  ui.detailScroll = 0;
+  ui.transcriptSelection = 0;
+  clearSearch();
+  setStatus(ui.transcriptAnomaliesOnly
+    ? `Showing ${count} transcript anomalies`
+    : 'Showing the complete transcript');
+  draw();
+  return true;
+}
+
+function openScopeEvidence() {
+  if (ui.screen !== 'detail' || Number(viewModel().meta?.scopeViolationCount || 0) <= 0) return false;
+  switchDetailTab(2);
+  return true;
+}
+
 function toggleFollow() {
   if (ui.screen !== 'detail' || ![0, 4].includes(ui.detailTab)) return false;
   if (ui.follow) {
@@ -1668,10 +1729,7 @@ function dispatchMenuAction(action) {
   if (action === 'detail.release') return detailAction('R');
   if (action === 'detail.review') return detailAction('w');
   if (action === 'detail.nudge') return detailAction('n');
-  if (action === 'detail.cancel') return detailAction('c');
-  if (action === 'detail.revert') return detailAction('v');
   if (action === 'work.accept') return workAction('a');
-  if (action === 'work.reject') return workAction('r');
   if (action === 'work.integrate') return workAction('i');
   if (action === 'work.next-round') return workAction('w');
   if (action === 'fleet.externals') {
@@ -1701,8 +1759,10 @@ function dispatchMenuAction(action) {
     return;
   }
   if (action === 'detail.follow') return toggleFollow();
+  if (action === 'detail.anomalies') return toggleTranscriptAnomalies();
   if (action === 'detail.events') return jumpTranscriptToEvents();
   if (action === 'detail.diff') return openFocusedToolDiff();
+  if (action === 'detail.scope-evidence') return openScopeEvidence();
   if (action === 'launcher.editor') return editLauncherBody();
   if (action === 'launcher.dry-run') return dryRunLaunch();
   if (action === 'view.yank') return copyFocused();
@@ -1713,6 +1773,34 @@ function dispatchMenuAction(action) {
     ui.statusHistoryPage = 0;
     draw();
   }
+}
+
+function dispatchRegisteredBinding(binding) {
+  return dispatchKeymapBinding(binding, {
+    perform(action) {
+      dispatchMenuAction(action);
+    },
+    confirm(gate, item) {
+      ui.actionMenu = null;
+      if (gate !== 'job-id-suffix') {
+        setStatus(`Unsupported confirmation gate for ${item.action}`, 'error');
+        draw();
+        return;
+      }
+      if (item.action === 'detail.cancel') beginCancel(selectedJob());
+      else if (item.action === 'detail.revert') beginRevert(selectedJob());
+      else if (item.action === 'work.reject') beginWorkDecision('rejected');
+      else {
+        setStatus(`No confirmation route is registered for ${item.action}`, 'error');
+        draw();
+      }
+    },
+    missingConfirmation(item) {
+      ui.actionMenu = null;
+      setStatus(`Blocked destructive action without confirmation: ${item.action}`, 'error');
+      draw();
+    }
+  });
 }
 
 function handleActionMenu(key) {
@@ -1774,7 +1862,8 @@ function handleActionMenu(key) {
       draw();
       return true;
     }
-    dispatchMenuAction(selected.action);
+    if (selected.class === 'destructive') dispatchRegisteredBinding(selected);
+    else dispatchMenuAction(selected.action);
     return true;
   } else return true;
   draw();
@@ -1851,6 +1940,10 @@ function handleKey(key) {
   if (directBlocked) {
     setStatus(directBlocked, 'error');
     draw();
+    return;
+  }
+  if (binding?.class === 'destructive') {
+    dispatchRegisteredBinding(binding);
     return;
   }
   if (key === 'b') return toggleNotifications();
@@ -1950,7 +2043,7 @@ function handleKey(key) {
       }
       return;
     }
-    if (['a', 'r', 'i', 'w'].includes(key)) workAction(key);
+    if (['a', 'i', 'w'].includes(key)) workAction(key);
     return;
   }
   if (ui.screen === 'stats') {
@@ -2016,6 +2109,7 @@ function handleKey(key) {
     toggleFollow();
     return;
   }
+  if (key === 'A' && ui.detailTab === 0) { toggleTranscriptAnomalies(); return; }
   if (key === '/' && [0, 1, 4].includes(ui.detailTab)) { beginPaneSearch(); return; }
   if (key === 'E' && ui.detailTab === 0) { jumpTranscriptToEvents(); return; }
   if (key === 'enter' && ui.detailTab === 0 && toggleFocusedTool()) return;
@@ -2030,10 +2124,11 @@ function handleKey(key) {
   }
   if (key === 'left' && ui.detailTab === 1) { pageDiff(-1); return; }
   if (key === 'right' && ui.detailTab === 1) { pageDiff(1); return; }
-  if (['a', 's', 'r', 'R', 'c', 'v', 'w'].includes(key)) detailAction(key);
+  if (['a', 's', 'r', 'R', 'w'].includes(key)) detailAction(key);
 }
 
 function onData(buffer) {
+  if (pendingInputAtNs == null) pendingInputAtNs = process.hrtime.bigint().toString();
   bufferedInput.push(buffer);
 }
 
@@ -2049,13 +2144,25 @@ function detachTuiInput() {
 
 const bufferedInput = new BufferedInput({
   onFlush(events) {
+    activeInputTiming = {
+      id: `input-${diagnosticRecorder?.frame ?? 0}-${Date.now()}`,
+      atNs: pendingInputAtNs || process.hrtime.bigint().toString(),
+      events: events.length
+    };
+    pendingInputAtNs = null;
+    diagnosticRecorder?.recordTimeline('input.flush', {
+      inputId: activeInputTiming.id,
+      inputAtNs: activeInputTiming.atNs,
+      events: events.length
+    });
     inputBatch = true;
     inputDrawPending = false;
     try {
       for (const event of events) handleKey(event);
     } finally {
       inputBatch = false;
-      if (inputDrawPending) draw();
+      if (inputDrawPending) draw('input');
+      activeInputTiming = null;
     }
   }
 });
@@ -2066,13 +2173,13 @@ source.on('change', (next) => {
   notifier.observe(next);
   rebuildPaneSearch();
   if (ui.screen === 'launcher') scheduleRouteAdvice();
-  draw();
+  draw('data');
 });
-source.on('warning', (error) => { setStatus(`Store warning: ${error.message}`, 'error'); draw(); });
-screen.on('resize', () => { invalidateWrapCache(); draw(); });
+source.on('warning', (error) => { setStatus(`Store warning: ${error.message}`, 'error'); draw('data-warning'); });
+screen.on('resize', () => { invalidateWrapCache(); draw('resize'); });
 const clock = setInterval(() => {
   ui.now = Date.now();
-  if (ui.terminalFocused) draw();
+  if (ui.terminalFocused) draw('clock');
 }, 1000);
 clock.unref?.();
 
@@ -2105,7 +2212,7 @@ if (probeResult.mode === 'verbose') addStatusHistory(formatWidthProbeResult(prob
 widthProbeInputStage = probeResult.background || null;
 attachTuiInput();
 if (probeResult.remainder) bufferedInput.push(probeResult.remainder);
-draw();
+draw('startup');
 if (widthProbeInputStage) {
   const stage = widthProbeInputStage;
   void stage.released.then(() => { if (widthProbeInputStage === stage) widthProbeInputStage = null; });

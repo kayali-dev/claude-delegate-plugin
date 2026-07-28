@@ -151,11 +151,91 @@ test('fleet directory truncates by display width and compact density drops direc
   assert.ok(rendered.includes(expected));
   assert.ok(!rendered.includes(dirname));
 
-  const directoryDropped = fleetViewModel(store, { now: NOW, fleetDensity: 'compact' }, { width: 60, height: 30 });
+  const directoryDropped = fleetViewModel(store, { now: NOW, fleetDensity: 'compact' }, { width: 61, height: 30 });
   assert.ok(!directoryDropped.panes[0].content.columns.some((column) => column.key === 'dir'));
   assert.ok(directoryDropped.panes[0].content.columns.some((column) => column.key === 'effort'));
   const bothDropped = fleetViewModel(store, { now: NOW, fleetDensity: 'compact' }, { width: 50, height: 30 });
   assert.ok(!bothDropped.panes[0].content.columns.some((column) => ['dir', 'effort'].includes(column.key)));
+});
+
+test('Fleet Changed timestamp follows mode, degrades without overflow, and fits remote Host layouts', () => {
+  const store = syntheticStore();
+  const wideViewport = { width: 130, height: 30 };
+  const absolute = fleetViewModel(store, {
+    now: NOW, timestampMode: 'absolute', fleetDensity: 'wide'
+  }, wideViewport);
+  const columns = absolute.panes[0].content.columns;
+  const changedIndex = columns.findIndex((column) => column.key === 'changed');
+  assert.ok(changedIndex >= 0, 'wide Fleet includes Changed');
+  assert.equal(
+    absolute.panes[0].content.rows[0].cells[changedIndex],
+    new Date(NOW - 5000).toISOString().slice(11, 19)
+  );
+  const relative = fleetViewModel(store, {
+    now: NOW, timestampMode: 'relative', fleetDensity: 'wide'
+  }, wideViewport);
+  assert.equal(relative.panes[0].content.rows[0].cells[changedIndex], '5s ago');
+
+  store.jobs[0].lastActivityAt = 0;
+  store.jobs[0].updatedAt = 0;
+  const missing = fleetViewModel(store, {
+    now: NOW, timestampMode: 'absolute', fleetDensity: 'wide', fleetSort: 'provider'
+  }, wideViewport);
+  const missingIndex = missing.panes[0].content.columns.findIndex((column) => column.key === 'changed');
+  const missingRow = missing.panes[0].content.rows.find((row) => row.id === store.jobs[0].id);
+  assert.equal(missingRow.cells[missingIndex], '-');
+
+  const assertFits = (frame, label) => {
+    const table = frame.panes[0].content;
+    assert.ok(table.columns.reduce((total, column) => total + column.width, 0) <= frame.width - 4, label);
+    assert.equal(paintFrame(frame).columns, frame.width, `${label}: frame width`);
+  };
+  const narrow = fleetViewModel(store, {
+    now: NOW, timestampMode: 'relative', fleetDensity: 'compact'
+  }, { width: 60, height: 18 });
+  assert.ok(!narrow.panes[0].content.columns.some((column) => column.key === 'changed'));
+  assertFits(narrow, 'narrow local');
+
+  const remote = { enabled: true, host: 'remote.test', includeLocal: false };
+  const remoteWide = fleetViewModel(store, {
+    now: NOW, timestampMode: 'relative', fleetDensity: 'wide', remote
+  }, { width: 144, height: 30 });
+  assert.ok(remoteWide.panes[0].content.columns.some((column) => column.key === 'host'));
+  assert.ok(remoteWide.panes[0].content.columns.some((column) => column.key === 'changed'));
+  assertFits(remoteWide, 'wide remote');
+  const remoteCompact = fleetViewModel(store, {
+    now: NOW, timestampMode: 'relative', fleetDensity: 'compact', remote
+  }, { width: 84, height: 24 });
+  assert.ok(remoteCompact.panes[0].content.columns.some((column) => column.key === 'host'));
+  assertFits(remoteCompact, 'compact remote');
+});
+
+test('transcript anomaly badge and drill-down consume the exact same projected list', () => {
+  const store = syntheticStore();
+  const jobId = 'codex-active-1234567';
+  store.eventsByJob[jobId] = [
+    { v: 1, seq: 1, at: NOW - 3000, jobId, type: 'scope.violation', redacted: true, data: { path: 'outside.js' } },
+    { v: 1, seq: 2, at: NOW - 2000, jobId, type: 'budget.exceeded', redacted: true, data: { maxOutputTokens: 10 } },
+    { v: 1, seq: 3, at: NOW - 1000, jobId, type: 'error', redacted: true, data: { message: 'provider failed' } },
+    { v: 1, seq: 4, at: NOW, jobId, type: 'message.completed', redacted: true, data: { text: 'ordinary evidence' } }
+  ];
+  const all = detailViewModel(store, {
+    jobId, detailTab: 0, now: NOW, follow: false
+  }, { width: 100, height: 30 });
+  const count = all.meta.anomalyCount;
+  assert.equal(count, 3);
+  assert.equal(all.panes[0].summary.badge.text, '3 ANOMALIES');
+
+  const drillDown = detailViewModel(store, {
+    jobId, detailTab: 0, now: NOW, follow: false, transcriptAnomaliesOnly: true
+  }, { width: 100, height: 30 });
+  assert.match(drillDown.panes[0].title, /anomalies only/);
+  assert.equal(drillDown.panes[0].content.entries.length, count);
+  assert.deepEqual(
+    drillDown.panes[0].content.entries.map((entry) => entry.key),
+    all.meta.anomalyEntryKeys
+  );
+  assert.deepEqual(drillDown.meta.anomalyEntryKeys, all.meta.anomalyEntryKeys);
 });
 
 test('open context compaction animates in both fleet row and detail header instead of rendering quiet', () => {

@@ -11,7 +11,7 @@ import { actionMenuForContext, footerForContext, formatKeyNotation, helpPagesFor
 import { uiPalette as palette } from './palette.mjs';
 import { sectionGapForHeight, SPACE } from './rhythm.mjs';
 import { classifySession, correlateSessions } from './sessions.mjs';
-import { formatTranscriptBlock, TranscriptProjector, wrapTranscriptBlock } from './transcript.mjs';
+import { formatTranscriptBlock, transcriptAnomalyEntries, TranscriptProjector, wrapTranscriptBlock } from './transcript.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
@@ -161,17 +161,26 @@ function jobEffort(job) {
 
 function fleetColumns(width, remote = null, density = 'wide') {
   const hostWidth = remote?.enabled ? 14 : 0;
+  const changedWidth = 10;
+  // Widths include the model column at its eight-cell minimum. Optional
+  // columns are admitted only when their complete width fits, leaving the
+  // single flexible model column to absorb positive slack.
+  const wideBaseWidth = 102 + hostWidth;
+  const compactBaseWidth = 50;
   const wide = density !== 'compact' && width >= 96 + hostWidth;
-  const compactBaseWidth = 45;
   const showHost = remote?.enabled && (wide || width >= compactBaseWidth + hostWidth);
   const showEffort = wide || width >= compactBaseWidth + (showHost ? hostWidth : 0) + 7;
-  const showDirectory = wide || width >= compactBaseWidth + (showHost ? hostWidth : 0) + 7 + 12;
+  const showDirectory = wide || width >= compactBaseWidth + (showHost ? hostWidth : 0)
+    + (showEffort ? 7 : 0) + 12;
+  const showChanged = width >= (wide ? wideBaseWidth : compactBaseWidth
+    + (showHost ? hostWidth : 0) + (showEffort ? 7 : 0) + (showDirectory ? 12 : 0)) + changedWidth;
   const columns = wide ? [
     { key: 'id', title: 'Job', width: 10, selectedStyle: palette.selectedId }, { key: 'provider', title: 'Provider', width: 8 },
     ...(remote?.enabled ? [{ key: 'host', title: 'Host', width: hostWidth }] : []),
     { key: 'dir', title: 'Directory', width: 12 }, { key: 'model', title: 'Model', width: 8, flexible: true },
     { key: 'effort', title: 'Effort', width: 7 }, { key: 'mode', title: 'Mode', width: 7 },
     { key: 'activity', title: 'Activity', width: 10 },
+    ...(showChanged ? [{ key: 'changed', title: 'Changed', width: changedWidth }] : []),
     { key: 'elapsed', title: 'Elapsed', width: 7, align: 'right' }, { key: 'tokens', title: 'Out/budget', width: 10, align: 'right' },
     { key: 'chain', title: 'Chain', width: 8 }, { key: 'badges', title: 'Badges', width: 15 }
   ] : [
@@ -180,7 +189,9 @@ function fleetColumns(width, remote = null, density = 'wide') {
     ...(showDirectory ? [{ key: 'dir', title: 'Directory', width: 12 }] : []),
     { key: 'model', title: 'Model', width: 8, flexible: true },
     ...(showEffort ? [{ key: 'effort', title: 'Effort', width: 7 }] : []),
-    { key: 'activity', title: 'Activity', width: 13 }, { key: 'badges', title: 'Badges', width: 12 }
+    { key: 'activity', title: 'Activity', width: 13 },
+    ...(showChanged ? [{ key: 'changed', title: 'Changed', width: changedWidth }] : []),
+    { key: 'badges', title: 'Badges', width: 12 }
   ];
   const total = columns.reduce((sum, column) => sum + column.width, 0);
   const flexible = columns.find((column) => column.flexible);
@@ -762,6 +773,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
       effort: jobEffort(job),
       mode: displayOr(job.mode, '-'),
       activity: activityIndicator(activity, now),
+      changed: formatTimestamp(job.lastActivityAt || job.updatedAt * 1000, { mode: ui.timestampMode, now }) || '-',
       elapsed: duration(((job.completedAt ? job.completedAt * 1000 : now) - (job.createdAt || 0) * 1000)),
       tokens,
       chain: job.rootJobId ? `>${formatDisplayValue(job.rootJobId).slice(-6)}` : job.groupId ? `G:${formatDisplayValue(job.groupId).slice(0, 7)}` : '-',
@@ -1266,7 +1278,8 @@ function detailContent(job, store, ui, tab, activity) {
         ? { kind: 'empty', message: 'subagent transcript not found (yet) \u2014 background agents link once the file appears; reopen to retry' }
       : { kind: 'empty', message: 'no transcript entries', action: 'Live output will appear here when the worker writes it' };
   if (tab === 0) {
-    const entries = transcriptProjector(job.id).project(events, {
+    const projector = transcriptProjector(job.id);
+    const entries = projector.project(events, {
       expandedTools: ui.expandedTools,
       jobCwd: job.cwd,
       now: nowOf(ui, store),
@@ -1276,11 +1289,13 @@ function detailContent(job, store, ui, tab, activity) {
       thinkingSince: activity.since,
       thinkingSeq: activity.sourceSeq
     });
+    const anomalyEntries = transcriptAnomalyEntries(entries);
+    const displayedEntries = ui.transcriptAnomaliesOnly ? anomalyEntries : entries;
     const tools = entries.filter((entry) => entry.kind === 'tool');
     const agents = tools.filter((entry) => entry.tool?.category === 'subagent');
-    const anomalies = entries.filter((entry) => entry.tool?.failed || entry.kind === 'notice' && /scope|budget|error/.test(entry.noticeType || '')).length;
+    const anomalies = anomalyEntries.length;
     return {
-      title: `Transcript${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${CHROME_SEPARATOR}time:${ui.timestampMode === 'relative' ? 'relative' : 'absolute'}${historyState}${searchSuffix(ui, 'transcript')}`,
+      title: `Transcript${ui.transcriptAnomaliesOnly ? `${CHROME_SEPARATOR}anomalies only` : ''}${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${CHROME_SEPARATOR}time:${ui.timestampMode === 'relative' ? 'relative' : 'absolute'}${historyState}${searchSuffix(ui, 'transcript')}`,
       summary: {
         text: joinDisplayParts([
           `${entries.length} blocks`,
@@ -1292,15 +1307,18 @@ function detailContent(job, store, ui, tab, activity) {
       },
       loading: hydration?.loading === true,
       loadingGlyph: spinnerGlyph(nowOf(ui, store)),
-      content: entries.length ? {
-        kind: 'rail', virtual: true, entries, formatEntry: formatTranscriptBlock, wrapEntry: wrapTranscriptBlock, styleLine: transcriptLineStyle,
-        measureKey: `transcript:${job.id}`,
+      content: displayedEntries.length ? {
+        kind: 'rail', virtual: true, entries: displayedEntries, formatEntry: formatTranscriptBlock, wrapEntry: wrapTranscriptBlock, styleLine: transcriptLineStyle,
+        measureKey: `transcript:${job.id}:${ui.transcriptAnomaliesOnly ? 'anomalies' : 'all'}`,
         follow: ui.follow !== false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'transcript'),
         selectedEntry: ui.follow !== false
-          ? entries.length - 1
-          : Math.max(0, Math.min(entries.length - 1, Number(ui.transcriptSelection ?? ui.detailScroll?.entry ?? ui.detailScroll ?? 0)))
+          ? displayedEntries.length - 1
+          : Math.max(0, Math.min(displayedEntries.length - 1, Number(ui.transcriptSelection ?? ui.detailScroll?.entry ?? ui.detailScroll ?? 0)))
       } : emptyHistory,
-      scrollItemCount: entries.length
+      scrollItemCount: displayedEntries.length,
+      projectionMetrics: projector.lastMetrics,
+      anomalyCount: anomalies,
+      anomalyEntryKeys: anomalyEntries.map((entry) => entry.key)
     };
   }
   if (tab === 1) {
@@ -1496,6 +1514,10 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
       chainJobIds: body.chainJobIds || [],
       eventKeys: body.eventKeys || [],
       scrollItemCount: body.scrollItemCount || 0,
+      projectionMetrics: body.projectionMetrics || null,
+      anomalyCount: Number(body.anomalyCount || 0),
+      anomalyEntryKeys: body.anomalyEntryKeys || [],
+      scopeViolationCount: scopeViolationCount(job),
       activity,
       originProject
     }
