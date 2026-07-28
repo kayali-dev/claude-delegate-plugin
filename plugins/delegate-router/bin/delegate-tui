@@ -6,6 +6,7 @@ import {
   filterDiffPaths,
   inspectJob,
   launchManagedJob,
+  maybePruneJobs,
   preflightManagedIntegration,
   prepareManagedIntegration,
   reviewRoundManagedJob,
@@ -190,6 +191,9 @@ try {
   process.exit(1);
 }
 if (cli.includeLocal && !remoteTargets.length) argumentError('--include-local requires at least one --connect or remotes.json entry');
+if (!remoteTargets.length || cli.includeLocal) {
+  try { maybePruneJobs(); } catch {}
+}
 if (initialJobId && !/^[a-zA-Z0-9_-]+$/.test(initialJobId)) {
   console.error(`delegate-tui: invalid job id: ${initialJobId}`);
   process.exit(1);

@@ -334,7 +334,18 @@ Everything else belongs in the status line or remains available through pull.
 
 For long jobs, do not chain polling turns: run `delegate-jobs wait <job-id>` with the Bash tool's `run_in_background: true` and continue other work — the harness notifies on exit (0 completed, 3 failed, 4 cancelled, 5 no observed changes, 6 verification failed, 75 wait-timeout). Bound the whole job with `timeoutSeconds` on `delegate_start` (60–86400; default 3600, deliberately long because LLM jobs legitimately run long). `maxOutputTokens` stops through the provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and the continuation ID.
 
-Shared write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another shared writer is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent shared writers. Workspace-isolated jobs instead require claims: overlapping path prefixes or exact resource IDs fail with `CLAIM_CONFLICT`, and a shared writer owns the whole repository for scheduling. A live shared-tree collision alert means a write already happened: inspect the named path and rerun stale verification before any acceptance decision. Terminal job records are pruned automatically after `DELEGATE_JOB_RETENTION_DAYS` (default 14).
+Shared write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another shared writer is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent shared writers. Workspace-isolated jobs instead require claims: overlapping path prefixes or exact resource IDs fail with `CLAIM_CONFLICT`, and a shared writer owns the whole repository for scheduling. A live shared-tree collision alert means a write already happened: inspect the named path and rerun stale verification before any acceptance decision.
+
+Store maintenance is self-managing and conservative. Age retention
+(`DELEGATE_JOB_RETENTION_DAYS`, default 14) runs before the 1.5 GiB total-state
+budget (`DELEGATE_STATE_BUDGET_BYTES`). Never describe a non-terminal,
+`ready-for-review`, `blocked`, live-leased, or newest-20 terminal job as
+reclaimable by budget. Protected overage is reported, not deleted. Terminal
+journals gzip transparently; both plain and gzip remain readable. The 32 MiB
+per-job journal cap keeps the head and newest tail and exposes a
+`journal.truncated` marker plus record metadata. Use `delegate-health` for
+bytes/files/headroom and the private bounded `maintenance.jsonl` for exact
+compression and age-versus-budget deletion history.
 
 When steering, remember a correction that shrinks the task can complete before a follow-up command lands; do not plan a steer-then-cancel sequence around a shrinking task.
 

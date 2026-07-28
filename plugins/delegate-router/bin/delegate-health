@@ -13,6 +13,7 @@ import {
 } from './lib/providers.mjs';
 import { resolveAttemptDriverMatrix } from './lib/attempt-driver.mjs';
 import { auditLogPath, effectiveUsage, enabledProviders, loadState, mutateState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
+import { maintenanceLogPath, measureStateStore } from './lib/store-maintenance.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout, windowsHide: true });
@@ -38,6 +39,7 @@ const codexBinary = process.env.DELEGATE_CODEX_BIN || executableOnPath('codex');
 const claudeBinary = executableOnPath('claude');
 const controlServer = path.join(path.dirname(fileURLToPath(import.meta.url)), 'delegate-control-mcp');
 const configuredProviders = enabledProviders();
+const store = measureStateStore();
 const packageInfo = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'));
 const report = {
   ok: true,
@@ -45,6 +47,8 @@ const report = {
   versionNote: 'CLI resolves to the installed plugin on every run; the skill and MCP servers pin at session start - reload plugins after upgrades to align all surfaces',
   stateFile: statePath(),
   auditLogFile: auditLogPath(),
+  maintenanceLogFile: maintenanceLogPath(),
+  store,
   providerConfigFile: providerConfigPath(),
   enabledProviders: configuredProviders,
   node: { ok: Number(process.versions.node.split('.')[0]) >= 18, version: process.versions.node },
@@ -175,7 +179,8 @@ if (deep) {
 
 report.ok = report.node.ok && report.claude.installed && report.control.installed
   && (!report.codex.enabled || report.codex.installed)
-  && (!report.cursor.enabled || report.cursor.installed);
+  && (!report.cursor.enabled || report.cursor.installed)
+  && !report.store.overBudget;
 if (!quick && report.cursor.enabled && report.cursor.installed) {
   report.ok = report.ok && report.cursor.status?.ok === true && report.cursor.models?.ok === true
     && report.cursor.projectConfig?.ok !== false && report.cursor.capabilityProbe?.ok === true;
@@ -190,6 +195,8 @@ else {
   console.log(`Cursor: ${report.cursor.enabled ? report.cursor.installed ? 'installed' : 'missing' : 'disabled'}${report.cursor.enabled && cursorBinary ? ` (${path.basename(cursorBinary)})` : ''}`);
   console.log(`Control MCP: ${report.control.installed ? 'installed' : 'missing'}`);
   console.log(`Audit log: ${report.auditLogFile}`);
+  console.log(`State store: ${report.store.bytes} bytes in ${report.store.files} files; budget ${report.store.budgetBytes}; headroom ${report.store.headroomBytes}${report.store.complete ? '' : ' (bounded scan incomplete)'}`);
+  console.log(`Maintenance log: ${report.maintenanceLogFile}`);
   if (report.cursor.acp) console.log(`Cursor ACP: ${report.cursor.acp.ok ? 'available' : 'unavailable (headless fallback)'}`);
   if (report.cursor.projectConfig?.ok === false) console.log(`Cursor project config: invalid (${report.cursor.projectConfig.code}) ${report.cursor.projectConfig.file}`);
   if (report.cursor.capabilityProbe) {

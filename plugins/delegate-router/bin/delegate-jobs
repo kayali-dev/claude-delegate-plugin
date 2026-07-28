@@ -16,6 +16,7 @@ import {
   jobTranscript,
   jobUsage,
   launchManagedJob,
+  maybePruneJobs,
   prepareManagedIntegration,
   preflightManagedIntegration,
   pruneJobs,
@@ -307,6 +308,9 @@ function withStdoutDiagnosticsRedirected(action) {
 const args = process.argv.slice(2);
 const rawCommand = args.shift() || 'status';
 const command = rawCommand === 'list' ? 'status' : rawCommand;
+if (command !== 'prune') {
+  try { maybePruneJobs(); } catch {}
+}
 
 try {
   if (command === 'spec') {

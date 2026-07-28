@@ -38,6 +38,7 @@ import {
   scanExternalCodexThreads
 } from '../codex-sessions.mjs';
 import { claudeProjectsDirectory, readClaudeTranscriptTail, scanClaudeSessions } from './sessions.mjs';
+import { readJournalTail } from '../store-maintenance.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DEFAULT_MAX_EVENTS = 5000;
@@ -51,27 +52,8 @@ export function readRecentJobEvents(id, options = {}) {
   const file = eventPath(id);
   const maxBytes = Math.max(1024, Number(options.maxBytes || ACTIVITY_TAIL_BYTES));
   const limit = Math.max(1, Number(options.limit || ACTIVITY_TAIL_EVENTS));
-  let size;
-  try { size = fs.statSync(file).size; }
+  try { return readJournalTail(file, maxBytes, limit); }
   catch { return []; }
-  if (!size) return [];
-  const offset = Math.max(0, size - maxBytes);
-  const fd = fs.openSync(file, 'r');
-  let text;
-  try {
-    const buffer = Buffer.alloc(size - offset);
-    fs.readSync(fd, buffer, 0, buffer.length, offset);
-    text = buffer.toString('utf8');
-  } finally {
-    fs.closeSync(fd);
-  }
-  if (offset) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
-  const events = [];
-  for (const line of text.split('\n')) {
-    if (!line) continue;
-    try { events.push(JSON.parse(line)); } catch {}
-  }
-  return events.slice(-limit);
 }
 
 export function aggregateJobGroups(jobs = []) {
@@ -294,7 +276,8 @@ export class DelegateDataSource extends EventEmitter {
         return true;
       } catch { return false; }
     };
-    const jobChange = (name) => !name || name.endsWith('.json') || name.endsWith('.events.jsonl') || name.endsWith('.finished');
+    const jobChange = (name) => !name || name.endsWith('.json') || name.endsWith('.events.jsonl')
+      || name.endsWith('.events.jsonl.gz') || name.endsWith('.finished');
     if (!add(jobsDir(), 'jobs', jobChange)) add(dataDir(), 'jobs', (name) => !name || name === 'jobs');
     add(statePath(), 'metadata');
     add(auditLogPath(), 'metadata');

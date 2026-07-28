@@ -58,7 +58,7 @@ test('delegate-tui --job validates the id before TTY startup and unknown jobs ex
   fs.mkdirSync(path.join(directory, 'jobs'));
   fs.writeFileSync(path.join(directory, 'jobs', 'known-job.json'), JSON.stringify({ id: 'known-job', status: 'completed', provider: 'codex' }));
   const known = spawnSync(process.execPath, [tui, '--job', 'known-job'], { encoding: 'utf8', env });
-  assert.equal(known.status, 2);
+  assert.equal(known.status, 2, known.stderr);
   assert.match(known.stderr, /stdout is not a TTY/);
   assert.doesNotMatch(known.stderr, /job not found/);
 });

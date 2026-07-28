@@ -2,6 +2,46 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.46.0 — 2026-07-28
+
+- Fixed Escape needing a second keypress to take effect. A lone `ESC` byte is
+  also a prefix of the bracketed-paste opener `ESC[200~`, and the decoder's
+  paste-prefix guard was the only incomplete-sequence guard that ignored
+  `final`, so `flush()` could not drain it either and the keypress surfaced
+  only when the user next typed. Every Escape consumer was affected — leaving
+  a transcript, closing the help dialog, the action menu, status history.
+  `BufferedInput` now holds an ambiguous prefix on a bounded escape timeout
+  (50ms) rather than indefinitely, with a separate 5s deadline for a paste body
+  and idle semantics so a sequence split over a slow link still coalesces. A
+  forward-progress invariant makes an input wedge unrepresentable, and an
+  unterminated paste is delivered rather than held forever.
+- Narrowed the `tui-datasource` close assertion, which timed a synchronous
+  `fs.watch` teardown whose macOS FSEvents latency is unbounded (13–30ms
+  typical, 9713ms observed) and accounted for 100% of the measured span, while
+  the deferred hydration it names settled in 0.0ms on every run. It now times
+  only the hydration settling and keeps every teardown assertion.
+- Bounded the complete Delegate Router state directory with an age policy plus
+  a 1.5 GiB default `DELEGATE_STATE_BUDGET_BYTES` budget. Budget reclaim is
+  oldest-terminal-first and never removes non-terminal work, `ready-for-review`
+  or `blocked` work, live supervisor leases, or the newest 20 terminal jobs.
+  If protected state prevents the target, reclaim stops and records a loud
+  over-budget warning instead of deleting work.
+- Terminal journals now gzip in place and every journal reader permanently
+  accepts both `.events.jsonl` and `.events.jsonl.gz`. The monitor retains its
+  cheap extension-aware mtime/size stamp, while MCP events, transcript/diff
+  projections, the TUI, and outcome readers transparently decode gzip.
+- Added a 32 MiB default `DELEGATE_JOB_JOURNAL_CAP_BYTES` cap. A capped live
+  journal retains its head and newest tail, inserts a visible
+  `journal.truncated` event, and records cumulative omission details on the job.
+- Maintenance remains on the shared six-hour stamp but now runs from MCP, CLI,
+  TUI, managed-launch, and the supervisor idle path. Each sweep examines at
+  most 500 records, removes at most 25, and compresses at most 25 legacy
+  terminal journals. A private bounded `maintenance.jsonl` records high-water
+  warnings, compression measurements, deletions, and age-versus-budget reason.
+- `delegate-health` now reports state-store bytes, file count, budget,
+  high-water threshold, and signed headroom in both JSON and human output. No
+  MCP schema or CLI flag changed.
+
 ## 0.45.0 — 2026-07-27
 
 - Completed P9 with a formal provider attempt-driver contract for Codex

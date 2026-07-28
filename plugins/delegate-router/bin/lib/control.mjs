@@ -43,6 +43,25 @@ import {
   initializeOutcomeAttempt,
   outcomeLedgerSnapshot
 } from './outcome-ledger.mjs';
+import {
+  DEFAULT_SWEEP_COMPRESS_LIMIT,
+  DEFAULT_SWEEP_FILE_LIMIT,
+  DEFAULT_SWEEP_RECORD_LIMIT,
+  DEFAULT_SWEEP_REMOVE_LIMIT,
+  appendJournalLine,
+  appendMaintenanceLog,
+  compressJournalFile,
+  jobRecordIdsByAge,
+  maintenanceLogPath,
+  measureStateStore,
+  readJournalBuffer,
+  readJournalText,
+  removeJobState,
+  replaceJournalBuffer,
+  resolveJournalFile,
+  storePolicy
+} from './store-maintenance.mjs';
+import { listSupervisorLeases } from './supervisor-common.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -321,10 +340,28 @@ function appendTerminalAuditIfMissing(job) {
   });
 }
 
+function compressTerminalJournal(job) {
+  if (!TERMINAL_STATUSES.has(job.status)) return null;
+  const result = compressJournalFile(paths(job.id).events);
+  if (!result) return null;
+  forgetJournalCaches(job.id);
+  if (!result.alreadyCompressed) {
+    job.journalStorage = {
+      encoding: 'gzip',
+      compressedAt: Date.now(),
+      uncompressedBytes: result.beforeBytes,
+      compressedBytes: result.afterBytes
+    };
+    saveJob(job);
+  }
+  return result;
+}
+
 function writeTerminalArtifacts(job, wasTerminal) {
   if (wasTerminal || !TERMINAL_STATUSES.has(job.status)) return;
   const sentinel = paths(job.id).finished;
   if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
+  compressTerminalJournal(job);
   // The resident owns process-exit telemetry. Delay its audit row until the
   // lease is finalized, while keeping the ordinary terminal sentinel and
   // store transition immediate for pull readers and the P2a monitor.
@@ -332,7 +369,7 @@ function writeTerminalArtifacts(job, wasTerminal) {
   appendTerminalAudit(job);
 }
 
-export function eventPath(id) { return paths(id).events; }
+export function eventPath(id) { return resolveJournalFile(paths(id).events); }
 
 // Streaming deltas can split a credential across chunk boundaries, evading
 // per-chunk regexes. Keep a bounded per-stream tail and suppress any chunk
@@ -544,7 +581,7 @@ function rememberCollisionOwnWrites(job, data, at) {
 
 function readRawEvents(id) {
   try {
-    return fs.readFileSync(eventPath(id), 'utf8').split('\n').filter(Boolean).flatMap((line) => {
+    return readJournalText(eventPath(id)).split('\n').filter(Boolean).flatMap((line) => {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
   } catch (error) {
@@ -601,6 +638,7 @@ function ensureCheckpoint(job) {
 }
 
 function repairAndReadLastEvent(file) {
+  if (resolveJournalFile(file).endsWith('.gz')) return readLastCompleteEvent(file);
   let fd;
   try { fd = fs.openSync(file, 'r+'); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -658,8 +696,21 @@ function previousNewlineOffset(fd, before) {
 }
 
 export function readLastCompleteEvent(file) {
+  const resolved = resolveJournalFile(file);
+  if (resolved.endsWith('.gz')) {
+    const text = readJournalText(resolved);
+    let end = text.lastIndexOf('\n');
+    while (end >= 0) {
+      const start = text.lastIndexOf('\n', end - 1) + 1;
+      if (end > start) {
+        try { return JSON.parse(text.slice(start, end)); } catch {}
+      }
+      end = start - 1;
+    }
+    return null;
+  }
   let fd;
-  try { fd = fs.openSync(file, 'r'); }
+  try { fd = fs.openSync(resolved, 'r'); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   try {
     const size = fs.fstatSync(fd).size;
@@ -672,6 +723,131 @@ export function readLastCompleteEvent(file) {
     if (bytesRead !== line.length) return null;
     try { return JSON.parse(line.toString('utf8')); } catch { return null; }
   } finally { fs.closeSync(fd); }
+}
+
+function completeJournalEntries(buffer) {
+  const entries = [];
+  let start = 0;
+  for (;;) {
+    const newline = buffer.indexOf(0x0a, start);
+    if (newline < 0) break;
+    const bytes = buffer.subarray(start, newline + 1);
+    let event = null;
+    try { event = JSON.parse(bytes.subarray(0, bytes.length - 1).toString('utf8')); } catch {}
+    if (event) entries.push({ bytes, event });
+    start = newline + 1;
+  }
+  return entries;
+}
+
+function forgetJournalCaches(id) {
+  pageCursors.delete(id);
+  compressedPageCache.delete(id);
+}
+
+function writeBoundedJournalEvent(job, event) {
+  const plain = paths(job.id).events;
+  const file = resolveJournalFile(plain);
+  const incoming = Buffer.from(`${JSON.stringify(event)}\n`);
+  const capBytes = storePolicy().journalCapBytes;
+  let existingSize = 0;
+  try { existingSize = fs.statSync(file).size; } catch {}
+  if (!file.endsWith('.gz') && existingSize + incoming.length <= capBytes) {
+    appendJournalLine(file, incoming);
+    return false;
+  }
+  const existing = readJournalBuffer(file);
+  if (existing.length + incoming.length <= capBytes) {
+    appendJournalLine(file, incoming);
+    return false;
+  }
+
+  const prior = job.journalTruncation || {};
+  const entries = [
+    ...completeJournalEntries(existing).filter((entry) => entry.event.type !== 'journal.truncated'),
+    { bytes: incoming, event }
+  ];
+  const headBudget = Math.floor(capBytes * 0.25);
+  const tailBudget = Math.floor(capBytes * 0.5);
+  const head = [];
+  let headBytes = 0;
+  let headEnd = 0;
+  while (headEnd < entries.length - 1) {
+    const entry = entries[headEnd];
+    if (head.length && headBytes + entry.bytes.length > headBudget) break;
+    head.push(entry);
+    headBytes += entry.bytes.length;
+    headEnd += 1;
+  }
+  const tail = [];
+  let tailBytes = 0;
+  let tailStart = entries.length;
+  while (tailStart > headEnd) {
+    const entry = entries[tailStart - 1];
+    if (tail.length && tailBytes + entry.bytes.length > tailBudget) break;
+    tail.unshift(entry);
+    tailBytes += entry.bytes.length;
+    tailStart -= 1;
+  }
+  if (!tail.length) {
+    tail.push(entries.at(-1));
+    tailStart = entries.length - 1;
+  }
+  const omitted = entries.slice(headEnd, tailStart);
+  const omittedSeqs = omitted.map((entry) => Number(entry.event.seq)).filter(Number.isFinite);
+  const firstTailSeq = Number(tail[0]?.event?.seq);
+  const firstOmittedSeq = Math.min(
+    Number.isFinite(Number(prior.firstOmittedSeq)) ? Number(prior.firstOmittedSeq) : Number.POSITIVE_INFINITY,
+    omittedSeqs.length ? Math.min(...omittedSeqs) : Number.POSITIVE_INFINITY
+  );
+  const lastOmittedSeq = Math.max(
+    Number.isFinite(Number(prior.lastOmittedSeq)) ? Number(prior.lastOmittedSeq) : 0,
+    omittedSeqs.length ? Math.max(...omittedSeqs) : 0
+  );
+  const truncation = {
+    at: Date.now(),
+    capBytes,
+    retained: 'head-and-tail',
+    firstOmittedSeq: Number.isFinite(firstOmittedSeq) ? firstOmittedSeq : null,
+    lastOmittedSeq: lastOmittedSeq || null,
+    omittedEvents: Number(prior.omittedEvents || 0) + omitted.length,
+    omittedBytes: Number(prior.omittedBytes || 0) + omitted.reduce((sum, entry) => sum + entry.bytes.length, 0)
+  };
+  const marker = {
+    v: EVENT_VERSION,
+    seq: Number.isFinite(firstTailSeq) ? Math.max(0, firstTailSeq - 1) : event.seq,
+    at: truncation.at,
+    jobId: job.id,
+    provider: job.provider,
+    sessionId: job.providerSessionId ?? job.session ?? null,
+    turnId: job.providerTurnId ?? null,
+    type: 'journal.truncated',
+    redacted: true,
+    data: {
+      ...truncation,
+      notice: 'journal exceeded its cap; middle events were removed while the head and tail were retained'
+    }
+  };
+  const markerBytes = Buffer.from(`${JSON.stringify(marker)}\n`);
+  let keptHead = head;
+  let keptTail = tail;
+  let output = Buffer.concat([...keptHead.map((entry) => entry.bytes), markerBytes, ...keptTail.map((entry) => entry.bytes)]);
+  while (output.length > capBytes && keptTail.length > 1) {
+    const removed = keptTail.shift();
+    truncation.omittedEvents += 1;
+    truncation.omittedBytes += removed.bytes.length;
+    output = Buffer.concat([...keptHead.map((entry) => entry.bytes), Buffer.from(`${JSON.stringify({ ...marker, data: { ...truncation, notice: marker.data.notice } })}\n`), ...keptTail.map((entry) => entry.bytes)]);
+  }
+  while (output.length > capBytes && keptHead.length > 1) {
+    const removed = keptHead.pop();
+    truncation.omittedEvents += 1;
+    truncation.omittedBytes += removed.bytes.length;
+    output = Buffer.concat([...keptHead.map((entry) => entry.bytes), Buffer.from(`${JSON.stringify({ ...marker, data: { ...truncation, notice: marker.data.notice } })}\n`), ...keptTail.map((entry) => entry.bytes)]);
+  }
+  job.journalTruncation = truncation;
+  replaceJournalBuffer(file, output);
+  forgetJournalCaches(job.id);
+  return true;
 }
 
 function appendUnlocked(job, type, data = {}, options = {}) {
@@ -712,8 +888,7 @@ function appendUnlocked(job, type, data = {}, options = {}) {
     ...(options.replay === true ? { replay: true } : {})
   };
   fs.mkdirSync(jobsDir(), { recursive: true, mode: 0o700 });
-  fs.appendFileSync(journal, `${JSON.stringify(event)}\n`, { mode: 0o600 });
-  try { fs.chmodSync(journal, 0o600); } catch {}
+  writeBoundedJournalEvent(job, event);
   job.lastSeq = seq;
   job.updatedAt = Math.floor(Date.now() / 1000);
   return event;
@@ -808,6 +983,7 @@ export function finalizeSupervisorAttempt(id, outcome = {}) {
       const sentinel = paths(job.id).finished;
       if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
       appendTerminalAuditIfMissing(job);
+      compressTerminalJournal(job);
     }
     return job;
   });
@@ -880,13 +1056,27 @@ export function readJobEvents(id, options = {}) {
 // quiet poll cost a single stat() and a busy poll parse only the new tail.
 const pageCursors = new Map();
 const PAGE_CURSOR_LIMIT = 64;
+const compressedPageCache = new Map();
+const COMPRESSED_PAGE_CACHE_LIMIT = 4;
 
-function rememberPageCursor(id, seq, offset) {
+function rememberPageCursor(id, seq, offset, sourceStamp) {
   pageCursors.delete(id);
-  pageCursors.set(id, { seq, offset });
+  pageCursors.set(id, { seq, offset, sourceStamp });
   if (pageCursors.size > PAGE_CURSOR_LIMIT) {
     pageCursors.delete(pageCursors.keys().next().value);
   }
+}
+
+function compressedJournalBuffer(id, file, sourceStamp) {
+  const cached = compressedPageCache.get(id);
+  if (cached?.sourceStamp === sourceStamp) return cached.buffer;
+  const buffer = readJournalBuffer(file);
+  compressedPageCache.delete(id);
+  compressedPageCache.set(id, { sourceStamp, buffer });
+  while (compressedPageCache.size > COMPRESSED_PAGE_CACHE_LIMIT) {
+    compressedPageCache.delete(compressedPageCache.keys().next().value);
+  }
+  return buffer;
 }
 
 function lastCompleteSeq(text) {
@@ -911,25 +1101,42 @@ export function readJobEventPage(id, options = {}) {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
     const file = eventPath(id);
-    let size = 0;
+    let physicalSize = 0;
+    let modified = 0;
     try {
-      size = fs.statSync(file).size;
+      const details = fs.statSync(file);
+      physicalSize = details.size;
+      modified = details.mtimeMs;
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
-    if (!size) return { events: [], nextSeq: afterSeq, latestSeq: afterSeq, hasMore: false };
+    if (!physicalSize) return { events: [], nextSeq: afterSeq, latestSeq: afterSeq, hasMore: false };
+    const compressed = file.endsWith('.gz');
+    const sourceStamp = `${compressed ? 'gz' : 'plain'}:${physicalSize}:${modified}`;
     const cursor = pageCursors.get(id);
-    const resumable = Boolean(cursor && cursor.seq === afterSeq && cursor.offset <= size);
+    if (compressed && cursor?.seq === afterSeq && cursor.sourceStamp === sourceStamp && cursor.atEnd === true) {
+      return { events: [], nextSeq: afterSeq, latestSeq: afterSeq, hasMore: false };
+    }
+    const source = compressed ? compressedJournalBuffer(id, file, sourceStamp) : null;
+    const size = compressed ? source.length : physicalSize;
+    const resumable = Boolean(cursor
+      && cursor.seq === afterSeq
+      && cursor.offset <= size
+      && (!compressed || cursor.sourceStamp === sourceStamp));
     const offset = resumable ? cursor.offset : 0;
     if (offset === size) return { events: [], nextSeq: afterSeq, latestSeq: afterSeq, hasMore: false };
-    const fd = fs.openSync(file, 'r');
     let text;
-    try {
-      const buffer = Buffer.alloc(size - offset);
-      fs.readSync(fd, buffer, 0, buffer.length, offset);
-      text = buffer.toString('utf8');
-    } finally {
-      fs.closeSync(fd);
+    if (compressed) {
+      text = source.subarray(offset).toString('utf8');
+    } else {
+      const fd = fs.openSync(file, 'r');
+      try {
+        const buffer = Buffer.alloc(size - offset);
+        fs.readSync(fd, buffer, 0, buffer.length, offset);
+        text = buffer.toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
     }
     const events = [];
     let nextSeq = afterSeq;
@@ -950,7 +1157,9 @@ export function readJobEventPage(id, options = {}) {
         }
       }
     }
-    rememberPageCursor(id, nextSeq, offset + Buffer.byteLength(text.slice(0, lineStart), 'utf8'));
+    rememberPageCursor(id, nextSeq, offset + Buffer.byteLength(text.slice(0, lineStart), 'utf8'), sourceStamp);
+    const remembered = pageCursors.get(id);
+    if (remembered) remembered.atEnd = remembered.offset === size;
     let latestSeq = nextSeq;
     if (limited) {
       const last = lastCompleteSeq(text);
@@ -1536,6 +1745,7 @@ const TRANSCRIPT_TYPES = new Set([
   'network.preflight', 'network.mode-elevated', 'network.policy.materialized', 'network.policy.restored',
   'input.requested', 'input.response.requested', 'input.resolved',
   'compaction.started', 'compaction.completed',
+  'journal.truncated',
   'correction.requested', 'correction.applied', 'correction.queued', 'correction.restarted',
   'error'
 ]);
@@ -3831,45 +4041,246 @@ export function backfillAuditLog() {
 
 export function pruneJobs(options = {}) {
   const days = Number(options.maxAgeDays ?? process.env.DELEGATE_JOB_RETENTION_DAYS ?? 14);
-  if (!Number.isFinite(days) || days <= 0) return { pruned: [], maxAgeDays: days };
-  const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
-  const pruned = [];
-  for (const record of listJobs()) {
-    let job = record;
-    const staleAgentStubAtRead = record.transport === 'claude-agent'
-      && (record.updatedAt || record.createdAt || 0) <= cutoff;
-    if (!TERMINAL_STATUSES.has(job.status) && jobNeedsReconciliation(job)) {
-      try { job = reconcileJob(job.id) || job; } catch {}
-    }
-    const staleAgentStub = staleAgentStubAtRead || (job.transport === 'claude-agent'
-      && (job.updatedAt || job.createdAt || 0) <= cutoff);
-    if (!TERMINAL_STATUSES.has(job.status) && !staleAgentStub) continue;
-    const finishedAt = staleAgentStubAtRead
-      ? (record.updatedAt || record.createdAt || 0)
-      : (job.completedAt || job.updatedAt || job.createdAt || 0);
-    if (finishedAt > cutoff) continue;
-    const p = paths(job.id);
-    for (const file of [p.events, p.prompt, p.verifyCommand, p.stdout, p.stderr, p.lock, p.finished, path.join(jobsDir(), `${job.id}.json`)]) {
-      try { fs.rmSync(file, { force: true }); } catch {}
-    }
-    for (const directory of [p.commands, p.artifacts]) {
-      try { fs.rmSync(directory, { recursive: true, force: true }); } catch {}
-    }
-    pruned.push(job.id);
+  const ageEnabled = Number.isFinite(days) && days > 0;
+  const cutoff = ageEnabled ? Math.floor(Date.now() / 1000) - days * 86400 : null;
+  const policy = storePolicy(options);
+  const maxRecordsExamined = Math.max(1, Number(options.maxRecordsExamined || DEFAULT_SWEEP_RECORD_LIMIT));
+  const maxRecordsRemoved = Math.max(1, Number(options.maxRecordsRemoved || DEFAULT_SWEEP_REMOVE_LIMIT));
+  const maxJournalsCompressed = Math.max(0, Number(options.maxJournalsCompressed ?? DEFAULT_SWEEP_COMPRESS_LIMIT));
+  const maxFilesExamined = Math.max(1, Number(options.maxFilesExamined || DEFAULT_SWEEP_FILE_LIMIT));
+  const logger = options.logger || console.error;
+  const before = measureStateStore({ budgetBytes: policy.budgetBytes, maxFiles: maxFilesExamined });
+  const warnings = [];
+  if (!before.complete) {
+    const warning = `state store scan stopped at the ${maxFilesExamined}-file bound; reported usage is a lower bound`;
+    warnings.push(warning);
+    logger(`delegate-router maintenance WARNING: ${warning}`);
   }
-  return { pruned, maxAgeDays: days };
+  if (before.highWater) {
+    const warning = `state store high-water: ${before.bytes} bytes across ${before.files} files; budget ${policy.budgetBytes} bytes`;
+    warnings.push(warning);
+    logger(`delegate-router maintenance WARNING: ${warning}`);
+    appendMaintenanceLog({
+      at: new Date().toISOString(),
+      type: 'high-water',
+      bytes: before.bytes,
+      files: before.files,
+      budgetBytes: policy.budgetBytes,
+      highWaterBytes: policy.highWaterBytes,
+      beforeDeletion: true
+    });
+  }
+
+  const orderedIds = jobRecordIdsByAge();
+  const loaded = new Map();
+  let examinedRecords = 0;
+  const loadBounded = (id) => {
+    if (loaded.has(id)) return loaded.get(id);
+    if (examinedRecords >= maxRecordsExamined) return null;
+    examinedRecords += 1;
+    const job = loadJob(id);
+    if (job) loaded.set(id, job);
+    return job;
+  };
+
+  const newestTerminal = [];
+  for (let index = orderedIds.length - 1; index >= 0 && examinedRecords < maxRecordsExamined; index -= 1) {
+    const job = loadBounded(orderedIds[index].id);
+    if (job && TERMINAL_STATUSES.has(job.status)) newestTerminal.push(job.id);
+    if (newestTerminal.length >= policy.recentTerminalKeep) break;
+  }
+  const recentProtectionComplete = policy.recentTerminalKeep === 0
+    || newestTerminal.length >= policy.recentTerminalKeep
+    || examinedRecords >= orderedIds.length;
+  for (const entry of orderedIds) {
+    if (examinedRecords >= maxRecordsExamined) break;
+    loadBounded(entry.id);
+  }
+
+  let liveLeases = [];
+  try {
+    liveLeases = listSupervisorLeases().filter((lease) => Number.isInteger(lease.pid) && isProcessAlive(lease.pid));
+  } catch {}
+  const leasedJobIds = new Set(liveLeases.flatMap((lease) => [lease.jobId, lease.attemptId]).filter(Boolean));
+  const recentIds = new Set(newestTerminal.slice(0, policy.recentTerminalKeep));
+  const protectedCounts = {
+    nonTerminal: 0,
+    unreviewed: 0,
+    liveLease: 0,
+    recentTerminal: 0
+  };
+  const protectedReason = (job, includeRecent = false) => {
+    if (!TERMINAL_STATUSES.has(job.status)) {
+      protectedCounts.nonTerminal += 1;
+      return 'non-terminal';
+    }
+    if (['ready-for-review', 'blocked'].includes(job.acceptance?.state)) {
+      protectedCounts.unreviewed += 1;
+      return `acceptance:${job.acceptance.state}`;
+    }
+    if (leasedJobIds.has(job.id)) {
+      protectedCounts.liveLease += 1;
+      return 'live-supervisor-lease';
+    }
+    if (includeRecent && recentIds.has(job.id)) {
+      protectedCounts.recentTerminal += 1;
+      return 'recent-terminal';
+    }
+    return null;
+  };
+
+  const removed = [];
+  const remove = (job, reason) => {
+    const footprint = removeJobState(job.id, { maxFiles: maxFilesExamined });
+    removed.push({ id: job.id, reason, bytes: footprint.bytes, files: footprint.files });
+    loaded.delete(job.id);
+    forgetJournalCaches(job.id);
+  };
+  const byOldest = [...loaded.values()].sort((left, right) => {
+    const leftAt = left.completedAt || left.updatedAt || left.createdAt || 0;
+    const rightAt = right.completedAt || right.updatedAt || right.createdAt || 0;
+    return leftAt - rightAt || left.id.localeCompare(right.id);
+  });
+
+  if (ageEnabled) {
+    for (const record of byOldest) {
+      if (removed.length >= maxRecordsRemoved) break;
+      let job = record;
+      const staleAgentStubAtRead = record.transport === 'claude-agent'
+        && (record.updatedAt || record.createdAt || 0) <= cutoff;
+      if (!TERMINAL_STATUSES.has(job.status) && jobNeedsReconciliation(job)) {
+        try { job = reconcileJob(job.id) || job; } catch {}
+      }
+      const protection = protectedReason(job, false);
+      if (protection) continue;
+      const finishedAt = staleAgentStubAtRead
+        ? (record.updatedAt || record.createdAt || 0)
+        : (job.completedAt || job.updatedAt || job.createdAt || 0);
+      if (finishedAt > 0 && finishedAt <= cutoff) remove(job, 'age');
+    }
+  }
+
+  const compressed = [];
+  if (maxJournalsCompressed > 0) {
+    for (const job of byOldest) {
+      if (compressed.length >= maxJournalsCompressed) break;
+      if (!loaded.has(job.id) || !TERMINAL_STATUSES.has(job.status)) continue;
+      const result = compressTerminalJournal(job);
+      if (result && !result.alreadyCompressed) {
+        compressed.push({
+          id: job.id,
+          beforeBytes: result.beforeBytes,
+          afterBytes: result.afterBytes,
+          savedBytes: result.savedBytes
+        });
+      }
+    }
+  }
+
+  let current = measureStateStore({ budgetBytes: policy.budgetBytes, maxFiles: maxFilesExamined });
+  if (current.overBudget && recentProtectionComplete) {
+    for (const job of byOldest) {
+      if (!current.overBudget || removed.length >= maxRecordsRemoved) break;
+      if (!loaded.has(job.id)) continue;
+      const protection = protectedReason(job, true);
+      if (protection) continue;
+      remove(job, 'budget');
+      current = {
+        ...current,
+        bytes: Math.max(0, current.bytes - removed.at(-1).bytes),
+        files: Math.max(0, current.files - removed.at(-1).files)
+      };
+      current.headroomBytes = policy.budgetBytes - current.bytes;
+      current.overBudget = current.bytes > policy.budgetBytes;
+    }
+  } else if (current.overBudget && !recentProtectionComplete) {
+    const warning = 'budget reclaim stopped: the bounded scan could not establish the newest terminal protection set';
+    warnings.push(warning);
+    logger(`delegate-router maintenance WARNING: ${warning}`);
+  }
+
+  const after = measureStateStore({ budgetBytes: policy.budgetBytes, maxFiles: maxFilesExamined });
+  const continuationNeeded = examinedRecords < orderedIds.length
+    || removed.length >= maxRecordsRemoved
+    || (maxJournalsCompressed > 0 && compressed.length >= maxJournalsCompressed);
+  if (after.overBudget) {
+    const warning = `state store remains ${after.bytes - policy.budgetBytes} bytes over budget; protected records and sweep bounds were retained`;
+    warnings.push(warning);
+    logger(`delegate-router maintenance WARNING: ${warning}`);
+  }
+  const result = {
+    pruned: removed.map((entry) => entry.id),
+    removed,
+    compressed,
+    maxAgeDays: days,
+    budgetBytes: policy.budgetBytes,
+    recentTerminalKeep: policy.recentTerminalKeep,
+    journalCapBytes: policy.journalCapBytes,
+    highWaterBytes: policy.highWaterBytes,
+    before,
+    after,
+    examinedRecords,
+    maxRecordsExamined,
+    maxRecordsRemoved,
+    maxJournalsCompressed,
+    continuationNeeded,
+    protected: protectedCounts,
+    warnings,
+    overBudget: after.overBudget,
+    maintenanceLog: maintenanceLogPath()
+  };
+  if (removed.length || compressed.length || warnings.length) {
+    appendMaintenanceLog({
+      at: new Date().toISOString(),
+      type: 'sweep',
+      removed,
+      compressed,
+      before: { bytes: before.bytes, files: before.files },
+      after: { bytes: after.bytes, files: after.files },
+      budgetBytes: policy.budgetBytes,
+      protected: protectedCounts,
+      warnings,
+      continuationNeeded
+    });
+  }
+  return result;
 }
 
 const PRUNE_INTERVAL_MS = 6 * 3600 * 1000;
 
-export function maybePruneJobs() {
+function emitPruneReport(result, logger = console.error) {
+  for (const entry of result.removed || []) {
+    logger(`delegate-router maintenance: removed ${entry.id} (${entry.reason}, ${entry.bytes} bytes, ${entry.files} files)`);
+  }
+  if (result.compressed?.length) {
+    const before = result.compressed.reduce((sum, entry) => sum + entry.beforeBytes, 0);
+    const after = result.compressed.reduce((sum, entry) => sum + entry.afterBytes, 0);
+    logger(`delegate-router maintenance: compressed ${result.compressed.length} terminal journals (${before} -> ${after} bytes)`);
+  }
+}
+
+export function maybePruneJobs(options = {}) {
+  if (!fs.existsSync(jobsDir())) return null;
   const stamp = path.join(jobsDir(), '.last-prune');
-  try {
-    if (Date.now() - fs.statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS) return null;
-  } catch {}
-  fs.mkdirSync(jobsDir(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(stamp, `${Date.now()}\n`, { mode: 0o600 });
-  return pruneJobs();
+  const stampLock = `${stamp}.lock`;
+  return withFileLock(stampLock, () => {
+    try {
+      if (!options.force && Date.now() - fs.statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS) return null;
+    } catch {}
+    fs.mkdirSync(jobsDir(), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(stamp, `${Date.now()}\n`, { mode: 0o600 });
+    const result = pruneJobs(options);
+    fs.writeFileSync(stamp, `${JSON.stringify({
+      at: Date.now(),
+      removed: result.removed.length,
+      compressed: result.compressed.length,
+      bytes: result.after.bytes,
+      overBudget: result.overBudget,
+      continuationNeeded: result.continuationNeeded
+    })}\n`, { mode: 0o600 });
+    emitPruneReport(result, options.logger);
+    return result;
+  });
 }
 
 export function defaultWorkerCommand() {

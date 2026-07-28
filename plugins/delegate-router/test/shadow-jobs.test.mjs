@@ -246,7 +246,7 @@ test('direct Cursor foreground shadows normalized headless events, edit counts, 
   const transcript = jobTranscript(job.id).map((event) => event.data?.text || event.data?.delta || '').join('\n');
   assert.match(transcript, /Cursor visible response/);
   assert.match(transcript, /✎ shadow-edit\.txt \(\+1 −0\)/);
-  assert.doesNotMatch(fs.readFileSync(path.join(path.dirname(process.env.DELEGATE_STATE_FILE), 'jobs', `${job.id}.events.jsonl`), 'utf8'), /hidden thought text/);
+  assert.doesNotMatch(JSON.stringify(readJobEvents(job.id)), /hidden thought text/);
   const audit = readAuditLog();
   assert.equal(audit[0].transport, 'direct-cli');
   assert.equal(aggregateAudit(audit).totals.jobs, 1);

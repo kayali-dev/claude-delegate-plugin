@@ -27,10 +27,22 @@ export function decodeInput(value, options = {}) {
   let offset = 0;
   while (offset < text.length) {
     const rest = text.slice(offset);
-    if (rest.length < PASTE_START.length && PASTE_START.startsWith(rest)) break;
+    // A short prefix of the paste opener is also a prefix of the Escape key and
+    // of every CSI sequence. Hold it only while more bytes may still arrive; at
+    // final the ESC handler below must resolve it, or the byte is held forever
+    // and the keypress only surfaces when the user next types something.
+    if (rest.length < PASTE_START.length && PASTE_START.startsWith(rest) && !options.final) break;
     if (rest.startsWith(PASTE_START)) {
       const end = rest.indexOf(PASTE_END, PASTE_START.length);
-      if (end < 0) break;
+      if (end < 0) {
+        if (!options.final) break;
+        // Final means no further bytes are coming. A paste whose terminator was
+        // lost is delivered as what was actually received; holding it back would
+        // wedge every later keystroke behind a marker that will never arrive.
+        events.push({ type: 'paste', text: rest.slice(PASTE_START.length) });
+        offset = text.length;
+        continue;
+      }
       events.push({ type: 'paste', text: rest.slice(PASTE_START.length, end) });
       offset += end + PASTE_END.length;
       continue;
@@ -95,16 +107,41 @@ export function coalesceInputEvents(events) {
   return coalesced;
 }
 
+// A held buffer is either a paste body (bounded by its terminator, which may be
+// many chunks away) or an ambiguous escape prefix (bounded by the terminal's
+// escape timeout). They are separate deadlines because a large paste legitimately
+// spans far more time than a keypress ever may.
+export const ESCAPE_TIMEOUT_MS = 50;
+export const PASTE_IDLE_TIMEOUT_MS = 5000;
+
+export function pendingHoldKind(raw) {
+  if (!raw) return null;
+  if (raw.startsWith(PASTE_START)) return 'paste-body';
+  if (raw[0] === ESC) return 'escape-prefix';
+  return 'other';
+}
+
 export class BufferedInput {
   constructor(options = {}) {
     this.onFlush = options.onFlush || (() => {});
     this.frameMs = Math.max(0, Number(options.frameMs ?? 16));
+    this.escapeTimeoutMs = Math.max(0, Number(options.escapeTimeoutMs ?? ESCAPE_TIMEOUT_MS));
+    this.pasteIdleTimeoutMs = Math.max(0, Number(options.pasteIdleTimeoutMs ?? PASTE_IDLE_TIMEOUT_MS));
     this.schedule = options.schedule || ((callback, delay) => setTimeout(callback, delay));
     this.cancel = options.cancel || ((handle) => clearTimeout(handle));
+    this.now = options.now || (() => Date.now());
     this.raw = '';
     this.events = [];
     this.timer = null;
+    this.timerKind = null;
+    this.pendingSince = null;
     this.closed = false;
+  }
+
+  arm(delay, kind) {
+    if (this.timer != null) this.cancel(this.timer);
+    this.timer = this.schedule(() => this.flush(), delay);
+    this.timerKind = kind;
   }
 
   push(value) {
@@ -113,17 +150,45 @@ export class BufferedInput {
     const decoded = decodeInput(this.raw, { final: false });
     this.events.push(...decoded.events);
     this.raw = decoded.rest;
-    if (this.timer == null) this.timer = this.schedule(() => this.flush(), this.frameMs);
+    // Idle semantics: every arriving byte restarts the hold, so a sequence split
+    // across a slow link still coalesces, while silence resolves the ambiguity.
+    this.pendingSince = this.raw ? this.now() : null;
+    // A hold timer is a worst-case deadline, not a paint cadence. Once the
+    // ambiguity is resolved, decoded events must not wait for it.
+    if (this.timer == null || (this.timerKind === 'hold' && !this.raw && this.events.length)) {
+      this.arm(this.frameMs, 'frame');
+    }
   }
 
   flush() {
     if (this.closed) return [];
     if (this.timer != null) this.cancel(this.timer);
     this.timer = null;
+    this.timerKind = null;
     if (this.raw) {
-      const decoded = decodeInput(this.raw, { final: true });
-      this.events.push(...decoded.events);
-      this.raw = decoded.rest;
+      const deadline = pendingHoldKind(this.raw) === 'paste-body' ? this.pasteIdleTimeoutMs : this.escapeTimeoutMs;
+      const waited = this.now() - (this.pendingSince ?? this.now());
+      if (waited < deadline) {
+        // Still ambiguous and still inside the deadline: keep waiting for the
+        // rest of the sequence, but on a timer, so input can never be held
+        // indefinitely waiting for bytes that will never arrive.
+        this.arm(Math.max(1, deadline - waited), 'hold');
+      } else {
+        const before = this.raw;
+        const decoded = decodeInput(this.raw, { final: true });
+        this.events.push(...decoded.events);
+        this.raw = decoded.rest;
+        this.pendingSince = this.raw ? this.now() : null;
+        // Forward progress is the invariant that keeps a wedge impossible: a
+        // final decode that consumed nothing would otherwise re-hold the same
+        // bytes forever. Drop the leading byte rather than stall the keyboard.
+        if (this.raw === before) {
+          this.events.push(before[0]);
+          this.raw = before.slice(1);
+          this.pendingSince = this.raw ? this.now() : null;
+        }
+        if (this.raw) this.arm(this.escapeTimeoutMs, 'hold');
+      }
     }
     const events = coalesceInputEvents(this.events);
     this.events = [];
@@ -134,7 +199,9 @@ export class BufferedInput {
   close() {
     if (this.timer != null) this.cancel(this.timer);
     this.timer = null;
+    this.timerKind = null;
     this.raw = '';
+    this.pendingSince = null;
     this.events = [];
     this.closed = true;
   }

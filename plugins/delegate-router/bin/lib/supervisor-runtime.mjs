@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   appendJobEvent,
   finalizeSupervisorAttempt,
+  maybePruneJobs,
   updateManagedJob
 } from './control.mjs';
 import { jobsDir, loadJob } from './state.mjs';
@@ -538,6 +539,7 @@ export class ResidentSupervisor {
 
   checkIdle() {
     if (this.draining || this.entries.size > 0) return;
+    try { maybePruneJobs(); } catch {}
     if (Date.now() - this.lastWorkAt >= this.idleMs) this.requestDrain('idle');
   }
 

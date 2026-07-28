@@ -6,7 +6,7 @@ import { CHROME_GLYPHS, CHROME_SEPARATOR, spinnerGlyph } from './glyphs.mjs';
 import { uiPalette as palette } from './palette.mjs';
 import { displayWidth, graphemeWidth, padToWidth, splitGraphemes, truncateToWidth } from './width.mjs';
 
-const TRANSCRIPT_NOTICE = /^(?:approval\.(?:requested|resolved)|correction\.|scope\.violation$|budget\.exceeded$|error$|network\.|input\.|session\.updated$|mode\.updated$|model\.updated$|commands\.updated$|subagent\.activity$|artifact\.created$)/;
+const TRANSCRIPT_NOTICE = /^(?:approval\.(?:requested|resolved)|correction\.|scope\.violation$|budget\.exceeded$|journal\.truncated$|error$|network\.|input\.|session\.updated$|mode\.updated$|model\.updated$|commands\.updated$|subagent\.activity$|artifact\.created$)/;
 const SUCCESS = /^(?:completed|complete|success|succeeded|ok|approved|accepted)$/i;
 const FAILURE = /^(?:failed|failure|error|cancelled|canceled|rejected|denied)$/i;
 const compactionNormalizationCache = new WeakMap();
@@ -589,6 +589,11 @@ function noticeText(event) {
   if (event.type.startsWith('correction.')) return joinDisplayParts([`> ${event.type.replace('correction.', 'correction ')}`, data.appliedAs]);
   if (event.type === 'scope.violation') return `! scope violation${CHROME_SEPARATOR}${numberValue(data.count, data.files?.length) || 1} path${Number(data.count || data.files?.length || 1) === 1 ? '' : 's'}`;
   if (event.type === 'budget.exceeded') return joinDisplayParts(['! output budget exceeded', data.maxOutputTokens ? `${formatDisplayValue(data.maxOutputTokens)} tokens` : '']);
+  if (event.type === 'journal.truncated') return joinDisplayParts([
+    '! journal truncated (head and tail retained)',
+    data.omittedEvents ? `${formatDisplayValue(data.omittedEvents)} events omitted` : '',
+    data.capBytes ? `${formatDisplayValue(data.capBytes)} byte cap` : ''
+  ]);
   if (event.type === 'network.preflight') return joinDisplayParts(['~ network preflight', data.expectedEgress, data.sandbox, data.effectiveMode]);
   if (event.type === 'network.mode-elevated') return joinDisplayParts(['! Cursor mode elevated for network', `${data.requestedMode} -> ${data.effectiveMode}`]);
   if (event.type === 'network.policy.materialized') return '~ temporary Cursor network policy installed';

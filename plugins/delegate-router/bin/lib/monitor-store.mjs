@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir, jobsDir } from './state.mjs';
+import {
+  journalFileForJob,
+  journalStamp,
+  readJournalTail
+} from './store-maintenance.mjs';
 
 const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
 const DEFAULT_MAX_RECORD_BYTES = 2 * 1024 * 1024;
@@ -30,38 +35,6 @@ function readBoundedFile(file, maximum) {
   } finally {
     fs.closeSync(fd);
   }
-}
-
-function readJournalTail(file, maximum, maxEvents) {
-  let details;
-  try { details = fs.statSync(file); }
-  catch (error) {
-    if (error.code === 'ENOENT') return [];
-    throw error;
-  }
-  if (!details.isFile() || !details.size) return [];
-  const length = Math.min(details.size, maximum);
-  const offset = details.size - length;
-  const fd = fs.openSync(file, 'r');
-  let text;
-  try {
-    const buffer = Buffer.alloc(length);
-    fs.readSync(fd, buffer, 0, length, offset);
-    text = buffer.toString('utf8');
-  } finally {
-    fs.closeSync(fd);
-  }
-  if (offset > 0) {
-    const boundary = text.indexOf('\n');
-    text = boundary < 0 ? '' : text.slice(boundary + 1);
-  }
-  if (text && !text.endsWith('\n')) text = text.slice(0, Math.max(0, text.lastIndexOf('\n') + 1));
-  const events = [];
-  for (const line of text.split('\n')) {
-    if (!line) continue;
-    try { events.push(JSON.parse(line)); } catch {}
-  }
-  return events.slice(-maxEvents);
 }
 
 function jobIds(directory, maximum) {
@@ -119,23 +92,24 @@ export class MonitorStore {
 
   readSnapshot(id) {
     const recordFile = path.join(this.directory, `${id}.json`);
-    const journalFile = path.join(this.directory, `${id}.events.jsonl`);
+    const journalPlainFile = path.join(this.directory, `${id}.events.jsonl`);
+    const journalFile = journalFileForJob(id, this.directory);
     const recordStamp = stamp(recordFile);
-    const journalStamp = stamp(journalFile);
+    const currentJournalStamp = journalStamp(journalPlainFile);
     const previous = this.cache.get(id);
-    if (previous?.recordStamp === recordStamp && previous?.journalStamp === journalStamp) return previous.snapshot;
+    if (previous?.recordStamp === recordStamp && previous?.journalStamp === currentJournalStamp) return previous.snapshot;
     try {
       const record = recordStamp === previous?.recordStamp
         ? previous.snapshot.job
         : { ...JSON.parse(readBoundedFile(recordFile, this.maxRecordBytes)), id };
-      const events = journalStamp === previous?.journalStamp
+      const events = currentJournalStamp === previous?.journalStamp
         ? previous.snapshot.events
         : readJournalTail(journalFile, this.journalTailBytes, this.maxTailEvents);
       const lastEventAt = [...events].reverse()
         .map((event) => Number(event?.at))
         .find((value) => Number.isFinite(value) && value > 0) || null;
       const snapshot = Object.freeze({ job: Object.freeze(record), events: Object.freeze(events), lastEventAt });
-      this.cache.set(id, { recordStamp, journalStamp, snapshot });
+      this.cache.set(id, { recordStamp, journalStamp: currentJournalStamp, snapshot });
       return snapshot;
     } catch (error) {
       this.onError(`job-read:${error.code || error.name || 'error'}`, error);

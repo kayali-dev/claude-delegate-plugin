@@ -69,6 +69,39 @@ Edit/Write and batch hooks remain active, and none of these hooks can block a
 tool or filesystem change. Collision alerts follow the same ambient monitor
 scope as every other edge.
 
+## Store Budget And Retention
+
+The complete state directory has a 1.5 GiB default budget, configurable with
+`DELEGATE_STATE_BUDGET_BYTES`. `delegate-health` reports its current logical
+bytes, regular-file count, budget, 85% high-water threshold, signed headroom,
+and whether the bounded scan completed. High-water is warned before a sweep
+deletes anything. The private, bounded `maintenance.jsonl` records every
+compression and deletion with its reason (`age` or `budget`) plus any protected
+overage.
+
+Age retention still uses `DELEGATE_JOB_RETENTION_DAYS` (default 14), then a
+budget sweep reclaims oldest eligible terminal jobs until under budget. Neither
+path deletes non-terminal work, `acceptance.state: "ready-for-review"` or
+`"blocked"`, or a job referenced by a live supervisor lease. Budget reclaim
+also keeps the newest 20 terminal jobs; change that history floor with
+`DELEGATE_RECENT_TERMINAL_KEEP`. If protected records prevent the target, the
+sweep stops over budget and warns rather than deleting them.
+
+Terminal journals use built-in gzip. Readers permanently accept both
+`.events.jsonl` and `.events.jsonl.gz`; there is no migration rewrite of job
+records. A live journal is capped at 32 MiB of uncompressed JSONL by default
+(`DELEGATE_JOB_JOURNAL_CAP_BYTES`). On overflow it keeps the initial head and
+newest tail, replaces only the middle with a visible `journal.truncated` event,
+and adds cumulative `journalTruncation` metadata to the record. It never
+compresses a non-terminal journal or silently drops events.
+
+The MCP server, `delegate-jobs`, local TUI, managed-launch path, and
+lease-free supervisor idle tick all call the same six-hour stamped sweep.
+Concurrent entry points share a lock and cannot multiply the work. Each run
+examines at most 500 records, removes at most 25, and compresses at most 25
+legacy terminal journals; remaining work continues on a later sweep instead of
+stalling a launch or session start.
+
 SessionStart and PostCompact also return identical native work
 `additionalContext`, hard-capped at 2,048 UTF-8 bytes and limited to safe IDs,
 closed lifecycle/blocker labels, counts, and allowance state. Prompts, results,

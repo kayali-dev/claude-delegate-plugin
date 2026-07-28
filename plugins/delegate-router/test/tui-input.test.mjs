@@ -97,3 +97,86 @@ test('focus reporting and Ctrl-D decode without ambiguity', () => {
     ['focus-in', 'focus-out', 'ctrl-d']
   );
 });
+
+// Regression: a lone Escape byte is also a prefix of the bracketed-paste opener
+// ESC[200~. Before the escape-timeout hold, the decoder kept it buffered with no
+// timer left to drain it, so Esc only reached the controller when the user next
+// pressed a key - every Esc-driven screen change appeared to need a second
+// keystroke. See bin/lib/tui/input.mjs decodeInput/BufferedInput.
+
+const ESC_BYTE = '\u001b';
+
+function escHarness(options = {}) {
+  const batches = [];
+  let scheduled = null;
+  const state = { clock: 0 };
+  const input = new BufferedInput({
+    now: () => state.clock,
+    schedule(callback) { scheduled = callback; return 1; },
+    cancel() {},
+    onFlush(events) { batches.push(events); },
+    ...options
+  });
+  return { input, batches, state, fire: () => scheduled() };
+}
+
+test('a lone Escape resolves on its own instead of waiting for the next keypress', () => {
+  const h = escHarness();
+  h.input.push(ESC_BYTE);
+  h.state.clock = 16;
+  h.fire();
+  assert.deepEqual(h.batches, [], 'still ambiguous inside the escape timeout');
+  h.state.clock = 60;
+  h.fire();
+  assert.deepEqual(h.batches, [['escape']], 'the escape timeout resolves it with no further input');
+  h.input.close();
+});
+
+test('Escape reaches the controller under real timers', async () => {
+  const batches = [];
+  const input = new BufferedInput({ onFlush: (events) => batches.push(events), escapeTimeoutMs: 20 });
+  input.push(ESC_BYTE);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(batches, [['escape']]);
+  input.close();
+});
+
+test('an escape sequence split across chunks still coalesces instead of emitting a spurious escape', () => {
+  const h = escHarness();
+  h.input.push(ESC_BYTE);
+  h.state.clock = 16;
+  h.fire();
+  assert.deepEqual(h.batches, [], 'held while the rest of the sequence may still arrive');
+  h.state.clock = 30;
+  h.input.push('[A');
+  h.state.clock = 40;
+  h.fire();
+  assert.deepEqual(h.batches, [['up']], 'resolved as the arrow key, not escape plus literals');
+  h.input.close();
+});
+
+test('no input byte can be held indefinitely once the terminal goes quiet', () => {
+  const partials = [ESC_BYTE, `${ESC_BYTE}[`, `${ESC_BYTE}[2`, `${ESC_BYTE}[20`, `${ESC_BYTE}[200`, `${ESC_BYTE}[<64;10`];
+  for (const raw of partials) {
+    const h = escHarness();
+    h.input.push(raw);
+    h.state.clock = 10_000;
+    h.fire();
+    assert.ok(h.batches.length > 0, `held forever: ${JSON.stringify(raw)}`);
+    assert.equal(h.input.raw, '', `buffer not drained: ${JSON.stringify(raw)}`);
+    h.input.close();
+  }
+});
+
+test('a paste whose terminator never arrives is delivered rather than wedging later keystrokes', () => {
+  const h = escHarness();
+  h.input.push(`${ESC_BYTE}[200~hello`);
+  h.state.clock = 1000;
+  h.fire();
+  assert.deepEqual(h.batches, [], 'a paste body is held far longer than a keypress');
+  h.state.clock = 6000;
+  h.fire();
+  assert.deepEqual(h.batches, [[{ type: 'paste', text: 'hello' }]]);
+  assert.equal(h.input.raw, '');
+  h.input.close();
+});

@@ -271,6 +271,27 @@ holding leases, launch falls back to the historical detached worker and records
 Lease-less jobs from an older broker are deliberately outside resident
 reconciliation.
 
+The resident's lease-free idle tick also participates in bounded store
+maintenance. It shares the same private six-hour stamp as MCP startup,
+`delegate-jobs`, local TUI startup, and managed launch, so those entry points
+cannot trigger concurrent full sweeps. A sweep is capped at 500 examined
+records, 25 removals, and 25 legacy-terminal journal compressions.
+
+Age pruning runs before the state-directory budget. It never deletes a
+non-terminal job, unreviewed `ready-for-review`/`blocked` acceptance state, or
+a job referenced by a live supervisor lease. Budget reclaim additionally
+protects the newest 20 terminal jobs and removes only oldest eligible terminal
+records. Protected overage is an explicit warning and durable maintenance-log
+entry, not permission to delete work. `pruneJobs()` retains the existing
+job-file, artifact-directory, and command-directory removal boundary.
+
+Terminal event journals are gzip-compressed with `node:zlib`; readers choose
+plain or gzip by extension forever. The monitor still invalidates its cache
+from a cheap extension-aware mtime/size stamp. MCP pagination and TUI hydration
+decode compressed journals transparently. A 32 MiB uncompressed per-job cap
+keeps the head and newest tail and inserts `journal.truncated` in place of the
+middle, with the same omission summary persisted on the job record.
+
 Built-in Claude `Agent` and legacy `Task` tool calls are observability-only too.
 Plugin PreToolUse/PostToolUse hooks still create and correlate a
 `claude-agent` stub by `tool_use_id`; additive `SubagentStart`/`SubagentStop`
