@@ -339,13 +339,14 @@ still applies its documented 300 ms debounce. Disable with
 hiding only the chip with `DELEGATE_NATIVE_STATUSLINE=0`.
 
 SessionStart injects `additionalContext` beside the existing collision
-`watchPaths`; PostCompact injects the byte-identical work projection again.
-It is session-scoped by default and contains only safe attempt/root IDs,
-provider/lifecycle tokens, closed blocker codes, counts, and allowance state.
-It never reads prompts, results, diffs, repository paths, secrets, pending
-questions, or free-form errors. The payload is hard-capped at 2,048 UTF-8
-bytes. When entries exceed the item/byte bounds, policy breach, human input,
-acceptance-ready work, and resumable failure win over lower-priority/older
+`watchPaths` and runs again with `source=compact` after compaction, rehydrating
+the same work projection through Claude Code's supported SessionStart output
+schema. It is session-scoped by default and contains only safe attempt/root
+IDs, provider/lifecycle tokens, closed blocker codes, counts, and allowance
+state. It never reads prompts, results, diffs, repository paths, secrets,
+pending questions, or free-form errors. The payload is hard-capped at 2,048
+UTF-8 bytes. When entries exceed the item/byte bounds, policy breach, human
+input, acceptance-ready work, and resumable failure win over lower-priority/older
 state; an omitted count points to `delegate_list`. Set
 `DELEGATE_NATIVE_CONTEXT=0` to suppress injection without disabling P2.5
 watch arming.

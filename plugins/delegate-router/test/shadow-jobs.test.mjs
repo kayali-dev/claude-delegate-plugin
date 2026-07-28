@@ -183,6 +183,44 @@ test('codex-reply creates a parented shadow and cumulative thread usage is chain
   }
 });
 
+test('direct Codex response waits until terminal shadow audit publication completes', async (t) => {
+  const directory = isolated(t);
+  const server = await startCodex();
+  const auditLock = path.join(path.dirname(process.env.DELEGATE_STATE_FILE), 'audit.jsonl.lock');
+  let reply = null;
+  try {
+    await server.request({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'codex', arguments: {
+      prompt: 'first', cwd: directory, sandbox: 'read-only'
+    } } });
+    const rootJob = await waitFor(() => listJobs().find((job) => job.status === 'completed'), 'the root Codex shadow to complete');
+    fs.writeFileSync(auditLock, `${process.pid}\n`, { mode: 0o600 });
+
+    let responsePublished = false;
+    reply = server.request({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'codex-reply', arguments: {
+      threadId: rootJob.providerSessionId,
+      prompt: 'continue'
+    } } }).then((response) => {
+      responsePublished = true;
+      return response;
+    });
+
+    await waitFor(() => {
+      const jobs = listJobs();
+      return jobs.length === 2 && jobs.every((job) => job.status === 'completed');
+    }, 'the child terminal record to reach its held audit publication');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(responsePublished, false, 'caller response must not precede the terminal audit row');
+
+    fs.unlinkSync(auditLock);
+    await reply;
+    assert.equal(readAuditLog().length, 2);
+  } finally {
+    try { fs.unlinkSync(auditLock); } catch {}
+    await reply?.catch(() => {});
+    await server.close();
+  }
+});
+
 test('direct transport control operations fail with DIRECT_TRANSPORT', (t) => {
   const directory = isolated(t);
   const job = createShadowJob({ provider: 'codex', transport: 'direct-mcp', prompt: 'read', cwd: directory, mode: 'review', workerPid: process.pid });

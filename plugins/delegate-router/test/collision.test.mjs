@@ -409,7 +409,7 @@ test('watch plans cap at 256 paths and record explicit post-hoc degradation', (t
 test('collision hooks are additive, fast-fail open, and exit zero on malformed payloads', () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'hooks', 'hooks.json'), 'utf8')).hooks;
   assert.ok(hooks.FileChanged);
-  assert.ok(hooks.PostCompact);
+  assert.equal(Object.hasOwn(hooks, 'PostCompact'), false);
   assert.ok(hooks.PostToolBatch);
   assert.ok(hooks.PostToolUse.some((group) => group.matcher === '^(Edit|Write)$'));
   const malformedCollision = runHook(collisionHook, '{', { ...process.env });

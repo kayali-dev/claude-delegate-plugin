@@ -111,12 +111,13 @@ examines at most 500 records, removes at most 25, and compresses at most 25
 legacy terminal journals; remaining work continues on a later sweep instead of
 stalling a launch or session start.
 
-SessionStart and PostCompact also return identical native work
-`additionalContext`, hard-capped at 2,048 UTF-8 bytes and limited to safe IDs,
-closed lifecycle/blocker labels, counts, and allowance state. Prompts, results,
-diffs, repository paths, pending questions, secrets, and free-form errors are
-never read into that context. Overflow keeps higher-priority/newer items and
-reports the omitted count. `DELEGATE_NATIVE_CONTEXT=0` disables only context;
+SessionStart also returns native work `additionalContext`, including when
+Claude Code invokes it with `source=compact` after compaction. The payload is
+hard-capped at 2,048 UTF-8 bytes and limited to safe IDs, closed
+lifecycle/blocker labels, counts, and allowance state. Prompts, results, diffs,
+repository paths, pending questions, secrets, and free-form errors are never
+read into that context. Overflow keeps higher-priority/newer items and reports
+the omitted count. `DELEGATE_NATIVE_CONTEXT=0` disables only context;
 `DELEGATE_NATIVE_STATUSLINE=0` hides only the `D` chip;
 `DELEGATE_NATIVE_MCP=0` hides only MCP resources/prompts; and
 `DELEGATE_NATIVE_FOOTER_LINKS=0` skips badge installation. The footer rule can

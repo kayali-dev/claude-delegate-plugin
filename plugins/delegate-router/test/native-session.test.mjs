@@ -14,6 +14,28 @@ import {
 
 const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const sessionHook = path.join(pluginRoot, 'bin', 'delegate-session-hook');
+const hooksFile = path.join(pluginRoot, 'hooks', 'hooks.json');
+
+function assertValidSessionStartHookOutput(stdout) {
+  const output = JSON.parse(stdout);
+  assert.deepEqual(Object.keys(output), ['hookSpecificOutput']);
+  const specific = output.hookSpecificOutput;
+  assert.equal(specific.hookEventName, 'SessionStart');
+  const allowed = new Set([
+    'hookEventName',
+    'additionalContext',
+    'initialUserMessage',
+    'sessionTitle',
+    'watchPaths',
+    'reloadSkills'
+  ]);
+  for (const key of Object.keys(specific)) {
+    assert.ok(allowed.has(key), `unsupported SessionStart hookSpecificOutput field: ${key}`);
+  }
+  assert.ok(Array.isArray(specific.watchPaths));
+  if (Object.hasOwn(specific, 'additionalContext')) assert.equal(typeof specific.additionalContext, 'string');
+  return specific;
+}
 
 function usageState(usedPercent = 41) {
   const updatedAt = Math.floor(Date.now() / 1000);
@@ -120,7 +142,7 @@ test('native context is bounded, closed-field redacted, and orders actionable st
   assert.equal(NATIVE_CONTEXT_MAX_BYTES, 2_048);
 });
 
-test('SessionStart and PostCompact inject identical bounded state while only SessionStart arms P2.5 watch paths', (t) => {
+test('SessionStart source=compact rehydrates bounded state with a validator-supported payload', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-native-session-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const stateFile = path.join(root, 'usage.json');
@@ -145,38 +167,37 @@ test('SessionStart and PostCompact inject identical bounded state while only Ses
     CLAUDE_PROJECT_DIR: workspace,
     CLAUDE_CODE_SESSION_ID: 'session-native'
   };
-  const invoke = (hookEventName) => spawnSync(process.execPath, [sessionHook], {
+  const invoke = (hookEventName, extra = {}, environment = env) => spawnSync(process.execPath, [sessionHook], {
     encoding: 'utf8',
     input: JSON.stringify({
       hook_event_name: hookEventName,
       session_id: 'session-native',
-      cwd: workspace
+      cwd: workspace,
+      ...extra
     }),
-    env
+    env: environment
   });
-  const started = invoke('SessionStart');
-  const compacted = invoke('PostCompact');
+
+  const registeredEvents = Object.entries(JSON.parse(fs.readFileSync(hooksFile, 'utf8')).hooks)
+    .filter(([, groups]) => groups.some((group) => group.hooks.some((hook) => hook.command?.includes('/bin/delegate-session-hook'))))
+    .map(([event]) => event);
+  assert.deepEqual(registeredEvents, ['SessionStart']);
+
+  const started = invoke('SessionStart', { source: 'compact' });
   assert.equal(started.status, 0, started.stderr);
-  assert.equal(compacted.status, 0, compacted.stderr);
-  const sessionOutput = JSON.parse(started.stdout).hookSpecificOutput;
-  const compactOutput = JSON.parse(compacted.stdout).hookSpecificOutput;
+  const sessionOutput = assertValidSessionStartHookOutput(started.stdout);
   assert.deepEqual(sessionOutput.watchPaths, [path.join(root, 'collision-watch.signal')]);
-  assert.equal(Object.hasOwn(compactOutput, 'watchPaths'), false);
-  assert.equal(compactOutput.additionalContext, sessionOutput.additionalContext);
   assert.equal(sessionOutput.additionalContext, `Delegate work (session; bounded metadata only, max 2048 bytes):
 active: codex-live-native-abcdef [codex running]
 Use these IDs directly with delegate_inspect/resume; delegate_list is only the overflow or new-session fallback.`);
   assert.ok(Buffer.byteLength(sessionOutput.additionalContext, 'utf8') <= NATIVE_CONTEXT_MAX_BYTES);
 
-  const optedOut = spawnSync(process.execPath, [sessionHook], {
-    encoding: 'utf8',
-    input: JSON.stringify({
-      hook_event_name: 'PostCompact',
-      session_id: 'session-native',
-      cwd: workspace
-    }),
-    env: { ...env, DELEGATE_NATIVE_CONTEXT: '0' }
-  });
+  const optedOut = invoke('SessionStart', { source: 'compact' }, { ...env, DELEGATE_NATIVE_CONTEXT: '0' });
   assert.equal(optedOut.status, 0, optedOut.stderr);
-  assert.equal(optedOut.stdout, '');
+  const optedOutOutput = assertValidSessionStartHookOutput(optedOut.stdout);
+  assert.equal(Object.hasOwn(optedOutOutput, 'additionalContext'), false);
+
+  const unsupported = invoke('PostCompact', { trigger: 'auto', compact_summary: 'not consumed' });
+  assert.equal(unsupported.status, 0);
+  assert.equal(unsupported.stdout, '');
 });

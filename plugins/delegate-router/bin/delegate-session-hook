@@ -43,7 +43,7 @@ function warn(reason, event = 'SessionStart') {
 try {
   const payload = readPayload();
   const event = String(payload?.hook_event_name || '');
-  if (!['SessionStart', 'PostCompact'].includes(event)) throw new Error('expected SessionStart or PostCompact payload');
+  if (event !== 'SessionStart') throw new Error('expected SessionStart payload');
   const payloadSessionId = String(payload.session_id || '').trim();
   const environmentSessionId = String(process.env.CLAUDE_CODE_SESSION_ID || '').trim();
   if (environmentSessionId && payloadSessionId !== environmentSessionId) {
@@ -51,7 +51,7 @@ try {
   }
   const projectDir = canonicalDirectory(process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd());
   const contextEnabled = String(process.env.DELEGATE_NATIVE_CONTEXT ?? '1') !== '0';
-  const jobs = event === 'SessionStart' || contextEnabled ? listJobs() : [];
+  const jobs = listJobs();
   let context = null;
   if (contextEnabled) {
     try {
@@ -66,57 +66,48 @@ try {
     }
   }
 
-  if (event === 'SessionStart') {
-    const marker = writeSessionCorrelationMarker({
-      stateDirectory: dataDir(),
-      sessionId: payloadSessionId,
-      coordinatorPid: process.ppid,
-      projectDir,
-      workspaceId: projectDir
+  const marker = writeSessionCorrelationMarker({
+    stateDirectory: dataDir(),
+    sessionId: payloadSessionId,
+    coordinatorPid: process.ppid,
+    projectDir,
+    workspaceId: projectDir
+  });
+  if (!marker.ok) warn(marker.reason, event);
+  const plan = buildCollisionWatchPlan({
+    jobs,
+    env: process.env,
+    sessionId: payloadSessionId,
+    workspaceId: projectDir,
+    projectDir
+  });
+  try {
+    ensureCollisionWatchSignal();
+  } catch {
+    const { recordCollisionWatchDegradation } = await import('./lib/control.mjs');
+    recordCollisionWatchDegradation(plan.jobIds, {
+      reason: 'watch-refresh-signal-unavailable',
+      cap: plan.cap,
+      totalPathCount: plan.totalPathCount,
+      watchedPathCount: plan.watchedPathCount
     });
-    if (!marker.ok) warn(marker.reason, event);
-    const plan = buildCollisionWatchPlan({
-      jobs,
-      env: process.env,
-      sessionId: payloadSessionId,
-      workspaceId: projectDir,
-      projectDir
-    });
-    try {
-      ensureCollisionWatchSignal();
-    } catch {
-      const { recordCollisionWatchDegradation } = await import('./lib/control.mjs');
-      recordCollisionWatchDegradation(plan.jobIds, {
-        reason: 'watch-refresh-signal-unavailable',
-        cap: plan.cap,
-        totalPathCount: plan.totalPathCount,
-        watchedPathCount: plan.watchedPathCount
-      });
-    }
-    if (plan.degraded) {
-      const { recordCollisionWatchDegradation } = await import('./lib/control.mjs');
-      recordCollisionWatchDegradation(plan.omittedJobIds, {
-        reason: plan.reason,
-        cap: plan.cap,
-        totalPathCount: plan.totalPathCount,
-        watchedPathCount: plan.watchedPathCount
-      });
-    }
-    process.stdout.write(`${JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: event,
-        watchPaths: plan.watchPaths,
-        ...(context ? { additionalContext: context } : {})
-      }
-    })}\n`);
-  } else if (context) {
-    process.stdout.write(`${JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: event,
-        additionalContext: context
-      }
-    })}\n`);
   }
+  if (plan.degraded) {
+    const { recordCollisionWatchDegradation } = await import('./lib/control.mjs');
+    recordCollisionWatchDegradation(plan.omittedJobIds, {
+      reason: plan.reason,
+      cap: plan.cap,
+      totalPathCount: plan.totalPathCount,
+      watchedPathCount: plan.watchedPathCount
+    });
+  }
+  process.stdout.write(`${JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: event,
+      watchPaths: plan.watchPaths,
+      ...(context ? { additionalContext: context } : {})
+    }
+  })}\n`);
 } catch (error) {
   warn(error?.code || error?.message || error?.name, 'hook');
 }

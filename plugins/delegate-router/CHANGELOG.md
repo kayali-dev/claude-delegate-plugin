@@ -2,6 +2,25 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.50.0 — 2026-07-28
+
+- Direct Codex MCP responses now remain private to the wrapper until their
+  shadow job has completed terminal artifacts and audit publication. Previously
+  the response was published first, so any reader treating it as the completion
+  boundary — the TUI, the monitor, `delegate_stats`, or a caller script — could
+  observe a terminal job whose chain-attribution audit row had not yet landed,
+  under-counting that row. It surfaced as an intermittent suite failure (two
+  completed parent/child shadows, one audit row), which is how it was found,
+  but the window was real for every reader. A held-audit-lock regression pins
+  the response boundary and fails against the previous ordering; it uses no
+  retry, sleep, widened tolerance, or suite serialization, and observation
+  stays fail-open so provider bytes are always relayed.
+- Removed the redundant PostCompact session-hook registration and its invalid
+  `hookSpecificOutput` discriminant. Claude Code invokes SessionStart again
+  with `source=compact`, whose documented output schema supports the existing
+  bounded `additionalContext` and collision `watchPaths`; a closed-field test
+  now validates the registered event and emitted payload shape.
+
 ## 0.49.0 — 2026-07-28
 
 - At real-store scale (141 jobs; largest journal 19,418,996 bytes), reduced

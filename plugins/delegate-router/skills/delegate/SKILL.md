@@ -302,17 +302,18 @@ deferred: `delegate_decide accepted` returns `CAS_CONFLICT` for moved targets
 or `WORKSPACE_APPLY_DEFERRED` after a clean preflight. Do not describe a
 prepared integration worktree as owner-applied or accepted.
 
-SessionStart and PostCompact also inject the same small session-owned work
-projection: active attempt IDs, policy/human/acceptance blockers,
-ready-for-review attempts, and resumable chain leaves. Use those IDs directly
-after compaction; the projection is capped and explicitly reports omissions.
-It contains no prompts, diffs, repository paths, results, secrets, or
-free-form errors. The status line keeps aggregate running/review-ready counts
-and one provider allowance visible during idle periods.
+SessionStart, including its `source=compact` invocation after compaction,
+injects a small session-owned work projection: active attempt IDs,
+policy/human/acceptance blockers, ready-for-review attempts, and resumable
+chain leaves. Use those IDs directly after compaction; the projection is capped
+and explicitly reports omissions. It contains no prompts, diffs, repository
+paths, results, secrets, or free-form errors. The status line keeps aggregate
+running/review-ready counts and one provider allowance visible during idle
+periods.
 
 After `delegate_start`, retain the job ID and revision. Use:
 
-- `delegate_list` to discover jobs in a genuinely new session, recover entries omitted by the bounded native context, or browse outside the current session scope. PostCompact already rehydrates retained IDs. The tool reconciles orphans and returns compact summaries, newest first; filter by `groupId` or request a group summary for fan-out completion.
+- `delegate_list` to discover jobs in a genuinely new session, recover entries omitted by the bounded native context, or browse outside the current session scope. SessionStart with `source=compact` already rehydrates retained IDs after compaction. The tool reconciles orphans and returns compact summaries, newest first; filter by `groupId` or request a group summary for fan-out completion.
 - `delegate_inspect` for lifecycle, capabilities, immutable launch `origin.sessionId` / `origin.workspaceId` / `origin.projectDir` versus delegated `cwd`, execution owner/lease attribution, continuation IDs, `resumable`, `driftReport`, any failure `checkpoint`, the final `result`, verification verdict, and current revision. `resultText` is the provider-independent text of the final message; use `resultWindow` (`find`, `offset`, `maxChars`) or `delegate-jobs result` window flags for long output. A read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. Inline workers retain legacy `ORPHANED` reconciliation; supervisor-owned attempts instead report exact exit/signal/lease attribution.
 - `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
 - `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
