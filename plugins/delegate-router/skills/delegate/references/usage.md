@@ -41,6 +41,15 @@ The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex w
 
 Per-job observed tokens and context occupancy are separate dimensions, neither of which is a subscription allowance percentage. `delegate_usage.tokenUsage` / `observed` contains input/output/total tokens and feeds the `maxOutputTokens` check; `chainCumulative` sums those token counters from the root job through the inspected continuation. Cursor ACP `usage_update {used,size}` is stored only as `contextOccupancy: { contextUsed, contextSize }`, never interpreted as output tokens and never compared with `maxOutputTokens`. Headless Cursor records tokens only from its final `result.usage` envelope. Routing continues to use the provider windows in `usage.json`.
 
+Plan-first uses a separate output sub-budget derived locally from packet
+size/structure, with a 4,096-token default floor and 16,384-token ceiling;
+`DELEGATE_PLAN_OUTPUT_TOKENS` overrides it without changing provider allowance.
+The sub-budget is still provider-reported output tokens, not quota percentage.
+Ambient monitoring names its terminal edge `budget-breach` for this per-job
+cap and `allowance-breach` for provider quota/rate exhaustion. A same-cause
+generic failure is redundant and suppressed; a different terminal cause
+remains visible.
+
 `delegate-jobs stats` reads the never-pruned audit log as an outcome ledger across managed jobs, direct Codex/Cursor shadows, and completed `claude-agent` stubs. Every new attempt and terminal/decision audit snapshot records broker, adapter, provider-CLI, policy, and event-schema versions; a stable task shape; the canonical packet sections that were present; real-tree verification outcome; bounded findings; the explicit owner decision; usage; and a redacted rejection reason when one exists. Provider CLI provenance reuses the managed adapter's existing local version check, direct Cursor's local `--version`, or Codex MCP `serverInfo`; it adds no provider/API round trip and spends no allowance. Historical rows remain readable with these fields absent.
 
 The ledger reports provider-completion, verification-pass, and owner-acceptance as three independent measurements. Each carries `{ numerator, sampleSize, minimumSample, status, rate }`; the minimum is 10, and `rate` is `null` with `status: "insufficient-data"` below it. Verification counts only broker-originated real-tree pass/fail/timeout labels. Owner acceptance counts only explicit `accepted`/`rejected` decisions. It never treats missing labels, `ready-for-review`, scope cleanliness, or provider silence as a positive label.

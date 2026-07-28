@@ -23,6 +23,7 @@ import {
   groupsViewModel,
   launcherViewModel,
   providersViewModel,
+  recordSections,
   sessionsViewModel,
   statsViewModel,
   WORK_TABS,
@@ -85,6 +86,27 @@ function syntheticStore() {
     }] }
   };
 }
+
+test('job detail surfaces plan-pass degradation while legacy records omit the additive section', () => {
+  const degraded = recordSections({
+    id: 'codex-plan-parent',
+    status: 'completed',
+    phase: 'completed',
+    planPass: {
+      state: 'degraded',
+      reason: 'plan-output-token-budget-exceeded',
+      jobId: 'codex-plan-child',
+      errorCode: 'BUDGET_EXCEEDED'
+    },
+    planning: { state: 'confirmed' }
+  });
+  const planning = degraded.find((section) => section.label === 'Planning');
+  assert.equal(planning.badge.text, 'PLAN DEGRADED');
+  assert.ok(planning.rows.some((row) => row.key === 'planPass state' && row.value === 'degraded'));
+  assert.ok(planning.rows.some((row) => row.key === 'planPass jobId' && row.value === 'codex-plan-child'));
+  assert.equal(recordSections({ id: 'legacy', status: 'completed', phase: 'completed' })
+    .some((section) => section.label === 'Planning'), false);
+});
 
 test('app bar receives the package version from startup and never invents a release literal', () => {
   const frame = dashboardViewModel(syntheticStore(), { now: NOW, version: packageVersion }, { width: 100, height: 30 });

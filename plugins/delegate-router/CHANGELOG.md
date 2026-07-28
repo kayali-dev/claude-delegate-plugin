@@ -2,6 +2,36 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.47.0 — 2026-07-28
+
+- Replaced the fixed 2,048-token plan-pass ceiling with a deterministic,
+  packet-scaled sub-budget. The default floor is 4,096 tokens; packet bytes and
+  structural directive markers add 1,024-token steps up to the existing 16,384
+  hard ceiling. `DELEGATE_PLAN_OUTPUT_TOKENS` remains the bounded explicit
+  override, explicit job caps remain authoritative, and budget compilation is
+  local—no provider round-trip or launch latency was added.
+- Independent plan jobs now project terminal outcome back onto their implement
+  attempt as additive `planPass` state with reason, job id, status, observed
+  cost, and limit. Inspect returns it and TUI detail shows `PLAN DEGRADED`.
+  Historical records tolerate the field's absence. Failed and over-budget
+  planning remains non-gating and continues the requested launch.
+- Split ambient `budget-breach` (configured per-job output cap) from
+  `allowance-breach` (provider quota/rate exhaustion), with distinct remedies.
+  A terminal failure whose code is exactly the already-active breach cause no
+  longer produces a duplicate line; a different failure cause remains queued
+  under the existing edge dedupe, cooldown, rate, and priority policy. MCP
+  schemas and CLI flags are unchanged.
+- Added retries to every recursive temp-directory teardown in the test suite.
+  A spawned worker could still be writing into its directory when the `after`
+  hook ran, so `rmSync` raised `ENOTEMPTY` and failed the run: measured at 1/10
+  on `shadow-jobs`, identically at the prior release, so it was environmental
+  rather than caused by any change. None of the 48 recursive teardowns used
+  Node's retry option, which exists for exactly this errno class. 0/35 after.
+- `package.test.mjs` no longer pins the version as a literal. It asserts the
+  semver shape and that `CHANGELOG.md` carries a dated section for the current
+  version, so a release that forgets to document itself fails instead of a line
+  that merely goes stale on every bump.
+
 ## 0.46.0 — 2026-07-28
 
 - Fixed Escape needing a second keypress to take effect. A lone `ESC` byte is

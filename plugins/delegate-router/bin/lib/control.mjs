@@ -27,7 +27,7 @@ import {
   contractDigest,
   interrogationOutputTokenLimit,
   planFirstDefault,
-  planOutputTokenLimit,
+  planOutputTokenBudget,
   planPrompt
 } from './planning.mjs';
 import { createWorkSpec } from './work-model.mjs';
@@ -2951,6 +2951,11 @@ export function createManagedJob(options) {
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
+  const compiledPlanBudget = planOutputTokenBudget(options.prompt);
+  const effectivePlanOutputTokenLimit = Math.min(
+    compiledPlanBudget.limit,
+    maxOutputTokens || compiledPlanBudget.limit
+  );
   const origin = launchOrigin({
     origin: options.origin,
     projectDir: options.originProjectDir,
@@ -2994,7 +2999,12 @@ export function createManagedJob(options) {
         state: ambiguityCheck ? 'pending' : 'skipped',
         ...(ambiguityCheck ? {} : { reason: 'explicitly-disabled' })
       },
-      planOutputTokenLimit: Math.min(planOutputTokenLimit(), maxOutputTokens || planOutputTokenLimit())
+      planOutputTokenLimit: effectivePlanOutputTokenLimit,
+      planBudget: {
+        ...compiledPlanBudget,
+        limit: effectivePlanOutputTokenLimit,
+        ...(effectivePlanOutputTokenLimit < compiledPlanBudget.limit ? { cappedByJobOutputBudget: true } : {})
+      }
     } : null,
     approval: options.approval || 'auto',
     effort,
@@ -3147,7 +3157,23 @@ export function startAmbiguityProbe(id) {
   if (!parent) throw brokerError('NOT_FOUND', `job not found: ${id}`);
   if (!parent.planFirst || parent.ambiguityCheck !== true) return null;
   if (parent.planning?.ambiguity?.jobId) return inspectJob(parent.planning.ambiguity.jobId);
-  const configuredLimit = planOutputTokenLimit();
+  const candidate = ambiguityCandidate(parent);
+  let originalPrompt;
+  try { originalPrompt = fs.readFileSync(parent.promptPath, 'utf8'); }
+  catch (error) {
+    updateManagedJob(id, (current) => {
+      current.planning.ambiguity = { enabled: true, state: 'skipped', reason: 'prompt-unavailable' };
+      current.planPass = { state: 'skipped', reason: 'prompt-unavailable', jobId: null };
+    }, { incrementRevision: false });
+    appendJobEvent(id, 'plan.degraded', {
+      stage: 'ambiguity-pass',
+      reason: `prompt-unavailable: ${redact(error.message)}`,
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
+  const compiledPlanBudget = planOutputTokenBudget(originalPrompt);
+  const configuredLimit = compiledPlanBudget.limit;
   const budget = parent.maxOutputTokens
     ? Math.min(configuredLimit, Math.floor(parent.maxOutputTokens * 0.2))
     : configuredLimit;
@@ -3158,24 +3184,16 @@ export function startAmbiguityProbe(id) {
         state: 'skipped',
         reason: 'insufficient-output-token-budget'
       };
+      current.planPass = {
+        state: 'skipped',
+        reason: 'insufficient-output-token-budget',
+        jobId: null,
+        outputTokenLimit: budget
+      };
     }, { incrementRevision: false });
     appendJobEvent(id, 'plan.degraded', {
       stage: 'ambiguity-pass',
       reason: 'insufficient-output-token-budget',
-      fallback: 'single-plan-confirmation'
-    });
-    return null;
-  }
-  const candidate = ambiguityCandidate(parent);
-  let originalPrompt;
-  try { originalPrompt = fs.readFileSync(parent.promptPath, 'utf8'); }
-  catch (error) {
-    updateManagedJob(id, (current) => {
-      current.planning.ambiguity = { enabled: true, state: 'skipped', reason: 'prompt-unavailable' };
-    }, { incrementRevision: false });
-    appendJobEvent(id, 'plan.degraded', {
-      stage: 'ambiguity-pass',
-      reason: `prompt-unavailable: ${redact(error.message)}`,
       fallback: 'single-plan-confirmation'
     });
     return null;
@@ -3200,16 +3218,34 @@ export function startAmbiguityProbe(id) {
       reportLint: false
     });
     updateManagedJob(id, (current) => {
-      current.planning.externalOutputTokensReserved = budget;
+      const recordedOutcome = current.planPass?.jobId === child.id
+        && ['completed', 'degraded'].includes(current.planPass.state)
+        ? current.planPass
+        : null;
+      current.planning.externalOutputTokensReserved = recordedOutcome?.outputTokens ?? budget;
       current.planning.ambiguity = {
         enabled: true,
-        state: 'running',
+        state: recordedOutcome?.state || 'running',
         jobId: child.id,
         provider: candidate.provider,
         model: candidate.model,
         independentBy: candidate.independentBy,
-        outputTokenLimit: budget
+        outputTokenLimit: budget,
+        ...(recordedOutcome ? {
+          probeStatus: recordedOutcome.planStatus,
+          outputTokens: recordedOutcome.outputTokens,
+          costBasis: recordedOutcome.outputTokens == null ? 'reserved-cap' : 'observed',
+          ...(recordedOutcome.reason ? { reason: recordedOutcome.reason } : {})
+        } : {})
       };
+      if (!recordedOutcome) {
+        current.planPass = {
+          state: 'running',
+          jobId: child.id,
+          outputTokenLimit: budget,
+          budgetSource: compiledPlanBudget.source
+        };
+      }
     }, { incrementRevision: false });
     appendJobEvent(id, 'plan.ambiguity.started', {
       jobId: child.id,
@@ -3227,6 +3263,11 @@ export function startAmbiguityProbe(id) {
         state: 'skipped',
         reason: redact(error.message)
       };
+      current.planPass = {
+        state: 'degraded',
+        reason: 'plan-pass-launch-failed',
+        jobId: null
+      };
     }, { incrementRevision: false });
     appendJobEvent(id, 'plan.degraded', {
       stage: 'ambiguity-pass',
@@ -3235,6 +3276,66 @@ export function startAmbiguityProbe(id) {
     });
     return null;
   }
+}
+
+function planPassFailureReason(planJob) {
+  if (planJob.errorCode === 'BUDGET_EXCEEDED' || planJob.stoppedReason === 'budget') {
+    return 'plan-output-token-budget-exceeded';
+  }
+  if (planJob.status === 'cancelled') return 'plan-pass-cancelled';
+  return planJob.errorCode ? `plan-pass-failed:${planJob.errorCode}` : 'plan-pass-failed';
+}
+
+export function recordPlanPassOutcome(planJobOrId) {
+  const planJob = typeof planJobOrId === 'string' ? loadJob(planJobOrId) : planJobOrId;
+  if (!planJob?.planningFor || !TERMINAL_STATUSES.has(planJob.status)) return null;
+  const parentId = planJob.planningFor;
+  if (!loadJob(parentId)) return null;
+  const totals = usageTotals(planJob.usage);
+  const degraded = planJob.status !== 'completed';
+  const reason = degraded ? planPassFailureReason(planJob) : null;
+  let changed = false;
+  updateManagedJob(parentId, (current) => {
+    const previous = current.planPass;
+    if (previous?.jobId === planJob.id
+      && previous.state === (degraded ? 'degraded' : 'completed')
+      && previous.planStatus === planJob.status) return;
+    current.planPass = {
+      state: degraded ? 'degraded' : 'completed',
+      ...(reason ? { reason } : {}),
+      jobId: planJob.id,
+      planStatus: planJob.status,
+      ...(planJob.errorCode ? { errorCode: planJob.errorCode } : {}),
+      outputTokenLimit: planJob.maxOutputTokens ?? current.planning?.ambiguity?.outputTokenLimit ?? null,
+      outputTokens: totals?.outputTokens ?? null,
+      recordedAt: Date.now()
+    };
+    if (current.planning?.ambiguity?.jobId === planJob.id) {
+      current.planning.externalOutputTokensReserved = totals?.outputTokens
+        ?? current.planning.ambiguity.outputTokenLimit
+        ?? 0;
+      current.planning.ambiguity = {
+        ...current.planning.ambiguity,
+        state: degraded ? 'degraded' : 'completed',
+        probeStatus: planJob.status,
+        outputTokens: totals?.outputTokens ?? null,
+        costBasis: totals ? 'observed' : 'reserved-cap',
+        ...(reason ? { reason } : {})
+      };
+    }
+    changed = true;
+  }, { incrementRevision: false });
+  if (changed) {
+    appendJobEvent(parentId, degraded ? 'plan.degraded' : 'plan.ambiguity.completed', {
+      stage: 'ambiguity-pass',
+      jobId: planJob.id,
+      status: planJob.status,
+      ...(reason ? { reason, fallback: 'single-plan-confirmation' } : {}),
+      outputTokens: totals?.outputTokens ?? null,
+      outputTokenLimit: planJob.maxOutputTokens ?? null
+    });
+  }
+  return inspectJob(parentId);
 }
 
 export async function awaitAmbiguityProbe(id, options = {}) {
@@ -3248,6 +3349,10 @@ export async function awaitAmbiguityProbe(id, options = {}) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
     probe = inspectJob(probeId);
   }
+  if (TERMINAL_STATUSES.has(probe.status)) {
+    recordPlanPassOutcome(probe);
+    return probe;
+  }
   const totals = usageTotals(probe.usage);
   const reserved = parent.planning?.ambiguity?.outputTokenLimit || 0;
   const attributed = totals?.outputTokens ?? reserved;
@@ -3255,21 +3360,19 @@ export async function awaitAmbiguityProbe(id, options = {}) {
     current.planning.externalOutputTokensReserved = attributed;
     current.planning.ambiguity = {
       ...current.planning.ambiguity,
-      state: TERMINAL_STATUSES.has(probe.status) ? 'completed' : 'inconclusive',
+      state: 'inconclusive',
       probeStatus: probe.status,
       outputTokens: totals?.outputTokens ?? null,
       costBasis: totals ? 'observed' : 'reserved-cap',
-      ...(TERMINAL_STATUSES.has(probe.status) ? {} : { reason: 'comparison-pass-wait-timeout' })
+      reason: 'comparison-pass-wait-timeout'
     };
   }, { incrementRevision: false });
-  if (!TERMINAL_STATUSES.has(probe.status)) {
-    appendJobEvent(id, 'plan.degraded', {
-      stage: 'ambiguity-comparison',
-      reason: 'comparison-pass-wait-timeout',
-      fallback: 'inconclusive-non-gating-comparison'
-    });
-  }
-  return TERMINAL_STATUSES.has(probe.status) ? probe : null;
+  appendJobEvent(id, 'plan.degraded', {
+    stage: 'ambiguity-comparison',
+    reason: 'comparison-pass-wait-timeout',
+    fallback: 'inconclusive-non-gating-comparison'
+  });
+  return null;
 }
 
 export function isDirectTransport(value) {

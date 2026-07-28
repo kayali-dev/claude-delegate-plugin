@@ -45,7 +45,7 @@ const hook = path.join(pluginRoot, 'bin', 'delegate-agent-hook');
 
 function tempRoot(t, prefix) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   return root;
 }
 
@@ -479,7 +479,7 @@ test('scanner survives in-flight rollout files whose meta line is not yet writte
   assert.equal(codexThreadIdentity(null), null);
   assert.equal(toolOriginEvidence(null), null);
   const root = mkdtempSync(path.join(os.tmpdir(), 'codex-scan-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const day = path.join(root, '2026', '07', '22');
   mkdirSync(day, { recursive: true });
   // In-flight file: first line truncated mid-JSON (writer has not finished).

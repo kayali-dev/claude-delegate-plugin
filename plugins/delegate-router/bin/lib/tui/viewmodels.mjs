@@ -1021,6 +1021,16 @@ export function recordSections(job) {
         }] : [])
       ]
     },
+    ...(job.planPass || job.planning ? [{
+      label: 'Planning',
+      ...(job.planPass?.state === 'degraded'
+        ? { badge: { text: 'PLAN DEGRADED', style: palette.badgeWarn } }
+        : {}),
+      rows: [
+        ...objectRows('planPass', job.planPass),
+        ...objectRows('planning', job.planning)
+      ]
+    }] : []),
     {
       label: 'Verification',
       ...(verifyFailed ? { badge: { text: 'VERIFY FAILED', style: palette.failed } }

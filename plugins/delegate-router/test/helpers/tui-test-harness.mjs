@@ -85,7 +85,7 @@ export async function useTuiTestHarness(metaUrl, callback) {
     await resetTuiRuntime(context);
     after(() => {
       restoreEnvironment(originalEnvironment);
-      fs.rmSync(context.root, { recursive: true, force: true });
+      fs.rmSync(context.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
     });
   }
   if (typeof callback !== 'function') return context;
@@ -95,7 +95,7 @@ export async function useTuiTestHarness(metaUrl, callback) {
   try {
     return await callback(nested);
   } finally {
-    fs.rmSync(nested.root, { recursive: true, force: true });
+    fs.rmSync(nested.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
     await resetTuiRuntime(context);
   }
 }

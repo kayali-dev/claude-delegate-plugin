@@ -24,7 +24,7 @@ const fakeCursor = path.join(testDir, 'fake-cursor-parity.mjs');
 
 async function isolated(t, provider, fn, extra = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-backchannel-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const previous = new Map();
   const values = {
     DELEGATE_STATE_FILE: path.join(root, 'state', 'usage.json'),

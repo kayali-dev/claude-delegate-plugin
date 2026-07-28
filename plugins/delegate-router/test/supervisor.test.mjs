@@ -118,7 +118,7 @@ async function isolated(t, fn, overrides = {}) {
 async function removeDirectoryWithRetry(directory, attempts = 20, delayMs = 25) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      fs.rmSync(directory, { recursive: true, force: true });
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
       return;
     } catch (error) {
       if (!['ENOTEMPTY', 'EBUSY', 'EPERM'].includes(error.code) || attempt === attempts - 1) {

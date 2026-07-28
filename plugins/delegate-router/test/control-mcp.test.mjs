@@ -99,7 +99,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
 
 test('control MCP adds bounded resources and common-flow prompts without changing tools', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-mcp-native-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const stateFile = path.join(directory, 'usage.json');
   const jobs = path.join(directory, 'jobs');
   const workspace = path.join(directory, 'workspace');
@@ -283,7 +283,7 @@ test('delegate_stats returns filtered audit aggregates and totals and rejects jo
     assert.deepEqual(recommendation.confidence, { level: 0.95, method: 'wilson-score-interval' });
     assert.equal(recommendation.staticRouterChanged, false);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 
@@ -333,7 +333,7 @@ test('delegate_respond queues a revision-safe answer through the control inbox',
     else process.env.DELEGATE_STATE_FILE = previousState;
     if (previousProviders == null) delete process.env.DELEGATE_ENABLED_PROVIDERS;
     else process.env.DELEGATE_ENABLED_PROVIDERS = previousProviders;
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 

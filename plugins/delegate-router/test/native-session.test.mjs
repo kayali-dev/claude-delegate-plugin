@@ -122,7 +122,7 @@ test('native context is bounded, closed-field redacted, and orders actionable st
 
 test('SessionStart and PostCompact inject identical bounded state while only SessionStart arms P2.5 watch paths', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-native-session-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const stateFile = path.join(root, 'usage.json');
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(path.join(root, 'jobs'), { recursive: true });

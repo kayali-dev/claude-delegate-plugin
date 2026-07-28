@@ -17,7 +17,7 @@ function escapeRegExp(value) {
 
 function temporaryRoot(t, label = 'delegate-shim-test-') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), label));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   return directory;
 }
 

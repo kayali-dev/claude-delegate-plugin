@@ -70,7 +70,15 @@ function complete() {
   send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-fake', turnId, itemId: 'message-1', delta: reply } });
   send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId, item: { type: 'agentMessage', id: 'message-1', text: reply, phase: 'final_answer', memoryCitation: null }, completedAtMs: Date.now() } });
   send({ jsonrpc: '2.0', method: 'turn/diff/updated', params: { threadId: 'thread-fake', turnId, diff: 'diff --git a/a.js b/a.js' } });
-  sendUsage(turnId, Math.max(2, turnCount * 10 + (interrogationQuestion ? 4 : 0)));
+  const configuredPlanTokens = Number(process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS);
+  const configuredPlanModel = String(process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL || '');
+  const useConfiguredPlanTokens = planPass
+    && Number.isFinite(configuredPlanTokens)
+    && configuredPlanTokens >= 0
+    && (!configuredPlanModel || String(threadModel).includes(configuredPlanModel));
+  sendUsage(turnId, useConfiguredPlanTokens
+    ? configuredPlanTokens
+    : Math.max(2, turnCount * 10 + (interrogationQuestion ? 4 : 0)));
   send({ jsonrpc: '2.0', method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 41, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, secondary: { usedPercent: 7, resetsAt: Math.floor(Date.now() / 1000) + 604800 } } } });
   send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-fake', turn: { id: turnId, status: 'completed', items: [], itemsView: 'full', error: null, startedAt: 1, completedAt: 2, durationMs: 100 } } });
   interrogationQuestion = null;

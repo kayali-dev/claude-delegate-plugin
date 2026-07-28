@@ -34,7 +34,7 @@ import {
 
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-diag-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   return directory;
 }
 

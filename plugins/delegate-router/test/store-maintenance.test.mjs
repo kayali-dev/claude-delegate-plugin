@@ -39,7 +39,7 @@ async function isolated(t, fn) {
     else process.env.DELEGATE_STATE_FILE = previous.state;
     if (previous.cap == null) delete process.env.DELEGATE_JOB_JOURNAL_CAP_BYTES;
     else process.env.DELEGATE_JOB_JOURNAL_CAP_BYTES = previous.cap;
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   });
   return fn(root);
 }

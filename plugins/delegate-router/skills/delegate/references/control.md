@@ -210,6 +210,16 @@ retains the existing recorded fallback to the explicitly requested launch; a
 missing comparison candidate remains non-gating. No plan pass may accept itself
 or start write work.
 
+The default plan output sub-budget is deterministic and network-free. Packets
+at or below 5 KiB and 24 structural directive markers receive a 4,096-token
+floor. Each additional started 4 KiB of packet text and each additional started
+16 list/constraint/section markers adds 1,024 tokens, capped at 16,384.
+`DELEGATE_PLAN_OUTPUT_TOKENS` remains an exact bounded override (128–16,384);
+an explicit smaller job-level `maxOutputTokens` still limits the primary plan,
+and the independent pass retains its existing share of that explicit overall
+cap. The stored `planning.planBudget` records the safe metrics, source, floor,
+ceiling, and effective limit without retaining another copy of the packet.
+
 When enabled, ambiguity detection sends the same WorkSpec to an independent
 cheap plan pass using a different provider or model. It compares only parsed
 target files, components, ordered approach shape, and declared assumptions.
@@ -217,6 +227,15 @@ Material divergence becomes a revisioned coordinator question before write
 work. Convergence proceeds after the ordinary plan confirmation. Invalid or
 unavailable structural evidence is reported as inconclusive and never
 converted into a guessed ambiguity verdict.
+
+The independent child always projects its terminal outcome back onto the
+implement attempt as additive `planPass: { state, reason?, jobId,
+planStatus, errorCode?, outputTokenLimit, outputTokens, recordedAt }`.
+`delegate_inspect` returns that field directly and TUI job detail renders a
+`PLAN DEGRADED` badge. Historical records with no `planPass` remain unchanged.
+A failed, cancelled, timed-out, or over-budget independent pass degrades to the
+single-plan confirmation/direct launch path; it never blocks the requested
+write and never remains visible only as an orphaned sibling.
 
 A steer that reduces the remaining work can finish the job before any follow-up command arrives. Do not design a steer-then-cancel sequence around a shrinking task; cancel first if termination is the goal.
 
@@ -355,9 +374,16 @@ MCP tool, TUI, `finishedPath`, or inspection/control pull behavior.
 Interactive Claude Code sessions with the experimental Monitor surface
 automatically start `delegate-monitor`. It reads bounded job records and
 journal tails and pushes only actionable edge transitions, in this order:
-policy breach (scope or budget/allowance), human input or blocked permission,
-ready for review, terminal failure, and stalled running work. It never emits
-progress, deltas, tool activity, usage ticks, or successful intermediate steps.
+scope policy breach, per-job output `budget-breach`, provider
+`allowance-breach`, human input or blocked permission, ready for review,
+terminal failure, and stalled running work. Budget and allowance are separate
+priority-one classes because raising `maxOutputTokens` and waiting for quota
+reset/rerouting are different remedies. When a terminal error code is the same
+budget or allowance cause already represented by the active breach edge, the
+generic failure edge is suppressed. A distinct terminal cause is still queued,
+deduplicated, cooled down, and emitted in priority order. The monitor never
+emits progress, deltas, tool activity, usage ticks, or successful intermediate
+steps.
 Every line is compact, redacted, and carries the job id plus the launch
 workspace basename; inspect that job and its immutable `origin.sessionId`,
 `origin.workspaceId`, and `origin.projectDir` before acting.
@@ -381,7 +407,8 @@ ten minutes; configure
 `DELEGATE_MONITOR_STALL_SECONDS`,
 `DELEGATE_MONITOR_COOLDOWN_SECONDS`, and
 `DELEGATE_MONITOR_MAX_LINES_PER_MINUTE` only when the local policy requires it.
-The priority remains policy breach → human input → acceptance ready → failure.
+The priority remains scope/budget/allowance breach → human input → acceptance
+ready → failure.
 Do not emit after every edit or command, repeat a suggestion within one logical
 task, announce successful intermediate activity, or treat provider completion
 alone as a demand for review. Non-actionable state belongs in the native

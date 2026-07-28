@@ -254,7 +254,7 @@ test('future WorkItem fields and schema versions survive write-read-update round
       assert.equal(fs.statSync(path.join(workDir(), 'work-future.json')).mode & 0o777, 0o600);
     });
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 
@@ -312,6 +312,6 @@ test('CLI and MCP work surfaces return projections without changing the store', 
     assert.deepEqual(fileSnapshot(directory), before);
     assert.equal(fs.existsSync(path.join(directory, 'work')), false);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });

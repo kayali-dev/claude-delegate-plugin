@@ -25,7 +25,7 @@ function mulberry32(seed) {
 
 test('TUI preferences persist privately and environment values remain authoritative', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-prefs-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const widthProbeCache = { 'term=tmux-256color|program=ghostty|version=1|mux=tmux': { widths: { '⚙': 1 }, measuredAt: 123 } };
   const file = saveTuiPreferences({ theme: 'light', notifications: false, timestampMode: 'relative', fleetDensity: 'compact', widthProbeCache }, { directory });
   assert.equal(file, tuiPreferencesPath({ directory }));
@@ -39,7 +39,7 @@ test('TUI preferences persist privately and environment values remain authoritat
 
 test('TUI preferences accept all six presets and sanitized custom base overrides', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-theme-prefs-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   for (const theme of ['dark', 'light', 'dark-daltonized', 'light-daltonized', 'dark-ansi', 'light-ansi']) {
     saveTuiPreferences({ theme }, { directory });
     assert.equal(loadTuiPreferences({ directory, env: {} }).theme, theme);
@@ -63,7 +63,7 @@ test('TUI preferences accept all six presets and sanitized custom base overrides
 
 test('width-probe cache saves merge concurrent session snapshots by newest measurement', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-prefs-merge-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const direct = { widths: { '⚙': 1 }, measuredAt: 100 };
   const tmux = { widths: { '⚙': 2 }, measuredAt: 200 };
   const staleSnapshot = {};

@@ -28,7 +28,7 @@ function run(command, args, cwd) {
 
 function repository(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-intent-spec-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   fs.mkdirSync(path.join(root, 'src'), { recursive: true });
   fs.mkdirSync(path.join(root, 'test'), { recursive: true });
   fs.writeFileSync(path.join(root, 'src', 'feature.mjs'), 'export const feature = false;\n');

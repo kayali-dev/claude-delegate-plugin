@@ -44,6 +44,13 @@ and waits for revisioned `delegate_respond accept=true|false`. Acceptance
 continues the same provider thread/session into write mode; it never launches a
 fresh context. When budget permits, a second cheap plan from another provider
 or model is compared structurally by targets, approach shape, and assumptions.
+The plan output sub-budget is computed locally from packet bytes plus list,
+constraint, and section markers: 4,096 tokens minimum, 1,024-token size and
+complexity steps, and a 16,384-token ceiling. It adds no provider round-trip;
+`DELEGATE_PLAN_OUTPUT_TOKENS` remains the explicit bounded override. An explicit
+smaller job-level `maxOutputTokens` can still cap the plan. If the independent
+pass fails, the implement attempt retains additive `planPass` state, reason,
+job id, observed cost, and limit in inspect/TUI while launch continues.
 Only material structural divergence opens an ambiguity question; inconclusive
 comparison says so and does not gate on a guessed verdict. For a genuinely
 trivial write, use MCP `delegate_start_trivial` or CLI
@@ -216,6 +223,11 @@ actionable edge: live collision detected, policy breach, required human input,
 acceptance blocked, ready for review, terminal failure, or the ten-minute stall
 policy. Treat that notification as a
 wake-up signal and inspect the named job; it never replaces acceptance review.
+Per-job `budget-breach` and provider `allowance-breach` are distinct priority-one
+edges with different remedies. When that edge already names the terminal cause,
+the monitor suppresses the redundant generic failure line; a different later
+failure cause remains actionable and is still emitted after the ordinary
+cooldown.
 Progress, deltas, tools, usage ticks, and intermediate successes remain silent.
 Push defaults to this Claude session's own launches. New records retain
 `origin.sessionId` plus a realpath-normalized `origin.workspaceId`; continuation

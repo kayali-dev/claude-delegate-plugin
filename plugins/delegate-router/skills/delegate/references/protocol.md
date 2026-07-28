@@ -140,7 +140,8 @@ job.created, job.state, job.completed, job.cancelled
 provider.initialized, session.created, session.updated, turn.started, turn.completed
 message.user, message.delta, message.completed
 activity
-plan.updated
+plan.updated, plan.ambiguity.started, plan.ambiguity.completed
+plan.presented, plan.confirmed, plan.declined, plan.degraded
 compaction.started, compaction.completed
 tool.started, tool.status, tool.output, tool.completed
 file.changed, diff.updated
@@ -160,6 +161,12 @@ job.retry, verification.finished
 acceptance.decided, autofix.launched, autofix.stopped
 error, provider.event, provider.item
 ```
+
+Independent plan jobs retain `planningFor` as before. Their terminal transition
+also updates the parent attempt with additive `planPass` state and the existing
+`planning.ambiguity` compatibility view. Readers must tolerate both fields
+being absent. The update contains closed status/reason/cost metadata only; it
+does not copy the plan packet or provider payload into the parent.
 
 `activity` contains only `{ kind: 'thinking' | 'output', at }`. Codex reasoning items plus Cursor ACP and headless thinking chunks produce transition markers at most once per two seconds; a bounded thought tail exists only in the provider process and is never written to the job record or journal. `provider.event` contains only a redacted event name and safe metadata. The raw transport stream and hidden reasoning remain excluded. An otherwise-unmapped Codex thread item additionally emits `provider.item` with `{ itemType, itemId, phase, item }`; the item is recursively redacted and capped by the ordinary event/string bounds, so the next provider item type remains inspectable without persisting an unbounded raw stream.
 
@@ -184,7 +191,7 @@ Every broker error has `{ code, retryable, provider }`; `provider` is null/omitt
 | `true` | `LOCK_TIMEOUT`, `WRITER_ACTIVE`, `REVISION_CONFLICT`, `ORPHANED`, `PARENT_ACTIVE`, `TIMEOUT`, `RPC_TIMEOUT`, `TRANSPORT_ERROR`, `PROVIDER_ERROR`, `STATE_ERROR` |
 | `false` | `INVALID_REQUEST`, `NOT_FOUND`, `QUOTA_GUARD`, `INVALID_MODEL`, `WRONG_LANE`, `RESUME_UNSUPPORTED`, `DIRECT_TRANSPORT`, `ACP_TIER_UNAVAILABLE`, `USER_INPUT_REQUIRED`, `SECRET_IN_PROMPT`, `BUDGET_EXCEEDED`, `LARGE_WRITE`, `PROVIDER_DISABLED`, `PROVIDER_TOO_OLD`, `SESSION_UNAVAILABLE`, `UNMANAGED_JOB`, `JOB_TERMINAL`, `ACCEPTANCE_BLOCKED`, `UNSUPPORTED_STRATEGY`, `INTERNAL` |
 
-`retryable: true` means retrying the same request, possibly after backoff, can succeed. `QUOTA_GUARD` needs a window reset or different provider; `ACP_TIER_UNAVAILABLE` needs a catalog or transport change; `USER_INPUT_REQUIRED` needs new information in a resume; and `BUDGET_EXCEEDED` needs a higher cap. `REVISION_CONFLICT` includes `currentRevision`; budget and timeout failures retain partial state for an explicit resume.
+`retryable: true` means retrying the same request, possibly after backoff, can succeed. `QUOTA_GUARD` needs a window reset or different provider; `ACP_TIER_UNAVAILABLE` needs a catalog or transport change; `USER_INPUT_REQUIRED` needs new information in a resume; and `BUDGET_EXCEEDED` needs a higher per-job or plan-pass cap. These are distinct edge classes: allowance exhaustion is never described as a configured output budget. `REVISION_CONFLICT` includes `currentRevision`; budget and timeout failures retain partial state for an explicit resume.
 
 `DIRECT_TRANSPORT` means the record is an observability shadow whose original caller owns the provider loop. All mutation controls reject without signalling the provider; read-only inspection, events, transcript, diff, files, usage, and aggregate stats remain available.
 

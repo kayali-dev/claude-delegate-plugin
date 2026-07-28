@@ -201,6 +201,6 @@ test('polluted user prefs and probe cache cannot alter owner or dashboard contra
     assert.equal(process.env.NO_COLOR, undefined);
   } finally {
     restoreEnvironment(before);
-    fs.rmSync(pollutedRoot, { recursive: true, force: true });
+    fs.rmSync(pollutedRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });

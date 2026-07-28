@@ -22,7 +22,7 @@ const NOW = Date.parse('2026-07-13T12:00:00.000Z');
 
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-p2b-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   return directory;
 }
 

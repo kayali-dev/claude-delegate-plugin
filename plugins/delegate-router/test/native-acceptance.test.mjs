@@ -60,7 +60,7 @@ async function cursorWrite(cwd, options = {}) {
 
 test('P3 derives verification, records real-tree evidence, gates additive acceptance, and bounds opt-in fix rounds', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-native-acceptance-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const previous = Object.fromEntries([
     'DELEGATE_STATE_FILE',
     'DELEGATE_ENABLED_PROVIDERS',

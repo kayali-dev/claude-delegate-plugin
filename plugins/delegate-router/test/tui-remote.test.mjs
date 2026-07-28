@@ -52,7 +52,7 @@ function isolated(t) {
       if (previous[name] == null) delete process.env[name];
       else process.env[name] = previous[name];
     }
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   });
   return root;
 }
@@ -137,7 +137,7 @@ test('server bind validation is loopback-only and first-use tokens are private a
   assert.throws(() => assertLoopbackBind({ env: {}, host: '192.0.2.1' }), /loopback-only/);
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-serve-token-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const first = loadOrCreateServeToken({ env: {}, stateDir: root });
   const second = loadOrCreateServeToken({ env: {}, stateDir: root });
   assert.equal(first.created, true);

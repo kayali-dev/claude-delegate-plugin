@@ -30,7 +30,7 @@ test('delegate-tui exits 2 with a clear message when stdout is not a TTY', () =>
 
 test('delegate-tui --analyze replays a diagnostic directory without a TTY', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-analyze-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const recorder = new TuiFlightRecorder(directory);
   const output = { columns: 20, rows: 2, write() { return true; } };
   const screen = new Screen({ output, input: {}, columns: 20, rows: 2, diagnostics: recorder });
@@ -48,7 +48,7 @@ test('delegate-tui --analyze replays a diagnostic directory without a TTY', (t) 
 
 test('delegate-tui --job validates the id before TTY startup and unknown jobs exit 1', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-job-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const env = { ...process.env, DELEGATE_STATE_FILE: path.join(directory, 'usage.json') };
   const unknown = spawnSync(process.execPath, [tui, '--job', 'missing-job'], { encoding: 'utf8', env });
   assert.equal(unknown.status, 1);

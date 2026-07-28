@@ -29,7 +29,7 @@ import { mouseReportingOff, mouseReportingOn } from '../bin/lib/tui/ansi.mjs';
 
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-tui-p2a-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   return directory;
 }
 

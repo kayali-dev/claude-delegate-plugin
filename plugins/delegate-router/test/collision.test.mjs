@@ -54,7 +54,7 @@ function runHook(hook, payload, env) {
 
 test('live collision hook emits one scoped edge, cools duplicate touches, and stales acceptance evidence', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-collision-live-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const previousStateFile = process.env.DELEGATE_STATE_FILE;
   t.after(() => {
     if (previousStateFile == null) delete process.env.DELEGATE_STATE_FILE;
@@ -177,7 +177,7 @@ test('live collision hook emits one scoped edge, cools duplicate touches, and st
 
 test('attempt writes self-suppress while a later coordinator Edit on the same path collides', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-collision-self-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const previousStateFile = process.env.DELEGATE_STATE_FILE;
   t.after(() => {
     if (previousStateFile == null) delete process.env.DELEGATE_STATE_FILE;
@@ -259,7 +259,7 @@ test('attempt writes self-suppress while a later coordinator Edit on the same pa
 
 test('PostToolBatch deduplicates repeated Write observations and collision alerts retain session scope', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-collision-batch-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const previousStateFile = process.env.DELEGATE_STATE_FILE;
   t.after(() => {
     if (previousStateFile == null) delete process.env.DELEGATE_STATE_FILE;
@@ -338,7 +338,7 @@ test('PostToolBatch deduplicates repeated Write observations and collision alert
 
 test('watch plans cap at 256 paths and record explicit post-hoc degradation', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-collision-cap-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const previousStateFile = process.env.DELEGATE_STATE_FILE;
   t.after(() => {
     if (previousStateFile == null) delete process.env.DELEGATE_STATE_FILE;

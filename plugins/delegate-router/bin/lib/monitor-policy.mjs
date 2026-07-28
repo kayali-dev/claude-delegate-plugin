@@ -13,7 +13,9 @@ const BLOCKING_CODES = new Set([
   'READ_ONLY_TRANSPORT'
 ]);
 const BUDGET_CODES = new Set([
-  'BUDGET_EXCEEDED',
+  'BUDGET_EXCEEDED'
+]);
+const ALLOWANCE_CODES = new Set([
   'ALLOWANCE_EXCEEDED',
   'QUOTA_EXCEEDED',
   'QUOTA_GUARD',
@@ -120,6 +122,18 @@ function budgetExceeded(job, events) {
       || (event.type === 'error' && BUDGET_CODES.has(eventCode(event))));
 }
 
+function allowanceExceeded(job, events) {
+  const code = String(job?.errorCode || '').toUpperCase();
+  return ALLOWANCE_CODES.has(code)
+    || events.some((event) => event.type === 'error' && ALLOWANCE_CODES.has(eventCode(event)));
+}
+
+function breachAlreadyExplainsFailure(job, budget, allowance) {
+  const code = String(job?.errorCode || '').toUpperCase();
+  return (budget && BUDGET_CODES.has(code))
+    || (allowance && ALLOWANCE_CODES.has(code));
+}
+
 function findingCount(job) {
   const candidates = [
     job?.findings,
@@ -172,7 +186,10 @@ export function detectActionableEdges(snapshot, options = {}) {
   }
   const violations = scopeViolationCount(job);
   if (violations > 0) edges.push(candidate(job, 'policy-breach:scope', 'policy-breach', 1, { breach: 'scope', count: violations }));
-  if (budgetExceeded(job, events)) edges.push(candidate(job, 'policy-breach:budget', 'policy-breach', 1, { breach: 'budget' }));
+  const budget = budgetExceeded(job, events);
+  const allowance = allowanceExceeded(job, events);
+  if (budget) edges.push(candidate(job, 'budget-breach', 'budget-breach', 1, { breach: 'budget' }));
+  if (allowance) edges.push(candidate(job, 'allowance-breach', 'allowance-breach', 1, { breach: 'allowance' }));
 
   if (inputOutstanding(job, events)) edges.push(candidate(job, 'needs-input:request', 'needs-input', 2, {
     input: 'request',
@@ -193,7 +210,8 @@ export function detectActionableEdges(snapshot, options = {}) {
     if (findings > 0) edges.push(candidate(job, 'ready-for-review:findings', 'ready-for-review', 4, { findings }));
   }
 
-  if (job.status === 'failed' || String(job.errorCode || '').toUpperCase() === 'ORPHANED' || cancelledByError(job)) {
+  if ((job.status === 'failed' || String(job.errorCode || '').toUpperCase() === 'ORPHANED' || cancelledByError(job))
+    && !breachAlreadyExplainsFailure(job, budget, allowance)) {
     edges.push(candidate(job, 'failure', 'failure', 5));
   }
 
@@ -236,10 +254,13 @@ export function formatEdgeLine(edge) {
     return `${prefix} ${id} collision detected (${field(edge.path, 'owned path', 180)}; base-drift recorded${edge.verificationStale ? ', checks stale' : ''})`;
   }
   if (edge.category === 'policy-breach') {
-    const detail = edge.breach === 'scope'
-      ? `scope violation, ${edge.count} path${edge.count === 1 ? '' : 's'}`
-      : 'budget or allowance exceeded';
-    return `${prefix} ${id} policy-breach (${detail})`;
+    return `${prefix} ${id} policy-breach (scope violation, ${edge.count} path${edge.count === 1 ? '' : 's'})`;
+  }
+  if (edge.category === 'budget-breach') {
+    return `${prefix} ${id} budget-breach (per-job output cap exceeded; raise maxOutputTokens or reduce output)`;
+  }
+  if (edge.category === 'allowance-breach') {
+    return `${prefix} ${id} allowance-breach (provider quota or rate allowance exhausted; wait for reset or choose another provider)`;
   }
   if (edge.category === 'needs-input') {
     if (edge.input === 'permission') return `${prefix} ${id} needs-input (permission blocked)`;
@@ -273,6 +294,8 @@ export function formatStartupSummary(edges) {
   const labels = [
     ['collision', 'collision'],
     ['policy-breach', 'policy breach'],
+    ['budget-breach', 'budget breach'],
+    ['allowance-breach', 'allowance breach'],
     ['needs-input', 'input'],
     ['blocked', 'blocked'],
     ['ready-for-review', 'review'],

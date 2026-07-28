@@ -2,11 +2,20 @@ import crypto from 'node:crypto';
 import { auditUsageBands, readAuditLog, usageBandKey } from './stats.mjs';
 
 const PLAN_MAX_CHARS = 32_000;
-const PLAN_OUTPUT_TOKENS_DEFAULT = 2_048;
+const PLAN_OUTPUT_TOKENS_FLOOR = 4_096;
+const PLAN_OUTPUT_TOKENS_CEILING = 16_384;
+const PLAN_OUTPUT_TOKENS_STEP = 1_024;
+const PLAN_SPEC_BASE_BYTES = 5 * 1_024;
+const PLAN_SPEC_BYTES_PER_STEP = 4 * 1_024;
+const PLAN_SPEC_BASE_DIRECTIVES = 24;
+const PLAN_SPEC_DIRECTIVES_PER_STEP = 16;
 const INTERROGATION_OUTPUT_TOKENS_DEFAULT = 1_024;
 const APPROACH_KINDS = new Set([
   'inspect', 'edit', 'test', 'verify', 'docs', 'config', 'migration', 'refactor', 'other'
 ]);
+const PLAN_CONSTRAINT_PATTERN = /\b(?:must|never|do not|required|requirement|non-negotiable|acceptance|allowed scope|hard fence|stop and report)\b/i;
+const PLAN_LIST_ITEM_PATTERN = /^\s*(?:[-*]|\d+[.)])\s+/;
+const PLAN_SECTION_PATTERN = /^\s*(?:#{1,6}\s+|[A-Za-z][A-Za-z0-9 _/&().-]{2,}:)\s*$/;
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const number = Number(value);
@@ -15,8 +24,55 @@ function boundedInteger(value, fallback, minimum, maximum) {
     : fallback;
 }
 
+function positiveSteps(value, baseline, perStep) {
+  return value > baseline ? Math.ceil((value - baseline) / perStep) : 0;
+}
+
+export function planOutputTokenBudget(spec = '', env = process.env) {
+  const text = String(spec || '');
+  const lines = text ? text.split(/\r?\n/) : [];
+  const metrics = {
+    bytes: Buffer.byteLength(text),
+    lines: lines.length,
+    listItems: lines.filter((line) => PLAN_LIST_ITEM_PATTERN.test(line)).length,
+    constraintLines: lines.filter((line) => PLAN_CONSTRAINT_PATTERN.test(line)).length,
+    sectionLines: lines.filter((line) => PLAN_SECTION_PATTERN.test(line)).length
+  };
+  metrics.directiveMarkers = metrics.listItems + metrics.constraintLines + metrics.sectionLines;
+
+  const configured = env.DELEGATE_PLAN_OUTPUT_TOKENS;
+  if (configured != null && String(configured).trim() !== '') {
+    return {
+      limit: boundedInteger(configured, PLAN_OUTPUT_TOKENS_FLOOR, 128, PLAN_OUTPUT_TOKENS_CEILING),
+      source: 'environment-override',
+      floor: PLAN_OUTPUT_TOKENS_FLOOR,
+      ceiling: PLAN_OUTPUT_TOKENS_CEILING,
+      metrics
+    };
+  }
+
+  const sizeSteps = positiveSteps(metrics.bytes, PLAN_SPEC_BASE_BYTES, PLAN_SPEC_BYTES_PER_STEP);
+  const complexitySteps = positiveSteps(
+    metrics.directiveMarkers,
+    PLAN_SPEC_BASE_DIRECTIVES,
+    PLAN_SPEC_DIRECTIVES_PER_STEP
+  );
+  return {
+    limit: Math.min(
+      PLAN_OUTPUT_TOKENS_CEILING,
+      PLAN_OUTPUT_TOKENS_FLOOR + ((sizeSteps + complexitySteps) * PLAN_OUTPUT_TOKENS_STEP)
+    ),
+    source: 'packet-scaled-default',
+    floor: PLAN_OUTPUT_TOKENS_FLOOR,
+    ceiling: PLAN_OUTPUT_TOKENS_CEILING,
+    sizeSteps,
+    complexitySteps,
+    metrics
+  };
+}
+
 export function planOutputTokenLimit(env = process.env) {
-  return boundedInteger(env.DELEGATE_PLAN_OUTPUT_TOKENS, PLAN_OUTPUT_TOKENS_DEFAULT, 128, 16_384);
+  return planOutputTokenBudget('', env).limit;
 }
 
 export function interrogationOutputTokenLimit(env = process.env) {

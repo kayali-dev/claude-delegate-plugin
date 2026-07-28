@@ -35,7 +35,7 @@ function repository(t, name = 'repo') {
   fs.writeFileSync(path.join(root, 'other.txt'), 'other\n');
   git(root, ['add', '.']);
   git(root, ['commit', '-qm', 'base']);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   return root;
 }
 
@@ -56,7 +56,7 @@ function withState(t) {
     else process.env.DELEGATE_ENABLED_PROVIDERS = previous.providers;
     if (previous.supervisor == null) delete process.env.DELEGATE_SUPERVISOR;
     else process.env.DELEGATE_SUPERVISOR = previous.supervisor;
-    fs.rmSync(state, { recursive: true, force: true });
+    fs.rmSync(state, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   });
   return state;
 }
@@ -347,11 +347,11 @@ test('detached owners and owners that are existing linked worktrees are supporte
   withState(t);
   const root = repository(t, 'existing-worktree');
   const linked = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-owner-linked-'));
-  fs.rmSync(linked, { recursive: true, force: true });
+  fs.rmSync(linked, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   git(root, ['worktree', 'add', '--detach', '-q', linked, 'HEAD']);
   t.after(() => {
     spawnSync('git', ['worktree', 'remove', '--force', '--', linked], { cwd: root, encoding: 'utf8' });
-    fs.rmSync(linked, { recursive: true, force: true });
+    fs.rmSync(linked, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   });
   const symbolic = spawnSync('git', ['symbolic-ref', '-q', 'HEAD'], { cwd: linked, encoding: 'utf8' });
   assert.equal(symbolic.status, 1);

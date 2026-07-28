@@ -58,8 +58,8 @@ function event(seq, type, data = {}, at = NOW) {
 test('monitor edge detection covers every actionable class in priority order', () => {
   const cases = [
     [snapshot({ id: 'scope', status: 'completed', scopeViolations: [{ path: 'outside.js' }] }), 'policy-breach:scope'],
-    [snapshot({ id: 'budget', status: 'failed', errorCode: 'BUDGET_EXCEEDED', stoppedReason: 'budget' }), 'policy-breach:budget'],
-    [snapshot({ id: 'allowance', status: 'failed', errorCode: 'QUOTA_GUARD' }), 'policy-breach:budget'],
+    [snapshot({ id: 'budget', status: 'failed', errorCode: 'BUDGET_EXCEEDED', stoppedReason: 'budget' }), 'budget-breach'],
+    [snapshot({ id: 'allowance', status: 'failed', errorCode: 'QUOTA_GUARD' }), 'allowance-breach'],
     [snapshot({ id: 'input', pendingInput: { requestId: 'q1' }, phase: 'user-input-required' }), 'needs-input:request'],
     [snapshot({ id: 'permission' }, [
       event(1, 'approval.requested', { method: 'session/request_permission' }),
@@ -87,6 +87,45 @@ test('monitor edge detection covers every actionable class in priority order', (
     const edges = detectActionableEdges(value, { now: NOW, stallMs: 10 * 60 * 1000 });
     assert.equal(edges[0]?.key, expected, value.job.id);
   }
+});
+
+test('budget and allowance edges use distinct remedies and suppress only same-cause terminal redundancy', () => {
+  const budgetPolicy = new NotificationPolicy({ cooldownMs: 0, maxLinesPerMinute: 20 });
+  budgetPolicy.bootstrap([snapshot({ id: 'budget-once' })], { now: NOW });
+  const liveBudget = snapshot({ id: 'budget-once' }, [
+    event(1, 'budget.exceeded', { code: 'BUDGET_EXCEEDED', maxOutputTokens: 2048 })
+  ]);
+  assert.deepEqual(budgetPolicy.observe([liveBudget], { now: NOW + 1 }), [
+    'delegate[delegate-router]: budget-once budget-breach (per-job output cap exceeded; raise maxOutputTokens or reduce output)'
+  ]);
+  assert.deepEqual(budgetPolicy.observe([snapshot({
+    id: 'budget-once',
+    status: 'failed',
+    errorCode: 'BUDGET_EXCEEDED',
+    stoppedReason: 'budget'
+  }, liveBudget.events)], { now: NOW + 2 }), []);
+
+  const allowance = detectActionableEdges(snapshot({
+    id: 'allowance-remedy',
+    status: 'failed',
+    errorCode: 'QUOTA_GUARD'
+  }), { now: NOW });
+  assert.deepEqual(allowance.map((edge) => edge.key), ['allowance-breach']);
+  assert.equal(
+    formatEdgeLine(allowance[0]),
+    'delegate[delegate-router]: allowance-remedy allowance-breach (provider quota or rate allowance exhausted; wait for reset or choose another provider)'
+  );
+
+  const distinctPolicy = new NotificationPolicy({ cooldownMs: 0, maxLinesPerMinute: 20 });
+  distinctPolicy.bootstrap([snapshot({ id: 'distinct-cause' })], { now: NOW });
+  assert.equal(distinctPolicy.observe([snapshot({ id: 'distinct-cause' }, liveBudget.events)], { now: NOW + 1 }).length, 1);
+  assert.deepEqual(distinctPolicy.observe([snapshot({
+    id: 'distinct-cause',
+    status: 'failed',
+    errorCode: 'PROVIDER_ERROR'
+  }, liveBudget.events)], { now: NOW + 2 }), [
+    'delegate[delegate-router]: distinct-cause failure (PROVIDER_ERROR)'
+  ]);
 });
 
 test('needs-input monitor line gives both inline TUI and revisioned CLI answer paths', () => {
@@ -276,7 +315,7 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
   // stalled the day after the constant was written.
   const liveNow = Date.now();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const jobs = path.join(root, 'jobs');
   fs.mkdirSync(jobs, { recursive: true });
   const record = path.join(jobs, 'codex-edge.json');
@@ -335,7 +374,7 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
 
 test('session and workspace scopes isolate sibling sessions and real worktree launch paths', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-scope-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const manualWorktree = path.join(root, 'manual-worktree');
   const claudeWorktree = path.join(root, 'repo', '.claude', 'worktrees', 'claude-created');
   const delegatedCwd = path.join(root, 'different-target');
@@ -484,7 +523,7 @@ test('session and workspace scopes isolate sibling sessions and real worktree la
 
 test('correlation failure records and visibly degrades session scope to workspace', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-degraded-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(workspace);
   const directory = monitorCorrelationDirectory(root);
@@ -539,7 +578,7 @@ test('correlation failure records and visibly degrades session scope to workspac
 
 test('durable ancestor markers choose the nearest session, then its newest marker', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-ancestor-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(workspace);
   const processTable = [
@@ -615,7 +654,7 @@ test('durable ancestor markers choose the nearest session, then its newest marke
 
 test('equal ancestor matches are ambiguous and PID reuse cannot correlate', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-ambiguous-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(workspace);
   const sharedStart = NOW - 10_000;
@@ -656,7 +695,7 @@ test('equal ancestor matches are ambiguous and PID reuse cannot correlate', (t) 
   assert.equal(ambiguous.record.effectiveScope, 'workspace');
 
   const reusedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-reused-'));
-  t.after(() => fs.rmSync(reusedRoot, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(reusedRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const reusedWorkspace = path.join(reusedRoot, 'workspace');
   fs.mkdirSync(reusedWorkspace);
   const reusedMarker = writeSessionCorrelationMarker({
@@ -687,7 +726,7 @@ test('equal ancestor matches are ambiguous and PID reuse cannot correlate', (t) 
   assert.equal(fs.existsSync(reusedMarker.file), false);
 
   const unavailableRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-unavailable-'));
-  t.after(() => fs.rmSync(unavailableRoot, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(unavailableRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const unavailable = resolveMonitorSession({
     stateDirectory: unavailableRoot,
     workspaceId: workspace,
@@ -703,7 +742,7 @@ test('equal ancestor matches are ambiguous and PID reuse cannot correlate', (t) 
 
 test('correlation garbage collection is bounded and removes expired handshake debris', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-gc-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const directory = monitorCorrelationDirectory(root);
   fs.mkdirSync(directory, { recursive: true });
   for (let index = 0; index < 140; index += 1) {
@@ -735,7 +774,7 @@ test('SessionStart marker survives hook exit and a later real monitor resolves s
     return null;
   };
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-correlation-live-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(workspace);
   const stateFile = path.join(root, 'usage.json');

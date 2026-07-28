@@ -48,7 +48,7 @@ function isolated(t, prefix = 'delegate-shadow-') {
       if (value == null) delete process.env[key];
       else process.env[key] = value;
     }
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   });
   return directory;
 }

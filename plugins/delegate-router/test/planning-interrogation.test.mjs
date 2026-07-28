@@ -19,6 +19,7 @@ import {
   compareStructuralPlans,
   contractDigest,
   parseStructuralPlan,
+  planOutputTokenBudget,
   planReviewPresentation
 } from '../bin/lib/planning.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
@@ -50,8 +51,10 @@ async function isolated(fn) {
     'DELEGATE_STATE_FILE', 'DELEGATE_CODEX_BIN', 'DELEGATE_CURSOR_BIN',
     'DELEGATE_CURSOR_LOGIN_SHELL', 'DELEGATE_MIN_CODEX_VERSION', 'DELEGATE_MIN_CURSOR_VERSION',
     'DELEGATE_ENABLED_PROVIDERS', 'DELEGATE_AMBIGUITY_CHECK', 'DELEGATE_SUPERVISOR',
+    'DELEGATE_PLAN_OUTPUT_TOKENS',
     'FAKE_CODEX_REQUEST_LOG', 'FAKE_CURSOR_REQUEST_LOG', 'FAKE_CODEX_DIVERGENT_MODEL',
-    'FAKE_CODEX_INCONCLUSIVE_MODEL'
+    'FAKE_CODEX_INCONCLUSIVE_MODEL', 'FAKE_CODEX_PLAN_OUTPUT_TOKENS',
+    'FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL'
   ];
   const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-plan-interrogate-'));
@@ -69,7 +72,7 @@ async function isolated(fn) {
       if (old[key] == null) delete process.env[key];
       else process.env[key] = old[key];
     }
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 }
 
@@ -107,6 +110,27 @@ test('structural plan comparison distinguishes convergence, divergence, and inco
   assert.equal(inconclusive.verdict, 'inconclusive');
   assert.match(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).question, /INCONCLUSIVE/);
   assert.equal(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).ambiguityQuestion, null);
+});
+
+test('plan output budget scales from a substantial floor to a documented ceiling and remains overridable', () => {
+  const simple = planOutputTokenBudget('Objective: rename one local variable');
+  assert.equal(simple.limit, 4_096);
+  assert.equal(simple.floor, 4_096);
+  assert.equal(simple.ceiling, 16_384);
+  assert.equal(simple.source, 'packet-scaled-default');
+
+  const complex = planOutputTokenBudget([
+    'Objective: implement the complete cross-surface change',
+    ...Array.from({ length: 50 }, (_, index) => `${index + 1}. Must preserve invariant ${index + 1}.`),
+    'x'.repeat(13_000)
+  ].join('\n'));
+  assert.ok(complex.limit > simple.limit);
+  assert.ok(complex.sizeSteps > 0);
+  assert.ok(complex.complexitySteps > 0);
+
+  const bounded = planOutputTokenBudget(`${'x'.repeat(100_000)}\n${'- must preserve this\n'.repeat(500)}`);
+  assert.equal(bounded.limit, 16_384);
+  assert.equal(planOutputTokenBudget('tiny', { DELEGATE_PLAN_OUTPUT_TOKENS: '3072' }).limit, 3_072);
 });
 
 test('write dry-runs announce the stricter plan-first default and both explicit escape hatches without creating state', () => isolated((directory) => {
@@ -221,6 +245,44 @@ test('two independent cheap plan passes open only structural divergence question
   assert.equal(inconclusive.job.planning.presentation.ambiguityQuestion, null);
   assert.match(inconclusive.job.planning.presentation.question, /INCONCLUSIVE/);
   assert.equal(inconclusive.job.status, 'cancelled');
+}));
+
+test('a failed independent plan pass degrades loudly on the implement attempt and never blocks its launch', () => isolated(async (directory) => {
+  process.env.DELEGATE_PLAN_OUTPUT_TOKENS = '128';
+  process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '200';
+  process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL = 'luna';
+  const created = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    planFirst: true,
+    ambiguityCheck: true
+  });
+  const running = runManagedProvider(created);
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
+  assert.equal(presented.status, 'running');
+  assert.equal(presented.planPass.state, 'degraded');
+  assert.equal(presented.planPass.reason, 'plan-output-token-budget-exceeded');
+  assert.equal(presented.planPass.errorCode, 'BUDGET_EXCEEDED');
+  assert.match(presented.planPass.jobId, /^codex-/);
+  assert.equal(presented.planning.ambiguity.state, 'degraded');
+  assert.equal(presented.planning.comparison.verdict, 'inconclusive');
+  submitControl(created.id, {
+    type: 'respond',
+    requestId: presented.pendingInput.requestId,
+    accept: true,
+    commandId: 'confirm-after-plan-pass-degradation'
+  }, presented.revision);
+  await running;
+  const completed = inspectJob(created.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.changedFiles.count, 1);
+  assert.equal(completed.planPass.state, 'degraded');
+  assert.ok(readJobEvents(created.id).some((event) => event.type === 'plan.degraded'
+    && event.data.jobId === completed.planPass.jobId
+    && event.data.fallback === 'single-plan-confirmation'));
 }));
 
 test('interrogation rejects authority fields and records answer plus observed token cost as WorkItem finding evidence', () => isolated((directory) => {

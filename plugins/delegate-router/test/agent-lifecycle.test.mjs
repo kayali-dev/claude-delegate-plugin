@@ -37,7 +37,7 @@ async function isolated(t, fn) {
     else process.env.DELEGATE_AGENT_STUB_QUIET_SECONDS = previousQuiet;
     if (previousActive == null) delete process.env.DELEGATE_AGENT_STUB_ACTIVE_SECONDS;
     else process.env.DELEGATE_AGENT_STUB_ACTIVE_SECONDS = previousActive;
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 }
 
