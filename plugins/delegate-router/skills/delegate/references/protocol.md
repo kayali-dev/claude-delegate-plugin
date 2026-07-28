@@ -40,10 +40,13 @@ historical jobs therefore stay readable across the extraction.
 Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.events.jsonl`. Prompts, logs, commands, and state files are created with user-only permissions. Event values are recursively redacted and size-bounded.
 
 P3 fields are additive. Historical records may omit `verificationProfile`,
-structured `verification`, `acceptance`, and `autoFix`; readers and WorkItem
-projections preserve that absence without migration. New write records retain
-the repository-sourced verification profile and an acceptance object beside
-the unchanged lifecycle `status`.
+structured `verification`, append-only `verificationEvidence`, `acceptance`,
+and `autoFix`; readers and WorkItem projections preserve that absence without
+migration. New write records retain the repository-sourced verification
+profile and an acceptance object beside the unchanged lifecycle `status`.
+`verification` remains the latest-record compatibility projection. Readers
+project a historical standalone `verification` as a one-record evidence chain
+without rewriting it.
 
 P5 compiled starts add `workSpec` and `specCompilation` to the job snapshot.
 `workSpec` is the validated P1 schema consumed by the WorkItem projection.
@@ -267,6 +270,13 @@ evidence and digest it was made against and performs no source operation.
 Existing consumers may continue branching on `status === "completed"`.
 `delegate-jobs wait` keeps exit 5 for zero observed changes and 6 for nonzero
 verification.
+
+`delegate-jobs verify` and MCP `delegate_verify` append fresh local evidence
+for a verification-blocked managed shared-tree job by executing only its private recorded
+recipe. They never open a provider session and expose no command replacement
+or acceptance override. Every record retains its own repository revision and
+tree digest; acceptance and the outcome ledger select the newest record while
+inspect and TUI expose the ordered chain.
 
 ## Honest Cursor non-parity
 

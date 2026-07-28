@@ -7,9 +7,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   createManagedJob,
+  decideAcceptance,
   inspectJob
 } from '../bin/lib/control.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
+import { listJobs, saveJob } from '../bin/lib/state.mjs';
 import {
   AUTO_FIX_HARD_CAP,
   autoFixMadeProgress,
@@ -137,6 +139,91 @@ test('P3 derives verification, records real-tree evidence, gates additive accept
   assert.equal(failed.status, 'completed');
   assert.equal(failed.verification.state, 'failed');
   assert.ok(failed.acceptance.blockedBy.includes('verification-failed'));
+  const originalRepeatedFailure = structuredClone(failed.verification);
+  const repeatedFailure = spawnSync(process.execPath, [cli, 'verify', failed.id], {
+    encoding: 'utf8',
+    env: { ...process.env }
+  });
+  assert.equal(repeatedFailure.status, 6, repeatedFailure.stderr);
+  const stillFailed = inspectJob(failed.id);
+  assert.equal(stillFailed.verificationEvidence.length, 2);
+  assert.deepEqual(stillFailed.verificationEvidence[0], originalRepeatedFailure);
+  assert.equal(stillFailed.verificationEvidence[1].state, 'failed');
+  assert.equal(stillFailed.verificationEvidence[1].evidenceKind, 'reverification');
+  assert.equal(stillFailed.acceptance.state, 'blocked');
+  assert.ok(stillFailed.acceptance.blockedBy.includes('verification-failed'));
+  const overrideAttempt = spawnSync(process.execPath, [
+    cli,
+    'verify',
+    failed.id,
+    '--verify-command',
+    'node -e "process.exit(0)"'
+  ], {
+    encoding: 'utf8',
+    env: { ...process.env }
+  });
+  assert.notEqual(overrideAttempt.status, 0);
+  assert.match(overrideAttempt.stderr, /always reuses the recorded command/);
+  assert.equal(inspectJob(failed.id).verificationEvidence.length, 2);
+  const jobCountBeforeMcpReverification = listJobs().length;
+  const rerunThroughMcp = spawnSync(process.execPath, [mcp], {
+    encoding: 'utf8',
+    env: { ...process.env },
+    input: `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: 'delegate_verify',
+      arguments: { jobId: failed.id }
+    } })}\n`
+  });
+  assert.equal(rerunThroughMcp.status, 0, rerunThroughMcp.stderr);
+  const rerunThroughMcpPayload = JSON.parse(JSON.parse(rerunThroughMcp.stdout.trim()).result.content[0].text);
+  assert.equal(rerunThroughMcpPayload.verification.state, 'failed');
+  assert.equal(rerunThroughMcpPayload.verificationEvidence.length, 3);
+  assert.deepEqual(rerunThroughMcpPayload.verificationEvidence[0], originalRepeatedFailure);
+  assert.equal(listJobs().length, jobCountBeforeMcpReverification, 'local re-verification never creates a provider job');
+
+  const repairedDirectory = scenario(root, 'repaired');
+  write(path.join(repairedDirectory, 'verification-state.txt'), 'fail');
+  const repairable = await cursorWrite(repairedDirectory, {
+    verify: {
+      command: 'node -e "if (require(\'fs\').readFileSync(\'verification-state.txt\', \'utf8\') !== \'pass\') process.exit(8)"',
+      timeoutSeconds: 10
+    }
+  });
+  const originalRepairableFailure = structuredClone(repairable.verification);
+  assert.equal(originalRepairableFailure.state, 'failed');
+  const jobCountBeforeReverification = listJobs().length;
+  write(path.join(repairedDirectory, 'verification-state.txt'), 'pass');
+  const repaired = spawnSync(process.execPath, [cli, 'verify', repairable.id], {
+    encoding: 'utf8',
+    env: { ...process.env }
+  });
+  assert.equal(repaired.status, 0, repaired.stderr);
+  const repairedRecord = inspectJob(repairable.id);
+  assert.equal(repairedRecord.verificationEvidence.length, 2);
+  assert.deepEqual(repairedRecord.verificationEvidence[0], originalRepairableFailure);
+  assert.equal(repairedRecord.verification.state, 'passed');
+  assert.equal(repairedRecord.verification.evidenceKind, 'reverification');
+  assert.equal(repairedRecord.verification.treeMovedSinceOriginal, true);
+  assert.equal(repairedRecord.verification.treeMovedSincePrevious, true);
+  assert.notEqual(
+    repairedRecord.verificationEvidence[0].completedInput.digest,
+    repairedRecord.verificationEvidence[1].input.digest
+  );
+  assert.equal(repairedRecord.acceptance.state, 'ready-for-review');
+  assert.equal(listJobs().length, jobCountBeforeReverification, 'CLI re-verification never creates a provider job');
+  const redundantRerun = spawnSync(process.execPath, [cli, 'verify', repairable.id], {
+    encoding: 'utf8',
+    env: { ...process.env }
+  });
+  assert.notEqual(redundantRerun.status, 0);
+  assert.match(redundantRerun.stderr, /requires a live verification failure, timeout, or stale-input blocker/);
+  assert.equal(inspectJob(repairable.id).verificationEvidence.length, 2);
+  const acceptedAfterRepair = spawnSync(process.execPath, [cli, 'accept', repairable.id], {
+    encoding: 'utf8',
+    env: { ...process.env }
+  });
+  assert.equal(acceptedAfterRepair.status, 0, acceptedAfterRepair.stderr);
+  assert.equal(inspectJob(repairable.id).acceptance.state, 'accepted');
 
   const timedOut = await cursorWrite(scenario(root, 'timeout'), {
     verify: { command: 'node -e "setTimeout(() => {}, 5000)"', timeoutSeconds: 1 }
@@ -230,6 +317,39 @@ test('P3 derives verification, records real-tree evidence, gates additive accept
   const readyEdges = detectActionableEdges({ job: { ...passed, acceptance: passed.acceptance }, events: [], lastEventAt: Date.now() });
   assert.match(formatEdgeLine(readyEdges[0]), /ready-for-review .*checks passed/);
   assert.ok(blockedEdges[0].priority < readyEdges[0].priority);
+
+  const legacyId = 'codex-legacy-no-chain-abcdef';
+  const legacyNow = Math.floor(Date.now() / 1000);
+  saveJob({
+    schemaVersion: 2,
+    id: legacyId,
+    provider: 'codex',
+    mode: 'implement',
+    status: 'completed',
+    phase: 'completed',
+    revision: 0,
+    lastSeq: 0,
+    cwd: passed.cwd,
+    ownerCwd: passed.cwd,
+    managedBy: 'delegate-control',
+    createdAt: legacyNow - 1,
+    updatedAt: legacyNow,
+    completedAt: legacyNow,
+    changedFiles: { count: 1, files: ['legacy.js'] },
+    verificationOrigin: 'broker',
+    verification: {
+      state: 'passed',
+      exitCode: 0,
+      inputChanged: false,
+      input: { repoRoot: passed.cwd, revision: null, digest: 'legacy-input' },
+      completedInput: { repoRoot: passed.cwd, revision: null, digest: 'legacy-input' }
+    }
+  });
+  const inspectedLegacy = inspectJob(legacyId);
+  assert.equal(inspectedLegacy.verification.state, 'passed');
+  assert.equal(inspectedLegacy.verificationEvidence.length, 1);
+  assert.equal(inspectedLegacy.verificationEvidence[0].input.digest, 'legacy-input');
+  assert.equal(decideAcceptance(legacyId, 'accepted').acceptance.state, 'accepted');
 
   assert.deepEqual(evaluateAutoFix({}), { action: 'stop', reason: 'off' });
   const deterministic = {

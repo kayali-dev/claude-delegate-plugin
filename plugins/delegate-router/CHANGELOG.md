@@ -2,6 +2,24 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.48.0 — 2026-07-28
+
+- Added local re-verification with `delegate-jobs verify <job-id>` and MCP
+  `delegate_verify`. It reruns only a verification-blocked managed job's recorded
+  verification command against the current shared tree, never launches or
+  resumes a provider, and accepts no command replacement or gate override.
+- Verification evidence is now append-only under `verificationEvidence`;
+  the existing `verification` field remains the latest-evidence compatibility
+  projection. Inspect and the TUI show the ordered chain, including each
+  record's repository revision and tree digest, while acceptance continues to
+  refuse whenever the latest evidence fails, times out, or becomes stale.
+- Each re-verification appends a higher outcome-audit revision, so P8 uses the
+  current real-tree label without deleting or rewriting the earlier failure.
+  Historical job records without a chain still inspect and decide through a
+  one-record compatibility projection. Discarded isolated workspaces fail
+  closed because checking the owner tree without their captured change set
+  would verify a different artifact.
+
 ## 0.47.0 — 2026-07-28
 
 - Replaced the fixed 2,048-token plan-pass ceiling with a deterministic,

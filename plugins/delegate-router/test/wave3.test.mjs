@@ -225,6 +225,45 @@ test('acceptance audit revisions coalesce without double-counting attempts or us
   assert.equal(aggregate.rates.ownerAcceptance.numerator, 1);
 });
 
+test('re-verification audit revisions replace only the latest rate label and preserve one attempt', () => {
+  const failed = {
+    jobId: 'attempt-reverified',
+    at: 1000,
+    recordedAt: 1100,
+    auditRevision: 2,
+    recordType: 'terminal',
+    provider: 'codex',
+    mode: 'implement',
+    outcome: { status: 'completed' },
+    usage: { total: { outputTokens: 100 } },
+    verificationOutcome: {
+      outcome: 'fail',
+      state: 'failed',
+      labelAvailable: true,
+      measuredOnRealTree: true,
+      origin: 'broker'
+    }
+  };
+  const passed = {
+    ...failed,
+    recordedAt: 1200,
+    auditRevision: 3,
+    recordType: 'verification-evidence',
+    verificationOutcome: {
+      outcome: 'pass',
+      state: 'passed',
+      labelAvailable: true,
+      measuredOnRealTree: true,
+      origin: 'broker'
+    }
+  };
+  const aggregate = aggregateAudit([failed, passed], { now: 2000 });
+  assert.equal(aggregate.jobs, 1);
+  assert.equal(aggregate.totals.outputTokens, 100);
+  assert.equal(aggregate.rates.verificationPass.sampleSize, 1);
+  assert.equal(aggregate.rates.verificationPass.numerator, 1);
+});
+
 test('outcome-aware routing declines sparse labels and recommends only on separated 95% intervals', () => {
   const row = (provider, index, accepted) => ({
     jobId: `${provider}-${index}`,

@@ -1,3 +1,5 @@
+import { latestVerification } from './acceptance.mjs';
+
 export const OUTCOME_LEDGER_SCHEMA_VERSION = 1;
 export const OUTCOME_POLICY_VERSION = 1;
 export const OUTCOME_RATE_MINIMUM_SAMPLE = 10;
@@ -152,7 +154,7 @@ export function findingsSnapshot(job = {}) {
 }
 
 export function verificationOutcomeSnapshot(job = {}) {
-  const verification = job.verification;
+  const verification = latestVerification(job);
   const origin = job.verificationOrigin || null;
   if (!verification || typeof verification !== 'object') {
     return {

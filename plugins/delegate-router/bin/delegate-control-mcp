@@ -26,6 +26,7 @@ import {
   readJobEventPage,
   prepareManagedIntegration,
   preflightManagedIntegration,
+  reverifyManagedJob,
   reviewRoundManagedJob,
   resumeManagedJob,
   sliceDiff,
@@ -78,7 +79,7 @@ const TOOLS = [
   { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, resultWindow: { type: 'object', additionalProperties: false, properties: { find: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } } } },
   { name: 'delegate_list', description: 'List recent delegation jobs, optionally filtered or summarized by fan-out group.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, activeOnly: { type: 'boolean' }, status: { type: 'array', items: { enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] } }, groupId: { type: 'string' }, groupSummary: { type: 'boolean' } } } },
   { name: 'delegate_stats', description: 'Return the local outcome ledger: separately sampled provider-completion, real-tree verification-pass, and owner-acceptance rates; broker/date cohorts; transport groups; and an optional confidence-bounded routing recommendation that never changes the static route.', inputSchema: { type: 'object', additionalProperties: false, properties: {
-    since: { type: 'string', description: "Optional duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.47.0')." },
+    since: { type: 'string', description: "Optional duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.48.0')." },
     until: { type: 'string', description: "Optional exclusive ISO-date upper bound such as '2026-07-17'." },
     recommendFor: {
       type: 'object',
@@ -129,6 +130,18 @@ TOOLS.push(
         expectedRevision: { type: 'integer' },
         question: { type: 'string', minLength: 1, maxLength: 8192 },
         commandId: { type: 'string', minLength: 1, maxLength: 128 }
+      }
+    }
+  },
+  {
+    name: 'delegate_verify',
+    description: 'Rerun a verification-blocked managed job’s recorded command locally against the current shared tree and append fresh broker evidence. This never launches a provider and cannot override a failing acceptance gate.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['jobId'],
+      properties: {
+        jobId: { type: 'string' }
       }
     }
   }
@@ -328,6 +341,7 @@ async function dispatch(name, args) {
   if (name === 'delegate_files') return { files: jobFiles(args.jobId), attributionConfidence: inspectJob(args.jobId).attributionConfidence };
   if (name === 'delegate_steer') return submitControl(args.jobId, { type: 'steer', correctionId: args.correctionId, strategy: args.strategy || 'auto', text: args.text, expectedTurnId: args.expectedTurnId }, args.expectedRevision);
   if (name === 'delegate_interrogate') return submitControl(args.jobId, { type: 'interrogate', question: args.question, commandId: args.commandId }, args.expectedRevision);
+  if (name === 'delegate_verify') return reverifyManagedJob(args.jobId);
   if (name === 'delegate_cancel') return submitControl(args.jobId, { type: 'cancel', commandId: args.commandId }, args.expectedRevision);
   if (name === 'delegate_release') return submitControl(args.jobId, { type: 'release', commandId: args.commandId }, args.expectedRevision);
   if (name === 'delegate_respond') return submitControl(args.jobId, { type: 'respond', requestId: args.requestId, answer: args.answer, accept: args.accept, response: args.response, commandId: args.commandId }, args.expectedRevision);
@@ -378,7 +392,7 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.47.0' }
+        serverInfo: { name: 'delegate-control', version: '0.48.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

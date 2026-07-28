@@ -25,10 +25,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage',
-    'delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_start_trivial', 'delegate_interrogate'
+    'delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'
   ]);
   const legacySchemas = responses[1].result.tools
-    .filter((tool) => !['delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_start_trivial', 'delegate_interrogate'].includes(tool.name))
+    .filter((tool) => !['delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'].includes(tool.name))
     .map(({ name, inputSchema }) => {
       const legacy = structuredClone(inputSchema);
       if (name === 'delegate_start') {
@@ -57,6 +57,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   const decide = responses[1].result.tools.find((tool) => tool.name === 'delegate_decide');
   const trivial = responses[1].result.tools.find((tool) => tool.name === 'delegate_start_trivial');
   const interrogate = responses[1].result.tools.find((tool) => tool.name === 'delegate_interrogate');
+  const verify = responses[1].result.tools.find((tool) => tool.name === 'delegate_verify');
   const integrate = responses[1].result.tools.find((tool) => tool.name === 'delegate_integrate');
   assert.ok(start.inputSchema.properties.idempotencyKey);
   assert.ok(start.inputSchema.properties.maxOutputTokens);
@@ -94,6 +95,9 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(trivial.inputSchema, start.inputSchema);
   assert.deepEqual(interrogate.inputSchema.required, ['jobId', 'expectedRevision', 'question']);
   assert.equal(interrogate.inputSchema.additionalProperties, false);
+  assert.deepEqual(verify.inputSchema.required, ['jobId']);
+  assert.equal(verify.inputSchema.additionalProperties, false);
+  assert.deepEqual(Object.keys(verify.inputSchema.properties), ['jobId']);
   assert.deepEqual(integrate.inputSchema.required, ['jobIds']);
 });
 
@@ -190,7 +194,7 @@ test('control MCP adds bounded resources and common-flow prompts without changin
     resources: { listChanged: false },
     prompts: { listChanged: false }
   });
-  assert.equal(byId.get(2).result.tools.length, 21);
+  assert.equal(byId.get(2).result.tools.length, 22);
   assert.deepEqual(byId.get(3).result.resources.map((resource) => resource.uri), [
     'delegate://work/active',
     'delegate://repo/profile'
@@ -229,7 +233,7 @@ test('native MCP opt-out hides only resources and prompts while preserving every
   assert.equal(result.status, 0, result.stderr);
   const responses = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
   assert.deepEqual(responses[0].result.capabilities, { tools: { listChanged: false } });
-  assert.equal(responses[1].result.tools.length, 21);
+  assert.equal(responses[1].result.tools.length, 22);
   assert.equal(responses[2].error.code, -32601);
 });
 
@@ -348,6 +352,7 @@ test('delegate-jobs help has CLI parity for caller options', () => {
   assert.match(result.stdout, /--retry-on/);
   assert.match(result.stdout, /--verify-command/);
   assert.match(result.stdout, /--verify-timeout-seconds/);
+  assert.match(result.stdout, /verify <job-id>/);
   assert.match(result.stdout, /revert <job-id> \[--dry-run\]/);
   for (const flag of ['--isolation', '--path-claims', '--resource-claims']) assert.match(result.stdout, new RegExp(flag), flag);
   assert.match(result.stdout, /workspace discard <job-id>/);

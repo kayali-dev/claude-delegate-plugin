@@ -487,6 +487,18 @@ jobs never run verification. A nonzero verdict or timeout does not rewrite the
 provider outcome: status remains `completed`, while `delegate-jobs wait` keeps
 its existing exit 6 behavior for a nonzero verification exit.
 
+For a completed shared-tree job whose recorded result is no longer current,
+run `delegate-jobs verify <job-id>` or MCP `delegate_verify`. This is a local
+rerun of exactly the stored recipe: it has no command/timeout override, starts
+no provider turn, and appends one bounded record to `verificationEvidence`.
+The compatibility `verification` field always projects the newest record.
+Each record retains its own before/after repository revision and tree digest,
+plus an explicit predecessor comparison, so a pass on a moved tree is visible
+as a different claim. Repeated failures are recorded and remain blocking.
+Jobs with no runnable recorded recipe are refused. A discarded broker
+worktree is also refused because checking the owner tree without applying its
+captured change set would verify the wrong artifact.
+
 Adapters assert their CLI versions before opening a provider session. `DELEGATE_MIN_CODEX_VERSION` and `DELEGATE_MIN_CURSOR_VERSION` override the validated built-in floors (`0.144.0` and `2026.7.0` respectively); a lower observed version fails with non-retryable `PROVIDER_TOO_OLD` and reports both versions.
 
 Profiles live under `${DELEGATE_PROFILES_DIR:-~/.delegate/profiles}/<name>.md`; simple frontmatter supplies mode/model/effort/allowedPaths/reportSchema defaults and explicit start options win. The body must contain `{{objective}}`. Packet lint warns when Objective, Allowed scope, Acceptance criteria, or Return is missing. The bundled `independent-review` profile is used only when no local override exists. Optional `reportSchema` instructs a final fenced JSON block; a conforming final object becomes `result.structured`, `objectiveMet` is surfaced, and missing or nonconforming output sets `structuredMissing` without changing terminal status.
@@ -520,6 +532,13 @@ verification failure/timeout, zero changes, scope violation, unresolved
 structured findings, or base/input drift. A live collision adds its path to
 `baseDriftPaths`; verification evidence that predates the touch is marked
 `stale` with `inputChanged: true`. No broker path auto-accepts.
+
+`verificationEvidence` is append-only. Historical records lacking that field
+project their existing `verification` as a one-record chain without rewriting
+the job. Acceptance and the outcome ledger read only the latest record, while
+inspect and TUI retain the entire ordered history. A clean fresh record may
+resolve an earlier verification or drift blocker, but it never deletes that
+failure and cannot resolve scope, zero-change, workspace, or review blockers.
 
 After reviewing the diff and evidence, record the owner decision with
 `delegate-jobs accept|reject <id> [--reason ...]` or additive MCP

@@ -16,7 +16,13 @@ import { assembleProviderPrompt } from './packet.mjs';
 import { applyProfile, lintPacket, lintPacketDetails } from './profiles.mjs';
 import { ensureSupervisorReady, submitJobToSupervisor } from './supervisor-client.mjs';
 import { supervisorBrokerVersion } from './supervisor-common.mjs';
-import { acceptanceEvidenceDigest, buildAcceptance } from './acceptance.mjs';
+import {
+  acceptanceEvidenceDigest,
+  appendVerificationEvidence,
+  buildAcceptance,
+  latestVerification,
+  verificationEvidenceChain
+} from './acceptance.mjs';
 import {
   deriveVerificationProfile,
   verificationRepositoryRoot,
@@ -62,6 +68,7 @@ import {
   storePolicy
 } from './store-maintenance.mjs';
 import { listSupervisorLeases } from './supervisor-common.mjs';
+import { executeVerification } from './verification-runner.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -238,6 +245,8 @@ export function terminalAuditRecord(job, options = {}) {
   const recordedAt = Date.now();
   const attemptAt = Number(job.createdAtMs || Number(job.createdAt || 0) * 1000 || recordedAt);
   const terminalAt = Number(job.completedAtMs || Number(completedAt) * 1000 || recordedAt);
+  const verification = latestVerification(job);
+  const verificationEvidence = verificationEvidenceChain(job);
   const ledger = outcomeLedgerSnapshot(job);
   return redact({
     at: terminalAt,
@@ -280,7 +289,8 @@ export function terminalAuditRecord(job, options = {}) {
       error: job.error || null
     },
     usage: job.usage || null,
-    verification: job.verification || null,
+    verification,
+    verificationEvidence,
     verificationOrigin: job.verificationOrigin || null,
     acceptance: job.acceptance || null,
     brokerVersion: ledger.provenance.brokerVersion,
@@ -1329,6 +1339,8 @@ export function inspectJob(id) {
   const shadow = job.managedBy === 'delegate-shadow' || isDirectTransport(job);
   return {
     ...job,
+    verification: latestVerification(job),
+    verificationEvidence: verificationEvidenceChain(job),
     ...activityFields(job),
     resumable: jobResumability(job),
     driftReport: driftReportFor(job),
@@ -1506,6 +1518,131 @@ export function prepareManagedIntegration(ids) {
   return result;
 }
 
+function assertReverificationEligible(job, options = {}) {
+  if (!job) throw brokerError('NOT_FOUND', 'job not found');
+  if (job.managedBy !== 'delegate-control') {
+    throw brokerError('INVALID_REQUEST', 're-verification is available only for managed Delegate Router jobs', {
+      provider: job.provider
+    });
+  }
+  if (!WRITE_MODES.has(job.mode) || job.status !== 'completed') {
+    throw brokerError('INVALID_REQUEST', 're-verification requires a completed implement or verify job', {
+      provider: job.provider
+    });
+  }
+  if (['accepted', 'superseded'].includes(job.acceptance?.state)
+    || (job.acceptance?.state === 'rejected' && options.allowRejected !== true)) {
+    throw brokerError('INVALID_REQUEST', `job already has a final ${job.acceptance.state} decision`, {
+      provider: job.provider
+    });
+  }
+  if (job.isolation === 'worktree') {
+    throw brokerError('INVALID_REQUEST', 're-verification cannot run after an isolated attempt workspace was discarded; verifying the owner tree without the captured change set would be a different artifact', {
+      provider: job.provider
+    });
+  }
+  if (!job.verify?.command || job.verify?.disabled === true || !job.verifyCommandPath) {
+    throw brokerError('INVALID_REQUEST', 'job has no recorded runnable verification command', {
+      provider: job.provider
+    });
+  }
+  if (!fs.existsSync(job.verifyCommandPath)) {
+    throw brokerError('INVALID_REQUEST', 'job recorded a verification command, but its private command artifact is unavailable', {
+      provider: job.provider
+    });
+  }
+  if (options.requireLiveBlocker !== false) {
+    const acceptance = buildAcceptance(job);
+    const verificationBlockers = new Set(['verification-failed', 'verification-timeout', 'base-drift']);
+    if (acceptance?.state !== 'blocked'
+      || !(acceptance.blockedBy || []).some((blocker) => verificationBlockers.has(blocker))) {
+      throw brokerError('INVALID_REQUEST', 're-verification requires a live verification failure, timeout, or stale-input blocker', {
+        provider: job.provider
+      });
+    }
+  }
+}
+
+function verificationInputReference(verification) {
+  const input = verification?.completedInput || verification?.input;
+  if (!input || typeof input !== 'object') return null;
+  return {
+    revision: input.revision || null,
+    digest: input.digest || null
+  };
+}
+
+export async function reverifyManagedJob(id) {
+  assertJobId(id);
+  const snapshot = withLock(id, () => {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    assertReverificationEligible(job);
+    return structuredClone(job);
+  });
+  const result = await executeVerification(snapshot, { redact });
+  const updated = withLock(id, () => {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    assertReverificationEligible(job, {
+      allowRejected: true,
+      requireLiveBlocker: false
+    });
+    const chain = verificationEvidenceChain(job);
+    const original = chain[0] || latestVerification(job);
+    const previous = chain.at(-1) || latestVerification(job);
+    const originalInput = verificationInputReference(original);
+    const previousInput = verificationInputReference(previous);
+    const currentInput = verificationInputReference(result);
+    const evidence = redact({
+      ...result,
+      evidenceKind: 'reverification',
+      attempt: chain.length + 1,
+      recordedAt: new Date().toISOString(),
+      predecessor: previous ? {
+        attempt: chain.length,
+        state: previous.state || null,
+        revision: previousInput?.revision || null,
+        digest: previousInput?.digest || null
+      } : null,
+      original: original ? {
+        attempt: 1,
+        state: original.state || null,
+        revision: originalInput?.revision || null,
+        digest: originalInput?.digest || null
+      } : null,
+      treeMovedSinceOriginal: Boolean(originalInput && currentInput
+        && (originalInput.revision !== currentInput.revision || originalInput.digest !== currentInput.digest)),
+      treeMovedSincePrevious: Boolean(previousInput && currentInput
+        && (previousInput.revision !== currentInput.revision || previousInput.digest !== currentInput.digest))
+    });
+    appendVerificationEvidence(job, evidence);
+    job.verificationOrigin = 'broker';
+    if (job.acceptance?.state !== 'rejected') job.acceptance = buildAcceptance(job);
+    job.revision = (job.revision || 0) + 1;
+    appendUnlocked(job, 'verification.finished', {
+      ...evidence,
+      reverified: true,
+      acceptance: {
+        state: job.acceptance?.state || null,
+        blockedBy: job.acceptance?.blockedBy || []
+      }
+    });
+    saveJob(job);
+    return structuredClone(job);
+  });
+  appendAuditRecords([terminalAuditRecord(updated, { recordType: 'verification-evidence' })]);
+  return {
+    id: updated.id,
+    status: updated.status,
+    verification: latestVerification(updated),
+    verificationEvidence: verificationEvidenceChain(updated),
+    verificationOrigin: updated.verificationOrigin,
+    acceptance: updated.acceptance,
+    revision: updated.revision
+  };
+}
+
 export function decideAcceptance(id, decision, options = {}) {
   assertJobId(id);
   if (!['accepted', 'rejected'].includes(decision)) {
@@ -1517,7 +1654,7 @@ export function decideAcceptance(id, decision, options = {}) {
     if (!WRITE_MODES.has(job.mode) || job.status !== 'completed') {
       throw brokerError('INVALID_REQUEST', 'acceptance decisions require a completed implement or verify job', { provider: job.provider });
     }
-    const current = job.acceptance || buildAcceptance(job);
+    const current = buildAcceptance(job);
     if (!current) throw brokerError('INVALID_REQUEST', 'acceptance evidence is unavailable', { provider: job.provider });
     if (decision === 'accepted' && current.state !== 'ready-for-review') {
       throw brokerError('ACCEPTANCE_BLOCKED', `job is ${current.state}; resolve ${current.blockedBy?.join(', ') || 'the recorded blockers'} before accepting`, {
@@ -2272,7 +2409,7 @@ function pathInsideDirectory(absolute, directory) {
 }
 
 function verificationCoversCollision(job, relative) {
-  const verification = job.verification;
+  const verification = latestVerification(job);
   if (!verification || ['pending', 'no-recipe', 'skipped', 'exception'].includes(verification.state)) return false;
   const absolute = path.resolve(job.cwd, relative);
   const roots = [
@@ -2286,19 +2423,20 @@ function verificationCoversCollision(job, relative) {
 
 function staleVerificationForCollision(job, relative, observedAtMs) {
   if (!verificationCoversCollision(job, relative)) return false;
-  const verification = job.verification;
+  const verification = latestVerification(job);
   const priorState = verification.state === 'stale'
     ? verification.stateBeforeStale || verification.priorState || null
     : verification.state || null;
-  job.verification = {
+  appendVerificationEvidence(job, {
     ...verification,
     state: 'stale',
     stateBeforeStale: priorState,
+    evidenceKind: 'invalidation',
     inputChanged: true,
     staleReason: 'base-drift',
     stalePaths: [...new Set([...(verification.stalePaths || []), relative])].slice(-COLLISION_RECORD_CAP),
     staleAtMs: observedAtMs
-  };
+  });
   return true;
 }
 

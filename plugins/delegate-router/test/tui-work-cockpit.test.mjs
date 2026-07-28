@@ -99,6 +99,22 @@ function cockpitStore(options = {}) {
     createdAt: NOW / 1000 - 60,
     durationMs: 58_000,
     verification: { state: 'passed', exitCode: 0, command: 'node --test test/*.test.mjs' },
+    verificationEvidence: [
+      {
+        state: 'failed',
+        exitCode: 1,
+        command: 'node --test test/*.test.mjs',
+        completedInput: { revision: 'base-abc123', digest: 'tree-before-fix' }
+      },
+      {
+        state: 'passed',
+        exitCode: 0,
+        command: 'node --test test/*.test.mjs',
+        evidenceKind: 'reverification',
+        completedInput: { revision: 'fixed-def456', digest: 'tree-after-fix' },
+        treeMovedSincePrevious: true
+      }
+    ],
     acceptance: { state: 'ready-for-review', blockedBy: [], evidence: { verification: { state: 'passed', exitCode: 0 } }, evidenceDigest: 'evidence-cafe' },
     findings: [
       { id: 'finding-open', severity: 'high', criterion: 'frame overflow', status: 'regressed', evidence: 'narrow frame regressed' },
@@ -159,6 +175,11 @@ test('Review keeps diff, verification, scope drift, findings, and base revision 
   assert.match(rendered, /base-abc123/);
   assert.match(rendered, /regressed/);
   assert.match(rendered, /src\/cockpit\.mjs/);
+  const verification = review.panes[1].content.sections.find((section) => section.label === 'Verification evidence');
+  assert.deepEqual(
+    verification.rows.filter((row) => row.key.startsWith('verification evidence')).map((row) => row.key),
+    ['verification evidence 1', 'verification evidence 2']
+  );
 });
 
 test('Approve exposes only backed actions and never implies owner-tree application', () => {
@@ -166,6 +187,12 @@ test('Approve exposes only backed actions and never implies owner-tree applicati
   assert.equal(shared.meta.acceptJobId, 'cursor-candidate-2222222');
   assert.equal(shared.meta.rejectJobId, 'cursor-candidate-2222222');
   assert.deepEqual(shared.meta.integrationJobIds, []);
+  assert.deepEqual(
+    shared.panes[0].content.sections[0].rows
+      .filter((row) => row.key.startsWith('verification evidence'))
+      .map((row) => row.key),
+    ['verification evidence 1', 'verification evidence 2']
+  );
   const sharedText = renderFrameToString(shared, { trimEnd: true });
   assert.match(sharedText, /available: a/);
   assert.match(sharedText, /owner tree apply.*DISABLED/i);

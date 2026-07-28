@@ -968,6 +968,27 @@ function objectRows(prefix, value) {
   }));
 }
 
+function verificationEvidenceRows(job) {
+  const chain = Array.isArray(job?.verificationEvidence) && job.verificationEvidence.length
+    ? job.verificationEvidence
+    : job?.verification ? [job.verification] : [];
+  return chain.map((entry, index) => {
+    const input = entry?.completedInput || entry?.input || {};
+    return {
+      key: `verification evidence ${index + 1}`,
+      value: compactFieldValue({
+        state: entry?.state,
+        kind: entry?.evidenceKind || (index === 0 ? 'original' : 'recorded'),
+        exitCode: entry?.exitCode,
+        revision: input.revision,
+        digest: input.digest,
+        treeMovedSinceOriginal: entry?.treeMovedSinceOriginal,
+        treeMovedSincePrevious: entry?.treeMovedSincePrevious
+      })
+    };
+  });
+}
+
 function scopeViolationCount(job) {
   return Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Math.max(0, Number(job.scopeViolations || 0));
 }
@@ -1039,6 +1060,7 @@ export function recordSections(job) {
         { key: 'verificationProfile', value: job.verificationProfile },
         { key: 'verificationOrigin', value: job.verificationOrigin },
         ...objectRows('verification', job.verification),
+        ...verificationEvidenceRows(job),
         ...objectRows('acceptance', job.acceptance)
       ]
     },
@@ -1986,6 +2008,7 @@ function workEvidenceSections(work, job, store) {
       rows: [
         { key: 'origin', value: job?.verificationOrigin },
         ...objectRows('verification', job?.verification),
+        ...verificationEvidenceRows(job),
         { key: 'acceptance state', value: job?.acceptance?.state },
         { key: 'evidence digest', value: job?.acceptance?.evidenceDigest, copy: true }
       ]
@@ -2252,6 +2275,7 @@ export function workViewModel(store, ui = {}, viewport = {}) {
               { key: 'state', value: acceptance.state },
               { key: 'blocked by', value: compactFieldValue(acceptance.blockedBy) },
               { key: 'evidence', value: compactFieldValue(acceptance.evidence) },
+              ...verificationEvidenceRows(job),
               { key: 'evidence digest', value: acceptance.evidenceDigest, copy: true }
             ]
           },

@@ -11,6 +11,39 @@ export const ACCEPTANCE_STATES = Object.freeze([
 export const AUTO_FIX_HARD_CAP = 3;
 
 const WRITE_MODES = new Set(['implement', 'verify']);
+const VERIFICATION_EVIDENCE_STATES = new Set(['passed', 'failed', 'timeout', 'stale']);
+
+function isVerificationEvidence(value) {
+  return Boolean(value && typeof value === 'object'
+    && (VERIFICATION_EVIDENCE_STATES.has(value.state) || Number.isInteger(value.exitCode)));
+}
+
+export function verificationEvidenceChain(job) {
+  if (Array.isArray(job?.verificationEvidence) && job.verificationEvidence.length) {
+    return job.verificationEvidence.filter((entry) => entry && typeof entry === 'object');
+  }
+  return isVerificationEvidence(job?.verification) ? [job.verification] : [];
+}
+
+export function latestVerification(job) {
+  return verificationEvidenceChain(job).at(-1) || job?.verification || null;
+}
+
+export function appendVerificationEvidence(job, evidence) {
+  const existing = verificationEvidenceChain(job).map((entry) => structuredClone(entry));
+  job.verificationEvidence = [...existing, evidence];
+  job.verification = evidence;
+  return evidence;
+}
+
+function activeBaseDrift(job, verification) {
+  if (verification?.state === 'stale' || verification?.inputChanged === true) return true;
+  // A re-verification is a new claim against the current tree. Historical
+  // drift remains visible in the immutable chain but no longer blocks a clean
+  // latest claim.
+  if (verification?.evidenceKind === 'reverification') return false;
+  return job?.baseDrift === true;
+}
 
 function unresolvedFindings(job) {
   const candidates = [
@@ -32,7 +65,8 @@ function scopeViolationCount(job) {
 }
 
 export function acceptanceEvidence(job) {
-  const verification = job?.verification || null;
+  const verification = latestVerification(job);
+  const verificationEvidence = verificationEvidenceChain(job);
   const findings = unresolvedFindings(job);
   return {
     providerOutcome: {
@@ -44,6 +78,7 @@ export function acceptanceEvidence(job) {
       files: Array.isArray(job?.changedFiles?.files) ? job.changedFiles.files.slice(0, 50) : []
     },
     verification,
+    verificationAttemptCount: verificationEvidence.length,
     scope: {
       violationCount: scopeViolationCount(job),
       violations: Array.isArray(job?.scopeViolations) ? job.scopeViolations.slice(0, 50) : []
@@ -54,7 +89,8 @@ export function acceptanceEvidence(job) {
     base: {
       launchedRevision: job?.baseRevision || null,
       completedRevision: job?.completedRevision || null,
-      drifted: job?.baseDrift === true || verification?.inputChanged === true,
+      drifted: activeBaseDrift(job, verification),
+      historicalDrifted: job?.baseDrift === true,
       // Recorded for evidence: HEAD moved, but only overlap with this job's own
       // paths counts as drift that blocks acceptance.
       revisionMoved: job?.revisionMoved === true,
@@ -74,10 +110,10 @@ export function buildAcceptance(job, options = {}) {
   if (!WRITE_MODES.has(job?.mode) || job?.status !== 'completed') return job?.acceptance || null;
   if (['accepted', 'rejected', 'superseded'].includes(job?.acceptance?.state)) return job.acceptance;
   const blockedBy = [];
-  const verification = job.verification || {};
+  const verification = latestVerification(job) || {};
   if (verification.state === 'timeout' || verification.timedOut === true) blockedBy.push('verification-timeout');
   else if (verification.state === 'failed' || (Number.isInteger(verification.exitCode) && verification.exitCode !== 0)) blockedBy.push('verification-failed');
-  if (verification.state === 'stale' || verification.inputChanged === true || job.baseDrift === true) blockedBy.push('base-drift');
+  if (activeBaseDrift(job, verification)) blockedBy.push('base-drift');
   if (scopeViolationCount(job) > 0) blockedBy.push('scope-violation');
   if (!(job.changedFiles?.count > 0)) blockedBy.push('zero-changed-files');
   if (job.isolation === 'worktree' && !job.changeSet?.patch?.path) blockedBy.push('workspace-changeset-unavailable');
@@ -115,7 +151,7 @@ export function verificationFailureCount(verification) {
 
 export function autoFixMetrics(job) {
   return {
-    failures: verificationFailureCount(job?.verification),
+    failures: verificationFailureCount(latestVerification(job)),
     scopeViolations: scopeViolationCount(job)
   };
 }
@@ -148,10 +184,11 @@ export function evaluateAutoFix(job, options = {}) {
   if (job.status !== 'completed') return { action: 'stop', reason: 'provider-not-completed' };
   if (!(job.changedFiles?.count > 0)) return { action: 'stop', reason: 'zero-changed-files' };
   if (unresolvedFindings(job).length) return { action: 'stop', reason: 'judgment-required' };
-  if (job.baseDrift === true || job.verification?.inputChanged === true) return { action: 'stop', reason: 'base-drift' };
-  if (job.verification?.state === 'timeout') return { action: 'stop', reason: 'verification-timeout' };
+  const verification = latestVerification(job);
+  if (activeBaseDrift(job, verification)) return { action: 'stop', reason: 'base-drift' };
+  if (verification?.state === 'timeout') return { action: 'stop', reason: 'verification-timeout' };
   const metrics = autoFixMetrics(job);
-  const deterministic = (job.verification?.state === 'failed' && Number.isInteger(metrics.failures))
+  const deterministic = (verification?.state === 'failed' && Number.isInteger(metrics.failures))
     || metrics.scopeViolations > 0;
   if (!deterministic) return { action: 'stop', reason: 'ambiguous-criterion' };
   if (round > 0 && !autoFixMadeProgress(job.autoFix.previousMetrics, metrics)) {
