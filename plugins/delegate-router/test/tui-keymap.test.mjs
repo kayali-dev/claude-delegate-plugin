@@ -125,6 +125,25 @@ test('anomaly drill-down is one KEYMAP binding shared by footer, help, menu, and
   assert.match(controller, /key === 'A' && ui\.detailTab === 0\) \{ toggleTranscriptAnomalies\(\)/);
 });
 
+test('tool, subagent, error, and warning drill-downs each flow through KEYMAP', () => {
+  const cases = [
+    { action: 'detail.tools', key: 'O', ctx: { ...runningContext(), toolCount: 2 }, dispatch: /action === 'detail\.tools'\) return toggleTranscriptKind\('tools'\)/, direct: /key === 'O' && ui\.detailTab === 0/ },
+    { action: 'detail.subagents', key: 'U', ctx: { ...runningContext(), subagentCount: 1 }, dispatch: /action === 'detail\.subagents'\) return toggleTranscriptKind\('subagents'\)/, direct: /key === 'U' && ui\.detailTab === 0/ },
+    { action: 'detail.event-errors', key: 'A', ctx: { ...runningContext(), detailTab: 4, errorCount: 2 }, dispatch: /action === 'detail\.event-errors'\) return toggleEventCategory\('error'\)/, direct: /key === 'A' && ui\.detailTab === 4/ },
+    { action: 'detail.event-warnings', key: 'W', ctx: { ...runningContext(), detailTab: 4, warningCount: 1 }, dispatch: /action === 'detail\.event-warnings'\) return toggleEventCategory\('warning'\)/, direct: /key === 'W' && ui\.detailTab === 4/ }
+  ];
+  const controller = fs.readFileSync(path.join(plugin, 'bin', 'delegate-tui'), 'utf8');
+  for (const item of cases) {
+    const binding = KEYMAP.find((entry) => entry.action === item.action);
+    assert.equal(formatKeyNotation(binding), item.key);
+    assert.ok(footerForContext(item.ctx, 220).groups.flat().some((entry) => entry.action === item.action), item.action);
+    assert.ok(helpPagesForContext(item.ctx).flatMap((page) => page.rows).some((entry) => entry.action === item.action), item.action);
+    assert.equal(actionMenuForContext(item.ctx).find((entry) => entry.action === item.action).unavailable, null);
+    assert.match(controller, item.dispatch);
+    assert.match(controller, item.direct);
+  }
+});
+
 test('footer, contextual help, action menu, and generated docs all derive from KEYMAP', () => {
   const ctx = runningContext();
   const actions = new Set(KEYMAP.map((item) => item.action));

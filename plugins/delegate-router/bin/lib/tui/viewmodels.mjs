@@ -737,6 +737,8 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
   const { width, height } = viewportOf(viewport);
   const now = nowOf(ui, store);
   const query = formatDisplayValue(ui.filter).toLowerCase();
+  const sessionCwd = ui.sessionCwdFilter ? path.resolve(formatDisplayValue(ui.sessionCwdFilter)) : null;
+  const sessionJobIds = Array.isArray(ui.sessionJobIds) ? new Set(ui.sessionJobIds) : null;
   const sort = ['activity', 'recency', 'provider', 'tokens'].includes(ui.fleetSort) ? ui.fleetSort : 'recency';
   const activityRank = { approval: 10, 'needs-input': 9, stalled: 8, compacting: 7, tool: 6, thinking: 5, streaming: 4, retrying: 3, verifying: 2, quiet: 1 };
   const entries = (store.jobs || []).map((raw) => {
@@ -745,7 +747,9 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
     const activity = deriveJobActivity(job, activityEvents(store, job), { now });
     return { raw, job, usage, activity };
   })
-    .filter(({ job }) => (!ui.groupId || job.groupId === ui.groupId)
+    .filter(({ job }) => (!sessionJobIds || sessionJobIds.has(job.id))
+      && (!sessionCwd || (job.cwd && path.resolve(formatDisplayValue(job.cwd)) === sessionCwd))
+      && (!ui.groupId || job.groupId === ui.groupId)
       && (ui.showExternals !== false || !job.external)
       && (!ui.activeOnly || active(job))
       && (!query || [job.id, job.resolvedModel || job.model, job.cwd, job.host, job.activityLabel].some((value) => formatDisplayValue(value).toLowerCase().includes(query))))
@@ -800,7 +804,7 @@ export function fleetViewModel(store, ui = {}, viewport = {}) {
   const statusOverride = errorStatus(ui);
   const frame = {
     width, height, screen: ui.groupId ? 'group-members' : 'fleet',
-    title: { text: `${ui.groupId ? `Group ${formatDisplayValue(ui.groupId)}` : 'Delegate fleet'}${ui.activeOnly ? `${CHROME_SEPARATOR}active` : ''}${ui.showExternals === false ? `${CHROME_SEPARATOR}externals:off` : ''}${ui.filter ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.filter)}` : ''}`, right: `${entries.length} jobs` },
+    title: { text: `${ui.groupId ? `Group ${formatDisplayValue(ui.groupId)}` : 'Delegate fleet'}${sessionCwd ? `${CHROME_SEPARATOR}session:${path.basename(sessionCwd)} active` : ''}${ui.activeOnly ? `${CHROME_SEPARATOR}active` : ''}${ui.showExternals === false ? `${CHROME_SEPARATOR}externals:off` : ''}${ui.filter ? `${CHROME_SEPARATOR}/${formatDisplayValue(ui.filter)}` : ''}`, right: `${entries.length} jobs` },
     panes: [{
       rect: { x: 0, y: 1, width, height: Math.max(3, height - 2) },
       title: store.error ? `Store warning: ${formatDisplayValue(store.error)}` : 'Delegation jobs',
@@ -1290,12 +1294,21 @@ function detailContent(job, store, ui, tab, activity) {
       thinkingSeq: activity.sourceSeq
     });
     const anomalyEntries = transcriptAnomalyEntries(entries);
-    const displayedEntries = ui.transcriptAnomaliesOnly ? anomalyEntries : entries;
     const tools = entries.filter((entry) => entry.kind === 'tool');
     const agents = tools.filter((entry) => entry.tool?.category === 'subagent');
+    const displayedEntries = ui.transcriptAnomaliesOnly
+      ? anomalyEntries
+      : ui.transcriptKindFilter === 'tools'
+        ? tools
+        : ui.transcriptKindFilter === 'subagents' ? agents : entries;
+    const transcriptFilterLabel = ui.transcriptAnomaliesOnly
+      ? 'anomalies only'
+      : ui.transcriptKindFilter === 'tools'
+        ? 'tools only'
+        : ui.transcriptKindFilter === 'subagents' ? 'subagents only' : '';
     const anomalies = anomalyEntries.length;
     return {
-      title: `Transcript${ui.transcriptAnomaliesOnly ? `${CHROME_SEPARATOR}anomalies only` : ''}${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${CHROME_SEPARATOR}time:${ui.timestampMode === 'relative' ? 'relative' : 'absolute'}${historyState}${searchSuffix(ui, 'transcript')}`,
+      title: `Transcript${transcriptFilterLabel ? `${CHROME_SEPARATOR}${transcriptFilterLabel}` : ''}${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${CHROME_SEPARATOR}time:${ui.timestampMode === 'relative' ? 'relative' : 'absolute'}${historyState}${searchSuffix(ui, 'transcript')}`,
       summary: {
         text: joinDisplayParts([
           `${entries.length} blocks`,
@@ -1309,7 +1322,7 @@ function detailContent(job, store, ui, tab, activity) {
       loadingGlyph: spinnerGlyph(nowOf(ui, store)),
       content: displayedEntries.length ? {
         kind: 'rail', virtual: true, entries: displayedEntries, formatEntry: formatTranscriptBlock, wrapEntry: wrapTranscriptBlock, styleLine: transcriptLineStyle,
-        measureKey: `transcript:${job.id}:${ui.transcriptAnomaliesOnly ? 'anomalies' : 'all'}`,
+        measureKey: `transcript:${job.id}:${ui.transcriptAnomaliesOnly ? 'anomalies' : ui.transcriptKindFilter || 'all'}`,
         follow: ui.follow !== false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'transcript'),
         selectedEntry: ui.follow !== false
           ? displayedEntries.length - 1
@@ -1318,7 +1331,11 @@ function detailContent(job, store, ui, tab, activity) {
       scrollItemCount: displayedEntries.length,
       projectionMetrics: projector.lastMetrics,
       anomalyCount: anomalies,
-      anomalyEntryKeys: anomalyEntries.map((entry) => entry.key)
+      anomalyEntryKeys: anomalyEntries.map((entry) => entry.key),
+      toolCount: tools.length,
+      toolEntryKeys: tools.map((entry) => entry.key),
+      subagentCount: agents.length,
+      subagentEntryKeys: agents.map((entry) => entry.key)
     };
   }
   if (tab === 1) {
@@ -1433,7 +1450,13 @@ function detailContent(job, store, ui, tab, activity) {
   }
   if (tab === 5) return chainContent(store, job, ui, Math.max(1, Number(ui.viewportWidth || 80) - 2));
   const typeFilter = formatDisplayValue(ui.eventFilter).toLowerCase();
-  const filtered = eventBlocks(events, typeFilter);
+  const allBlocks = eventBlocks(events, typeFilter);
+  const errors = allBlocks.filter((block) => eventCategory(block.event?.type) === 'error');
+  const warnings = allBlocks.filter((block) => eventCategory(block.event?.type) === 'warning');
+  const filtered = ui.eventCategoryFilter === 'error'
+    ? errors
+    : ui.eventCategoryFilter === 'warning' ? warnings : allBlocks;
+  const categoryLabel = ui.eventCategoryFilter ? `${ui.eventCategoryFilter}s only` : '';
   const eventNow = nowOf(ui, store);
   const wrapEntry = (block, width, formatted) => wrapEventBlock(block, width, formatted, {
     now: eventNow,
@@ -1441,16 +1464,16 @@ function detailContent(job, store, ui, tab, activity) {
     expandedEvents: ui.expandedEvents
   });
   return {
-    title: `Events${CHROME_SEPARATOR}${typeFilter ? `type /${typeFilter}` : 'all'}${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${historyState}${searchSuffix(ui, 'events')}`,
+    title: `Events${CHROME_SEPARATOR}${categoryLabel || (typeFilter ? `type /${typeFilter}` : 'all')}${CHROME_SEPARATOR}follow ${ui.follow === false ? 'off' : 'on'}${historyState}${searchSuffix(ui, 'events')}`,
     summary: {
       text: joinDisplayParts([
-        `${filtered.length} events`,
-        `${filtered.filter((block) => eventCategory(block.event?.type) === 'error').length} errors`,
-        `${filtered.filter((block) => eventCategory(block.event?.type) === 'warning').length} warnings`
+        `${allBlocks.length} events`,
+        `${errors.length} errors`,
+        `${warnings.length} warnings`
       ]),
-      ...(filtered.some((block) => eventCategory(block.event?.type) === 'error') ? {
+      ...(errors.length ? {
         badge: {
-          text: `${filtered.filter((block) => eventCategory(block.event?.type) === 'error').length} ERRORS`,
+          text: `${errors.length} ERRORS`,
           style: palette.failed
         }
       } : {})
@@ -1459,14 +1482,20 @@ function detailContent(job, store, ui, tab, activity) {
     loadingGlyph: spinnerGlyph(eventNow),
     content: filtered.length ? {
       kind: 'rail', virtual: true, entries: filtered, formatEntry: formatEventBlock, wrapEntry,
-      measureKey: `events:${job.id}:${typeFilter}`,
+      measureKey: `events:${job.id}:${typeFilter}:${ui.eventCategoryFilter || 'all'}`,
       follow: ui.follow !== false, scroll: ui.detailScroll || 0, searchQuery: searchQuery(ui, 'events'),
       selectedEntry: ui.follow !== false
         ? filtered.length - 1
         : Math.max(0, Math.min(filtered.length - 1, Number(ui.eventSelection ?? ui.detailScroll?.entry ?? ui.detailScroll ?? 0)))
     } : emptyHistory,
     scrollItemCount: filtered.length,
-    eventKeys: filtered.map((block) => block.key)
+    eventKeys: filtered.map((block) => block.key),
+    eventCount: allBlocks.length,
+    eventEntryKeys: allBlocks.map((block) => block.key),
+    errorCount: errors.length,
+    errorEntryKeys: errors.map((block) => block.key),
+    warningCount: warnings.length,
+    warningEntryKeys: warnings.map((block) => block.key)
   };
 }
 
@@ -1517,6 +1546,16 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
       projectionMetrics: body.projectionMetrics || null,
       anomalyCount: Number(body.anomalyCount || 0),
       anomalyEntryKeys: body.anomalyEntryKeys || [],
+      toolCount: Number(body.toolCount || 0),
+      toolEntryKeys: body.toolEntryKeys || [],
+      subagentCount: Number(body.subagentCount || 0),
+      subagentEntryKeys: body.subagentEntryKeys || [],
+      eventCount: Number(body.eventCount || 0),
+      eventEntryKeys: body.eventEntryKeys || [],
+      errorCount: Number(body.errorCount || 0),
+      errorEntryKeys: body.errorEntryKeys || [],
+      warningCount: Number(body.warningCount || 0),
+      warningEntryKeys: body.warningEntryKeys || [],
       scopeViolationCount: scopeViolationCount(job),
       activity,
       originProject
@@ -1670,6 +1709,7 @@ export function sessionsViewModel(store, ui = {}, viewport = {}) {
       sessionIds: correlated.map((session) => session.id),
       sessionCwds: correlated.map((session) => session.cwd),
       selectedSessionCwd: selectedSession.cwd,
+      selectedActiveJobIds: selectedSession.activeDelegateJobIds || [],
       selected
     }
   };

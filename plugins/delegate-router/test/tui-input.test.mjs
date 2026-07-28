@@ -131,6 +131,33 @@ test('unambiguous input schedules the next turn without a display-frame delay', 
   input.close();
 });
 
+test('zero-delay frames use the immediate scheduler while escape holds keep their deadline timer', () => {
+  let frame = null;
+  let hold = null;
+  let holdDelay = null;
+  const state = { clock: 0 };
+  const input = new BufferedInput({
+    now: () => state.clock,
+    scheduleFrame(callback) { frame = callback; return 'frame'; },
+    cancelFrame() {},
+    schedule(callback, delay) { hold = callback; holdDelay = delay; return 'hold'; },
+    cancel() {}
+  });
+
+  input.push('j');
+  assert.equal(typeof frame, 'function');
+  assert.equal(hold, null);
+  frame();
+
+  frame = null;
+  input.push(ESC_BYTE);
+  assert.equal(typeof frame, 'function', 'ambiguous input first reaches the same-turn decode boundary');
+  frame();
+  assert.equal(typeof hold, 'function');
+  assert.equal(holdDelay, 50, 'the Escape correctness deadline is unchanged');
+  input.close();
+});
+
 test('a lone Escape resolves on its own instead of waiting for the next keypress', () => {
   const h = escHarness();
   h.input.push(ESC_BYTE);

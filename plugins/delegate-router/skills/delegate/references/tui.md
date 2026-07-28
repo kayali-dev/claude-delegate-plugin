@@ -173,6 +173,60 @@ Cursor headless thinking/tool state comes only from actual stream-json events; t
 
 Direct-shadow detail views otherwise render like managed jobs, including Directory and Effort columns, normalized transcript edit lines, diff/files, and usage. Mutation keys (`s`, `c`, `r`, `R`, `n`, and review/respond actions) do nothing and put `read-only: direct-transport job` in the status line because the launching caller owns the loop.
 
+## Count audit
+
+The TUI follows the rule that a problem count must lead to its evidence. The
+table below audits every numeric badge, total, sample count, and repeated
+item-count family rendered by the dashboard, fleet, detail, WorkItem cockpit,
+groups, sessions, providers, stats, launcher, and overlays. “Same pane” means
+the count is a summary of the rows, fields, blocks, diff rows, or lines already
+under it; arrows, `j`/`k`, viewport keys, `g`/`G`, and the scrollbar reach the
+items.
+
+| Surface | Rendered count or total | Evidence path | Audit result |
+| --- | --- | --- | --- |
+| Every non-dashboard pane and every viewport | Default `N rows`, `N fields`, `N blocks`, `N diff rows`, or `N lines`; key-value `N unusual`; visible `start-end/total` | Same pane; navigation and scrolling | Reachable; the painter derives the summary and viewport counter from the rendered content |
+| Search, Help, and status-history overlays | Search `current/total`; overlay `page/total` | `n`/`N` for matches; `[`/`]`, arrows, or viewport keys for pages | Reachable |
+| Federated app bar | `N hosts` | Host chips show only the width-bounded subset | No complete destination; needs a federation-host overlay containing every host and connection state |
+| App bar and dashboard provider allowance | Used percent and approximate `N pp outside tracked` | `g p` opens provider windows and the same estimates | Metric detail is reachable, but there is no item ledger; unattributed burn is deliberately approximate and cannot honestly name source items |
+| Dashboard title | `N jobs` | `F` or `g f` | Reachable; Fleet uses the same store job collection |
+| Dashboard attention and recent activity | Pane viewport totals | Same pane; arrows and `Enter` open the selected job | Reachable |
+| Dashboard running / paused tile | Two status counts | Fleet has jobs, but no filter matching these two exact predicates | No exact destination; needs registry-backed Fleet filters for running and paused |
+| Dashboard jobs / provider-done tile | Today job total, completion percent, and `n=sample` | `g t` shows aggregate outcome groups, not the contributing audit records | No item destination; needs a bounded audit-record browser keyed to the selected day and rate denominator |
+| Dashboard tokens and cache tile | Input, output, total tokens, and mean cache-hit percent | Job Usage tabs expose per-job aggregates only | No contributing-item destination; needs a day-scoped usage-attribution ledger |
+| Dashboard 14-day trends | Day/data counts and scale maxima encoded in the sparkline | No day browser | No destination; needs a 14-day bucket overlay with the contributing audit rows |
+| Fleet title and table | `N jobs`, viewport rows | Same pane; arrows and `Enter` | Reachable |
+| Fleet status | `writers:N` | `g p`, Active writer ownership pane | Reachable; both use `writerLocks` |
+| Fleet job rows | Output/budget token totals and percent | `Enter`, then `4` Usage | Reachable as aggregate detail; tokens are metrics rather than an asserted item list |
+| Fleet scope badge | `S<N>` | `Enter`, then `3` Record; scope evidence is listed under Scope and drift | Reachable |
+| Groups title and Members | `N groups`, per-group member total | Same pane; `Enter` opens all member rows | Reachable |
+| Groups status columns | Running, terminal, and stalled subgroup counts | `Enter` opens all members with their status/activity evidence, but does not prefilter a subgroup | Underlying items are reachable; an exact subgroup view would require additional group-member status filters |
+| Sessions title | `N sessions` | Same pane | Reachable |
+| Sessions Jobs column | Active managed jobs for a cwd | `Enter` opens Fleet containing exactly those job IDs | Reachable; the count and drill-down IDs are one correlation result |
+| Sessions scan cap | `newest scanned/total` | Only the newest capped set is loaded | No destination by design; a full destination requires a separately bounded/paged session-file scanner |
+| Sessions selected detail | Approximate transcript bytes | No transcript viewer; metadata-only privacy boundary | No destination; exposing byte contributors would cross the deliberate no-transcript-viewing boundary |
+| Providers | Provider rows, allowance-window values, and writer-lock lines | Same panes; scroll writer ownership | Reachable as displayed rows/metrics; no lower-level allowance event ledger exists |
+| Stats title | `visible/total audit rows` | Same pane; `/` filters aggregate rows | Reachable |
+| Stats rows | Jobs, rate percents, and `n=sample` for provider, verification, and acceptance | Same aggregate row only | No contributing-record destination; needs the bounded audit-record browser described above |
+| Launcher form | Field-row total | Same pane | Reachable |
+| Launcher preview | Unresolved, warning, and preview-line counts | Same confirmation card and preview lines | Reachable |
+| Launcher route advisor | `N fallbacks` | Only the primary and first fallback are rendered | No complete destination; needs all fallback candidates rendered in a scrollable advisor list |
+| Work cockpit title | `current/total WorkItem`, `N candidates`, and `0 work items` | Left/Right cycles WorkItems; Compare renders only the newest two candidates | WorkItem total is reachable. Candidate total lacks a complete destination and needs candidate cycling or a candidate list |
+| Work Compose | Field and unresolved counts | Same WorkSpec card and Dispatch field | Reachable |
+| Work Review | Changed-file count, additions/deletions, outside-scope count, and finding-state counts | Same bounded diff, evidence sections, changed paths, and Findings checklist | Reachable; finding summaries and rows share one normalized finding list |
+| Work Approve | `N isolated change sets` | Same pane lists candidate attempt IDs; `i` composes them | Reachable |
+| Work Compare | Per-candidate files, additions/deletions, findings, tokens, and unresolved risks | Same candidate pane | Reachable for the two rendered candidates; the title’s larger candidate total remains unresolved as noted above |
+| Work Converge | Open/resolved/regressed and `N NEED WORK`; used/max/remaining rounds | Findings are in the same pane; `w` launches the bounded next round | Finding counts are reachable. Round-budget numbers have no round-history destination here; one would require a WorkItem round list or link to Chain |
+| Detail Transcript | Blocks, tools, subagents, and anomalies | Blocks: same pane. Tools: `O`. Subagents: `U`. Anomalies: `A` | Reachable; each filtered count and list is projected once and tested for identical keys |
+| Expanded transcript tool/file entries | Output-line and changed-path totals | `Enter` expands/collapses tool output; `d` opens the focused file diff | Reachable |
+| Detail Diff | Files, additions, deletions, diff rows, and outside-scope badge | File table: arrows/`Enter`; opened diff: Left/Right pages; scope evidence: `x` menu, then open scope evidence | Reachable; additions/deletions are diff metrics |
+| Detail Record | Fields, unusual sections, scope violations, and drift entries | Same pane; scroll | Reachable |
+| Detail Usage | Current/chain tokens, output budget, cache percent, and chain-job count | Token aggregates are in the same pane; `6` opens Chain and `[`/`]` navigates tabs | Chain jobs are reachable. Token figures are aggregate metrics without a token-event item browser |
+| Detail Events | Total events, errors, and warnings | Total: same pane. Errors: `A`. Warnings: `W` | Reachable; each category count and filtered list shares one event-block collection |
+| Detail Chain | Rounds, changed files, and unusual rounds | Same pane; arrows and `Enter` open a selected round’s job detail | Reachable |
+| Revert confirmation overlay and completion status | Revertable, skipped, conflict, and truncated-remainder counts | `v` opens the itemized dry-run; the overlay names the exact CLI command when more than 17 rows exist | Reachable before mutation; the completion status summarizes that already-reviewed plan/result |
+| Integration confirmation and blocked status | Change-set and conflict counts | `i` opens the change-set IDs; preflight status includes conflict reasons | Reachable |
+
 ## Keys
 
 <!-- BEGIN GENERATED KEYMAP -->
@@ -228,6 +282,10 @@ Direct-shadow detail views otherwise render like managed jobs, including Directo
 | `z` | toggle Fleet density | fleet |
 | `f` | toggle follow | detail |
 | `A` | toggle transcript anomaly list | detail |
+| `O` | toggle transcript tool list | detail |
+| `U` | toggle transcript subagent list | detail |
+| `A` | toggle error event list | detail |
+| `W` | toggle warning event list | detail |
 | `E` | jump to raw Events | detail |
 | `d` | open focused Diff | detail |
 | `x menu` | open scope violation evidence | detail |

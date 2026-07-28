@@ -341,9 +341,12 @@ function normalizedCwd(value) {
 export function correlateSessions(sessions = [], jobs = [], writerLocks = []) {
   const activeJobsByCwd = new Map();
   for (const job of jobs) {
-    if (!job || TERMINAL.has(job.status)) continue;
+    if (!job || job.external === true || job.transport === 'external' || TERMINAL.has(job.status)) continue;
     const cwd = normalizedCwd(job.cwd);
-    if (cwd) activeJobsByCwd.set(cwd, (activeJobsByCwd.get(cwd) || 0) + 1);
+    if (cwd) {
+      if (!activeJobsByCwd.has(cwd)) activeJobsByCwd.set(cwd, []);
+      activeJobsByCwd.get(cwd).push(job.id);
+    }
   }
   const writersByCwd = new Map();
   for (const lock of writerLocks) {
@@ -355,7 +358,8 @@ export function correlateSessions(sessions = [], jobs = [], writerLocks = []) {
     const writer = cwd ? writersByCwd.get(cwd) || null : null;
     return {
       ...session,
-      activeDelegateJobs: cwd ? activeJobsByCwd.get(cwd) || 0 : 0,
+      activeDelegateJobIds: cwd ? activeJobsByCwd.get(cwd) || [] : [],
+      activeDelegateJobs: cwd ? (activeJobsByCwd.get(cwd) || []).length : 0,
       writerLock: writer,
       writerJobId: writer?.jobId || null
     };

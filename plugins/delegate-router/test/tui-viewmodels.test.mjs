@@ -238,6 +238,60 @@ test('transcript anomaly badge and drill-down consume the exact same projected l
   assert.deepEqual(drillDown.meta.anomalyEntryKeys, all.meta.anomalyEntryKeys);
 });
 
+test('transcript tool and subagent counts cannot disagree with their drill-down lists', () => {
+  const store = syntheticStore();
+  const jobId = 'codex-active-1234567';
+  store.eventsByJob[jobId] = [
+    { v: 1, seq: 1, at: NOW - 4000, jobId, type: 'message.completed', redacted: true, data: { text: 'starting' } },
+    { v: 1, seq: 2, at: NOW - 3000, jobId, type: 'tool.started', redacted: true, data: { item: { id: 'cmd', type: 'commandExecution', command: 'node --test', status: 'inProgress' } } },
+    { v: 1, seq: 3, at: NOW - 2000, jobId, type: 'tool.completed', redacted: true, data: { item: { id: 'cmd', type: 'commandExecution', command: 'node --test', status: 'completed', exitCode: 0 } } },
+    { v: 1, seq: 4, at: NOW - 1000, jobId, type: 'subagent.started', redacted: true, data: { id: 'reviewer', type: 'reviewer', task: 'review result', status: 'running' } },
+    { v: 1, seq: 5, at: NOW, jobId, type: 'subagent.completed', redacted: true, data: { id: 'reviewer', type: 'reviewer', task: 'review result', status: 'completed' } }
+  ];
+  const all = detailViewModel(store, {
+    jobId, detailTab: 0, now: NOW, follow: false
+  }, { width: 100, height: 30 });
+  const tools = detailViewModel(store, {
+    jobId, detailTab: 0, now: NOW, follow: false, transcriptKindFilter: 'tools'
+  }, { width: 100, height: 30 });
+  const subagents = detailViewModel(store, {
+    jobId, detailTab: 0, now: NOW, follow: false, transcriptKindFilter: 'subagents'
+  }, { width: 100, height: 30 });
+
+  assert.equal(tools.panes[0].content.entries.length, all.meta.toolCount);
+  assert.deepEqual(tools.panes[0].content.entries.map((entry) => entry.key), all.meta.toolEntryKeys);
+  assert.equal(subagents.panes[0].content.entries.length, all.meta.subagentCount);
+  assert.deepEqual(subagents.panes[0].content.entries.map((entry) => entry.key), all.meta.subagentEntryKeys);
+  assert.ok(all.meta.toolCount >= all.meta.subagentCount);
+});
+
+test('Event totals, errors, and warnings cannot disagree with their drill-down lists', () => {
+  const store = syntheticStore();
+  const jobId = 'codex-active-1234567';
+  store.eventsByJob[jobId] = [
+    { v: 1, seq: 1, at: NOW - 3000, jobId, type: 'message.completed', redacted: true, data: { text: 'ordinary' } },
+    { v: 1, seq: 2, at: NOW - 2000, jobId, type: 'scope.violation', redacted: true, data: { path: 'outside.js' } },
+    { v: 1, seq: 3, at: NOW - 1000, jobId, type: 'budget.warning', redacted: true, data: { remaining: 10 } },
+    { v: 1, seq: 4, at: NOW, jobId, type: 'error', redacted: true, data: { message: 'failed' } }
+  ];
+  const all = detailViewModel(store, {
+    jobId, detailTab: 4, now: NOW, follow: false
+  }, { width: 100, height: 30 });
+  const errors = detailViewModel(store, {
+    jobId, detailTab: 4, now: NOW, follow: false, eventCategoryFilter: 'error'
+  }, { width: 100, height: 30 });
+  const warnings = detailViewModel(store, {
+    jobId, detailTab: 4, now: NOW, follow: false, eventCategoryFilter: 'warning'
+  }, { width: 100, height: 30 });
+
+  assert.equal(all.panes[0].content.entries.length, all.meta.eventCount);
+  assert.deepEqual(all.panes[0].content.entries.map((entry) => entry.key), all.meta.eventEntryKeys);
+  assert.equal(errors.panes[0].content.entries.length, all.meta.errorCount);
+  assert.deepEqual(errors.panes[0].content.entries.map((entry) => entry.key), all.meta.errorEntryKeys);
+  assert.equal(warnings.panes[0].content.entries.length, all.meta.warningCount);
+  assert.deepEqual(warnings.panes[0].content.entries.map((entry) => entry.key), all.meta.warningEntryKeys);
+});
+
 test('open context compaction animates in both fleet row and detail header instead of rendering quiet', () => {
   const store = syntheticStore();
   const id = 'codex-active-1234567';

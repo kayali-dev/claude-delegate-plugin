@@ -2,6 +2,31 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.52.0 — 2026-07-28
+
+- Completed the TUI count audit. Existing destinations now have registry-owned
+  drill-downs for transcript tools (`O`), provider subagents (`U`), Event
+  errors (`A`), and Event warnings (`W`); Sessions `Enter` now opens the exact
+  active managed-job IDs counted for that coordinator cwd. Each new count/list
+  pair shares one projected collection and has a disagreement regression.
+  Counts without an honest existing destination are documented rather than
+  linked to partial evidence.
+- Workspace composition now enumerates manifest overlap and compare-and-swap
+  conflicts independently of patch artifact health. A forced process-global
+  state-root switch deterministically reproduces the one-sighting
+  `outside private broker storage` preemption; the overlapping-path conflict
+  now remains first and visible, while both storage failures are still
+  reported. Normal CLI/MCP callers load and preflight synchronously under one
+  fixed process state root, so the exact root-switch cause is test/embedding
+  state, while suppression by any unrelated artifact failure was a real
+  preflight-reporting defect.
+- Unambiguous zero-delay input frames now batch at the event-loop check phase
+  reached directly after stdin polling instead of entering the timer queue.
+  On an 80-job/500-event diagnostic fixture, Fleet median queue time moved from
+  5.55 ms to 4.62 ms and input-to-paint from 10.32 ms to 9.95 ms; Transcript
+  queue moved from 4.74 ms to 3.63 ms and input-to-paint from 11.31 ms to
+  9.93 ms. Escape and bracketed-paste deadlines remain 50 ms and 5000 ms.
+
 ## 0.51.0 — 2026-07-28
 
 - Terminal job records and finished sentinels are now published only after the

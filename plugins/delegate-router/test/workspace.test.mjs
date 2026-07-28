@@ -16,7 +16,7 @@ import {
   revertManagedJob,
   updateManagedJob
 } from '../bin/lib/control.mjs';
-import { allocateWorkspace, discardWorkspace } from '../bin/lib/workspace.mjs';
+import { allocateWorkspace, discardWorkspace, preflightWorkspaceChangeSets } from '../bin/lib/workspace.mjs';
 
 const fakeCodex = fileURLToPath(new URL('./fake-codex-app-server.mjs', import.meta.url));
 
@@ -278,6 +278,36 @@ test('composition stops when two change sets claim the same changed path', (t) =
   assert.equal(result.stage, 'cas-preflight');
   assert.match(result.conflicts[0].reason, /does not invent a resolution/);
   assert.equal(fs.readFileSync(path.join(root, 'target.txt'), 'utf8'), 'base\n');
+});
+
+test('manifest conflicts survive a forced broker-state-root switch before preflight', (t) => {
+  withState(t);
+  const root = repository(t, 'compose-state-switch');
+  const first = workspaceJob(root);
+  const second = workspaceJob(root);
+  fs.writeFileSync(path.join(first.cwd, 'target.txt'), 'one\n');
+  fs.writeFileSync(path.join(second.cwd, 'target.txt'), 'two\n');
+  captureManagedWorkspace(first.id, { discard: true });
+  captureManagedWorkspace(second.id, { discard: true });
+  terminalize(first.id);
+  terminalize(second.id);
+  const jobs = [inspectJob(first.id), inspectJob(second.id)];
+
+  const capturedStateFile = process.env.DELEGATE_STATE_FILE;
+  const switchedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-workspace-switched-state-'));
+  t.after(() => fs.rmSync(switchedRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
+  let result;
+  try {
+    process.env.DELEGATE_STATE_FILE = path.join(switchedRoot, 'usage.json');
+    result = preflightWorkspaceChangeSets(jobs);
+  } finally {
+    process.env.DELEGATE_STATE_FILE = capturedStateFile;
+  }
+
+  assert.equal(result.ok, false);
+  assert.match(result.conflicts[0].reason, /does not invent a resolution/);
+  assert.equal(result.conflicts.filter((conflict) => /does not invent a resolution/.test(conflict.reason)).length, 1);
+  assert.equal(result.conflicts.filter((conflict) => /outside private broker storage/.test(conflict.reason)).length, 2);
 });
 
 test('portable change sets preserve additions, deletions, and binary bytes in integration only', (t) => {

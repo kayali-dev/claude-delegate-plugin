@@ -201,6 +201,38 @@ export const KEYMAP = Object.freeze([
       ? 'open Transcript'
       : Number(ctx.anomalyCount || 0) > 0 ? null : 'no transcript anomalies'
   }),
+  entry({
+    keys: ['O'], label: 'toggle transcript tool list', action: 'detail.tools', scope: ['detail'], class: 'view',
+    footer: true, footerLabel: 'tools',
+    when: (ctx) => Number(ctx.detailTab) === 0 && Number(ctx.toolCount || 0) > 0,
+    unavailableReason: (ctx) => Number(ctx.detailTab) !== 0
+      ? 'open Transcript'
+      : Number(ctx.toolCount || 0) > 0 ? null : 'no transcript tools'
+  }),
+  entry({
+    keys: ['U'], label: 'toggle transcript subagent list', action: 'detail.subagents', scope: ['detail'], class: 'view',
+    footer: true, footerLabel: 'subagents',
+    when: (ctx) => Number(ctx.detailTab) === 0 && Number(ctx.subagentCount || 0) > 0,
+    unavailableReason: (ctx) => Number(ctx.detailTab) !== 0
+      ? 'open Transcript'
+      : Number(ctx.subagentCount || 0) > 0 ? null : 'no transcript subagents'
+  }),
+  entry({
+    keys: ['A'], label: 'toggle error event list', action: 'detail.event-errors', scope: ['detail'], class: 'view',
+    footer: true, footerLabel: 'errors',
+    when: (ctx) => Number(ctx.detailTab) === 4 && Number(ctx.errorCount || 0) > 0,
+    unavailableReason: (ctx) => Number(ctx.detailTab) !== 4
+      ? 'open Events'
+      : Number(ctx.errorCount || 0) > 0 ? null : 'no error events'
+  }),
+  entry({
+    keys: ['W'], label: 'toggle warning event list', action: 'detail.event-warnings', scope: ['detail'], class: 'view',
+    footer: true, footerLabel: 'warnings',
+    when: (ctx) => Number(ctx.detailTab) === 4 && Number(ctx.warningCount || 0) > 0,
+    unavailableReason: (ctx) => Number(ctx.detailTab) !== 4
+      ? 'open Events'
+      : Number(ctx.warningCount || 0) > 0 ? null : 'no warning events'
+  }),
   entry({ keys: ['E'], label: 'jump to raw Events', action: 'detail.events', scope: ['detail'], class: 'view', footer: false, when: (ctx) => Number(ctx.detailTab) === 0 }),
   entry({ keys: ['d'], label: 'open focused Diff', action: 'detail.diff', scope: ['detail'], class: 'view', footer: false, when: (ctx) => Number(ctx.detailTab) === 0 }),
   entry({
@@ -459,6 +491,10 @@ export function keymapContext(frame = {}, ui = {}, store = {}) {
     workNextRoundJobId: frame.meta?.nextRoundJobId || null,
     workNextRoundUnavailable: frame.meta?.nextRoundUnavailable || null,
     anomalyCount: Number(frame.meta?.anomalyCount || 0),
+    toolCount: Number(frame.meta?.toolCount || 0),
+    subagentCount: Number(frame.meta?.subagentCount || 0),
+    errorCount: Number(frame.meta?.errorCount || 0),
+    warningCount: Number(frame.meta?.warningCount || 0),
     scopeViolationCount: Number(frame.meta?.scopeViolationCount || 0),
     job
   });

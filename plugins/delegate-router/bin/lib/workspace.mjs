@@ -361,26 +361,13 @@ export function preflightWorkspaceChangeSets(jobs) {
   const ownerRoot = ownerRoots[0];
   const conflicts = [];
   const claimed = new Map();
+  const portableJobs = [];
   for (const job of jobs) {
     if (job.isolation !== 'worktree' || job.workspace?.ownedBy !== 'delegate-router' || !job.changeSet?.patch?.path) {
       conflicts.push({ jobId: job.id, path: null, reason: 'portable workspace change set is unavailable' });
       continue;
     }
-    try {
-      if (!isInside(dataDir(), job.changeSet.patch.path) || isInside(ownerRoot, job.changeSet.patch.path)) {
-        conflicts.push({ jobId: job.id, path: null, reason: 'change-set patch is outside private broker storage' });
-        continue;
-      }
-      const patch = fs.readFileSync(job.changeSet.patch.path);
-      const digest = crypto.createHash('sha256').update(patch).digest('hex');
-      if (digest !== job.changeSet.patch.sha256 || patch.length !== job.changeSet.patch.bytes) {
-        conflicts.push({ jobId: job.id, path: null, reason: 'change-set patch digest or byte count does not match its manifest' });
-        continue;
-      }
-    } catch (error) {
-      conflicts.push({ jobId: job.id, path: null, reason: `change-set patch is unreadable: ${error.message}` });
-      continue;
-    }
+    portableJobs.push(job);
     for (const file of job.changeSet.files || []) {
       if (claimed.has(file.path)) {
         conflicts.push({
@@ -401,6 +388,25 @@ export function preflightWorkspaceChangeSets(jobs) {
       } else if (current.oid !== file.baseOid || current.mode !== file.baseMode) {
         conflicts.push({ jobId: job.id, path: file.path, reason: 'target content or mode moved since the immutable base' });
       }
+    }
+  }
+  // Manifest ownership and compare-and-swap checks are independent of patch
+  // artifact health. Enumerate them first so an unrelated storage problem
+  // cannot hide a real overlapping-path conflict.
+  for (const job of portableJobs) {
+    try {
+      if (!isInside(dataDir(), job.changeSet.patch.path) || isInside(ownerRoot, job.changeSet.patch.path)) {
+        conflicts.push({ jobId: job.id, path: null, reason: 'change-set patch is outside private broker storage' });
+        continue;
+      }
+      const patch = fs.readFileSync(job.changeSet.patch.path);
+      const digest = crypto.createHash('sha256').update(patch).digest('hex');
+      if (digest !== job.changeSet.patch.sha256 || patch.length !== job.changeSet.patch.bytes) {
+        conflicts.push({ jobId: job.id, path: null, reason: 'change-set patch digest or byte count does not match its manifest' });
+        continue;
+      }
+    } catch (error) {
+      conflicts.push({ jobId: job.id, path: null, reason: `change-set patch is unreadable: ${error.message}` });
     }
   }
   const currentRevision = requireGit(ownerRoot, ['rev-parse', '--verify', 'HEAD^{commit}'], 'owner repository has no current HEAD commit').trim();

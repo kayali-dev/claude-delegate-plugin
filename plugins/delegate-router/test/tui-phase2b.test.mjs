@@ -16,7 +16,7 @@ import {
   parseSessionTail,
   scanClaudeSessions
 } from '../bin/lib/tui/sessions.mjs';
-import { sessionsViewModel } from '../bin/lib/tui/viewmodels.mjs';
+import { fleetViewModel, sessionsViewModel } from '../bin/lib/tui/viewmodels.mjs';
 
 const NOW = Date.parse('2026-07-13T12:00:00.000Z');
 
@@ -105,6 +105,33 @@ test('cwd correlation counts only active delegate jobs and attaches managed writ
     ['alpha', 2, 'active-a'],
     ['beta', 1, null]
   ]);
+});
+
+test('session active-job count and Fleet drill-down share the exact managed job ids', () => {
+  const cwd = '/work/alpha';
+  const store = {
+    sessions: [{ id: 'alpha', cwd, mtimeMs: NOW, size: 100, lastActivity: 'active', activeSeconds: 300 }],
+    sessionScan: { status: 'ready', available: true, scanned: 1, totalFiles: 1, capped: false },
+    jobs: [
+      { id: 'running', cwd, status: 'running' },
+      { id: 'queued', cwd, status: 'queued' },
+      { id: 'done', cwd, status: 'completed' },
+      { id: 'external-flag', cwd, status: 'running', external: true },
+      { id: 'external-transport', cwd, status: 'running', transport: 'external' },
+      { id: 'elsewhere', cwd: '/work/beta', status: 'running' }
+    ],
+    writerLocks: []
+  };
+  const sessions = sessionsViewModel(store, { now: NOW }, { width: 100, height: 22 });
+  const fleet = fleetViewModel(store, {
+    now: NOW,
+    sessionCwdFilter: sessions.meta.selectedSessionCwd,
+    sessionJobIds: sessions.meta.selectedActiveJobIds
+  }, { width: 100, height: 22 });
+
+  assert.deepEqual(sessions.meta.selectedActiveJobIds, ['running', 'queued']);
+  assert.deepEqual([...fleet.meta.visibleJobIds].sort(), [...sessions.meta.selectedActiveJobIds].sort());
+  assert.equal(Number(sessions.panes[0].content.rowAt(0).cells[4].text), fleet.meta.visibleJobIds.length);
 });
 
 test('session snippets use shared redaction before display', (t) => {

@@ -1,0 +1,1698 @@
+✔ SubagentStop correlates a background stub by agent_id and records the real terminal response (78.415334ms)
+✔ a quiet background stub reconciles at read time to ended-unknown idempotently without fabricated success (8.669875ms)
+✔ a two-day-old pre-existing spawn-returned record heals on inspection without migration (1.83725ms)
+✔ recent transcript growth stays active and quiet-within-window renders idle (5.883125ms)
+✔ foreground Agent completion remains completed and the lifecycle hooks are registered additively (5.3955ms)
+✔ retention reconciliation prunes old non-terminal agent stubs instead of accumulating them (7.821708ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ all three lanes expose the complete lifecycle contract behind one negotiated surface (5.767792ms)
+✔ capability negotiation preserves honest lane non-parity and evidence provenance (0.273708ms)
+✔ scheduling profiles distinguish workflow, budget, checkpoint, and containment guarantees (0.092292ms)
+✔ a workflow is refused rather than degraded when its lane lacks the named capability (0.2685ms)
+✔ driver scheduling preserves legacy job capabilities and the existing Cursor same-turn error (101.34725ms)
+✔ health resolves the installed three-lane matrix with no model turn and honors only the provider env override (617.216625ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ back-channel server exposes exactly the question-only tools and imports no control-plane mutators (78.119583ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ fake Codex worker question round-trips through delegate-jobs respond with redaction and context (706.66075ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ back-channel rejects structured authority and times out with a durable default-reject stopReason (224.401792ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ report_progress journals a bounded milestone without opening an input round trip (97.034292ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Codex and Cursor ACP retry session creation without the back-channel when injection is rejected (740.868125ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ live collision hook emits one scoped edge, cools duplicate touches, and stales acceptance evidence (323.089666ms)
+✔ attempt writes self-suppress while a later coordinator Edit on the same path collides (200.788125ms)
+✔ PostToolBatch deduplicates repeated Write observations and collision alerts retain session scope (133.849917ms)
+✔ watch plans cap at 256 paths and record explicit post-hoc degradation (150.497541ms)
+✔ collision hooks are additive, fast-fail open, and exit zero on malformed payloads (75.407042ms)
+✔ provider configuration persists codex-only, cursor-only, and both modes (3.321042ms)
+✔ delegate-health surfaces the never-pruned audit log path (131.474959ms)
+✔ Cursor-only control MCP advertises only Cursor and Codex MCP exposes no tools (118.025167ms)
+✔ installer rejects conflicting provider modes without changing configuration (8.652458ms)
+✔ statusline enable wraps an existing command, captures usage, and disable restores it (247.493292ms)
+✔ statusline enable without an existing status line installs the minimal renderer (195.172709ms)
+✔ footer link opt-out removes only the Delegate Router entry and preserves user badges (61.89025ms)
+✔ control MCP initializes and exposes the complete supervision surface (94.156333ms)
+✔ control MCP adds bounded resources and common-flow prompts without changing tools (96.61475ms)
+✔ native MCP opt-out hides only resources and prompts while preserving every tool (48.954917ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ delegate_stats returns filtered audit aggregates and totals and rejects job parameters (180.097417ms)
+✔ delegate_respond queues a revision-safe answer through the control inbox (125.029708ms)
+✔ delegate-jobs help has CLI parity for caller options (86.732458ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ managed jobs persist ordered redacted events and derived views (66.308208ms)
+✔ delegate-jobs status keeps requested model display honest and strips empty attributes (178.397209ms)
+✔ outbound prompt scan blocks credentials unless allowSensitive explicitly overrides (31.530416ms)
+✔ idempotency replays return the same job id without launching another record (315.717708ms)
+✔ control commands use revisions and stable ids for exactly-once acceptance (53.174583ms)
+✔ event pagination resumes without duplicates and ignores a truncated tail (46.539708ms)
+✔ inspect leaves a partial journal tail byte-for-byte unchanged (61.331333ms)
+✔ large diffs spill to private artifacts and remain fully inspectable (5120.601709ms)
+✔ managed starts enforce provider allowance before spawning a worker (131.702667ms)
+✔ redaction preserves numeric usage while hiding numeric and boolean secrets (0.484208ms)
+✔ compound provider usage counters survive journaling and Events rendering while credential tokens stay redacted (46.780334ms)
+✔ usage-shaped token objects recurse but non-usage token keys never receive the exemption (0.191875ms)
+✔ broker error taxonomy carries closed codes, retryability, and provider attribution (0.295042ms)
+✔ filtered event pages advance across nonmatches without skipping later matches (43.047083ms)
+✔ resume rejects an active parent session (41.975ms)
+✔ launch origin comes from the coordinator project and continuation rounds never overwrite it (230.469042ms)
+✔ monitor scope never gates cross-session control operations (51.878042ms)
+✔ inspect reconciles orphaned running jobs to failed with an audit event (39.827542ms)
+✔ inspect and list expose journal-tail activity and flag stalled running jobs (48.308083ms)
+✔ write-mode launches are blocked while another writer is active in the same cwd (315.28375ms)
+✔ writer guard honors an explicit overrideWriter bypass (268.689041ms)
+✔ writer guard releases once the previous writer is orphaned (285.527333ms)
+✔ revision conflicts carry the current revision for one-step retry (34.125ms)
+✔ transcript pages omit deltas by default and paginate with nextSeq (27.742042ms)
+✔ delegate transcript pages admit first-class context-compaction marker events (24.919167ms)
+✔ delegate transcript admits provider items and plain-text first-class subagent lifecycle lines (26.198583ms)
+✔ delegate transcript retroactively normalizes Codex and Cursor file changes into compact counted lines (24.193625ms)
+✔ prune removes aged terminal jobs and preserves active ones (47.1055ms)
+✔ prune reconciles stale queued debris before applying terminal retention (37.902667ms)
+✔ terminal audit log is one-line-per-transition, redacted, private, and never pruned (58.542375ms)
+✔ timeoutSeconds is validated, stored, and inherited by resume (25.92975ms)
+✔ retryPolicy and verify options validate, persist, and default safely (23.312333ms)
+✔ write jobs launched from a dirty baseline emit baseline.dirty with bounded paths (58.903416ms)
+✔ inspect exposes shared resumability and driftReport derivations (50.965458ms)
+✔ delegate-jobs revert restores owned files, skips overlap, and dry-run touches nothing (305.85ms)
+✔ revert refuses a file edited after the job final hash was recorded (109.602708ms)
+✔ list returns compact summaries newest first with active filtering (58.750334ms)
+✔ delta redactor suppresses secrets split across chunk boundaries (0.153083ms)
+✔ stale queued jobs reconcile to failed and release the writer guard (305.063542ms)
+✔ network option is stored, defaults off, and shapes codex spawn args (59.09725ms)
+✔ GPT models are refused on cursor while codex is enabled and under its avoid band (317.382708ms)
+✔ scope matching, allowedPaths validation, and diff path filtering (0.317916ms)
+✔ jobFiles dedupes absolute and relative reports of the same file (54.379708ms)
+✔ list rows carry session and rootJobId for resume chains (105.383542ms)
+✔ sandbox off is validated, stored, and maps to full access across providers (100.749ms)
+✔ event page cursor parses only the new tail and survives truncation (148.520084ms)
+✔ effort is validated against the known reasoning ladder (146.598334ms)
+✔ cursor same-turn steering is rejected at the control boundary (66.399916ms)
+✔ list previews object results and exposes provenance fields (43.894791ms)
+✔ diff stat and windowing bound large diffs (0.230208ms)
+✔ event responses are capped by serialized size, preserving the cursor (0.137084ms)
+✔ usage reports distinguish missing provider data from zero (38.451291ms)
+✔ usage reports chain-cumulative totals through the current continuation (52.112292ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ headless read modes stream NDJSON and network elevation plus advanced flags preserve intent (1.631ms)
+✔ headless mapper dedupes assistant flushes, keeps thinking ephemeral, normalizes tools, and trusts final result usage (63.246084ms)
+✔ network preflight covers mode, sandbox, force, config enums, explicit domains, and fail-fast gates (5.118917ms)
+✔ sandbox.json materializes by merge, restores exact prior bytes, and exit cleanup covers provider crash paths (35.812667ms)
+✔ ACP mapper covers every update variant, raw output, nested diffs, replay, and context occupancy without budget coupling (65.127042ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ ask-question blocks for revisioned coordinator response and idempotent retry (451.724208ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ create-plan blocks for revisioned coordinator response and idempotent retry (313.259792ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ blocking Cursor input rejects after the configured timeout with a durable stopReason (182.968041ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ ACP force selects allow_once, never allow_always, and journals normalized ambiguous context (147.547333ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ headless pre-creates chats, falls back on older CLIs, and network read-only jobs carry the strict preamble (163.686541ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ create-chat missing is an explicit graceful fallback (164.833583ms)
+✔ session/load replay is tagged, excluded from live result assembly, and grouped as restored history (119.037917ms)
+✔ malformed project cli.json is diagnosed distinctly and names the exact file (69.62975ms)
+✔ capability probe is no-turn and reproduces the installed select-option catalog shape (63.940208ms)
+✔ parameterizedModelPicker remains preferred when an ACP build advertises it (66.014ms)
+✔ delegate-health prefers status JSON and reports the versioned terminal/fs no-turn detail (575.856541ms)
+✔ advanced Cursor job fields validate, persist in dry-run broker output, and reach flags (92.354583ms)
+﹣ live installed Cursor no-turn handshake (explicit opt-in) (0.07325ms) # set DELEGATE_LIVE_CURSOR_HANDSHAKE=1; no model prompt is sent
+✔ Composer and Grok aliases select the newest eligible standard model (1.617833ms)
+✔ write mode uses sandboxed Smart Auto and never embeds the prompt in argv (0.448208ms)
+✔ read-only mode uses plan mode without write approval flags (0.656459ms)
+✔ sandbox off disables cursor sandboxing in write and read modes (0.113042ms)
+✔ runCursor delivers the prompt over stdin and parses the result (65.744208ms)
+✔ runCursor terminates a timed-out process tree (103.730416ms)
+✔ background forwarding strips prompt arguments from child argv (0.422834ms)
+✔ sentence intent compiles a valid WorkSpec with visible provenance and P3 verification (145.257833ms)
+✔ plain intent never omits unresolved scope, criteria, budget, or write authority (202.299625ms)
+✔ current diff supplies an attributable scope claim without turning it into allowedPaths (243.114958ms)
+✔ failing check derives a mechanical criterion but keeps diagnostic scope low-confidence (191.427625ms)
+✔ TODO intent derives the exact comment and its file without reading outside the repository (211.49725ms)
+✔ task records are evidence, never an implicit allowedPaths grant (137.468083ms)
+✔ repository conventions fill verification only and expose the remaining gaps (139.345959ms)
+✔ confirmation is the only bridge to launch options and never adds privilege fields (130.157334ms)
+✔ compiled WorkSpec reaches the existing start preview and plan-first packet (175.481292ms)
+✔ hand-written packets retain their exact provider packet and lint contract (71.300791ms)
+✔ packet lint details name the compiler field that fills each missing section (0.269834ms)
+✔ CLI spec renders one card without creating broker state (229.15925ms)
+✔ CLI intent starts never auto-launch writes and automation cannot confirm gaps (396.831041ms)
+✔ JSON-RPC requests fail on a bounded deadline and the provider is stoppable (57.570375ms)
+✔ monitor edge detection covers every actionable class in priority order (1.229458ms)
+✔ budget and allowance edges use distinct remedies and suppress only same-cause terminal redundancy (0.670916ms)
+✔ needs-input monitor line gives both inline TUI and revisioned CLI answer paths (0.085333ms)
+✔ progress, deltas, tools, usage, and successful intermediate steps stay silent (0.067458ms)
+✔ provider completion alone stays silent until acceptance evidence is ready (0.075833ms)
+✔ edge policy deduplicates, permits genuine re-entry, and holds per-job cooldown (0.175792ms)
+✔ simultaneous edges drain in priority order across the per-job cooldown (0.14675ms)
+✔ global rate ceiling emits one exact suppressed-count summary (0.118916ms)
+✔ boot baselines history and emits at most one consolidated attention summary (0.169167ms)
+✔ line formatting redacts hostile fields and never includes prompts, diffs, paths, or secrets (0.119833ms)
+✔ kill switch disables the process and snooze suppresses every non-breach edge (37.3645ms)
+✔ monitor runtime observes a synthetic store edge without mutating it (93.357792ms)
+✔ session and workspace scopes isolate sibling sessions and real worktree launch paths (256.152583ms)
+✔ correlation failure records and visibly degrades session scope to workspace (4.51425ms)
+✔ durable ancestor markers choose the nearest session, then its newest marker (2.57675ms)
+✔ equal ancestor matches are ambiguous and PID reuse cannot correlate (7.073291ms)
+✔ correlation garbage collection is bounded and removes expired handshake debris (21.226041ms)
+✔ SessionStart marker survives hook exit and a later real monitor resolves session scope (153.006875ms)
+✔ every notification line carries an explicit project label (0.336917ms)
+✔ monitor modules import no broker mutation surface (1.566375ms)
+✔ monitors.json uses the documented schema and a space-safe plugin-root command (0.440291ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ P3 derives verification, records real-tree evidence, gates additive acceptance, and bounds opt-in fix rounds (11121.420541ms)
+✔ status-line work chip renders idle, running, and review-ready states exactly (0.905208ms)
+✔ native context is bounded, closed-field redacted, and orders actionable state by policy (0.425375ms)
+✔ SessionStart source=compact rehydrates bounded state with a validator-supported payload (157.527792ms)
+✔ plugin metadata and MCP registrations stay portable and version-aligned (3.110291ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ structural plan comparison distinguishes convergence, divergence, and inconclusive output without prose similarity (1.406666ms)
+✔ plan output budget scales from a substantial floor to a documented ceiling and remains overridable (0.751583ms)
+✔ write dry-runs announce the stricter plan-first default and both explicit escape hatches without creating state (42.047208ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ plan-first confirmation continues the same Codex thread and switches only the confirmed turn to workspace-write (1364.891125ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ two independent cheap plan passes open only structural divergence questions and report inconclusive without a verdict (3293.098625ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ a failed independent plan pass degrades loudly on the implement attempt and never blocks its launch (1624.272542ms)
+✔ interrogation rejects authority fields and records answer plus observed token cost as WorkItem finding evidence (63.004334ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Codex interrogation round trip uses turn/steer framing, preserves the contract, and attributes provider tokens (663.686ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Cursor plan-first and interrogation reuse one ACP session while questions stay queued, read-only, and restart-honest (2877.746792ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Codex app-server maps events and applies true same-turn steering (685.498583ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Codex context-compaction items retain provider passthroughs and add ordered first-class lifecycles (652.290333ms)
+✔ every first-class Codex item type stays out of the generic provider-item fallback in every phase (87.459542ms)
+✔ agentMessage start and completion map to exactly one message block and no provider-item block (52.843959ms)
+✔ managed Codex, direct Codex, and Cursor normalize identical first-class subagent lifecycles and rendered blocks (159.992042ms)
+✔ unknown Codex items preserve bounded redacted payloads and render without type-specific code (10272.047792ms)
+✔ subagent result output is redacted and capped independently of the parent final message (34.047333ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Cursor ACP maps structured updates and reports correction as restart (1409.127083ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Cursor falls back to headless only when ACP fails before a session starts (457.952542ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Cursor final inventory includes staged and untracked files (1274.410209ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Cursor diff excludes pre-existing dirty files the job never changed and flags overlap (1292.859291ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ review-flow threads are flagged and refuse resume fast; terminal jobs write the finished sentinel (592.890792ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ out-of-scope writes are recorded as scopeViolations with a scope.violation event (1227.578334ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ a completed write-mode job with zero changes is flagged no-changes-write-mode (595.734041ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ a session advertising only fast variants falls back to headless non-fast (live-catalog shape) (483.363958ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Codex provider exit fails immediately instead of waiting for the turn timeout (121.682292ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ retryPolicy retries a transient Codex crash once on the same job and thread (692.631667ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ terminal jobs tag verification origin and sandbox-only CLI results warn before acceptance (2010.798667ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Codex output budget interrupts the turn and preserves partial state and continuation (149.253042ms)
+✔ provider minimum versions fail clearly through an env-forced floor (52.167042ms)
+✔ cursor model resolution matches attribute-serialized catalogs (REG-1) (0.269125ms)
+✔ fast-only live catalogs are flagged as a compromise, cursor- prefixed ids resolve (0.258583ms)
+✔ cursor model resolution also matches suffix-style catalogs and empty lists (0.058375ms)
+✔ codex resume rejections map to an actionable RESUME_UNSUPPORTED code (0.032375ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Cursor ACP resolves a grok tier request against the advertised catalog end-to-end (1139.663292ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ Cursor ACP fails closed on a bogus model id end-to-end (413.937375ms)
+✔ ACP tier gaps fall back to headless with the CLI-resolved model, explicitly evented (513.546333ms)
+✔ routes clear implementation work to Cursor Auto when no model is named (1.925209ms)
+✔ an explicit composer request still pins Composer (0.567042ms)
+✔ complex kinds keep pinned Cursor models instead of Auto (0.111792ms)
+✔ routes hard debugging and review work to Sol (0.063333ms)
+✔ routes broad cross-domain research to Grok (0.057584ms)
+✔ routes vision-heavy architecture judgment to Claude Opus, never auto-selecting Fable (0.056916ms)
+✔ explicit fable requests route but require per-task authorization (0.088792ms)
+✔ removes a provider at the avoid threshold and selects a fallback (0.068375ms)
+✔ keeps small contextual work in Claude (0.189917ms)
+✔ per-provider avoid map excludes cursor at its stricter band while codex stays eligible (0.348125ms)
+✔ direct Codex calls create redacted direct-mcp shadows with normalized transcript, audit, stats, and descriptions (165.182208ms)
+✔ codex-reply creates a parented shadow and cumulative thread usage is chain-attributed once (151.704875ms)
+✔ direct Codex response waits until terminal shadow audit publication completes (179.50675ms)
+✔ direct transport control operations fail with DIRECT_TRANSPORT (21.924875ms)
+✔ dead direct transport pids reconcile as orphaned and write terminal artifacts (17.466792ms)
+✔ Codex wrapper preserves the direct tool-result bytes and store failure degrades to one warning (137.97025ms)
+✔ direct Cursor foreground shadows normalized headless events, edit counts, audit, and stats (234.615292ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ direct Cursor background mode creates one complete shadow job (291.818917ms)
+✔ Cursor shadow store failure preserves foreground stdout bytes (405.293167ms)
+✔ fleet exposes direct and overlap badges while preserving Directory/Effort and action keys are read-only (98.40575ms)
+✔ bootstrap links every delegate command to the shim and is idempotent (72.161417ms)
+✔ shim executes the resolved binary under the invoked command name (531.88825ms)
+✔ shim refuses direct invocation (28.262208ms)
+✔ shim warns once when the installed version lacks the invoked binary (104.903291ms)
+✔ shim warns once when the installed registry lookup fails (100.631291ms)
+✔ bootstrap retargets a stale Delegate Router cache shim to the current install (33.751542ms)
+✔ bootstrap recreates a dangling Delegate Router cache shim link (33.965666ms)
+✔ bootstrap leaves a user-custom delegate command file untouched (37.402ms)
+✔ usage windows and background jobs persist atomically (1.255875ms)
+✔ quota hook blocks Codex above threshold and honors explicit environment override (260.679625ms)
+✔ per-provider guard bands: cursor defaults stricter, env overrides win (0.246833ms)
+✔ manual usage without a reset boundary expires after the TTL (0.510708ms)
+✔ quota hook applies the stricter cursor band only to fresh known data (103.989834ms)
+✔ mutateState serializes writers and cleans up its lock (3.343834ms)
+✔ a stale lock is reclaimed instead of deadlocking (1.695375ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router maintenance WARNING: state store high-water: 76631 bytes across 37 files; budget 1 bytes
+delegate-router maintenance WARNING: state store remains 67312 bytes over budget; protected records and sweep bounds were retained
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router maintenance WARNING: state store high-water: 35690 bytes across 17 files; budget 1 bytes
+delegate-router maintenance WARNING: state store remains 26374 bytes over budget; protected records and sweep bounds were retained
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ store policy defaults are bounded developer-tool values (0.324416ms)
+✔ budget reclaim deletes oldest eligible work but stops over budget with every protected class intact (354.887916ms)
+✔ one sweep caps record examination and removal and reports continuation (152.05775ms)
+✔ journal cap records one explicit marker and retains the head and latest tail (274.358084ms)
+✔ terminal gzip remains transparent to event pagination and TUI transcript tails (46.38975ms)
+✔ journal readers follow a plain-to-gzip handoff after resolving the disappearing plain path (3.436583ms)
+✔ health JSON exposes store bytes, files, budget, and headroom (717.621917ms)
+✔ CLI, TUI, MCP, and supervisor idle all share maybePruneJobs (0.64925ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ concurrent lazy starts converge on one resident instance (236.718208ms)
+✔ stale-lock policy signals only a positively identified supervisor and never an unknown PID (0.407625ms)
+✔ lease heartbeat advances heartbeat and expiry durably (38.205375ms)
+✔ boot reconciliation adopts owned live leases and records dead and ambiguous outcomes distinctly (206.628125ms)
+✔ a pre-existing inline job with no lease is untouched by supervisor boot and reconciliation (260.316292ms)
+✔ version skew drains only without leases and falls back while old leases remain (0.533209ms)
+✔ supervisor-unavailable launch preserves inline behavior and records only inline ownership (98.574208ms)
+✔ SIGTERM drains and persists stopped state, and an idle resident exits on policy (444.161916ms)
+✔ SIGKILL on an owned worker records precise signal, process, lease, and audit attribution (339.993334ms)
+✔ killing the launcher shell does not kill a supervisor-owned attempt (1022.2095ms)
+✔ activity precedence ranks approval, input, tool, thinking, streaming, phase, quiet, and stalled (1.20675ms)
+✔ three-second streaming and thirty-second quiet windows honor boundary clocks (0.115833ms)
+✔ open first-class and legacy compactions are active until completion (0.110083ms)
+✔ active subagents drive fleet activity until their terminal lifecycle event (0.084709ms)
+✔ transport capability truth table reflects streamed headless thinking and tools without inventing approvals (0.215375ms)
+✔ content-free activity markers emit on transitions only and coalesce bursts (1.833167ms)
+✔ Codex reasoning and ACP thought chunks drive the same bounded transition marker (1.416542ms)
+✔ delegate-tui help prints usage without entering the alternate screen (89.05175ms)
+✔ delegate-tui exits 2 with a clear message when stdout is not a TTY (91.428041ms)
+✔ delegate-tui --analyze replays a diagnostic directory without a TTY (76.325458ms)
+✔ delegate-tui --job validates the id before TTY startup and unknown jobs exit 1 (161.6655ms)
+✔ every TUI launch and continuation path suppresses direct packet-lint console output (0.698917ms)
+✔ dashboard is the default landing screen and F/Esc preserve progressive navigation (0.292709ms)
+✔ virtual log wraps only the viewport window and reuses untouched entry wraps (14.235125ms)
+✔ virtual log scrolling advances by display lines within wrapped entries (0.910083ms)
+✔ key-value painter shares one grid, humanizes keys, collapses nulls, and promotes section anomalies (3.574792ms)
+✔ diff painter owns line gutters, file bands, symbols, row tint, and intra-line emphasis (2.153334ms)
+✔ diff painter formats only the visible window (7.085208ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ tailAllJobs discovers new job files and tails only new journal events (111.99825ms)
+✔ datasource exposes provider allowance, stats inputs, and active writer ownership read-only (173.040542ms)
+✔ startup paints from 35 job records without touching journals and stays under 500ms (2017.772833ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ first detail selection loads completed-job history from seq zero before following (55.247292ms)
+✔ record-only refresh advances fleet heartbeat without hydrating an unselected journal (39.57525ms)
+✔ close tears down polls, debounce work, watchers, and deferred hydration immediately (70.284041ms)
+✔ leaving detail cancels deferred journal hydration until that job is selected again (56.345959ms)
+✔ lazy visible-row reconciliation is deferred and capped at five jobs per batch (456.883833ms)
+✔ completed history hydration stays settled across quiet refreshes and tails without loading churn (57.918625ms)
+✔ fleet freshness follows unselected record, journal, and clock transitions within one refresh cycle (386.92575ms)
+✔ seeded real-screen thrash bytes always equal independently composed intended frames (6785.37575ms)
+✔ every TUI test file enters the shared harness before importing the TUI stack (4.33875ms)
+✔ constructing persistent TUI inputs resolves and reads only inside the harness state directory (0.496708ms)
+✔ polluted user prefs and probe cache cannot alter owner or dashboard contracts in process (97.628916ms)
+✔ SGR mouse wheel sequences decode to three-line scroll deltas (1.591125ms)
+✔ buffered arrows preserve every selection step while rendering once per tick (0.594541ms)
+✔ only wheel motion coalesces into viewport scroll while arrows stay logical (0.14575ms)
+✔ input decoder retains split escape sequences until the next chunk (0.18475ms)
+✔ bracketed paste keeps a two-line payload literal instead of emitting submit keys (0.474083ms)
+✔ focus reporting and Ctrl-D decode without ambiguity (0.196042ms)
+✔ unambiguous input schedules the next turn without a display-frame delay (0.165958ms)
+✔ zero-delay frames use the immediate scheduler while escape holds keep their deadline timer (0.186875ms)
+✔ a lone Escape resolves on its own instead of waiting for the next keypress (0.216834ms)
+✔ Escape reaches the controller under real timers (122.723792ms)
+✔ an escape sequence split across chunks still coalesces instead of emitting a spurious escape (0.235667ms)
+✔ no input byte can be held indefinitely once the terminal goes quiet (0.304792ms)
+✔ a paste whose terminator never arrives is delivered rather than wedging later keystrokes (0.098375ms)
+✔ KEYMAP structure makes ambiguous notation unrepresentable (0.555ms)
+✔ every destructive KEYMAP entry is forced through its declared confirmation gate (0.66975ms)
+✔ anomaly drill-down is one KEYMAP binding shared by footer, help, menu, and docs (1.334209ms)
+✔ tool, subagent, error, and warning drill-downs each flow through KEYMAP (1.188834ms)
+✔ footer, contextual help, action menu, and generated docs all derive from KEYMAP (1.507417ms)
+✔ footer degrades by whole class and keeps help/back right-anchored at every owner width (8.626792ms)
+✔ help is a raised centred dialog with theme-tuned scrims and structural key caps (228.444ms)
+✔ action menu keeps running and terminal unavailable actions visible with reasons (0.219209ms)
+✔ every moved binding has a first-press migration hint in the controller (0.29475ms)
+✔ dashboard tile interior has one surface-background owner including text and padding (12.15625ms)
+✔ dashboard tile band has exact background ownership under polluted theme and probe state (21.878459ms)
+✔ dashboard trend model uses sparse placeholders, flat baselines, and actual min/max scaling (0.092167ms)
+✔ scrollable and static panes share tinted surfaces while track and thumb stay inside padding (1.033375ms)
+✔ dashboard aggregates only the final audit row per job and reads nested cached input (0.321541ms)
+✔ dashboard and stats attribute cumulative Codex chains without multiplying thread totals (1.471208ms)
+✔ usage attribution handles missing parents, Cursor jobs, cross-day parents, and counter resets (0.918042ms)
+✔ events use structural rails, fixed measures, grouping gaps, and lazy expansion (4.298667ms)
+✔ all navigation paths share bottom follow re-engagement and leaving-tail behavior (0.196583ms)
+✔ history loading stays in the pane title and never inserts a shifting message row (2.790917ms)
+✔ activity mapping animates busy states only and every active surface shares one phase (6.77125ms)
+✔ detail tab strip owns the pane surface and keeps a non-color active cue (7.608333ms)
+✔ app-bar painter owns a blank spacer row and all screen content starts below it (1.592083ms)
+✔ dark-theme compatibility names now resolve to perceptually authored tokens (1.479209ms)
+✔ NO_COLOR removes palette colors but preserves structural bold and dim (0.651958ms)
+✔ all six presets self-verify every contrast target and preserve the authored surface ramps (5.275625ms)
+✔ neutral tiers are tinted at the governing OKLCH seed (0.219666ms)
+✔ daltonized semantic and diff pairs replace red-green with distinguishable blue-yellow (0.656292ms)
+✔ truecolor, derived 256, ANSI presets, and NO_COLOR render the same real frame without fallback (31.291709ms)
+✔ custom themes are base plus validated OKLCH overrides (0.45ms)
+✔ theme selection keeps captured palette references live and exposes all three border weights (0.404792ms)
+✔ groups aggregate member breakdowns and all-terminal barrier states (11.775625ms)
+✔ chain tab orders resume rounds and exposes exact jump targets (2.022917ms)
+✔ incremental logical search maps hits lazily through the wrap cache and navigates both directions (12.039042ms)
+✔ editor handoff restores terminal, runs a scripted editor, and fully re-enters the screen (37.250083ms)
+✔ editor handoff cancels one active background probe and returns keys to the app (86.564125ms)
+✔ route advisor formats primary, top fallback, scores, and observed usage bands (0.423417ms)
+✔ notification dispatch is safe, debounced, and disabled by DELEGATE_TUI_NOTIFY=0 (0.722916ms)
+✔ SGR button press exposes click coordinates for row selection and tab switching (0.563916ms)
+✔ light theme changes semantic palette values without component-specific overrides (0.438125ms)
+✔ encoded Claude project directories decode round-trip, including hyphenated path components (167.597ms)
+✔ tail parsing skips garbage, truncated starts, huge lines, and empty files without throwing (10.769167ms)
+✔ session activity classification and scan ordering use file mtimes (1.430333ms)
+✔ cwd correlation counts only active delegate jobs and attaches managed writer ownership (0.128916ms)
+✔ session active-job count and Fleet drill-down share the exact managed job ids (2.719ms)
+✔ session snippets use shared redaction before display (0.610375ms)
+✔ missing projects directory degrades to an explanatory absent panel (2.652792ms)
+✔ session scan parses only the newest capped set (3.440375ms)
+✔ fixed Sessions viewmodel snapshot is deterministic and exposes cwd filter metadata (6.243625ms)
+✔ TUI preferences persist privately and environment values remain authoritative (1.556375ms)
+✔ TUI preferences accept all six presets and sanitized custom base overrides (1.918375ms)
+✔ width-probe cache saves merge concurrent session snapshots by newest measurement (0.983375ms)
+✔ clipboard dispatch uses the platform tool and silently declines unavailable platforms (0.105542ms)
+✔ scrollable panes paint a palette-only track, proportional thumb, and title position (8.801625ms)
+✔ moving scrollbar thumbs repaint the complete owned edge column (3.549292ms)
+✔ scrollbar geometry has constant length, monotonic position, and bounded endpoints (15.808583ms)
+✔ virtual line estimates keep multi-line block thumbs proportional and offset-stable (5.739417ms)
+✔ virtual line estimates refine monotonically and use a full bar iff content fits (3.596083ms)
+✔ diff line semantics color additions, deletions, and hunk headers through the palette (0.415792ms)
+✔ accent is reserved for live focus rather than default transcript, tool, or diff content (0.16175ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ serve.mjs imports no managed-job mutation symbols (0.55675ms)
+✔ server bind validation is loopback-only and first-use tokens are private and stable (0.964458ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ bearer auth is constant-time shaped and unauthorized responses do not disclose token state (86.795334ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ read-only endpoints match existing store readers and reject unsafe job ids (79.386666ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ SSE streams appended events and heartbeat comments (62.595708ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ RemoteDatasource satisfies the local interface, renders remote identity, tails SSE, and disables mutations (65.827417ms)
+✔ RemoteDatasource reports connection loss and advances retry state without crashing (179.696875ms)
+✔ safe display formatting handles every provider value shape without implicit object coercion (0.86475ms)
+✔ nasty journal renders every detail tab, WorkItem mode, and fleet without coercion artifacts or frame overflow (143.186541ms)
+✔ fixed-seed incremental rendering always matches a from-scratch repaint (2540.192709ms)
+✔ suspect-width repaint owns every background cell beside the scrollbar (10.048625ms)
+✔ ambiguous suspect spans take the new owner style in every background direction (0.538375ms)
+✔ scroll-thrash keeps every scrollbar edge cell composed and clears old thumbs (1043.706916ms)
+✔ wide title replacement, shorter status, and dismissed overlays have stable full-frame snapshots (3.715291ms)
+✔ cell grids preserve wide glyph columns and expose a deterministic headless rendering (0.876709ms)
+✔ overwriting either half of a wide glyph clears the complete old glyph (0.127042ms)
+✔ a wide glyph is never based in the final column (0.0505ms)
+✔ screen double buffering emits only the changed run after the first frame (1.115667ms)
+✔ resize invalidates the previous frame and forces a full repaint (0.202041ms)
+✔ normal, signal, and exception exits all disable mouse and restore the terminal (0.747209ms)
+✔ terminal capabilities synchronize frames and restore paste and focus modes cleanly (0.204333ms)
+✔ actual bytes preserve the bottom-right cell with autowrap disabled (0.601542ms)
+✔ terminal ownership captures stray streams and console output until suspend or exit (3.345ms)
+✔ message deltas concatenate exactly and completed text replaces the accumulation (3.101958ms)
+✔ anonymous message blocks close at turn, correction, and completion boundaries (0.565333ms)
+✔ streaming updates invalidate only the changing block identity (0.175833ms)
+✔ tool pairs collapse output and expand only journaled command, cwd, files, and tail (0.59675ms)
+✔ tool one-liners use rich command, MCP, Cursor, and fallback fields; file lines and tools map paths into Diff (1.040083ms)
+✔ Codex and Cursor file changes render compact per-file counts, actions, colors, and Diff anchors (1.730416ms)
+✔ latest plan replaces earlier plans and provider noise never enters Transcript (0.349791ms)
+✔ agentMessage lifecycle renders one first-class message and no provider-item duplicate (0.130917ms)
+✔ legacy first-class item starts do not become phantom provider-item blocks (0.067708ms)
+✔ terminal jobs end unmatched provider-item and subagent starts with an explicit unknown outcome (0.391792ms)
+✔ context compaction renders one timed block for first-class and legacy journals (0.20975ms)
+✔ open and nasty context-compaction tails remain animated and display-safe (0.117875ms)
+✔ subagent lifecycle renders as an expandable provider-derived tool block with distinct error state (0.198458ms)
+✔ legacy subagent metadata stubs render an honest not-captured block instead of disappearing (0.134417ms)
+✔ plan checklist glyph tiers and spinner phase snapshot in Unicode and ASCII modes (5.791292ms)
+✔ search indexes coalesced blocks without wrapping history and maps one hit lazily (73.009792ms)
+✔ coalesced transcript snapshot keeps one blank line between logical blocks (1.322375ms)
+✔ expanded output distinguishes real line breaks from literal backslash-n text (0.356083ms)
+✔ one virtual mapping owns transcript highlight, click, and scroll after block height changes (27.274208ms)
+✔ frame-level transcript selection highlights the selected block after wheel, expansion, and streaming growth (16.20825ms)
+✔ arrow selection is independent of viewport limits for variable-height blocks (11.6755ms)
+✔ job detail surfaces plan-pass degradation while legacy records omit the additive section (0.804625ms)
+✔ app bar receives the package version from startup and never invents a release literal (5.941541ms)
+✔ fleet rows sort active first, expose compact safety badges, and filter id/model/cwd (1.770416ms)
+✔ fleet directory truncates by display width and compact density drops directory before effort (13.577917ms)
+✔ Fleet Changed timestamp follows mode, degrades without overflow, and fits remote Host layouts (11.503083ms)
+✔ transcript anomaly badge and drill-down consume the exact same projected list (2.383833ms)
+✔ transcript tool and subagent counts cannot disagree with their drill-down lists (1.078417ms)
+✔ Event totals, errors, and warnings cannot disagree with their drill-down lists (0.640875ms)
+✔ open context compaction animates in both fleet row and detail header instead of rendering quiet (0.733459ms)
+✔ an active provider subagent animates in Fleet and detail until its terminal lifecycle event (2.030334ms)
+✔ fleet and Record derive failed state for stale queued records before durable reconciliation (0.631916ms)
+✔ detail view models every tab and exposes diff-file selection metadata (1.067125ms)
+✔ detail transcript exposes history hydration progress instead of a blank pane (0.163875ms)
+✔ fleet and detail snapshots expose live activity, transient thinking, and honest headless visibility (4.796333ms)
+✔ remote clock offset keeps activity windows aligned to the newest server timeline (0.1425ms)
+✔ timestamp mode, fleet density, and provider/token sort are reflected in pure frames (0.475792ms)
+✔ providers render a smooth band-colored fill over a dim track (0.267041ms)
+✔ stats and launcher frames use seven days and show the exact dry-run packet (0.477208ms)
+✔ dashboard is attention-first and derives today tiles, providers, feed, and trends without scanning (6.416375ms)
+✔ dashboard frame snapshots are deterministic in ASCII and probe-proven Unicode modes (11.213417ms)
+✔ dashboard trend frames snapshot sparse, single-day, flat, and normal histories exactly (22.253333ms)
+✔ help lists mouse, viewport, and edge navigation alongside every action group (0.676917ms)
+✔ fixed 100x30 fleet headless frame is deterministic (4.826833ms)
+✔ every screen paints at realistic resize breakpoints with filters, follow, launcher, and help state (319.470416ms)
+✔ the spacing scale and named height-pressure threshold control real section gaps (0.592209ms)
+✔ every screen reserves selection and prefix gutters so content columns never shift (93.139875ms)
+✔ width classification is conservative and runtime probe overrides are exact (1.210625ms)
+✔ terminal identity distinguishes tmux from the same outer terminal (0.175584ms)
+✔ width probe covers every elegant chrome family before it may be selected (0.728709ms)
+✔ sparkline glyph tier is selected as one probe-proven family and never mixed (2.450958ms)
+✔ TUI-owned chrome gates every ambiguous literal behind the measured elegant tier (20.019375ms)
+✔ runtime CPR probe measures the interposed terminal and cached/off modes do not write (2.028875ms)
+✔ runtime CPR probe owns raw stdin before writes and handles every reply latency (45.109917ms)
+✔ runtime CPR probe skips visibly when raw input cannot be established (0.416459ms)
+✔ runtime CPR probe parses coalesced, fragmented, and noisy delivery without losing replies (4.057625ms)
+✔ runtime CPR probe isolates malformed and missing replies by ordered outcome (27.000375ms)
+✔ verbose width-probe result reports measured, parse, and timeout family outcomes (0.371625ms)
+✔ the full elegant glyph set proves under one coalesced CPR delivery (2.167542ms)
+✔ pipelined probe proves the complete glyph set at local and ssh-like RTTs (24.7685ms)
+✔ probe budget scales with streamed reply cadence and distinguishes budget exhaustion (597.464375ms)
+✔ late coalesced CPR batches upgrade atomically in the background at tmux-over-SSH delays (1869.923958ms)
+✔ immediate CPR completion stays foreground-only with no listener or timer residue (6.201334ms)
+✔ no-reply background expires cleanly and leaves real key input attached (125.751041ms)
+✔ non-complete backgrounds swallow only late probe-row CPRs for the bounded grace window (229.190083ms)
+✔ completion-ended background installs no straggler swallow stage (71.764208ms)
+✔ background input filter strips only probe-row CPRs and preserves interleaved keystrokes in order (71.775459ms)
+✔ suspect graphemes are isolated by CUP so adversarial width disagreement cannot move neighboring ASCII (4.111041ms)
+✔ flight recorder round-trips bytes and frames, and markers land in both logs (3.309292ms)
+✔ flight analyzer identifies a corrupted emitted byte as a writer bug with a byte window (2.552791ms)
+✔ Ctrl-G is decoded as a dedicated snapshot key (0.144458ms)
+✔ displayWidth ignores ANSI escapes and counts combining text once (0.582917ms)
+✔ displayWidth treats East Asian glyphs, flags, and common emoji as double width (0.149125ms)
+✔ truncateToWidth preserves whole graphemes and ANSI state (0.182083ms)
+✔ padToWidth aligns ANSI and double-width content by display columns (0.087792ms)
+✔ Compose is the structured P5 card and unresolved fields visibly block dispatch (19.489417ms)
+✔ Review keeps diff, verification, scope drift, findings, and base revision on one surface (8.638042ms)
+✔ Approve exposes only backed actions and never implies owner-tree application (12.51925ms)
+✔ Compare renders the latest two candidates side by side against identical criteria (10.576792ms)
+✔ Replay is honestly disabled and Converge shows states plus bounded policy before launch (12.869125ms)
+✔ all cockpit modes fit 120x40 dark, ASCII, and NO_COLOR without losing structural labels (186.555791ms)
+✔ external Codex scanner excludes personal and broker-owned threads while including proven app-server work (3.1135ms)
+✔ unattributed burn math suppresses chain-attributed windows and records aggregate-only empty windows (0.513416ms)
+✔ Agent hook creates and completes one read-only stub, derives transcript, honors kill switch, and swallows store failure (283.878666ms)
+✔ composite datasource namespaces jobs, preserves host labels, and isolates one down host (0.94725ms)
+✔ RemoteDatasource ages out only its own stale rows after repeated failure (8.34875ms)
+✔ remote config merges CLI precedence and pairs repeatable token files by order (1.065166ms)
+✔ Fleet renders external badge and Host column in wide and compact federation frames (10.438791ms)
+✔ scanner survives in-flight rollout files whose meta line is not yet written (1.287708ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ stats aggregate synthetic audit records and the CLI reads audit.jsonl (123.617917ms)
+✔ outcome ledger separates sampled rates, cohorts fixed-era failures, and since version/date views (10.251209ms)
+✔ acceptance audit revisions coalesce without double-counting attempts or usage (0.114792ms)
+✔ re-verification audit revisions replace only the latest rate label and preserve one attempt (0.102334ms)
+✔ outcome-aware routing declines sparse labels and recommends only on separated 95% intervals (1.238875ms)
+✔ stats attribute Codex chain deltas across every token aggregate and preserve reset and window semantics (0.273917ms)
+✔ stats token parsing skips nulls but preserves real zero and numeric strings (0.055834ms)
+✔ combined audit aggregate captures one clock snapshot for groups, totals, and generatedAt (0.084834ms)
+✔ visibility ledger shares one clock snapshot across rates, recommendation, and allowance views (0.169833ms)
+✔ route candidates gain advisory usage bands without changing selection (0.150958ms)
+✔ profiles merge defaults, explicit options win, lint warns, and bundled fallback loads (140.606291ms)
+✔ fan-out groups filter list rows and summarize terminal state (78.98225ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ startPaused establishes a session, holds, releases, and supports cancel while paused (945.02375ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ ingestFiles copies in, copies changed content back, and leaves failed staging in the checkpoint (1427.971416ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ autoNudge runs once in the same session and preserves firstAttemptText (1168.323125ms)
+✔ delegate-health --deep records a non-throwing live probe shape (845.514666ms)
+✔ Codex live large-write breaker fails with LARGE_WRITE and a checkpoint (94.330083ms)
+✔ independent-review parses conforming findings and flags nonconforming structured output without failing (1168.714458ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ waitFor resolves turn and first-output milestones from the journal and times out boundedly (1563.33375ms)
+✔ resultText windowing supports offset, find, absolute nextOffset, and CLI find misses (131.522625ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ review-round resumes with diff stat, changed files, scope, and findings, and refuses active parents (1895.78425ms)
+✔ start dry-run creates no state or staging and shares byte-identical packet assembly with real starts (87.120375ms)
+✔ ingest copy-back preserves divergent sources, writes delegate-new, and still copies clean sources (61.717792ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ cancel and steer commands are settled during retry backoff without a second provider spawn (535.16725ms)
+✔ audit backfill appends only missing terminal jobs and is idempotent (86.265459ms)
+✔ historical fixture corpus projects totally with stable ids and explicit gaps (3.5775ms)
+✔ five-deep chains and sibling review rounds collapse into one ordered work item (0.246125ms)
+✔ WorkSpec validation accepts a minimal valid spec and reports malformed fields actionably (0.415167ms)
+✔ future WorkItem fields and schema versions survive write-read-update round trips (1.293625ms)
+✔ CLI and MCP work surfaces return projections without changing the store (94.855833ms)
+✔ broker workspace contains dirty-owner writes and discard cannot touch the owner tree (591.443333ms)
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+delegate-router packet lint: missing Objective, Allowed scope, Acceptance criteria, Return
+
+Objective:
+Allowed scope:
+Acceptance criteria:
+Return:
+✔ a real managed provider process writes only in its isolated workspace and terminal capture discards it (1536.495375ms)
+✔ strict CAS prepares a clean integration worktree and refuses moved owner content byte-for-byte (584.064708ms)
+✔ path and resource claims schedule workspace writers while shared launches retain the conservative whole-tree guard (443.977666ms)
+✔ composition stops when two change sets claim the same changed path (754.70275ms)
+✔ manifest conflicts survive a forced broker-state-root switch before preflight (744.563333ms)
+✔ portable change sets preserve additions, deletions, and binary bytes in integration only (492.225709ms)
+✔ rejecting an isolated attempt discards only its workspace and records the decision (330.085667ms)
+✔ unsupported Git shapes and unsafe creation fail before provider launch (422.793958ms)
+✔ detached owners and owners that are existing linked worktrees are supported (229.502958ms)
+ℹ tests 498
+ℹ suites 0
+ℹ pass 497
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 25527.420583

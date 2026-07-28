@@ -133,19 +133,39 @@ export class BufferedInput {
     this.pasteIdleTimeoutMs = Math.max(0, Number(options.pasteIdleTimeoutMs ?? PASTE_IDLE_TIMEOUT_MS));
     this.schedule = options.schedule || ((callback, delay) => setTimeout(callback, delay));
     this.cancel = options.cancel || ((handle) => clearTimeout(handle));
+    // stdin arrives in the poll phase. For an unambiguous zero-delay frame,
+    // the check phase is the nearest same-turn batching boundary; a timer adds
+    // another event-loop queue without protecting an input invariant. Tests
+    // that inject the deadline scheduler retain it unless they explicitly
+    // inject a separate frame scheduler.
+    this.scheduleFrame = options.scheduleFrame
+      || (options.schedule ? this.schedule : ((callback) => setImmediate(callback)));
+    this.cancelFrame = options.cancelFrame
+      || (options.cancel ? this.cancel : ((handle) => clearImmediate(handle)));
     this.now = options.now || (() => Date.now());
     this.raw = '';
     this.events = [];
     this.timer = null;
     this.timerKind = null;
+    this.timerCancel = null;
     this.pendingSince = null;
     this.closed = false;
   }
 
   arm(delay, kind) {
-    if (this.timer != null) this.cancel(this.timer);
-    this.timer = this.schedule(() => this.flush(), delay);
+    this.disarm();
+    const immediateFrame = kind === 'frame' && delay === 0;
+    const schedule = immediateFrame ? this.scheduleFrame : this.schedule;
+    this.timerCancel = immediateFrame ? this.cancelFrame : this.cancel;
+    this.timer = schedule(() => this.flush(), delay);
     this.timerKind = kind;
+  }
+
+  disarm() {
+    if (this.timer != null) (this.timerCancel || this.cancel)(this.timer);
+    this.timer = null;
+    this.timerKind = null;
+    this.timerCancel = null;
   }
 
   push(value) {
@@ -166,9 +186,7 @@ export class BufferedInput {
 
   flush() {
     if (this.closed) return [];
-    if (this.timer != null) this.cancel(this.timer);
-    this.timer = null;
-    this.timerKind = null;
+    this.disarm();
     if (this.raw) {
       const deadline = pendingHoldKind(this.raw) === 'paste-body' ? this.pasteIdleTimeoutMs : this.escapeTimeoutMs;
       const waited = this.now() - (this.pendingSince ?? this.now());
@@ -201,9 +219,7 @@ export class BufferedInput {
   }
 
   close() {
-    if (this.timer != null) this.cancel(this.timer);
-    this.timer = null;
-    this.timerKind = null;
+    this.disarm();
     this.raw = '';
     this.pendingSince = null;
     this.events = [];

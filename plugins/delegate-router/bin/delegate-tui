@@ -288,13 +288,13 @@ const ui = {
   screen: initialJobId ? 'detail' : 'dashboard', jobId: initialJobId, version: TUI_PACKAGE_VERSION, now: Date.now(), selectedIndex: 0, scroll: 0,
   activeOnly: false, showExternals: true, filter: '', help: false, helpPage: 0, actionMenu: null, input: null, confirm: null,
   status: '', statusKind: 'info', detailTab: 0, detailScroll: 0, transcriptSelection: null,
-  transcriptAnomaliesOnly: false,
-  diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', follow: true,
+  transcriptAnomaliesOnly: false, transcriptKindFilter: null,
+  diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', eventCategoryFilter: null, follow: true,
   expandedTools: new Set(), expandedEvents: new Set(), eventSelection: null,
   chainSelection: 0, search: null, detailReturn: initialJobId ? 'dashboard' : 'fleet',
   dashboardFocus: 0, dashboardAttentionSelection: 0, dashboardFeedSelection: 0, focusedPane: 0,
   groupSelection: 0, groupScroll: 0, groupId: null, groupMemberSelection: 0, groupMemberScroll: 0,
-  sessionSelection: 0, sessionScroll: 0,
+  sessionSelection: 0, sessionScroll: 0, sessionCwdFilter: null, sessionJobIds: null,
   providerScroll: 0, statsSelection: 0, statsScroll: 0, statsFilter: '', notifyEnabled: notifier.enabled,
   workIndex: 0, workTab: 0, workScroll: 0,
   timestampMode: preferences.timestampMode, fleetDensity: preferences.fleetDensity, fleetSort: 'recency', theme: preferences.theme,
@@ -975,6 +975,7 @@ function openJobDetail(job, returnScreen = ui.screen) {
   ui.detailScroll = 0;
   ui.transcriptSelection = null;
   ui.transcriptAnomaliesOnly = false;
+  ui.transcriptKindFilter = null;
   ui.chainSelection = 0;
   ui.diffSelection = 0;
   ui.diffFile = null;
@@ -983,6 +984,7 @@ function openJobDetail(job, returnScreen = ui.screen) {
   ui.expandedTools = new Set();
   ui.expandedEvents = new Set();
   ui.eventSelection = null;
+  ui.eventCategoryFilter = null;
   ui.follow = true;
   clearSearch();
   clearStatus();
@@ -1480,6 +1482,11 @@ function goBack() {
     ui.filter = '';
     ui.selectedIndex = 0;
     ui.scroll = 0;
+  } else if (ui.screen === 'fleet' && ui.sessionCwdFilter) {
+    ui.sessionCwdFilter = null;
+    ui.sessionJobIds = null;
+    ui.selectedIndex = 0;
+    ui.scroll = 0;
   } else if (ui.screen === 'detail' && ui.diffFile) {
     ui.diffFile = null;
     ui.diffPaths = [];
@@ -1615,6 +1622,7 @@ function toggleTranscriptAnomalies() {
     return false;
   }
   ui.transcriptAnomaliesOnly = !ui.transcriptAnomaliesOnly;
+  ui.transcriptKindFilter = null;
   ui.follow = false;
   ui.detailScroll = 0;
   ui.transcriptSelection = 0;
@@ -1622,6 +1630,48 @@ function toggleTranscriptAnomalies() {
   setStatus(ui.transcriptAnomaliesOnly
     ? `Showing ${count} transcript anomalies`
     : 'Showing the complete transcript');
+  draw();
+  return true;
+}
+
+function toggleTranscriptKind(kind) {
+  if (ui.screen !== 'detail' || ui.detailTab !== 0) return false;
+  const countKey = kind === 'subagents' ? 'subagentCount' : 'toolCount';
+  const count = Number(viewModel().meta?.[countKey] || 0);
+  if (!count) {
+    setStatus(`No transcript ${kind} to show`, 'error');
+    draw();
+    return false;
+  }
+  ui.transcriptKindFilter = ui.transcriptKindFilter === kind ? null : kind;
+  ui.transcriptAnomaliesOnly = false;
+  ui.follow = false;
+  ui.detailScroll = 0;
+  ui.transcriptSelection = 0;
+  clearSearch();
+  setStatus(ui.transcriptKindFilter
+    ? `Showing ${count} transcript ${kind}`
+    : 'Showing the complete transcript');
+  draw();
+  return true;
+}
+
+function toggleEventCategory(category) {
+  if (ui.screen !== 'detail' || ui.detailTab !== 4) return false;
+  const count = Number(viewModel().meta?.[`${category}Count`] || 0);
+  if (!count) {
+    setStatus(`No ${category} events to show`, 'error');
+    draw();
+    return false;
+  }
+  ui.eventCategoryFilter = ui.eventCategoryFilter === category ? null : category;
+  ui.follow = false;
+  ui.detailScroll = 0;
+  ui.eventSelection = 0;
+  clearSearch();
+  setStatus(ui.eventCategoryFilter
+    ? `Showing ${count} ${category} events`
+    : 'Showing all events');
   draw();
   return true;
 }
@@ -1654,7 +1704,11 @@ function navigateScreen(target) {
   }
   if (ui.screen === 'detail') void source.selectJob(null);
   ui.screen = target;
-  if (target === 'fleet') ui.selectedIndex = 0;
+  if (target === 'fleet') {
+    ui.selectedIndex = 0;
+    ui.sessionCwdFilter = null;
+    ui.sessionJobIds = null;
+  }
   if (target === 'work') {
     ui.workIndex = 0;
     ui.workTab = 0;
@@ -1760,6 +1814,10 @@ function dispatchMenuAction(action) {
   }
   if (action === 'detail.follow') return toggleFollow();
   if (action === 'detail.anomalies') return toggleTranscriptAnomalies();
+  if (action === 'detail.tools') return toggleTranscriptKind('tools');
+  if (action === 'detail.subagents') return toggleTranscriptKind('subagents');
+  if (action === 'detail.event-errors') return toggleEventCategory('error');
+  if (action === 'detail.event-warnings') return toggleEventCategory('warning');
   if (action === 'detail.events') return jumpTranscriptToEvents();
   if (action === 'detail.diff') return openFocusedToolDiff();
   if (action === 'detail.scope-evidence') return openScopeEvidence();
@@ -2052,13 +2110,16 @@ function handleKey(key) {
   }
   if (ui.screen === 'sessions') {
     if (key === 'enter') {
-      const cwd = viewModel().meta.selectedSessionCwd;
+      const session = viewModel().meta;
+      const cwd = session.selectedSessionCwd;
       if (cwd) {
-        ui.filter = cwd;
+        ui.filter = '';
+        ui.sessionCwdFilter = cwd;
+        ui.sessionJobIds = session.selectedActiveJobIds || [];
         ui.selectedIndex = 0;
         ui.scroll = 0;
         ui.screen = 'fleet';
-        setStatus(`Fleet filtered to coordinator cwd: ${cwd}`);
+        setStatus(`Fleet showing active jobs for coordinator cwd: ${cwd}`);
         draw();
       }
     }
@@ -2110,6 +2171,10 @@ function handleKey(key) {
     return;
   }
   if (key === 'A' && ui.detailTab === 0) { toggleTranscriptAnomalies(); return; }
+  if (key === 'O' && ui.detailTab === 0) { toggleTranscriptKind('tools'); return; }
+  if (key === 'U' && ui.detailTab === 0) { toggleTranscriptKind('subagents'); return; }
+  if (key === 'A' && ui.detailTab === 4) { toggleEventCategory('error'); return; }
+  if (key === 'W' && ui.detailTab === 4) { toggleEventCategory('warning'); return; }
   if (key === '/' && [0, 1, 4].includes(ui.detailTab)) { beginPaneSearch(); return; }
   if (key === 'E' && ui.detailTab === 0) { jumpTranscriptToEvents(); return; }
   if (key === 'enter' && ui.detailTab === 0 && toggleFocusedTool()) return;
