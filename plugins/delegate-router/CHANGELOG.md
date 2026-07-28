@@ -2,6 +2,18 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.51.0 — 2026-07-28
+
+- Terminal job records and finished sentinels are now published only after the
+  final lifecycle event, journal compression handoff, and applicable terminal
+  audit row are durable. Previously terminalization saved the job JSON first;
+  a concurrent transcript reader could select the plain JSONL immediately
+  before compression unlinked it, treat the resulting `ENOENT` as an empty
+  journal, and observe `completed` with no transcript. Journal reads also retry
+  the gzip path when they race that plain-to-compressed handoff. Held-audit-lock
+  regressions force the direct Codex and detached Cursor interleavings without
+  retrying assertions, widening tolerances, or serializing the suite.
+
 ## 0.50.0 — 2026-07-28
 
 - Direct Codex MCP responses now remain private to the wrapper until their

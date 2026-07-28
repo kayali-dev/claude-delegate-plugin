@@ -350,7 +350,7 @@ function appendTerminalAuditIfMissing(job) {
   });
 }
 
-function compressTerminalJournal(job) {
+function compressTerminalJournal(job, options = {}) {
   if (!TERMINAL_STATUSES.has(job.status)) return null;
   const result = compressJournalFile(paths(job.id).events);
   if (!result) return null;
@@ -362,21 +362,25 @@ function compressTerminalJournal(job) {
       uncompressedBytes: result.beforeBytes,
       compressedBytes: result.afterBytes
     };
-    saveJob(job);
+    if (options.persist !== false) saveJob(job);
   }
   return result;
 }
 
 function writeTerminalArtifacts(job, wasTerminal) {
   if (wasTerminal || !TERMINAL_STATUSES.has(job.status)) return;
-  const sentinel = paths(job.id).finished;
-  if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
-  compressTerminalJournal(job);
+  // A terminal record and its sentinel are public completion boundaries.
+  // Finish the journal move and audit publication first so any reader that
+  // observes either boundary can read the complete durable journal.
+  compressTerminalJournal(job, { persist: false });
   // The resident owns process-exit telemetry. Delay its audit row until the
   // lease is finalized, while keeping the ordinary terminal sentinel and
   // store transition immediate for pull readers and the P2a monitor.
-  if (job.executionOwner === 'supervisor' && job.attemptLease && job.executionAttribution?.finalized !== true) return;
-  appendTerminalAudit(job);
+  if (!(job.executionOwner === 'supervisor' && job.attemptLease && job.executionAttribution?.finalized !== true)) {
+    appendTerminalAudit(job);
+  }
+  const sentinel = paths(job.id).finished;
+  if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
 }
 
 export function eventPath(id) { return resolveJournalFile(paths(id).events); }
@@ -934,8 +938,12 @@ export function updateManagedJob(id, mutate, options = {}) {
     ensureCheckpoint(job);
     if (options.incrementRevision !== false) job.revision = (job.revision || 0) + 1;
     job.updatedAt = Math.floor(Date.now() / 1000);
-    saveJob(job);
-    writeTerminalArtifacts(job, wasTerminal);
+    if (!wasTerminal && TERMINAL_STATUSES.has(job.status)) {
+      writeTerminalArtifacts(job, wasTerminal);
+      saveJob(job);
+    } else {
+      saveJob(job);
+    }
     return job;
   });
 }
@@ -988,13 +996,13 @@ export function finalizeSupervisorAttempt(id, outcome = {}) {
       job.failureAttribution = attribution;
     }
     job.updatedAt = Math.floor(Date.now() / 1000);
-    saveJob(job);
     if (TERMINAL_STATUSES.has(job.status)) {
+      compressTerminalJournal(job, { persist: false });
+      appendTerminalAuditIfMissing(job);
       const sentinel = paths(job.id).finished;
       if (!fs.existsSync(sentinel)) writePrivate(sentinel, `${job.status}\n`);
-      appendTerminalAuditIfMissing(job);
-      compressTerminalJournal(job);
     }
+    saveJob(job);
     return job;
   });
   if (finalized?.isolation === 'worktree' && TERMINAL_STATUSES.has(finalized.status)) {
@@ -1015,6 +1023,10 @@ export function completeShadowJob(id, outcome = {}) {
   });
   const names = [...new Set(entries.map((entry) => entry.path).filter(Boolean))];
   const completedAt = Math.floor(Date.now() / 1000);
+  appendJobEvent(id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', {
+    status,
+    ...(outcome.error ? { error: outcome.error, code: outcome.errorCode || 'PROVIDER_ERROR' } : {})
+  });
   const completed = updateManagedJob(id, (job) => {
     const subagents = Array.isArray(job.result?.subagents) ? job.result.subagents : [];
     job.status = status;
@@ -1040,10 +1052,6 @@ export function completeShadowJob(id, outcome = {}) {
     if (outcome.error) job.error = redact(outcome.error);
     if (outcome.errorCode) job.errorCode = outcome.errorCode;
     if (outcome.errorRetryable != null) job.errorRetryable = outcome.errorRetryable === true;
-  });
-  appendJobEvent(id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', {
-    status,
-    ...(outcome.error ? { error: outcome.error, code: outcome.errorCode || 'PROVIDER_ERROR' } : {})
   });
   return inspectJob(completed.id);
 }
@@ -1255,8 +1263,8 @@ function reconcileAgentStub(id, original) {
       agentLifecycle: current.agentLifecycle,
       quietForMs: activity.quietForMs
     });
-    saveJob(current);
     writeTerminalArtifacts(current, false);
+    saveJob(current);
     return current;
   });
 }
@@ -1302,8 +1310,8 @@ export function reconcileJob(id) {
     current.revision = (current.revision || 0) + 1;
     appendUnlocked(current, 'error', { code: 'ORPHANED', message: current.error, stage: 'reconcile' });
     ensureCheckpoint(current);
-    saveJob(current);
     writeTerminalArtifacts(current, false);
+    saveJob(current);
     return current;
   });
   if (reconciled?.isolation === 'worktree') discardTerminalWorkspaceBestEffort(id);
@@ -3798,6 +3806,13 @@ export function launchManagedJob(options) {
   child.once('error', (error) => {
     try {
       const typed = normalizeBrokerError(error, { provider, defaultCode: 'TRANSPORT_ERROR' });
+      appendJobEvent(job.id, 'error', {
+        code: typed.code,
+        retryable: typed.retryable,
+        provider: typed.provider,
+        error: typed.message,
+        stage: 'worker-spawn'
+      });
       updateManagedJob(job.id, (current) => {
         current.status = 'failed';
         current.phase = 'failed';
@@ -3807,7 +3822,6 @@ export function launchManagedJob(options) {
         current.errorProvider = typed.provider;
         current.completedAt = Math.floor(Date.now() / 1000);
       });
-      appendJobEvent(job.id, 'error', { code: typed.code, retryable: typed.retryable, provider: typed.provider, error: typed.message, stage: 'worker-spawn' });
     } catch {}
   });
   fs.closeSync(stdout);

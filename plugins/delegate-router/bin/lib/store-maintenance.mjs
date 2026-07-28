@@ -74,7 +74,17 @@ export function readJournalBuffer(file) {
     const bytes = fs.readFileSync(resolved);
     return resolved.endsWith('.gz') ? zlib.gunzipSync(bytes) : bytes;
   } catch (error) {
-    if (error.code === 'ENOENT') return Buffer.alloc(0);
+    if (error.code === 'ENOENT') {
+      // Terminal publication moves a journal from plain JSONL to gzip. A
+      // reader can resolve the plain name immediately before that rename
+      // completes and otherwise mistake the handoff for an empty journal.
+      const replacement = resolveJournalFile(file);
+      if (replacement !== resolved) {
+        const bytes = fs.readFileSync(replacement);
+        return replacement.endsWith('.gz') ? zlib.gunzipSync(bytes) : bytes;
+      }
+      return Buffer.alloc(0);
+    }
     throw error;
   }
 }

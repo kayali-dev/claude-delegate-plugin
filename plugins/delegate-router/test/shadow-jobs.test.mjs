@@ -18,7 +18,7 @@ import {
   updateManagedJob
 } from '../bin/lib/control.mjs';
 import { readAuditLog, aggregateAudit } from '../bin/lib/stats.mjs';
-import { listJobs } from '../bin/lib/state.mjs';
+import { jobsDir, listJobs } from '../bin/lib/state.mjs';
 import { directTransportActionMessage } from '../bin/lib/tui/action-policy.mjs';
 import { fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
 
@@ -204,15 +204,21 @@ test('direct Codex response waits until terminal shadow audit publication comple
       return response;
     });
 
-    await waitFor(() => {
-      const jobs = listJobs();
-      return jobs.length === 2 && jobs.every((job) => job.status === 'completed');
-    }, 'the child terminal record to reach its held audit publication');
+    const child = await waitFor(() => {
+      const candidate = listJobs().find((job) => job.id !== rootJob.id);
+      return candidate && fs.existsSync(path.join(jobsDir(), `${candidate.id}.events.jsonl.gz`))
+        ? candidate : null;
+    }, 'the child journal to reach its held terminal publication');
+    assert.equal(inspectJob(child.id).status, 'running',
+      'terminal status must remain unpublished while its audit row is blocked');
+    assert.match(jobTranscript(child.id).map((event) => JSON.stringify(event.data)).join('\n'), /shadow codex reply 2/);
+    assert.equal(readJobEvents(child.id, { limit: 1000 }).at(-1)?.type, 'job.completed');
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(responsePublished, false, 'caller response must not precede the terminal audit row');
 
     fs.unlinkSync(auditLock);
     await reply;
+    assert.equal(inspectJob(child.id).status, 'completed');
     assert.equal(readAuditLog().length, 2);
   } finally {
     try { fs.unlinkSync(auditLock); } catch {}
@@ -295,11 +301,26 @@ test('direct Cursor background mode creates one complete shadow job', async (t) 
   const cwd = path.join(directory, 'cursor-background');
   fs.mkdirSync(cwd);
   spawnSync('git', ['init', '-q'], { cwd });
-  const launched = spawnSync(process.execPath, [cursorCli, '--background', '--model', 'composer', '--mode', 'review', '--cwd', cwd, '--prompt', 'Background read'], {
-    encoding: 'utf8', env: { ...process.env }
-  });
-  assert.equal(launched.status, 0, launched.stderr);
-  const { jobId } = JSON.parse(launched.stdout);
+  const auditLock = path.join(path.dirname(process.env.DELEGATE_STATE_FILE), 'audit.jsonl.lock');
+  fs.mkdirSync(path.dirname(auditLock), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(auditLock, `${process.pid}\n`, { mode: 0o600 });
+  let jobId;
+  try {
+    const launched = spawnSync(process.execPath, [cursorCli, '--background', '--model', 'composer', '--mode', 'review', '--cwd', cwd, '--prompt', 'Background read'], {
+      encoding: 'utf8', env: { ...process.env }
+    });
+    assert.equal(launched.status, 0, launched.stderr);
+    ({ jobId } = JSON.parse(launched.stdout));
+    await waitFor(() => fs.existsSync(path.join(jobsDir(), `${jobId}.events.jsonl.gz`)),
+      'the Cursor journal to reach its held terminal publication');
+    const publishing = inspectJob(jobId);
+    assert.equal(publishing.status, 'running',
+      'terminal status must remain unpublished while its audit row is blocked');
+    assert.match(jobTranscript(jobId).map((event) => JSON.stringify(event.data)).join('\n'), /Cursor visible response/);
+    assert.equal(readJobEvents(jobId, { limit: 1000 }).at(-1)?.type, 'job.completed');
+  } finally {
+    try { fs.unlinkSync(auditLock); } catch {}
+  }
   const deadline = Date.now() + 5000;
   let job;
   while (Date.now() < deadline) {

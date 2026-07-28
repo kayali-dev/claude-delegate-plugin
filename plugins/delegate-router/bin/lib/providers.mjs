@@ -1111,6 +1111,9 @@ function terminal(job, status, phase, extra = {}) {
       }, { incrementRevision: false });
     }
   }
+  if (!deferVerification) {
+    appendJobEvent(job.id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', extra);
+  }
   updateManagedJob(job.id, (current) => {
     const firstAttemptText = current.result?.firstAttemptText;
     const subagents = Array.isArray(current.result?.subagents) ? current.result.subagents : [];
@@ -1216,10 +1219,9 @@ function terminal(job, status, phase, extra = {}) {
       current.acceptance = buildAcceptance(current);
     }
   });
-  appendJobEvent(job.id, deferVerification
-    ? 'job.state'
-    : status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error',
-  deferVerification ? { status: 'running', phase: 'verifying' } : extra);
+  if (deferVerification) {
+    appendJobEvent(job.id, 'job.state', { status: 'running', phase: 'verifying' });
+  }
   if (!deferVerification && job.planningFor) {
     try { recordPlanPassOutcome(loadJob(job.id)); }
     catch (error) {
@@ -1731,7 +1733,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.50.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.51.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2783,7 +2785,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.50.0' }
+      clientInfo: { name: 'delegate-router', version: '0.51.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +23,8 @@ import {
   DEFAULT_JOURNAL_CAP_BYTES,
   DEFAULT_RECENT_TERMINAL_KEEP,
   DEFAULT_STATE_BUDGET_BYTES,
-  maintenanceLogPath
+  maintenanceLogPath,
+  readJournalBuffer
 } from '../bin/lib/store-maintenance.mjs';
 
 const pluginRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -198,6 +200,30 @@ test('terminal gzip remains transparent to event pagination and TUI transcript t
 
   const tuiTail = readRecentJobEvents(job.id, { maxBytes: 1024 * 1024, limit: 100 });
   assert.match(JSON.stringify(normalizeTranscriptEvents(tuiTail)), /terminal transcript text/);
+}));
+
+test('journal readers follow a plain-to-gzip handoff after resolving the disappearing plain path', (t) => isolated(t, (root) => {
+  const plain = path.join(root, 'handoff.events.jsonl');
+  const compressed = `${plain}.gz`;
+  const payload = Buffer.from('{"seq":1,"type":"message.completed"}\n');
+  fs.writeFileSync(plain, payload, { mode: 0o600 });
+  const originalRead = fs.readFileSync;
+  let forced = false;
+  fs.readFileSync = function readWithForcedHandoff(file, ...args) {
+    if (!forced && path.resolve(String(file)) === path.resolve(plain)) {
+      forced = true;
+      const source = originalRead.call(fs, file);
+      fs.writeFileSync(compressed, zlib.gzipSync(source), { mode: 0o600 });
+      fs.unlinkSync(plain);
+    }
+    return originalRead.call(fs, file, ...args);
+  };
+  try {
+    assert.equal(readJournalBuffer(plain).toString('utf8'), payload.toString('utf8'));
+    assert.equal(forced, true, 'the test must force the post-resolution unlink interleaving');
+  } finally {
+    fs.readFileSync = originalRead;
+  }
 }));
 
 test('health JSON exposes store bytes, files, budget, and headroom', (t) => isolated(t, (root) => {
