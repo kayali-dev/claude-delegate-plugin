@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const server = path.join(root, 'bin', 'delegate-control-mcp');
@@ -18,9 +19,15 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   lines.on('line', (line) => responses.push(JSON.parse(line)));
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })}\n`);
-  for (let i = 0; i < 50 && responses.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitForCondition({
+    description: 'initialize and tools/list MCP responses',
+    timeoutMs: 1_000,
+    observe: () => ({ count: responses.length }),
+    predicate: (state) => state.count >= 2,
+    summarize: (state) => `responses=${state.count}`
+  });
   child.stdin.end();
-  await new Promise((resolve) => child.once('exit', resolve));
+  await waitForChildExit({ child, description: 'the initialized control MCP process to exit' });
   assert.equal(responses[0].result.serverInfo.name, 'delegate-control');
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
@@ -182,11 +189,15 @@ test('control MCP adds bounded resources and common-flow prompts without changin
     }
   ];
   for (const request of requests) child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...request })}\n`);
-  for (let index = 0; index < 150 && responses.length < requests.length; index += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  await waitForCondition({
+    description: 'all control MCP resource, prompt, and tool responses',
+    timeoutMs: 3_000,
+    observe: () => ({ count: responses.length, expected: requests.length }),
+    predicate: (state) => state.count >= state.expected,
+    summarize: (state) => `responses=${state.count}/${state.expected}`
+  });
   child.stdin.end();
-  await new Promise((resolve) => child.once('exit', resolve));
+  await waitForChildExit({ child, description: 'the control MCP resource process to exit' });
   assert.equal(responses.length, requests.length, JSON.stringify(responses));
   const byId = new Map(responses.map((response) => [response.id, response]));
   assert.deepEqual(byId.get(1).result.capabilities, {
@@ -257,9 +268,15 @@ test('delegate_stats returns filtered audit aggregates and totals and rejects jo
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '7d' } } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '7d', jobId: 'not-allowed' } } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'delegate_stats', arguments: { since: '2026-01-01', recommendFor: { mode: 'review', access: 'read' } } } })}\n`);
-  for (let i = 0; i < 100 && responses.length < 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitForCondition({
+    description: 'three delegate_stats MCP responses',
+    timeoutMs: 2_000,
+    observe: () => ({ count: responses.length }),
+    predicate: (state) => state.count >= 3,
+    summarize: (state) => `responses=${state.count}/3`
+  });
   child.stdin.end();
-  await new Promise((resolve) => child.once('exit', resolve));
+  await waitForChildExit({ child, description: 'the control MCP stats process to exit' });
   try {
     const aggregate = JSON.parse(responses.find((response) => response.id === 1).result.content[0].text);
     assert.equal(aggregate.jobs, 2, JSON.stringify(aggregate));
@@ -301,14 +318,19 @@ test('delegate_stats returns filtered audit aggregates and totals and rejects jo
   }
 });
 
-test('delegate_respond queues a revision-safe answer through the control inbox', async () => {
+test('delegate_respond waits for applied and rejected terminal command outcomes', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-mcp-respond-'));
   const previousState = process.env.DELEGATE_STATE_FILE;
   const previousProviders = process.env.DELEGATE_ENABLED_PROVIDERS;
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
   process.env.DELEGATE_ENABLED_PROVIDERS = 'cursor';
   try {
-    const { createManagedJob, updateManagedJob } = await import('../bin/lib/control.mjs');
+    const {
+      claimCommands,
+      completeCommand,
+      createManagedJob,
+      updateManagedJob
+    } = await import('../bin/lib/control.mjs');
     const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'consult', cwd: directory, prompt: 'answer without changing files' });
     const requestId = 'cursor-question-1';
     const waiting = updateManagedJob(job.id, (current) => {
@@ -316,7 +338,14 @@ test('delegate_respond queues a revision-safe answer through the control inbox',
       current.phase = 'user-input-required';
       current.stopReason = 'USER_INPUT_REQUIRED';
       current.pid = process.pid;
-      current.pendingInput = { requestId, method: 'cursor/ask_question', payload: { question: 'Which directory?' } };
+      current.pendingInput = {
+        requestId,
+        kind: 'question',
+        method: 'cursor/ask_question',
+        origin: 'cursor-acp',
+        payload: { question: 'Which directory?' },
+        expiresAt: Date.now() + 5_000
+      };
     });
     const child = spawn(process.execPath, [server], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -332,15 +361,109 @@ test('delegate_respond queues a revision-safe answer through the control inbox',
       answer: 'src',
       commandId: 'mcp-response-1'
     } } })}\n`);
-    for (let i = 0; i < 100 && responses.length < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    const settle = waitForCondition({
+      description: 'delegate_respond command intake to become claimable',
+      timeoutMs: 2_000,
+      observe: () => claimCommands(job.id, { includeTypes: ['respond'] })[0] || null
+    }).then((claimed) => {
+      updateManagedJob(job.id, (current) => {
+        current.pendingInput = null;
+        current.phase = 'prompting';
+        current.stopReason = null;
+      });
+      completeCommand(job.id, claimed, {
+        ok: true,
+        appliedAs: 'input-response',
+        requestId
+      });
+    });
+    await waitForCondition({
+      description: 'the delegate_respond MCP result',
+      timeoutMs: 2_000,
+      observe: () => ({ count: responses.length }),
+      predicate: (state) => state.count >= 1,
+      summarize: (state) => `responses=${state.count}`
+    });
+    await settle;
+    const rejectedJob = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'consult', cwd: directory, prompt: 'reject stale input' });
+    const rejectedRequestId = 'cursor-question-rejected';
+    const rejectedWaiting = updateManagedJob(rejectedJob.id, (current) => {
+      current.status = 'running';
+      current.phase = 'user-input-required';
+      current.stopReason = 'USER_INPUT_REQUIRED';
+      current.pid = process.pid;
+      current.pendingInput = {
+        requestId: rejectedRequestId,
+        kind: 'question',
+        method: 'cursor/ask_question',
+        origin: 'cursor-acp',
+        payload: { question: 'This request will become stale.' },
+        expiresAt: Date.now() + 5_000
+      };
+    });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'delegate_respond', arguments: {
+      jobId: rejectedJob.id,
+      expectedRevision: rejectedWaiting.revision,
+      requestId: rejectedRequestId,
+      answer: 'stale answer',
+      commandId: 'mcp-response-rejected'
+    } } })}\n`);
+    const reject = waitForCondition({
+      description: 'the second delegate_respond command intake to become claimable',
+      timeoutMs: 2_000,
+      observe: () => claimCommands(rejectedJob.id, { includeTypes: ['respond'] })[0] || null
+    }).then((claimed) => {
+      completeCommand(rejectedJob.id, claimed, {
+        ok: false,
+        error: 'worker no longer accepts input',
+        requestId: rejectedRequestId
+      });
+    });
+    await waitForCondition({
+      description: 'the rejected delegate_respond MCP result',
+      timeoutMs: 2_000,
+      observe: () => ({ count: responses.length }),
+      predicate: (state) => state.count >= 2,
+      summarize: (state) => `responses=${state.count}`
+    });
+    await reject;
     child.stdin.end();
-    await new Promise((resolve) => child.once('exit', resolve));
+    await waitForChildExit({ child, description: 'the delegate_respond MCP process to exit' });
     const result = JSON.parse(responses[0].result.content[0].text);
     assert.deepEqual(result, {
-      accepted: true,
-      commandId: 'mcp-response-1',
-      revision: waiting.revision + 1,
-      phase: 'responding'
+      command: {
+        id: 'mcp-response-1',
+        claimed: true,
+        state: 'applied',
+        duplicate: false
+      },
+      request: {
+        id: requestId,
+        kind: 'question',
+        answered: true,
+        outcome: 'answered',
+        appliedAs: 'input-response'
+      },
+      revision: waiting.revision + 2,
+      phase: 'prompting'
+    });
+    const rejected = responses[1].result;
+    assert.equal(rejected.isError, true);
+    assert.deepEqual(JSON.parse(rejected.content[0].text), {
+      error: 'INVALID_REQUEST: response command mcp-response-rejected was rejected: worker no longer accepts input',
+      code: 'INVALID_REQUEST',
+      retryable: false,
+      provider: 'cursor',
+      command: {
+        id: 'mcp-response-rejected',
+        claimed: true,
+        state: 'rejected'
+      },
+      request: {
+        id: rejectedRequestId,
+        kind: 'question',
+        answered: false
+      }
     });
   } finally {
     if (previousState == null) delete process.env.DELEGATE_STATE_FILE;

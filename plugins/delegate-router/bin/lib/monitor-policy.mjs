@@ -194,6 +194,7 @@ export function detectActionableEdges(snapshot, options = {}) {
   if (inputOutstanding(job, events)) edges.push(candidate(job, 'needs-input:request', 'needs-input', 2, {
     input: 'request',
     requestId: job.pendingInput?.requestId || null,
+    requestKind: job.pendingInput?.kind || 'question',
     revision: job.revision
   }));
   if (blockedApproval(events)) edges.push(candidate(job, 'needs-input:permission', 'needs-input', 2, { input: 'permission' }));
@@ -268,6 +269,10 @@ export function formatEdgeLine(edge) {
     const candidateRequestId = field(edge.requestId, '', 96);
     const requestId = /^[A-Za-z0-9_.:-]{1,96}$/.test(candidateRequestId) ? candidateRequestId : '';
     const request = requestId ? ` --request-id ${requestId}` : '';
+    if (edge.requestKind === 'plan-confirmation') {
+      const base = `delegate-jobs respond ${id} --expected-revision ${revision}${request}`;
+      return `${prefix} ${id} needs-input (confirm plan with: ${base} --accept; reject plan with: ${base} --reject)`;
+    }
     return `${prefix} ${id} needs-input (answer in TUI with a, or: delegate-jobs respond ${id} --expected-revision ${revision}${request} --answer '<answer>')`;
   }
   if (edge.category === 'blocked') {

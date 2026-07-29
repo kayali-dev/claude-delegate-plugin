@@ -71,6 +71,7 @@ import {
 } from './store-maintenance.mjs';
 import { listSupervisorLeases } from './supervisor-common.mjs';
 import { executeVerification } from './verification-runner.mjs';
+import { validatePendingResponse } from './response-contract.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -3901,13 +3902,31 @@ export function submitControl(id, command, expectedRevision) {
       throw brokerError('DIRECT_TRANSPORT', 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', { provider: job.provider });
     }
     if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'live control is unavailable for this legacy job', { provider: job.provider });
-    if (TERMINAL_STATUSES.has(job.status)) throw brokerError('JOB_TERMINAL', `job is already ${job.status}`, { provider: job.provider });
     const requestedId = command.commandId || command.correctionId || crypto.randomUUID();
     const commandId = /^[a-zA-Z0-9_-]{1,128}$/.test(requestedId)
       ? requestedId
       : `cmd-${crypto.createHash('sha256').update(requestedId).digest('hex').slice(0, 24)}`;
     job.controls ||= {};
-    if (job.controls[commandId]) return { duplicate: true, commandId, job };
+    if (job.controls[commandId]) {
+      if (command.type !== 'respond') return { duplicate: true, commandId, job };
+      const existing = job.controls[commandId];
+      return {
+        duplicate: true,
+        command: {
+          id: commandId,
+          claimed: existing.state !== 'queued',
+          state: existing.state
+        },
+        request: {
+          id: existing.requestId || command.requestId || null,
+          kind: existing.requestKind || 'question',
+          answered: existing.state === 'applied'
+        },
+        revision: job.revision,
+        phase: job.phase
+      };
+    }
+    if (TERMINAL_STATUSES.has(job.status)) throw brokerError('JOB_TERMINAL', `job is already ${job.status}`, { provider: job.provider });
     if (!Number.isInteger(expectedRevision)) {
       throw brokerError('INVALID_REQUEST', `expectedRevision is required; current revision is ${job.revision}`, {
         provider: job.provider,
@@ -3958,12 +3977,7 @@ export function submitControl(id, command, expectedRevision) {
           provider: job.provider, currentRevision: job.revision
         });
       }
-      const hasAnswer = typeof command.answer === 'string';
-      const hasDecision = typeof command.accept === 'boolean';
-      const hasResponse = command.response && typeof command.response === 'object' && !Array.isArray(command.response);
-      if (!hasAnswer && !hasDecision && !hasResponse) {
-        throw brokerError('INVALID_REQUEST', 'respond requires answer, accept/reject, or a structured response object', { provider: job.provider });
-      }
+      validatePendingResponse(job.pendingInput, command, { provider: job.provider });
     }
     if (command.type === 'release' && !job.startPaused) throw brokerError('INVALID_REQUEST', 'release is available only for startPaused jobs', { provider: job.provider });
     if (command.type === 'steer' && command.strategy === 'same-turn') {
@@ -3992,7 +4006,16 @@ export function submitControl(id, command, expectedRevision) {
         : { ...command, commandId, expectedRevision, requestedAt: Date.now() };
     fs.mkdirSync(paths(id).commands, { recursive: true, mode: 0o700 });
     writePrivate(path.join(paths(id).commands, `${commandId}.json`), `${JSON.stringify(record, null, 2)}\n`);
-    job.controls[commandId] = { type: command.type, state: 'queued', requestedAt: record.requestedAt };
+    job.controls[commandId] = {
+      type: command.type,
+      state: 'queued',
+      requestedAt: record.requestedAt,
+      ...(command.type === 'respond' ? {
+        requestId: record.requestId,
+        requestKind: job.pendingInput.kind || 'question',
+        accept: typeof record.accept === 'boolean' ? record.accept : null
+      } : {})
+    };
     job.revision += 1;
     if (command.type === 'cancel') job.phase = 'cancelling';
     if (command.type === 'release') job.phase = 'releasing';
@@ -4025,8 +4048,113 @@ export function submitControl(id, command, expectedRevision) {
           }
         : { commandId, strategy: command.strategy || null, text: command.text || null });
     saveJob(job);
+    if (command.type === 'respond') {
+      return {
+        duplicate: false,
+        command: { id: commandId, claimed: false, state: 'queued' },
+        request: {
+          id: record.requestId,
+          kind: job.pendingInput.kind || 'question',
+          answered: false
+        },
+        revision: job.revision,
+        phase: job.phase
+      };
+    }
     return { accepted: true, commandId, revision: job.revision, phase: job.phase };
   });
+}
+
+function resolvedResponseResult(job, intake, events = []) {
+  const commandId = intake.command.id;
+  const control = job.controls?.[commandId];
+  const commandEvent = [...events].reverse().find((event) =>
+    ['command.applied', 'command.rejected'].includes(event.type)
+      && (event.data?.commandId === commandId || event.data?.requestId === intake.request.id));
+  const durableControlState = ['applied', 'rejected'].includes(control?.state) ? control.state : null;
+  const commandState = durableControlState || (commandEvent?.type === 'command.applied' ? 'applied'
+    : commandEvent?.type === 'command.rejected' ? 'rejected' : null);
+  if (!['applied', 'rejected'].includes(commandState)) return null;
+  const requestId = control?.requestId || commandEvent?.data?.requestId || intake.request.id;
+  const requestKind = control?.requestKind || intake.request.kind;
+  if (commandState === 'rejected') {
+    throw brokerError('INVALID_REQUEST', `response command ${commandId} was rejected: ${control?.error || commandEvent?.data?.error || 'the pending request did not accept it'}`, {
+      provider: job.provider,
+      commandId,
+      commandClaimed: true,
+      commandState: 'rejected',
+      requestId,
+      requestKind,
+      requestAnswered: false
+    });
+  }
+  const resolvedEvent = [...events].reverse().find((event) =>
+    event.type === 'input.resolved' && event.data?.requestId === requestId);
+  const requestStillPending = job.pendingInput?.requestId === requestId && job.pendingInput?.timedOut !== true;
+  if (requestStillPending && !resolvedEvent) return null;
+  const outcome = requestKind === 'plan-confirmation'
+    ? resolvedEvent?.data?.outcome === 'accepted' || control?.accept === true ? 'accepted' : 'rejected'
+    : 'answered';
+  return {
+    command: {
+      id: commandId,
+      claimed: true,
+      state: 'applied',
+      duplicate: intake.duplicate === true
+    },
+    request: {
+      id: requestId,
+      kind: requestKind,
+      answered: true,
+      outcome,
+      appliedAs: control?.appliedAs || commandEvent?.data?.appliedAs || null
+    },
+    revision: job.revision,
+    phase: job.phase
+  };
+}
+
+export async function respondToPendingInput(id, command, expectedRevision) {
+  const intake = submitControl(id, { ...command, type: 'respond' }, expectedRevision);
+  const initial = loadJob(id);
+  const expiresAt = Number(initial?.pendingInput?.expiresAt || 0);
+  const fallbackDeadline = Date.now() + 30_000;
+  const deadline = expiresAt > Date.now()
+    ? Math.min(expiresAt + 1_000, Date.now() + 86_400_000)
+    : fallbackDeadline;
+  for (;;) {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    const events = readJobEvents(id, {
+      limit: 1000,
+      types: ['command.applied', 'command.rejected', 'input.resolved']
+    });
+    const result = resolvedResponseResult(job, intake, events);
+    if (result) return result;
+    if (TERMINAL_STATUSES.has(job.status)) {
+      throw brokerError('JOB_TERMINAL', `job became ${job.status} before response command ${intake.command.id} resolved; last saw command=${job.controls?.[intake.command.id]?.state || 'missing'}, pending=${job.pendingInput?.requestId || 'none'}, events=${events.map((event) => event.type).join(',') || 'none'}`, {
+        provider: job.provider,
+        commandId: intake.command.id,
+        commandClaimed: job.controls?.[intake.command.id]?.state !== 'queued',
+        commandState: job.controls?.[intake.command.id]?.state || 'missing',
+        requestId: intake.request.id,
+        requestKind: intake.request.kind,
+        requestAnswered: false
+      });
+    }
+    if (Date.now() >= deadline) {
+      throw brokerError('TIMEOUT', `timed out waiting for response command ${intake.command.id} to resolve ${intake.request.kind} ${intake.request.id}; last saw command=${job.controls?.[intake.command.id]?.state || 'missing'}, status=${job.status}, phase=${job.phase}`, {
+        provider: job.provider,
+        commandId: intake.command.id,
+        commandClaimed: job.controls?.[intake.command.id]?.state !== 'queued',
+        commandState: job.controls?.[intake.command.id]?.state || 'missing',
+        requestId: intake.request.id,
+        requestKind: intake.request.kind,
+        requestAnswered: false
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 export function claimCommands(id, options = {}) {

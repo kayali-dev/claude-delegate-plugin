@@ -25,6 +25,7 @@ import {
 } from '../bin/lib/supervisor-common.mjs';
 import { reconcileSupervisorLeases } from '../bin/lib/supervisor-runtime.mjs';
 import { auditLogPath, loadJob } from '../bin/lib/state.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const supervisor = path.join(pluginRoot, 'bin', 'delegate-supervisor');
@@ -32,20 +33,21 @@ const workerFixture = path.join(pluginRoot, 'test', 'fixtures', 'supervisor-work
 const launcherFixture = path.join(pluginRoot, 'test', 'fixtures', 'supervisor-launcher.mjs');
 
 function runCli(args, env) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [supervisor, ...args, '--json'], {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.once('exit', (status, signal) => {
-      let payload = null;
-      try { payload = JSON.parse(stdout.trim().split('\n').filter(Boolean).at(-1)); } catch {}
-      resolve({ status, signal, stdout, stderr, payload });
-    });
+  const child = spawn(process.execPath, [supervisor, ...args, '--json'], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return waitForChildExit({
+    child,
+    description: `delegate-supervisor ${args[0] || 'command'} to exit`
+  }).then(({ status, signal }) => {
+    let payload = null;
+    try { payload = JSON.parse(stdout.trim().split('\n').filter(Boolean).at(-1)); } catch {}
+    return { status, signal, stdout, stderr, payload };
   });
 }
 
@@ -60,14 +62,8 @@ function runCliSync(args, env) {
   return { ...result, payload };
 }
 
-async function waitFor(check, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() >= deadline) throw new Error('condition did not become true before timeout');
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+function waitFor(check, description, timeoutMs = 5_000) {
+  return waitForCondition({ description, timeoutMs, intervalMs: 25, observe: check });
 }
 
 async function stopResident(env) {
@@ -76,7 +72,7 @@ async function stopResident(env) {
   await waitFor(() => {
     const lock = supervisorPaths().lock;
     return !fs.existsSync(lock);
-  }, 3000).catch(() => null);
+  }, 'the supervisor startup lock to disappear', 3_000).catch(() => null);
 }
 
 async function isolated(t, fn, overrides = {}) {
@@ -292,7 +288,7 @@ test('SIGTERM drains and persists stopped state, and an idle resident exits on p
       const state = JSON.parse(fs.readFileSync(supervisorPaths().runtimeState, 'utf8'));
       return state.status === 'stopped' ? state : null;
     } catch { return null; }
-  });
+  }, "supervisor runtime state.status === 'stopped'");
   assert.equal(stopped.drainReason, 'SIGTERM');
   assert.equal(fs.existsSync(supervisorPaths().lock), false);
 
@@ -305,7 +301,7 @@ test('SIGTERM drains and persists stopped state, and an idle resident exits on p
       const state = JSON.parse(fs.readFileSync(supervisorPaths().runtimeState, 'utf8'));
       return state.status === 'stopped' && state.bootId === idle.payload.bootId ? state : null;
     } catch { return null; }
-  });
+  }, 'the idle supervisor to publish its stopped state');
   assert.equal(idleStopped.drainReason, 'idle');
 }));
 
@@ -324,7 +320,7 @@ test('SIGKILL on an owned worker records precise signal, process, lease, and aud
   const failed = await waitFor(() => {
     const current = loadJob(job.id);
     return current?.status === 'failed' ? current : null;
-  });
+  }, "owned worker job.status === 'failed'");
   assert.equal(failed.errorCode, 'PROVIDER_ERROR');
   assert.match(failed.error, /SUPERVISOR_WORKER_SIGNAL.*SIGKILL/);
   assert.equal(failed.failureAttribution.signal, 'SIGKILL');
@@ -353,24 +349,28 @@ test('killing the launcher shell does not kill a supervisor-owned attempt', (t) 
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let line = '';
-  const launched = await new Promise((resolve, reject) => {
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      line += chunk;
+  let childError = null;
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { line += chunk; });
+  child.once('error', (error) => { childError = error; });
+  const launched = await waitForCondition({
+    description: 'the supervisor launcher fixture to print its launched job',
+    timeoutMs: 5_000,
+    observe: () => {
+      if (childError) throw childError;
       const newline = line.indexOf('\n');
-      if (newline >= 0) {
-        try { resolve(JSON.parse(line.slice(0, newline))); } catch (error) { reject(error); }
-      }
-    });
-    child.once('error', reject);
+      if (newline < 0) return null;
+      return JSON.parse(line.slice(0, newline));
+    },
+    summarize: () => `stdout=${JSON.stringify(line.slice(-500))}, exitCode=${child.exitCode ?? 'null'}`
   });
   assert.equal(launched.executionOwner, 'supervisor');
   process.kill(child.pid, 'SIGKILL');
-  await new Promise((resolve) => child.once('exit', resolve));
+  await waitForChildExit({ child, description: 'the killed supervisor launcher fixture to exit' });
   const terminal = await waitFor(() => {
     const current = loadJob(launched.id);
     return current?.status === 'completed' && current.executionAttribution?.finalized ? current : null;
-  });
+  }, 'the supervisor-owned job to complete with finalized attribution');
   assert.equal(terminal.resultText, 'supervisor fixture completed');
   assert.equal(terminal.executionAttribution.exitCode, 0);
   assert.equal(terminal.executionAttribution.signal, null);
@@ -378,6 +378,6 @@ test('killing the launcher shell does not kill a supervisor-owned attempt', (t) 
   const observed = await waitFor(() => {
     const current = processInfo(lock.pid);
     return current.state === 'alive' && current.info.ppid === 1 ? current : null;
-  });
+  }, 'the resident supervisor process to be reparented and alive');
   assert.equal(observed.info.pgid, lock.pid);
 }));

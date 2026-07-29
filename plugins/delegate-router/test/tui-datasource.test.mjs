@@ -11,6 +11,7 @@ import { paintFrame } from '../bin/lib/tui/components.mjs';
 import { DelegateDataSource, tailAllJobs } from '../bin/lib/tui/datasource.mjs';
 import { dashboardViewModel, fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
 import { loadJob, saveJob } from '../bin/lib/state.mjs';
+import { waitForEventState } from './helpers/wait.mjs';
 
 async function isolated(fn) {
   const names = ['DELEGATE_STATE_FILE', 'DELEGATE_ENABLED_PROVIDERS', 'DELEGATE_CLAUDE_PROJECTS_DIR'];
@@ -28,22 +29,8 @@ async function isolated(fn) {
   }
 }
 
-function waitFor(source, predicate, timeoutMs = 2500) {
-  const current = source.getState();
-  if (predicate(current)) return Promise.resolve(current);
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      source.off('change', changed);
-      reject(new Error('timed out waiting for datasource change'));
-    }, timeoutMs);
-    const changed = (state) => {
-      if (!predicate(state)) return;
-      clearTimeout(timeout);
-      source.off('change', changed);
-      resolve(state);
-    };
-    source.on('change', changed);
-  });
+function waitFor(source, predicate, description, timeoutMs = 2_500) {
+  return waitForEventState({ source, predicate, description, timeoutMs });
 }
 
 function completePacket(objective) {
@@ -54,7 +41,7 @@ test('tailAllJobs discovers new job files and tails only new journal events', ()
   const source = tailAllJobs({ pollMs: 100, debounceMs: 5 });
   try {
     const job = createManagedJob({ provider: 'codex', mode: 'review', cwd: root, prompt: 'inspect the code' });
-    const discovered = await waitFor(source, (state) => state.jobs.some((entry) => entry.id === job.id));
+    const discovered = await waitFor(source, (state) => state.jobs.some((entry) => entry.id === job.id), 'datasource fleet discovery to include the new job');
     assert.equal(discovered.eventsByJob[job.id], undefined, 'fleet discovery must not hydrate journals');
     assert.equal(source.metrics.journalPages, 0);
 
@@ -66,7 +53,7 @@ test('tailAllJobs discovers new job files and tails only new journal events', ()
     const initialMetric = source.metrics.journalEvents;
 
     appendJobEvent(job.id, 'message.completed', { text: 'findings' });
-    const tailed = await waitFor(source, (state) => state.eventsByJob[job.id]?.some((event) => event.type === 'message.completed'));
+    const tailed = await waitFor(source, (state) => state.eventsByJob[job.id]?.some((event) => event.type === 'message.completed'), 'selected job events to include message.completed');
     assert.equal(tailed.eventsByJob[job.id].filter((event) => event.type === 'message.completed').length, 1);
     assert.ok(source.journalCursors.get(job.id) > initialCursor);
     assert.equal(source.metrics.journalEvents, initialMetric + 1);

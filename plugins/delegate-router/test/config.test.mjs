@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { enabledProviders, providerEnabled, saveEnabledProviders } from '../bin/lib/state.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const plugin = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -43,9 +44,16 @@ test('Cursor-only control MCP advertises only Cursor and Codex MCP exposes no to
   const responses = [];
   lines.on('line', (line) => responses.push(JSON.parse(line)));
   child.stdin.write('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n');
-  for (let i = 0; i < 50 && !responses.length; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForCondition({
+    description: 'the Cursor-only control MCP tools/list response',
+    timeoutMs: 500,
+    intervalMs: 10,
+    observe: () => ({ count: responses.length }),
+    predicate: (state) => state.count >= 1,
+    summarize: (state) => `responses=${state.count}`
+  });
   child.stdin.end();
-  await new Promise((resolve) => child.once('exit', resolve));
+  await waitForChildExit({ child, description: 'the Cursor-only control MCP process to exit' });
   const start = responses[0].result.tools.find((tool) => tool.name === 'delegate_start');
   assert.deepEqual(start.inputSchema.properties.provider.enum, ['cursor']);
 

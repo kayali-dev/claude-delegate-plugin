@@ -23,6 +23,7 @@ import {
   normalizeMonitorProjectDirectory,
   scopeMonitorSnapshots
 } from '../bin/lib/monitor-runtime.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 import { MonitorStore, parseSnoozeUntil, preferenceSnoozed } from '../bin/lib/monitor-store.mjs';
 
 const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -132,13 +133,28 @@ test('needs-input monitor line gives both inline TUI and revisioned CLI answer p
   const edge = detectActionableEdges(snapshot({
     id: 'question-job',
     revision: 7,
-    pendingInput: { requestId: 'question-1' },
+    pendingInput: { requestId: 'question-1', kind: 'question' },
     phase: 'user-input-required'
   }), { now: NOW })[0];
   assert.equal(
     formatEdgeLine(edge),
     "delegate[delegate-router]: question-job needs-input (answer in TUI with a, or: delegate-jobs respond question-job --expected-revision 7 --request-id question-1 --answer '<answer>')"
   );
+});
+
+test('needs-input monitor line derives plan confirmation flags from the pending kind', () => {
+  const edge = detectActionableEdges(snapshot({
+    id: 'plan-job',
+    revision: 6,
+    pendingInput: { requestId: 'plan-1', kind: 'plan-confirmation' },
+    phase: 'user-input-required'
+  }), { now: NOW })[0];
+  const line = formatEdgeLine(edge);
+  assert.equal(
+    line,
+    'delegate[delegate-router]: plan-job needs-input (confirm plan with: delegate-jobs respond plan-job --expected-revision 6 --request-id plan-1 --accept; reject plan with: delegate-jobs respond plan-job --expected-revision 6 --request-id plan-1 --reject)'
+  );
+  assert.doesNotMatch(line, /--answer/);
 });
 
 test('progress, deltas, tools, usage, and successful intermediate steps stay silent', () => {
@@ -764,15 +780,6 @@ test('correlation garbage collection is bounded and removes expired handshake de
 test('SessionStart marker survives hook exit and a later real monitor resolves session scope', async (t) => {
   const monitorBin = path.join(pluginRoot, 'bin', 'delegate-monitor');
   const hookBin = path.join(pluginRoot, 'bin', 'delegate-session-hook');
-  const waitFor = async (predicate, timeoutMs = 2500) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const value = predicate();
-      if (value) return value;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    return null;
-  };
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-monitor-correlation-live-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }));
   const workspace = path.join(root, 'workspace');
@@ -794,8 +801,20 @@ test('SessionStart marker survives hook exit and a later real monitor resolves s
     env: { ...common, CLAUDE_CODE_SESSION_ID: sessionId }
   });
   assert.equal(hook.status, 0, hook.stderr);
-  const markerFiles = fs.readdirSync(monitorCorrelationDirectory(root))
-    .filter((name) => name.startsWith('session-'));
+  const markerFiles = await waitForCondition({
+    description: 'the SessionStart hook to persist one session correlation marker',
+    timeoutMs: 2_500,
+    observe: () => {
+      try {
+        return fs.readdirSync(monitorCorrelationDirectory(root))
+          .filter((name) => name.startsWith('session-'));
+      } catch {
+        return [];
+      }
+    },
+    predicate: (files) => files.length === 1,
+    summarize: (files) => `markerFiles=${files.length}`
+  });
   assert.equal(markerFiles.length, 1);
   const marker = JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), markerFiles[0]), 'utf8'));
   assert.equal(marker.version, 2);
@@ -820,17 +839,20 @@ test('SessionStart marker survives hook exit and a later real monitor resolves s
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   try {
-    const correlated = await waitFor(() => {
-      try {
-        for (const name of fs.readdirSync(monitorCorrelationDirectory(root))) {
-          if (!name.startsWith('resolution-')) continue;
-          const record = JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), name), 'utf8'));
-          if (record.status === 'correlated') return record;
-        }
-      } catch {}
-      return null;
+    const correlated = await waitForCondition({
+      description: "monitor correlation status === 'correlated'",
+      timeoutMs: 2_500,
+      observe: () => {
+        try {
+          for (const name of fs.readdirSync(monitorCorrelationDirectory(root))) {
+            if (!name.startsWith('resolution-')) continue;
+            return JSON.parse(fs.readFileSync(path.join(monitorCorrelationDirectory(root), name), 'utf8'));
+          }
+        } catch {}
+        return null;
+      },
+      predicate: (record) => record?.status === 'correlated'
     });
-    assert.ok(correlated, `correlation did not complete: ${stderr}`);
     assert.equal(correlated.sessionId, sessionId);
     assert.equal(correlated.effectiveScope, 'session');
     assert.ok(correlated.commonAncestor?.pid > 1);
@@ -838,10 +860,7 @@ test('SessionStart marker survives hook exit and a later real monitor resolves s
     assert.doesNotMatch(stdout, /monitor-scope degraded/);
   } finally {
     child.kill('SIGTERM');
-    await new Promise((resolve) => {
-      if (child.exitCode != null) resolve();
-      else child.once('exit', resolve);
-    });
+    await waitForChildExit({ child, description: 'the correlation monitor process to exit after SIGTERM' });
   }
 });
 

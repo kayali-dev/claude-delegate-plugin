@@ -2,6 +2,22 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.55.0 — 2026-07-29
+
+- Validate `delegate-jobs respond` and MCP `delegate_respond` against the
+  pending request kind before command intake. Plan confirmations now require
+  `--accept` / `--reject` or `accept=true|false`; answer-only submissions fail
+  immediately. Both surfaces wait for the applied/rejected command outcome and
+  distinguish command claim from the identified request resolution instead of
+  returning an ambiguous intake-level `accepted`.
+- Derive monitor needs-input guidance from `pendingInput.kind`, and lead
+  plan-confirmation documentation with the boolean decision forms while
+  reserving `--answer` and structured answer/steer objects for free-form
+  questions.
+- Bound every test polling helper with condition-specific timeout diagnostics
+  and compact last-observed state so unreachable states fail instead of
+  blocking indefinitely.
+
 ## 0.54.0 — 2026-07-29
 
 - Sized the plan pass generously on both axes and per provider. The independent

@@ -21,6 +21,7 @@ import { readAuditLog, aggregateAudit } from '../bin/lib/stats.mjs';
 import { jobsDir, listJobs } from '../bin/lib/state.mjs';
 import { directTransportActionMessage } from '../bin/lib/tui/action-policy.mjs';
 import { fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const codexServer = path.join(root, 'bin', 'delegate-codex-mcp');
@@ -76,23 +77,20 @@ class LineServer {
     this.child.stderr.on('data', (chunk) => { this.stderr += chunk; });
   }
 
-  async request(message) {
+  request(message) {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      const found = this.lines.find((line) => line.value?.id === message.id && !line.value?.method);
-      if (found) return found;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    throw new Error(`timed out waiting for response ${message.id}: ${this.stderr}`);
+    return waitForCondition({
+      description: `JSON-RPC response id ${message.id}`,
+      timeoutMs: 5_000,
+      intervalMs: 10,
+      observe: () => this.lines.find((line) => line.value?.id === message.id && !line.value?.method) || null,
+      summarize: () => `responseIds=${JSON.stringify(this.lines.map((line) => line.value?.id).filter(Boolean))}, stderr=${JSON.stringify(this.stderr.slice(-500))}`
+    });
   }
 
   async close() {
     this.child.stdin.end();
-    await new Promise((resolve) => {
-      if (this.child.exitCode != null) resolve();
-      else this.child.once('exit', resolve);
-    });
+    await waitForChildExit({ child: this.child, description: 'the JSON-RPC line server to exit' });
   }
 }
 
@@ -102,14 +100,14 @@ async function startCodex(env = process.env) {
   return server;
 }
 
-async function waitFor(predicate, message, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timed out waiting for ${message}`);
+function waitFor(predicate, message, timeoutMs = 5_000) {
+  return waitForCondition({
+    description: message,
+    timeoutMs,
+    intervalMs: 10,
+    observe: predicate,
+    summarize: () => `jobs=${JSON.stringify(listJobs().map((job) => ({ id: job.id, status: job.status, phase: job.phase })))}`
+  });
 }
 
 test('direct Codex calls create redacted direct-mcp shadows with normalized transcript, audit, stats, and descriptions', async (t) => {
@@ -321,13 +319,14 @@ test('direct Cursor background mode creates one complete shadow job', async (t) 
   } finally {
     try { fs.unlinkSync(auditLock); } catch {}
   }
-  const deadline = Date.now() + 5000;
-  let job;
-  while (Date.now() < deadline) {
-    try { job = inspectJob(jobId); } catch {}
-    if (job && ['completed', 'failed', 'cancelled'].includes(job.status)) break;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  const job = await waitForCondition({
+    description: 'the direct Cursor shadow status to become terminal',
+    timeoutMs: 5_000,
+    observe: () => {
+      try { return inspectJob(jobId); } catch { return null; }
+    },
+    predicate: (current) => current && ['completed', 'failed', 'cancelled'].includes(current.status)
+  });
   assert.equal(job?.status, 'completed');
   assert.equal(job.transport, 'direct-cli');
   assert.equal(job.directParams.background, true);

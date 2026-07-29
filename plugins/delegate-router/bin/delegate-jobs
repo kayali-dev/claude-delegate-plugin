@@ -23,6 +23,7 @@ import {
   readJobEventPage,
   reconcileJob,
   reverifyManagedJob,
+  respondToPendingInput,
   reviewRoundManagedJob,
   revertManagedJob,
   resumeManagedJob,
@@ -578,8 +579,7 @@ try {
     const rejects = args.includes('--reject');
     if (accepts && rejects) throw new Error('choose only one of --accept or --reject');
     const responseJson = value(args, '--response-json');
-    json(submitControl(args[0], {
-      type: 'respond',
+    json(await respondToPendingInput(args[0], {
       commandId: value(args, '--command-id'),
       requestId: value(args, '--request-id'),
       answer: value(args, '--answer'),

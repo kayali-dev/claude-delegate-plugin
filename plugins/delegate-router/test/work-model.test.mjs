@@ -23,6 +23,7 @@ import {
   writeWorkItem
 } from '../bin/lib/work-store.mjs';
 import { saveJob } from '../bin/lib/state.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const jobsCli = path.join(root, 'bin', 'delegate-jobs');
@@ -70,11 +71,15 @@ async function mcpWork(env, args) {
     method: 'tools/call',
     params: { name: 'delegate_work', arguments: args }
   })}\n`);
-  for (let index = 0; index < 100 && responses.length < 1; index += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  await waitForCondition({
+    description: 'one delegate_work MCP response',
+    timeoutMs: 2_000,
+    observe: () => ({ count: responses.length }),
+    predicate: (state) => state.count >= 1,
+    summarize: (state) => `responses=${state.count}`
+  });
   child.stdin.end();
-  await new Promise((resolve) => child.once('exit', resolve));
+  await waitForChildExit({ child, description: 'the delegate_work MCP process to exit' });
   assert.equal(responses.length, 1);
   return JSON.parse(responses[0].result.content[0].text);
 }

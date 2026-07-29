@@ -23,6 +23,7 @@ import {
 import { assembleProviderPrompt } from '../bin/lib/packet.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
 import { auditLogPath, listJobs, loadJob } from '../bin/lib/state.mjs';
+import { waitForCondition } from './helpers/wait.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.dirname(testDir);
@@ -49,13 +50,14 @@ async function isolated(fn) {
   }
 }
 
-async function waitUntil(jobId, predicate) {
-  for (let index = 0; index < 300; index += 1) {
-    const job = inspectJob(jobId);
-    if (predicate(job)) return job;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timed out waiting for ${jobId}`);
+function waitUntil(jobId, predicate, description) {
+  return waitForCondition({
+    description,
+    timeoutMs: 3_000,
+    intervalMs: 10,
+    observe: () => inspectJob(jobId),
+    predicate
+  });
 }
 
 test('waitFor resolves turn and first-output milestones from the journal and times out boundedly', () => isolated(async ({ cwd }) => {
@@ -137,7 +139,7 @@ test('review-round resumes with diff stat, changed files, scope, and findings, a
   assert.match(packet, /Changed files:\n- src\/a\.js/);
   assert.match(packet, /Allowed paths:\n- src\n- test/);
   assert.match(packet, /Findings:\nFix the missing boundary check\./);
-  await waitUntil(child.id, (job) => ['completed', 'failed'].includes(job.status));
+  await waitUntil(child.id, (job) => ['completed', 'failed'].includes(job.status), 'review child status to become completed or failed');
 
   const cliRound = spawnSync(process.execPath, [cli, 'review-round', parent.id, '--prompt', 'Fix the CLI boundary too.'], {
     encoding: 'utf8', env: { ...process.env }
@@ -146,7 +148,7 @@ test('review-round resumes with diff stat, changed files, scope, and findings, a
   assert.doesNotThrow(() => JSON.parse(cliRound.stdout));
   assert.doesNotMatch(cliRound.stdout, /packet lint/i);
   assert.match(cliRound.stderr, /packet lint/i);
-  await waitUntil(JSON.parse(cliRound.stdout).id, (job) => ['completed', 'failed'].includes(job.status));
+  await waitUntil(JSON.parse(cliRound.stdout).id, (job) => ['completed', 'failed'].includes(job.status), 'CLI review child status to become completed or failed');
 
   const beforeSecret = listJobs().length;
   assert.throws(() => reviewRoundManagedJob(parent.id, { prompt: 'API_KEY=abcdefghijklmnop' }), /looks like a credential/);
@@ -225,7 +227,7 @@ test('cancel and steer commands are settled during retry backoff without a secon
     retryPolicy: { maxAttempts: 2, retryOn: ['transport'] }
   });
   const running = runManagedProvider(job);
-  const retrying = await waitUntil(job.id, (current) => current.phase === 'retrying');
+  const retrying = await waitUntil(job.id, (current) => current.phase === 'retrying', "job.phase === 'retrying'");
   submitControl(job.id, { type: 'steer', correctionId: 'between-attempts', text: 'change direction', strategy: 'auto' }, retrying.revision);
   const steered = inspectJob(job.id);
   submitControl(job.id, { type: 'cancel', commandId: 'cancel-backoff' }, steered.revision);

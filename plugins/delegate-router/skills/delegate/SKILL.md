@@ -245,12 +245,16 @@ Managed Codex, Cursor ACP, and Cursor headless workers receive a broker-owned
 question-only back-channel. A worker's `ask_coordinator` call enters
 `user-input-required` with one normalized, redacted question plus bounded
 stuck context, diff so far, and options considered. Inspect the current
-revision and answer with `delegate_respond`, `delegate-jobs respond`, or `a`
-inside the job's TUI detail view. A structured response may contain only
+revision and follow the pending request's contract. A `plan-confirmation`
+requires the boolean MCP decision `delegate_respond accept=true|false`, or CLI
+`delegate-jobs respond <id> --expected-revision N --request-id <request> --accept`
+or the same command with `--reject`; a free-form `--answer` is invalid for a
+plan. A free-form `question` takes MCP `answer`, CLI `--answer`, or `a` inside
+the job's TUI detail view. A structured response may contain only
 `{"answer":"...", "steer":"..."}`; the steer is guidance within the original
 task and is never a permission, approval, scope, budget, timeout, network,
 sandbox, or control-plane grant. The monitor line prints the exact revisioned
-CLI form when input is outstanding.
+CLI form for the pending kind when input is outstanding.
 
 Do not silently let a question expire. The default timeout is 300 seconds and
 the declared default is rejection with `stopReason: input-timeout`; blocked

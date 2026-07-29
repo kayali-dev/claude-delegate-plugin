@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -33,6 +33,7 @@ import {
   runManagedProvider
 } from '../bin/lib/providers.mjs';
 import { TranscriptProjector } from '../bin/lib/tui/transcript.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const fixture = path.join(testDir, 'fake-cursor-parity.mjs');
@@ -69,14 +70,23 @@ async function isolated(fn, scenario = 'normal') {
   }
 }
 
-async function waitFor(predicate, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error('timed out waiting for condition');
+function waitFor(predicate, description, timeoutMs = 5_000) {
+  return waitForCondition({ description, timeoutMs, observe: predicate });
+}
+
+function runNode(args, env = process.env) {
+  const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return waitForChildExit({
+    child,
+    description: `Node child ${path.basename(args[0])} to exit`,
+    timeoutMs: 35_000
+  }).then(({ status, signal }) => ({ status, signal, stdout, stderr }));
 }
 
 test('headless read modes stream NDJSON and network elevation plus advanced flags preserve intent', () => {
@@ -232,7 +242,7 @@ for (const scenario of ['ask-question', 'create-plan']) {
     const waiting = await waitFor(() => {
       const current = inspectJob(job.id);
       return current.pendingInput ? current : null;
-    });
+    }, 'a pending Cursor input request');
     assert.equal(waiting.phase, 'user-input-required');
     const commandId = `${scenario}-response`;
     const command = scenario === 'ask-question'
@@ -241,10 +251,14 @@ for (const scenario of ['ask-question', 'create-plan']) {
     const responseArgs = [jobsCli, 'respond', job.id, '--expected-revision', String(waiting.revision), '--request-id', waiting.pendingInput.requestId, '--command-id', commandId];
     if (scenario === 'ask-question') responseArgs.push('--answer', 'src');
     else responseArgs.push('--reject', '--answer', 'revise scope');
-    const cli = spawnSync(process.execPath, responseArgs, { env: process.env, encoding: 'utf8' });
+    const cli = await runNode(responseArgs);
     assert.equal(cli.status, 0, cli.stderr);
-    const accepted = JSON.parse(cli.stdout);
-    assert.equal(accepted.accepted, true);
+    const responseResult = JSON.parse(cli.stdout);
+    assert.equal(responseResult.command.claimed, true);
+    assert.equal(responseResult.command.state, 'applied');
+    assert.equal(responseResult.request.answered, true);
+    assert.equal(responseResult.request.kind, scenario === 'create-plan' ? 'plan-confirmation' : 'question');
+    assert.equal(responseResult.request.outcome, scenario === 'create-plan' ? 'rejected' : 'answered');
     const duplicate = submitControl(job.id, command, waiting.revision);
     assert.equal(duplicate.duplicate, true);
     await running;

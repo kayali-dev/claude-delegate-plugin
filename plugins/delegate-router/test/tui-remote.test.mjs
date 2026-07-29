@@ -35,6 +35,7 @@ import { assertDatasourceInterface } from '../bin/lib/tui/datasource-interface.m
 import { RemoteDatasource } from '../bin/lib/tui/remote-datasource.mjs';
 import { scanClaudeSessions } from '../bin/lib/tui/sessions.mjs';
 import { createViewModel } from '../bin/lib/tui/viewmodels.mjs';
+import { waitForEventState } from './helpers/wait.mjs';
 
 const TOKEN = 'remote-test-token-0123456789abcdef';
 const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -105,22 +106,8 @@ function jsonValue(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function waitFor(source, predicate, timeoutMs = 4000) {
-  const current = source.getState();
-  if (predicate(current)) return Promise.resolve(current);
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      source.off('change', changed);
-      reject(new Error('timed out waiting for remote datasource state'));
-    }, timeoutMs);
-    const changed = (state) => {
-      if (!predicate(state)) return;
-      clearTimeout(timeout);
-      source.off('change', changed);
-      resolve(state);
-    };
-    source.on('change', changed);
-  });
+function waitFor(source, predicate, description, timeoutMs = 4_000) {
+  return waitForEventState({ source, predicate, description, timeoutMs });
 }
 
 test('serve.mjs imports no managed-job mutation symbols', () => {
@@ -253,10 +240,15 @@ test('SSE streams appended events and heartbeat comments', async (t) => {
   while (Date.now() < deadline && (!received.includes('SSE appended finding') || !received.includes(': heartbeat'))) {
     const result = await Promise.race([
       reader.read(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('SSE read timeout')), 1000))
+      new Promise((_, reject) => setTimeout(() => reject(new Error(
+        `timed out waiting for the next SSE chunk while awaiting the appended event and heartbeat; last saw ${JSON.stringify(received.slice(-500))}`
+      )), 1000))
     ]);
     if (result.done) break;
     received += decoder.decode(result.value, { stream: true });
+  }
+  if (!received.includes('SSE appended finding') || !received.includes(': heartbeat')) {
+    throw new Error(`timed out waiting for the SSE appended event and heartbeat; last saw ${JSON.stringify(received.slice(-500))}`);
   }
   assert.match(received, /SSE appended finding/);
   assert.match(received, /: heartbeat/);
@@ -282,7 +274,7 @@ test('RemoteDatasource satisfies the local interface, renders remote identity, t
   t.after(() => source.close());
   assert.equal(assertDatasourceInterface(source), source);
   source.start();
-  const connected = await waitFor(source, (state) => state.remote.connection.status === 'connected' && state.jobs.some((entry) => entry.id === job.id));
+  const connected = await waitFor(source, (state) => state.remote.connection.status === 'connected' && state.jobs.some((entry) => entry.id === job.id), 'remote datasource to connect and discover the job');
   assert.equal(connected.remote.host, `127.0.0.1:${running.port}`);
   assert.equal(source.readOnly, true);
 
@@ -303,7 +295,7 @@ test('RemoteDatasource satisfies the local interface, renders remote identity, t
   assert.equal(selected.hydrationByJob[job.id].loaded, true);
   assert.ok(selected.eventsByJob[job.id].some((event) => event.data?.text === 'Synthetic findings.'));
   appendJobEvent(job.id, 'message.completed', { text: 'Remote datasource live event' });
-  const tailed = await waitFor(source, (state) => state.eventsByJob[job.id]?.some((event) => event.data?.text === 'Remote datasource live event'));
+  const tailed = await waitFor(source, (state) => state.eventsByJob[job.id]?.some((event) => event.data?.text === 'Remote datasource live event'), 'remote event stream to include the appended message');
   assert.equal(tailed.remote.connection.status, 'connected');
   const before = JSON.stringify(tailed.jobs);
   await source.reconcileVisibleJobs([job.id]);
@@ -322,9 +314,9 @@ test('RemoteDatasource reports connection loss and advances retry state without 
     requestTimeoutMs: 250
   }).start();
   t.after(() => source.close());
-  await waitFor(source, (state) => state.remote.connection.status === 'connected');
+  await waitFor(source, (state) => state.remote.connection.status === 'connected', 'remote datasource connection status to become connected');
   await running.close({ timeoutMs: 200 });
-  const retrying = await waitFor(source, (state) => state.remote.connection.status === 'retrying' && state.remote.connection.attempt >= 1, 4000);
+  const retrying = await waitFor(source, (state) => state.remote.connection.status === 'retrying' && state.remote.connection.attempt >= 1, 'remote datasource connection status to become retrying', 4_000);
   assert.ok(retrying.remote.connection.retryAt >= Date.now() - 1000);
   assert.match(retrying.remote.connection.error, /fetch|connect|request|unavailable/i);
 });

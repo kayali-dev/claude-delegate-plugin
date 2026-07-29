@@ -236,13 +236,17 @@ plugin plus `--approve-mcps`. Injection failure emits
 server; it never fails the job.
 
 Back-channel and native Cursor questions share one redacted/bounded
-`pendingInput`: `{ requestId, kind: "question", question, options, urgency,
+`pendingInput`: `{ requestId, kind: "question" | "plan-confirmation", question, options, urgency,
 context: { stuckOn, diffSoFar, optionsConsidered }, requestedAt, timeoutMs,
 expiresAt, defaultAction: "reject" }`. Phase becomes
 `user-input-required`; `input.requested` carries that shape, and revisioned MCP
-`delegate_respond`, CLI `delegate-jobs respond`, or the TUI `a` action queues
-`input.response.requested`. `input.resolved` journals the redacted answer and
-optional steer. Structured back-channel responses reject every field except
+`delegate_respond`, CLI `delegate-jobs respond`, or the TUI `a` action for a
+free-form question queues `input.response.requested`. A `plan-confirmation`
+requires `accept=true|false` / `--accept` / `--reject`; answer-only input is
+rejected before queueing. `input.resolved` journals the redacted answer or
+boolean decision and optional steer. The CLI and MCP response surfaces wait for
+the terminal command outcome and return separate command-claimed and
+request-answered records. Structured back-channel responses reject every field except
 `answer` and `steer`; the returned tool result explicitly preserves all
 original scope, permission, approval, budget, timeout, network, sandbox, and
 control constraints.

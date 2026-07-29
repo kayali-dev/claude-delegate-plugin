@@ -263,14 +263,21 @@ A steer that reduces the remaining work can finish the job before any follow-up 
 - Codex can accept a genuine same-turn correction through app-server `turn/steer`.
 - Cursor ACP v1 cannot. Its correction path cancels the prompt and resumes the same session, and must be reported as a restart.
 
-Cursor `cursor/ask_question` and `cursor/create_plan` requests are blocking control-inbox items, not provider noise. The job stays running in phase `user-input-required`, persists the redacted request under `pendingInput`, and emits `input.requested`. Inspect the latest revision, then use MCP `delegate_respond` or `delegate-jobs respond <id> --expected-revision N --request-id ... --answer ...` (with `--accept`/`--reject` for plans); retry the same response with the same `commandId`. No answer or plan approval is fabricated. `DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS` (default 300) bounds the wait; expiry rejects the provider request and fails with `stopReason: input-timeout`.
+Cursor `cursor/ask_question` and `cursor/create_plan` requests are blocking control-inbox items, not provider noise. The job stays running in phase `user-input-required`, persists the redacted request under `pendingInput`, and emits `input.requested`. Inspect the latest revision and lead with the contract-specific form:
+
+- Plan confirmation: MCP `delegate_respond accept=true|false`, or `delegate-jobs respond <id> --expected-revision N --request-id ... --accept` / `--reject`.
+- Free-form question: MCP `delegate_respond answer="..."`, or `delegate-jobs respond <id> --expected-revision N --request-id ... --answer "..."`.
+
+An answer-only plan response fails before command intake and names `--accept` / `--reject`. CLI and MCP return only after the command is applied or rejected; success identifies the resolved request, its kind, and its outcome instead of reporting intake as `accepted`. Retry the same response with the same `commandId`. No answer or plan approval is fabricated. `DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS` (default 300) bounds the wait; expiry rejects the provider request and fails with `stopReason: input-timeout`.
 
 Managed sessions also receive the separate `delegate-backchannel-mcp`.
 Codex and Cursor headless use it for the free-form question path that ACP
 already provides; all three transports render the same `pendingInput`
 question/options/urgency/context/default shape. `ask_coordinator` blocks and
 `report_progress` does not. Press `a` in TUI detail or use the same revisioned
-`delegate_respond`/`delegate-jobs respond` flow. To attach an in-contract steer,
+`delegate_respond`/`delegate-jobs respond --answer` flow for free-form
+questions. Plan confirmations require the boolean decision form above. To
+attach an in-contract steer to a free-form answer,
 use `--response-json '{"answer":"...","steer":"..."}'`.
 
 The back-channel is data, never authority. Its server exposes only those two

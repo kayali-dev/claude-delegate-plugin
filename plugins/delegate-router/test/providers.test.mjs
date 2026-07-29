@@ -15,6 +15,7 @@ import {
 import { CODEX_FIRST_CLASS_ITEM_TYPES } from '../bin/lib/codex-item-types.mjs';
 import { effectiveUsage, loadState } from '../bin/lib/state.mjs';
 import { formatTranscriptBlock, TranscriptProjector } from '../bin/lib/tui/transcript.mjs';
+import { waitForCondition } from './helpers/wait.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
@@ -34,20 +35,21 @@ async function isolated(fn) {
   }
 }
 
-async function waitFor(jobId, predicate) {
-  for (let i = 0; i < 300; i += 1) {
-    const job = inspectJob(jobId);
-    if (predicate(job)) return job;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('timed out waiting for job state');
+function waitFor(jobId, predicate, description) {
+  return waitForCondition({
+    description,
+    timeoutMs: 3_000,
+    intervalMs: 10,
+    observe: () => inspectJob(jobId),
+    predicate
+  });
 }
 
 test('Codex app-server maps events and applies true same-turn steering', () => isolated(async (directory) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'implement' });
   const running = runManagedProvider(job);
-  const active = await waitFor(job.id, (current) => Boolean(current.providerTurnId));
+  const active = await waitFor(job.id, (current) => Boolean(current.providerTurnId), 'providerTurnId to be recorded');
   submitControl(job.id, { type: 'steer', correctionId: 'codex-correction', strategy: 'same-turn', text: 'add a test' }, active.revision);
   await running;
   assert.equal(inspectJob(job.id).status, 'completed');
@@ -234,7 +236,7 @@ test('Cursor ACP maps structured updates and reports correction as restart', () 
   process.env.DELEGATE_CURSOR_LOGIN_SHELL = '0';
   const job = createManagedJob({ provider: 'cursor', model: 'composer', mode: 'implement', cwd: directory, prompt: 'implement' });
   const running = runManagedProvider(job);
-  const active = await waitFor(job.id, (current) => Boolean(current.providerSessionId));
+  const active = await waitFor(job.id, (current) => Boolean(current.providerSessionId), 'providerSessionId to be recorded');
   submitControl(job.id, { type: 'steer', correctionId: 'cursor-correction', strategy: 'auto', text: 'use a different API' }, active.revision);
   const afterFirst = inspectJob(job.id);
   submitControl(job.id, { type: 'steer', correctionId: 'cursor-correction-2', strategy: 'auto', text: 'also add a regression test' }, afterFirst.revision);

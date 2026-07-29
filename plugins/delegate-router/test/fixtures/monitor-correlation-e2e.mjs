@@ -4,6 +4,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
+import { waitForChildExit, waitForCondition } from '../helpers/wait.mjs';
 
 const pluginRoot = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 const hookBin = path.join(pluginRoot, 'bin', 'delegate-session-hook');
@@ -26,22 +27,9 @@ function records(root, prefix) {
   }
 }
 
-async function waitFor(predicate, timeoutMs = 3_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  return null;
-}
-
 async function stop(child) {
   child.kill('SIGTERM');
-  await new Promise((resolve) => {
-    if (child.exitCode != null) resolve();
-    else child.once('exit', resolve);
-  });
+  await waitForChildExit({ child, description: 'the monitor fixture process to exit after SIGTERM' });
 }
 
 async function runMonitor(root) {
@@ -62,7 +50,11 @@ async function runMonitor(root) {
   let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
-  const resolution = await waitFor(() => records(root, 'resolution-')[0]);
+  const resolution = await waitForCondition({
+    description: 'the monitor fixture to publish a resolution record',
+    timeoutMs: 3_000,
+    observe: () => records(root, 'resolution-')[0] || null
+  });
   await stop(child);
   return {
     resolution,

@@ -29,6 +29,7 @@ import {
 } from '../bin/lib/stats.mjs';
 import { loadProfile } from '../bin/lib/profiles.mjs';
 import { loadJob } from '../bin/lib/state.mjs';
+import { waitForCondition } from './helpers/wait.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.dirname(testDir);
@@ -56,13 +57,14 @@ async function isolated(fn) {
   }
 }
 
-async function waitFor(jobId, predicate) {
-  for (let index = 0; index < 500; index += 1) {
-    const job = inspectJob(jobId);
-    if (predicate(job)) return job;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('timed out waiting for job state');
+function waitFor(jobId, predicate, description) {
+  return waitForCondition({
+    description,
+    timeoutMs: 5_000,
+    intervalMs: 10,
+    observe: () => inspectJob(jobId),
+    predicate
+  });
 }
 
 test('stats aggregate synthetic audit records and the CLI reads audit.jsonl', () => isolated(({ root }) => {
@@ -480,7 +482,7 @@ test('startPaused establishes a session, holds, releases, and supports cancel wh
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   const releasedJob = createManagedJob({ provider: 'codex', cwd, prompt: 'run after release', startPaused: true });
   const releasedRun = runManagedProvider(releasedJob);
-  const paused = await waitFor(releasedJob.id, (job) => job.phase === 'paused');
+  const paused = await waitFor(releasedJob.id, (job) => job.phase === 'paused', "job.phase === 'paused'");
   assert.ok(paused.providerSessionId);
   assert.equal(readJobEvents(releasedJob.id, { limit: 1000 }).some((event) => event.type === 'turn.started'), false);
   submitControl(releasedJob.id, { type: 'release', commandId: 'release-one' }, paused.revision);
@@ -489,7 +491,7 @@ test('startPaused establishes a session, holds, releases, and supports cancel wh
 
   const cancelledJob = createManagedJob({ provider: 'codex', cwd, prompt: 'never run', startPaused: true });
   const cancelledRun = runManagedProvider(cancelledJob);
-  const pausedAgain = await waitFor(cancelledJob.id, (job) => job.phase === 'paused');
+  const pausedAgain = await waitFor(cancelledJob.id, (job) => job.phase === 'paused', "job.phase === 'paused'");
   submitControl(cancelledJob.id, { type: 'cancel', commandId: 'cancel-paused' }, pausedAgain.revision);
   await cancelledRun;
   const cancelled = inspectJob(cancelledJob.id);

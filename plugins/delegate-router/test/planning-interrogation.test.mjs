@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   attributeInterrogationUsage,
   claimCommands,
+  completeCommand,
   createManagedJob,
   inspectJob,
   launchManagedJob,
@@ -29,6 +30,7 @@ import {
 } from '../bin/lib/planning.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
 import { projectJobAsWorkItem } from '../bin/lib/work-projection.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
@@ -84,13 +86,34 @@ async function isolated(fn) {
   }
 }
 
-async function waitFor(id, predicate) {
-  for (let index = 0; index < 500; index += 1) {
-    const job = inspectJob(id);
-    if (predicate(job)) return job;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timed out waiting for ${id}`);
+function runNode(args, options = {}) {
+  const child = spawn(process.execPath, args, {
+    env: options.env || process.env,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  if (options.input != null) child.stdin.end(options.input);
+  else child.stdin.end();
+  return waitForChildExit({
+    child,
+    description: `Node child ${path.basename(args[0])} to exit`,
+    timeoutMs: 35_000
+  }).then(({ status, signal }) => ({ status, signal, stdout, stderr }));
+}
+
+function waitFor(id, predicate, description, timeoutMs = 5_000) {
+  return waitForCondition({
+    description,
+    timeoutMs,
+    intervalMs: 10,
+    observe: () => inspectJob(id),
+    predicate
+  });
 }
 
 test('structural plan comparison distinguishes convergence, divergence, and inconclusive output without prose similarity', () => {
@@ -261,7 +284,7 @@ test('plan-first confirmation continues the same Codex thread and switches only 
     ambiguityCheck: false
   });
   const running = runManagedProvider(created);
-  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
   assert.equal(presented.status, 'running');
   assert.equal(presented.planning.state, 'awaiting-confirmation');
   assert.deepEqual(presented.planning.presentation.predictedBlastRadius.files, ['a.js', 'test/a.test.js']);
@@ -286,6 +309,204 @@ test('plan-first confirmation continues the same Codex thread and switches only 
   assert.ok(readJobEvents(created.id).some((event) => event.type === 'plan.confirmed'));
 }));
 
+test('CLI plan responses reject answer-only before intake and return the resolved request for accept', () => isolated(async (directory) => {
+  const created = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    maxOutputTokens: 200,
+    planFirst: true,
+    ambiguityCheck: false
+  });
+  const running = runManagedProvider(created);
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
+  const misuse = spawnSync(process.execPath, [
+    jobsCli,
+    'respond',
+    created.id,
+    '--expected-revision', String(presented.revision),
+    '--request-id', presented.pendingInput.requestId,
+    '--command-id', 'answer-only-plan',
+    '--answer', 'Please proceed with the plan'
+  ], { encoding: 'utf8', env: process.env });
+  assert.equal(misuse.status, 1);
+  assert.equal(misuse.stdout, '');
+  assert.equal(
+    misuse.stderr,
+    'delegate-jobs: INVALID_REQUEST: plan confirmation requires --accept or --reject (MCP: accept=true or accept=false); --answer is valid only for a free-form question (retryable=false, provider=codex)\n'
+  );
+  const afterMisuse = inspectJob(created.id);
+  assert.equal(afterMisuse.revision, presented.revision);
+  assert.equal(afterMisuse.pendingInput.requestId, presented.pendingInput.requestId);
+  assert.equal(afterMisuse.controls?.['answer-only-plan'], undefined);
+
+  const accepted = await runNode([
+    jobsCli,
+    'respond',
+    created.id,
+    '--expected-revision', String(presented.revision),
+    '--request-id', presented.pendingInput.requestId,
+    '--command-id', 'accept-plan-cli',
+    '--accept'
+  ]);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const result = JSON.parse(accepted.stdout);
+  assert.equal('accepted' in result, false);
+  assert.deepEqual(result.command, {
+    id: 'accept-plan-cli',
+    claimed: true,
+    state: 'applied',
+    duplicate: false
+  });
+  assert.deepEqual(result.request, {
+    id: presented.pendingInput.requestId,
+    kind: 'plan-confirmation',
+    answered: true,
+    outcome: 'accepted',
+    appliedAs: 'same-session-plan-confirmation'
+  });
+  await running;
+  assert.equal(inspectJob(created.id).planning.state, 'confirmed');
+}));
+
+test('CLI respond exits non-zero when a claimed response is rejected asynchronously', () => isolated(async (directory) => {
+  const job = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'consult',
+    cwd: directory,
+    prompt: 'Wait for a coordinator answer'
+  });
+  const requestId = 'question-async-rejection';
+  const waiting = updateManagedJob(job.id, (current) => {
+    current.status = 'running';
+    current.phase = 'user-input-required';
+    current.stopReason = 'USER_INPUT_REQUIRED';
+    current.pid = process.pid;
+    current.pendingInput = {
+      requestId,
+      kind: 'question',
+      method: 'ask_coordinator',
+      origin: 'backchannel',
+      expiresAt: Date.now() + 5_000
+    };
+  });
+  const response = runNode([
+    jobsCli,
+    'respond',
+    job.id,
+    '--expected-revision', String(waiting.revision),
+    '--request-id', requestId,
+    '--command-id', 'async-rejected-cli',
+    '--answer', 'This arrives after the request becomes stale'
+  ]);
+  let earlyResult = null;
+  response.then((result) => { earlyResult = result; });
+  const claimed = await waitForCondition({
+    description: 'the CLI response command to become claimable',
+    timeoutMs: 5_000,
+    observe: () => {
+      const command = claimCommands(job.id, { includeTypes: ['respond'] })[0] || null;
+      if (!command && earlyResult) throw new Error(`CLI exited early: status=${earlyResult.status}, stderr=${JSON.stringify(earlyResult.stderr)}`);
+      return command;
+    }
+  });
+  completeCommand(job.id, claimed, {
+    ok: false,
+    error: 'pending request expired after intake',
+    requestId
+  });
+  const result = await response;
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.equal(
+    result.stderr,
+    'delegate-jobs: INVALID_REQUEST: response command async-rejected-cli was rejected: pending request expired after intake (retryable=false, provider=codex)\n'
+  );
+}));
+
+test('MCP plan responses make both submit-time rejection and accepted resolution unmistakable', () => isolated(async (directory) => {
+  const created = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    maxOutputTokens: 200,
+    planFirst: true,
+    ambiguityCheck: false
+  });
+  const running = runManagedProvider(created);
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
+  const request = (id, arguments_) => `${JSON.stringify({
+    jsonrpc: '2.0',
+    id,
+    method: 'tools/call',
+    params: { name: 'delegate_respond', arguments: arguments_ }
+  })}\n`;
+  const misuse = spawnSync(process.execPath, [controlMcp], {
+    encoding: 'utf8',
+    env: process.env,
+    input: request(1, {
+      jobId: created.id,
+      expectedRevision: presented.revision,
+      requestId: presented.pendingInput.requestId,
+      answer: 'Please proceed with the plan',
+      commandId: 'answer-only-plan-mcp'
+    })
+  });
+  assert.equal(misuse.status, 0, misuse.stderr);
+  const rejectedEnvelope = JSON.parse(misuse.stdout.trim());
+  assert.equal(rejectedEnvelope.result.isError, true);
+  const rejected = JSON.parse(rejectedEnvelope.result.content[0].text);
+  assert.equal('accepted' in rejected, false);
+  assert.equal(rejected.code, 'INVALID_REQUEST');
+  assert.match(rejected.error, /--accept or --reject/);
+  assert.deepEqual(rejected.command, {
+    id: 'answer-only-plan-mcp',
+    claimed: false,
+    state: 'rejected-before-intake'
+  });
+  assert.deepEqual(rejected.request, {
+    id: presented.pendingInput.requestId,
+    kind: 'plan-confirmation',
+    answered: false
+  });
+
+  const acceptedCall = runNode([controlMcp], {
+    input: request(2, {
+      jobId: created.id,
+      expectedRevision: presented.revision,
+      requestId: presented.pendingInput.requestId,
+      accept: true,
+      commandId: 'accept-plan-mcp'
+    })
+  });
+  const acceptedProcess = await acceptedCall;
+  assert.equal(acceptedProcess.status, 0, acceptedProcess.stderr);
+  const acceptedEnvelope = JSON.parse(acceptedProcess.stdout.trim());
+  assert.equal(acceptedEnvelope.result.isError, undefined);
+  const accepted = JSON.parse(acceptedEnvelope.result.content[0].text);
+  assert.equal('accepted' in accepted, false);
+  assert.deepEqual(accepted.command, {
+    id: 'accept-plan-mcp',
+    claimed: true,
+    state: 'applied',
+    duplicate: false
+  });
+  assert.deepEqual(accepted.request, {
+    id: presented.pendingInput.requestId,
+    kind: 'plan-confirmation',
+    answered: true,
+    outcome: 'accepted',
+    appliedAs: 'same-session-plan-confirmation'
+  });
+  await running;
+  assert.equal(inspectJob(created.id).planning.state, 'confirmed');
+}));
+
 test('two independent cheap plan passes open only structural divergence questions and report inconclusive without a verdict', () => isolated(async (directory) => {
   const runComparison = async ({ divergentModel = null, inconclusiveModel = null }) => {
     if (divergentModel) process.env.FAKE_CODEX_DIVERGENT_MODEL = divergentModel;
@@ -303,7 +524,7 @@ test('two independent cheap plan passes open only structural divergence question
       ambiguityCheck: true
     });
     const running = runManagedProvider(created);
-    const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
+    const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
     const comparison = presented.planning.comparison;
     submitControl(created.id, {
       type: 'respond',
@@ -357,7 +578,7 @@ test('a realistic five-kilobyte packet recovers a marginal plan overrun and reac
     ambiguityCheck: true
   });
   const running = runManagedProvider(created);
-  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
   assert.equal(presented.planPass.state, 'recovered');
   assert.equal(presented.planPass.outputTokenLimit, 4_096);
   assert.equal(presented.planPass.outputTokens, 4_162);
@@ -387,7 +608,7 @@ test('a failed independent plan pass degrades loudly on the implement attempt an
     ambiguityCheck: true
   });
   const running = runManagedProvider(created);
-  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
   assert.equal(presented.status, 'running');
   assert.equal(presented.planPass.state, 'degraded');
   assert.equal(presented.planPass.reason, 'runaway-plan-output-token-budget-exceeded');
@@ -451,7 +672,7 @@ test('CLI and MCP launch responses surface plan degradation with observed-versus
   assert.equal(cli.status, 0, cli.stderr);
   const cliResult = JSON.parse(cli.stdout);
   assertWarning(cliResult);
-  await waitFor(cliResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status));
+  await waitFor(cliResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status), 'job status to become terminal');
 
   const request = {
     jsonrpc: '2.0',
@@ -478,7 +699,7 @@ test('CLI and MCP launch responses surface plan degradation with observed-versus
   const response = JSON.parse(mcp.stdout.trim());
   const mcpResult = JSON.parse(response.result.content[0].text);
   assertWarning(mcpResult);
-  await waitFor(mcpResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status));
+  await waitFor(mcpResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status), 'job status to become terminal');
 }));
 
 test('interrogation rejects authority fields and records answer plus observed token cost as WorkItem finding evidence', () => isolated((directory) => {
@@ -541,7 +762,7 @@ test('Codex interrogation round trip uses turn/steer framing, preserves the cont
   });
   const digest = contractDigest(created);
   const running = runManagedProvider(created);
-  const active = await waitFor(created.id, (job) => Boolean(job.providerTurnId));
+  const active = await waitFor(created.id, (job) => Boolean(job.providerTurnId), 'providerTurnId to be recorded');
   submitControl(created.id, {
     type: 'interrogate',
     question: 'what did the failing check actually say?',
@@ -576,7 +797,7 @@ test('Cursor plan-first and interrogation reuse one ACP session while questions 
     ambiguityCheck: false
   });
   const planningRun = runManagedProvider(planned);
-  const presented = await waitFor(planned.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
+  const presented = await waitFor(planned.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
   submitControl(planned.id, {
     type: 'respond',
     requestId: presented.pendingInput.requestId,
@@ -603,7 +824,7 @@ test('Cursor plan-first and interrogation reuse one ACP session while questions 
     planFirst: false
   });
   const questioningRun = runManagedProvider(questioned);
-  const active = await waitFor(questioned.id, (job) => Boolean(job.providerSessionId));
+  const active = await waitFor(questioned.id, (job) => Boolean(job.providerSessionId), 'providerSessionId to be recorded');
   submitControl(questioned.id, {
     type: 'interrogate',
     question: 'what did the failing check actually say?',

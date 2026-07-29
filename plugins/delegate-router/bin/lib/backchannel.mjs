@@ -11,6 +11,7 @@ import {
   updateManagedJob
 } from './control.mjs';
 import { brokerError } from './errors.mjs';
+import { validateBackchannelResponse } from './response-contract.mjs';
 import { jobsDir, loadJob } from './state.mjs';
 
 const QUESTION_MAX = 8_192;
@@ -21,12 +22,6 @@ const DIFF_MAX_DEFAULT = 12_000;
 const ANSWER_MAX = 16_384;
 const URGENCIES = new Set(['low', 'normal', 'high', 'blocking']);
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
-const AUTHORITY_FIELDS = new Set([
-  'allowedPaths', 'scope', 'permissions', 'approval', 'approvals', 'budget',
-  'timeout', 'timeoutSeconds', 'network', 'sandbox', 'sandboxOff',
-  'cancel', 'steerJob', 'resume', 'resumeJob', 'command', 'control'
-]);
-
 export const BACKCHANNEL_TOOLS = Object.freeze([
   Object.freeze({
     name: 'ask_coordinator',
@@ -156,7 +151,7 @@ export function normalizeCoordinatorQuestion(job, input = {}, options = {}) {
     : args.question;
   return redact({
     requestId,
-    kind: 'question',
+    kind: method === 'cursor/create_plan' ? 'plan-confirmation' : 'question',
     question: args.question,
     options: args.options,
     urgency: args.urgency,
@@ -218,25 +213,9 @@ export function resolveCoordinatorQuestion(jobId, question, outcome, origin = 'b
 }
 
 function answerFromCommand(command) {
-  if (command.response != null) {
-    if (!command.response || typeof command.response !== 'object' || Array.isArray(command.response)) {
-      throw brokerError('INVALID_REQUEST', 'structured back-channel response must be an object');
-    }
-    const keys = Object.keys(command.response);
-    const forbidden = keys.filter((key) => AUTHORITY_FIELDS.has(key));
-    const unknown = keys.filter((key) => !['answer', 'steer'].includes(key));
-    if (forbidden.length || unknown.length) {
-      throw brokerError('INVALID_REQUEST', `back-channel responses carry answer data only; rejected fields: ${[...new Set([...forbidden, ...unknown])].join(', ')}`);
-    }
-  }
+  validateBackchannelResponse(command);
   const answer = command.answer ?? command.response?.answer;
-  if (typeof answer !== 'string' || !answer.trim()) {
-    throw brokerError('INVALID_REQUEST', 'back-channel response requires a non-empty answer string');
-  }
   const steer = command.response?.steer;
-  if (steer != null && (typeof steer !== 'string' || !steer.trim())) {
-    throw brokerError('INVALID_REQUEST', 'back-channel steer must be a non-empty string');
-  }
   return {
     answer: String(redact(answer.trim(), '', ANSWER_MAX)),
     ...(steer == null ? {} : { steer: String(redact(steer.trim(), '', ANSWER_MAX)) })

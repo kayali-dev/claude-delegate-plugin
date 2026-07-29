@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
@@ -14,6 +14,7 @@ import {
 } from '../bin/lib/control.mjs';
 import { JsonRpcProcess } from '../bin/lib/jsonrpc.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
+import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.dirname(testDir);
@@ -52,14 +53,23 @@ async function isolated(t, provider, fn, extra = {}) {
   }
 }
 
-async function waitFor(predicate, timeoutMs = 7_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error('timed out waiting for condition');
+function waitFor(predicate, description, timeoutMs = 7_000) {
+  return waitForCondition({ description, timeoutMs, observe: predicate });
+}
+
+function runNode(args, env = process.env) {
+  const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return waitForChildExit({
+    child,
+    description: `Node child ${path.basename(args[0])} to exit`,
+    timeoutMs: 35_000
+  }).then(({ status, signal }) => ({ status, signal, stdout, stderr }));
 }
 
 test('back-channel server exposes exactly the question-only tools and imports no control-plane mutators', async (t) => {
@@ -108,7 +118,7 @@ test('fake Codex worker question round-trips through delegate-jobs respond with 
     const waiting = await waitFor(() => {
       const current = inspectJob(job.id);
       return current.pendingInput ? current : null;
-    });
+    }, 'a pending coordinator question');
     assert.equal(waiting.phase, 'user-input-required');
     assert.equal(waiting.stalled, false);
     assert.equal(waiting.pendingInput.kind, 'question');
@@ -117,7 +127,7 @@ test('fake Codex worker question round-trips through delegate-jobs respond with 
     assert.match(waiting.pendingInput.context.diffSoFar, /work completed before the question/);
     assert.ok(!JSON.stringify(waiting.pendingInput).includes('question-secret-value'));
 
-    const answered = spawnSync(process.execPath, [
+    const answered = await runNode([
       jobsCli,
       'respond',
       job.id,
@@ -128,9 +138,18 @@ test('fake Codex worker question round-trips through delegate-jobs respond with 
         answer: 'Use src. API_KEY=answer-secret-value',
         steer: 'Run the parser test within the original scope'
       })
-    ], { env: process.env, encoding: 'utf8' });
+    ]);
     assert.equal(answered.status, 0, answered.stderr);
-    assert.equal(JSON.parse(answered.stdout).accepted, true);
+    const responseResult = JSON.parse(answered.stdout);
+    assert.equal(responseResult.command.claimed, true);
+    assert.equal(responseResult.command.state, 'applied');
+    assert.deepEqual(responseResult.request, {
+      id: waiting.pendingInput.requestId,
+      kind: 'question',
+      answered: true,
+      outcome: 'answered',
+      appliedAs: 'backchannel-answer'
+    });
 
     await running;
     const completed = inspectJob(job.id);
@@ -171,13 +190,18 @@ test('back-channel rejects structured authority and times out with a durable def
       name: 'ask_coordinator',
       arguments: { question: 'Can I proceed?', options: ['stop'], urgency: 'blocking' }
     }, 2_000);
-    const waiting = await waitFor(() => inspectJob(job.id).pendingInput && inspectJob(job.id));
-    submitControl(job.id, {
+    const waiting = await waitFor(
+      () => inspectJob(job.id).pendingInput && inspectJob(job.id),
+      'a pending coordinator question'
+    );
+    assert.throws(() => submitControl(job.id, {
       type: 'respond',
       requestId: waiting.pendingInput.requestId,
       commandId: 'authority-answer',
       response: { answer: 'yes', network: true }
-    }, waiting.revision);
+    }, waiting.revision), (error) => error.code === 'INVALID_REQUEST'
+      && error.commandClaimed === false
+      && /network/.test(error.message));
     const result = await asking;
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /default action rejected continuation/);
@@ -189,7 +213,7 @@ test('back-channel rejects structured authority and times out with a durable def
     assert.equal(timedOut.attemptLease.blockedQuestionId, null);
     assert.ok(timedOut.attemptLease.blockedMs >= 100);
     const events = readJobEvents(job.id);
-    assert.ok(events.some((event) => event.type === 'command.rejected' && /network/.test(event.data.error)));
+    assert.equal(events.some((event) => event.type === 'command.rejected' && /network/.test(event.data.error)), false);
     assert.ok(events.some((event) => event.type === 'input.resolved'
       && event.data.outcome === 'timeout'
       && event.data.defaultAction === 'reject'));
