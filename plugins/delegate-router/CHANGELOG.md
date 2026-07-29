@@ -2,6 +2,30 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.54.0 — 2026-07-29
+
+- Sized the plan pass generously on both axes and per provider. The independent
+  planner prefers PROVIDER independence, so a Codex parent with Cursor enabled
+  plans on Cursor — which is materially slower to first token and was dying on
+  the old ceiling, while Codex/luna finished in a median 46s. Codex now gets
+  8,192 nominal tokens (9,830 with the recoverable band) and a 300s floor;
+  Cursor gets 12,288 (14,745) and a 600s floor. Both runaways observed in the
+  field, 66,428 and 77,912 tokens, still exceed every allowance and still fail.
+- The two failure modes are not symmetric, so the numbers are deliberately not
+  fitted to observed spend: too small means plan-first silently does not work,
+  which is what happened fifteen consecutive times, while too large costs a few
+  tokens only if the model fills the room — and the compact JSON contract plus
+  the recoverable-overrun band already bound that. The previous 4,915 effective
+  ceiling would also have rejected the largest legitimate spend measured (8,373)
+  as a runaway.
+- `DELEGATE_PLAN_OUTPUT_TOKENS` and `DELEGATE_PLAN_TIMEOUT_SECONDS` still win,
+  the ceiling still applies, and a plan still cannot outlive its parent.
+- Pinned the two tests that hardcoded the shipped default rather than the
+  relationship they exercise. A test asserting that a marginal overrun recovers,
+  or that a runaway reports observed-versus-cap, must set the cap it is testing;
+  inheriting the default meant raising it turned an overrun into an underrun and
+  the awaited state never arrived.
+
 ## 0.53.0 — 2026-07-29
 
 - Replaced packet-size plan allowance scaling with a compact structural

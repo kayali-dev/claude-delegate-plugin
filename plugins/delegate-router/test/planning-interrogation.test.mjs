@@ -122,8 +122,8 @@ test('structural plan comparison distinguishes convergence, divergence, and inco
 
 test('plan output budget stays structural instead of scaling on packet bytes and remains overridable', () => {
   const simple = planOutputTokenBudget('Objective: rename one local variable');
-  assert.equal(simple.limit, 4_096);
-  assert.equal(simple.floor, 4_096);
+  assert.equal(simple.limit, 8_192);
+  assert.equal(simple.floor, 8_192);
   assert.equal(simple.ceiling, 16_384);
   assert.equal(simple.source, 'structured-default');
 
@@ -137,23 +137,23 @@ test('plan output budget stays structural instead of scaling on packet bytes and
   assert.ok(complex.metrics.directiveMarkers > simple.metrics.directiveMarkers);
 
   const bounded = planOutputTokenBudget(`${'x'.repeat(100_000)}\n${'- must preserve this\n'.repeat(500)}`);
-  assert.equal(bounded.limit, 4_096);
+  assert.equal(bounded.limit, 8_192);
   assert.equal(planOutputTokenBudget('tiny', { DELEGATE_PLAN_OUTPUT_TOKENS: '3072' }).limit, 3_072);
 });
 
 test('plan wall clock derives from the token budget instead of a fixed cap', () => {
   const simple = planWallClockBudget('Objective: rename one local variable');
-  assert.equal(simple.floor, 120);
+  assert.equal(simple.floor, 300);
   assert.equal(simple.source, 'token-budget-derived');
-  assert.ok(simple.seconds >= 120, 'small packets keep at least the previous cap');
+  assert.ok(simple.seconds >= 300, 'the floor is generous rather than fitted to observed spend');
 
   const configured = planWallClockBudget('same packet', { DELEGATE_PLAN_OUTPUT_TOKENS: '16384' });
-  assert.ok(configured.seconds > simple.seconds, 'a larger explicit token budget earns more wall clock');
+  assert.ok(configured.seconds >= simple.seconds, 'a larger explicit token budget never earns less wall clock');
   assert.equal(configured.tokenLimit, 16_384);
   assert.ok(configured.seconds <= configured.ceiling);
 
   const saturated = planWallClockBudget(`${'x'.repeat(100_000)}\n${'- must preserve this\n'.repeat(500)}`);
-  assert.equal(saturated.tokenLimit, 4_096);
+  assert.equal(saturated.tokenLimit, 8_192);
   assert.ok(saturated.seconds <= 900, 'the ceiling bounds a saturated budget');
 
   // A plan pass must never outlive the work it plans; the previous
@@ -167,6 +167,35 @@ test('plan wall clock derives from the token budget instead of a fixed cap', () 
   assert.equal(overridden.seconds, 300);
   assert.equal(overridden.source, 'environment-override');
   assert.equal(planWallClockBudget('tiny', { DELEGATE_PLAN_TIMEOUT_SECONDS: '99999' }).seconds, 900);
+});
+
+test('the independent planner is budgeted for whoever actually plans, not the parent', () => {
+  // ambiguityCandidate prefers PROVIDER independence, so a Codex parent with
+  // Cursor enabled plans on Cursor. Cursor is materially slower to first token
+  // and was hitting the old ceiling on owner machines while Codex/luna finished
+  // in a median 46s. The budget-filling evidence behind the flat Codex default
+  // was measured only on Codex, so Cursor carries its own floor rather than a
+  // blanket raise that would regress Codex back into filling its allowance.
+  const spec = 'x'.repeat(5_000);
+  const codex = planOutputTokenBudget(spec, {}, { provider: 'codex' });
+  const cursor = planOutputTokenBudget(spec, {}, { provider: 'cursor' });
+  assert.equal(codex.limit, 8_192);
+  assert.equal(codex.source, 'structured-default');
+  assert.ok(cursor.limit > codex.limit, 'the slower provider gets a larger allowance');
+  assert.equal(cursor.source, 'provider-default:cursor');
+  assert.ok(cursor.limit <= cursor.ceiling);
+
+  const codexClock = planWallClockBudget(spec, {}, 5_400, { provider: 'codex' });
+  const cursorClock = planWallClockBudget(spec, {}, 5_400, { provider: 'cursor' });
+  assert.equal(codexClock.seconds, 300, 'Codex keeps a generous floor rather than a fitted one');
+  assert.ok(cursorClock.seconds > 120, 'Cursor clears the ceiling it was dying on');
+  assert.ok(cursorClock.seconds > codexClock.seconds);
+  assert.ok(cursorClock.seconds <= cursorClock.ceiling);
+
+  // Provider tuning must not defeat the guards that already existed.
+  assert.equal(planWallClockBudget(spec, {}, 300, { provider: 'cursor' }).seconds, 300);
+  assert.equal(planWallClockBudget(spec, { DELEGATE_PLAN_TIMEOUT_SECONDS: '200' }, 5_400, { provider: 'cursor' }).seconds, 200);
+  assert.equal(planOutputTokenBudget(spec, { DELEGATE_PLAN_OUTPUT_TOKENS: '3072' }, { provider: 'cursor' }).limit, 3_072);
 });
 
 test('compact plan framing and structural recovery accept marginal overruns but reject both observed runaways', () => {
@@ -305,6 +334,11 @@ test('two independent cheap plan passes open only structural divergence question
 }));
 
 test('a realistic five-kilobyte packet recovers a marginal plan overrun and reaches a comparison verdict', () => isolated(async (directory) => {
+  // Pin the allowance this test is exercising. It asserts that a MARGINAL
+  // overrun recovers, which is a relationship between spend and cap, not a
+  // property of whatever default ships — raising the shipped floor otherwise
+  // turns 4162 into an underrun and the awaited state never arrives.
+  process.env.DELEGATE_PLAN_OUTPUT_TOKENS = '4096';
   process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '4162';
   process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL = 'luna';
   const packet = [
@@ -380,6 +414,10 @@ test('a failed independent plan pass degrades loudly on the implement attempt an
 }));
 
 test('CLI and MCP launch responses surface plan degradation with observed-versus-cap numbers', () => isolated(async (directory) => {
+  // Pin the cap this test reports on. It asserts that a runaway surfaces with
+  // observed-versus-cap numbers, which is a relationship, not a property of
+  // whatever default ships.
+  process.env.DELEGATE_PLAN_OUTPUT_TOKENS = '4096';
   process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '66428';
   process.env.DELEGATE_PLAN_LAUNCH_WAIT_SECONDS = '10';
   const packet = [

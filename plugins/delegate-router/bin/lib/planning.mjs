@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { auditUsageBands, readAuditLog, usageBandKey } from './stats.mjs';
 
 const PLAN_MAX_CHARS = 32_000;
-const PLAN_OUTPUT_TOKENS_FLOOR = 4_096;
+const PLAN_OUTPUT_TOKENS_FLOOR = 8_192;
 const PLAN_OUTPUT_TOKENS_CEILING = 16_384;
 const PLAN_RECOVERABLE_OVERRUN_RATIO = 0.20;
 const INTERROGATION_OUTPUT_TOKENS_DEFAULT = 1_024;
@@ -12,8 +12,23 @@ const INTERROGATION_OUTPUT_TOKENS_DEFAULT = 1_024;
 // same defect the token scaling fixed, one unit over. Deriving seconds from the
 // token budget keeps one scaling source, so the two cannot drift apart again.
 const PLAN_TOKENS_PER_SECOND = 30;
-const PLAN_TIMEOUT_FLOOR_SECONDS = 120;
+const PLAN_TIMEOUT_FLOOR_SECONDS = 300;
 const PLAN_TIMEOUT_CEILING_SECONDS = 900;
+// Both axes are deliberately generous rather than fitted to observed spend. The
+// two failure modes are not symmetric: too small means plan-first silently does
+// not work, which is exactly what happened for fifteen consecutive jobs, while
+// too large costs a few tokens only if the model actually fills the room — and
+// the compact JSON contract plus the recoverable-overrun band already bound
+// that. The independent planner also prefers PROVIDER independence, so a Codex
+// parent with Cursor enabled plans on Cursor, which is materially slower to
+// first token; it therefore carries a higher floor again on both axes.
+const PLAN_PROVIDER_TUNING = Object.freeze({
+  cursor: Object.freeze({ outputTokens: 12_288, timeoutFloorSeconds: 600 })
+});
+
+function providerTuning(provider) {
+  return PLAN_PROVIDER_TUNING[String(provider || '').toLowerCase()] || null;
+}
 const APPROACH_KINDS = new Set([
   'inspect', 'edit', 'test', 'verify', 'docs', 'config', 'migration', 'refactor', 'other'
 ]);
@@ -28,7 +43,7 @@ function boundedInteger(value, fallback, minimum, maximum) {
     : fallback;
 }
 
-export function planOutputTokenBudget(spec = '', env = process.env) {
+export function planOutputTokenBudget(spec = '', env = process.env, options = {}) {
   const text = String(spec || '');
   const lines = text ? text.split(/\r?\n/) : [];
   const metrics = {
@@ -51,13 +66,15 @@ export function planOutputTokenBudget(spec = '', env = process.env) {
     };
   }
 
+  const tuning = providerTuning(options.provider);
   return {
     // Live observations found plan output nearly flat across 2.6-6.1 KiB
     // packets, while raising this allowance simply moved the observed spend
     // upward. Packet bytes and directive markers remain useful diagnostics,
-    // but they no longer buy a larger response.
-    limit: PLAN_OUTPUT_TOKENS_FLOOR,
-    source: 'structured-default',
+    // but they no longer buy a larger response. That evidence is Codex-only,
+    // so a slower/more verbose provider may carry its own default.
+    limit: tuning?.outputTokens || PLAN_OUTPUT_TOKENS_FLOOR,
+    source: tuning ? `provider-default:${String(options.provider).toLowerCase()}` : 'structured-default',
     floor: PLAN_OUTPUT_TOKENS_FLOOR,
     ceiling: PLAN_OUTPUT_TOKENS_CEILING,
     metrics
@@ -68,15 +85,17 @@ export function planOutputTokenLimit(env = process.env) {
   return planOutputTokenBudget('', env).limit;
 }
 
-export function planWallClockBudget(spec = '', env = process.env, parentTimeoutSeconds = null) {
-  const budget = planOutputTokenBudget(spec, env);
+export function planWallClockBudget(spec = '', env = process.env, parentTimeoutSeconds = null, options = {}) {
+  const budget = planOutputTokenBudget(spec, env, options);
+  const tuning = providerTuning(options.provider);
+  const floorSeconds = tuning?.timeoutFloorSeconds || PLAN_TIMEOUT_FLOOR_SECONDS;
   const configured = env.DELEGATE_PLAN_TIMEOUT_SECONDS;
   const overridden = configured != null && String(configured).trim() !== '';
   const derived = overridden
     ? boundedInteger(configured, PLAN_TIMEOUT_FLOOR_SECONDS, 30, PLAN_TIMEOUT_CEILING_SECONDS)
     : Math.min(
       PLAN_TIMEOUT_CEILING_SECONDS,
-      Math.max(PLAN_TIMEOUT_FLOOR_SECONDS, Math.ceil(budget.limit / PLAN_TOKENS_PER_SECOND))
+      Math.max(floorSeconds, Math.ceil(budget.limit / PLAN_TOKENS_PER_SECOND))
     );
   // A plan pass must never outlive the work it is planning. The previous
   // Math.max(60, ...) could hand a plan more wall clock than its own parent.
@@ -88,7 +107,7 @@ export function planWallClockBudget(spec = '', env = process.env, parentTimeoutS
     clampedToParent: bounded !== derived,
     derivedSeconds: derived,
     tokenLimit: budget.limit,
-    floor: PLAN_TIMEOUT_FLOOR_SECONDS,
+    floor: floorSeconds,
     ceiling: PLAN_TIMEOUT_CEILING_SECONDS
   };
 }

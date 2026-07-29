@@ -3323,7 +3323,10 @@ export function startAmbiguityProbe(id) {
     });
     return null;
   }
-  const compiledPlanBudget = planOutputTokenBudget(originalPrompt);
+  // The independent planner may run on a different provider than the parent
+  // (provider independence is preferred), so both budgets are sized for
+  // whoever is actually planning rather than for the parent.
+  const compiledPlanBudget = planOutputTokenBudget(originalPrompt, process.env, { provider: candidate.provider });
   const configuredLimit = compiledPlanBudget.limit;
   const budget = parent.maxOutputTokens
     ? Math.min(configuredLimit, Math.floor(parent.maxOutputTokens * 0.2))
@@ -3359,7 +3362,7 @@ export function startAmbiguityProbe(id) {
       cwd: parent.cwd,
       prompt: planPrompt(originalPrompt),
       allowSensitive: parent.allowSensitive === true,
-      timeoutSeconds: planWallClockBudget(originalPrompt, process.env, parent.timeoutSeconds).seconds,
+      timeoutSeconds: planWallClockBudget(originalPrompt, process.env, parent.timeoutSeconds, { provider: candidate.provider }).seconds,
       maxOutputTokens: budget,
       idempotencyKey: `ambiguity-${parent.id}`,
       groupId: `ambiguity-${parent.id}`,
