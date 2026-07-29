@@ -64,11 +64,13 @@ import {
   resolveCoordinatorQuestion
 } from './backchannel.mjs';
 import {
+  assessStructuralPlanOutput,
   compareStructuralPlans,
   IMPLEMENT_CONFIRMED_PROMPT,
   interrogationPrompt,
   observedPlanEstimate,
   parseStructuralPlan,
+  planHardOutputTokenLimit,
   planPrompt,
   planRequestId,
   planReviewPresentation
@@ -224,22 +226,12 @@ async function presentPlanForConfirmation(jobId, primaryText) {
   const job = inspectJob(jobId);
   const primary = parseStructuralPlan(primaryText);
   if (!primary.ok) {
-    updateManagedJob(jobId, (current) => {
-      current.planning = {
-        ...current.planning,
-        state: 'degraded',
-        confirmationRequired: false,
-        reason: `primary-plan-${primary.reason}`
-      };
-    }, { incrementRevision: false });
-    appendJobEvent(jobId, 'plan.degraded', {
-      stage: 'primary-plan',
-      reason: primary.reason,
-      fallback: 'explicitly-requested-direct-write'
-    });
+    const assessment = assessPrimaryPlanBudget(jobId, primaryText);
+    recordPrimaryPlanDegradation(jobId, `primary-plan-${primary.reason}`, assessment);
     return { action: 'fallback', reason: primary.reason };
   }
   const probe = await awaitAmbiguityProbe(jobId);
+  const planPass = inspectJob(jobId).planPass;
   let comparison;
   if (job.ambiguityCheck !== true) {
     comparison = {
@@ -248,7 +240,7 @@ async function presentPlanForConfirmation(jobId, primaryText) {
       comparedDimensions: [],
       differences: []
     };
-  } else if (!probe || probe.status !== 'completed') {
+  } else if (!probe || (probe.status !== 'completed' && planPass?.state !== 'recovered')) {
     comparison = {
       verdict: 'inconclusive',
       reason: inspectJob(jobId).planning?.ambiguity?.reason || 'independent-plan-unavailable',
@@ -986,6 +978,23 @@ export function recordUsage(job, usage, options = {}) {
   const current = loadJob(job.id) || job;
   const external = Number(current.planning?.externalOutputTokensReserved || 0);
   const attributedOutputTokens = totals ? totals.outputTokens + external : null;
+  const planLimit = Number(current.planningFor
+    ? current.maxOutputTokens
+    : current.planning?.planOutputTokenLimit);
+  const planActive = Boolean(current.planningFor) || current.planning?.state === 'running';
+  if (planActive && Number.isFinite(planLimit) && totals?.outputTokens > planHardOutputTokenLimit(planLimit)) {
+    return brokerError('BUDGET_EXCEEDED', `plan pass output token usage ${totals.outputTokens} exceeded its ${planLimit} token budget and ${planHardOutputTokenLimit(planLimit)} hard runaway limit`, {
+      provider: job.provider,
+      maxOutputTokens: planLimit,
+      observedOutputTokens: totals.outputTokens,
+      planPass: !current.planningFor,
+      independentPlanPass: Boolean(current.planningFor)
+    });
+  }
+  // A structurally valid overrun of at most 20% is assessed only after the
+  // completed answer is parseable. Keep the provider alive inside that narrow
+  // window; the hard limit above still interrupts runaways.
+  if (planActive) return null;
   if (current.maxOutputTokens && totals && attributedOutputTokens > current.maxOutputTokens) {
     return brokerError('BUDGET_EXCEEDED', `attributed output token usage ${attributedOutputTokens} exceeded maxOutputTokens ${current.maxOutputTokens}`, {
       provider: job.provider,
@@ -993,16 +1002,70 @@ export function recordUsage(job, usage, options = {}) {
       observedOutputTokens: attributedOutputTokens
     });
   }
-  const planLimit = Number(current.planning?.planOutputTokenLimit);
-  if (current.planning?.state === 'running' && Number.isFinite(planLimit) && totals?.outputTokens > planLimit) {
-    return brokerError('BUDGET_EXCEEDED', `plan pass output token usage ${totals.outputTokens} exceeded its ${planLimit} token sub-budget`, {
-      provider: job.provider,
-      maxOutputTokens: planLimit,
-      observedOutputTokens: totals.outputTokens,
-      planPass: true
+  return null;
+}
+
+function assessPrimaryPlanBudget(jobId, text) {
+  const current = inspectJob(jobId);
+  const totals = usageTotals(current.usage);
+  const assessment = assessStructuralPlanOutput(
+    text,
+    totals?.outputTokens,
+    current.planning?.planOutputTokenLimit
+  );
+  if (assessment.state === 'recovered') {
+    const recovery = {
+      state: 'recovered',
+      reason: assessment.reason,
+      observedOutputTokens: assessment.observedOutputTokens,
+      outputTokenLimit: assessment.outputTokenLimit,
+      hardOutputTokenLimit: assessment.hardOutputTokenLimit,
+      overrunTokens: assessment.overrunTokens,
+      overrunPercent: assessment.overrunPercent
+    };
+    updateManagedJob(jobId, (job) => {
+      job.planning = { ...job.planning, budgetOutcome: recovery };
+    }, { incrementRevision: false });
+    appendJobEvent(jobId, 'plan.recovered', {
+      stage: 'primary-plan',
+      ...recovery
     });
   }
-  return null;
+  return assessment;
+}
+
+function recordPrimaryPlanDegradation(jobId, reason, assessment = null, options = {}) {
+  const current = inspectJob(jobId);
+  const totals = usageTotals(current.usage);
+  const outputTokens = assessment?.observedOutputTokens ?? totals?.outputTokens ?? null;
+  const outputTokenLimit = assessment?.outputTokenLimit
+    ?? current.planning?.planOutputTokenLimit
+    ?? null;
+  updateManagedJob(jobId, (job) => {
+    job.planning = {
+      ...job.planning,
+      state: 'degraded',
+      confirmationRequired: false,
+      reason,
+      outputTokens,
+      outputTokenLimit,
+      budgetOutcome: {
+        state: 'degraded',
+        reason,
+        observedOutputTokens: outputTokens,
+        outputTokenLimit,
+        hardOutputTokenLimit: assessment?.hardOutputTokenLimit
+          ?? (Number.isFinite(Number(outputTokenLimit)) ? planHardOutputTokenLimit(outputTokenLimit) : null)
+      }
+    };
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, 'plan.degraded', {
+    stage: 'primary-plan',
+    reason,
+    observedOutputTokens: outputTokens,
+    maxOutputTokens: outputTokenLimit,
+    fallback: 'explicitly-requested-direct-write'
+  }, options);
 }
 
 function recordBudgetExceeded(job, error, options = {}) {
@@ -1733,7 +1796,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.52.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.53.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1941,25 +2004,22 @@ async function runCodex(job, driver) {
         if (budgetError) throw budgetError;
         if (cancelled) { terminal(job, 'cancelled', 'cancelled'); break; }
         if (planPhase === 'planning') {
-          if (planPassError || completed.turn.status === 'failed') {
-            updateManagedJob(job.id, (current) => {
-              current.planning = {
-                ...current.planning,
-                state: 'degraded',
-                confirmationRequired: false,
-                reason: planPassError ? 'plan-output-token-sub-budget-exceeded' : 'provider-plan-turn-failed'
-              };
-            }, { incrementRevision: false });
-            appendJobEvent(job.id, 'plan.degraded', {
-              stage: 'primary-plan',
-              reason: planPassError ? 'plan-output-token-sub-budget-exceeded' : 'provider-plan-turn-failed',
-              fallback: 'explicitly-requested-direct-write'
-            });
+          const primaryText = loadJob(job.id).resultText || loadJob(job.id).result || '';
+          const assessment = assessPrimaryPlanBudget(job.id, primaryText);
+          const budgetFailure = assessment.state === 'rejected'
+            ? assessment.reason
+            : planPassError ? 'plan-output-token-sub-budget-exceeded' : null;
+          if (budgetFailure || completed.turn.status === 'failed') {
+            recordPrimaryPlanDegradation(
+              job.id,
+              budgetFailure || 'provider-plan-turn-failed',
+              assessment
+            );
             planPhase = 'implementing';
             await startTurn(IMPLEMENT_CONFIRMED_PROMPT, codexSandboxMode(loadJob(job.id)));
             continue;
           }
-          const planned = await presentPlanForConfirmation(job.id, loadJob(job.id).resultText || loadJob(job.id).result || '');
+          const planned = await presentPlanForConfirmation(job.id, primaryText);
           if (planned.action === 'fallback') {
             planPhase = 'implementing';
             await startTurn(IMPLEMENT_CONFIRMED_PROMPT, codexSandboxMode(loadJob(job.id)));
@@ -2785,7 +2845,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.52.1' }
+      clientInfo: { name: 'delegate-router', version: '0.53.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -3070,21 +3130,18 @@ async function runCursorAcpTransport(job, driver) {
       }
       if (cancelRequested) { terminal(job, 'cancelled', 'cancelled'); break; }
       if (planPhase === 'planning') {
-        if (planPassError) {
-          updateManagedJob(job.id, (current) => {
-            current.planning = {
-              ...current.planning,
-              state: 'degraded',
-              confirmationRequired: false,
-              reason: 'plan-output-token-sub-budget-exceeded'
-            };
-          }, { incrementRevision: false });
+        const planText = [planEntriesText(planHolder.entries), messageParts.join('')].filter(Boolean).join('\n');
+        const assessment = assessPrimaryPlanBudget(job.id, planText);
+        const budgetFailure = assessment.state === 'rejected'
+          ? assessment.reason
+          : planPassError ? 'plan-output-token-sub-budget-exceeded' : null;
+        if (budgetFailure) {
+          recordPrimaryPlanDegradation(job.id, budgetFailure, assessment, { sessionId });
           planPhase = 'implementing';
           await setSessionMode('agent', job.mode);
           startPrompt(IMPLEMENT_CONFIRMED_PROMPT);
           continue;
         }
-        const planText = [planEntriesText(planHolder.entries), messageParts.join('')].filter(Boolean).join('\n');
         const planned = await presentPlanForConfirmation(job.id, planText);
         if (planned.action === 'fallback') {
           planPhase = 'implementing';
@@ -3467,21 +3524,19 @@ async function runCursorHeadlessTransport(job, driver) {
     }
     if (cancelRequested) { terminal(job, 'cancelled', 'cancelled'); return; }
     if (planPhase === 'planning') {
-      if (planPassError) {
-        updateManagedJob(job.id, (current) => {
-          current.planning = {
-            ...current.planning,
-            state: 'degraded',
-            confirmationRequired: false,
-            reason: 'plan-output-token-sub-budget-exceeded'
-          };
-        }, { incrementRevision: false });
+      const primaryText = resultText(outcome.payload) || '';
+      const assessment = assessPrimaryPlanBudget(job.id, primaryText);
+      const budgetFailure = assessment.state === 'rejected'
+        ? assessment.reason
+        : planPassError ? 'plan-output-token-sub-budget-exceeded' : null;
+      if (budgetFailure) {
+        recordPrimaryPlanDegradation(job.id, budgetFailure, assessment, { sessionId: resume });
         planPhase = 'implementing';
         currentMode = job.mode;
         text = IMPLEMENT_CONFIRMED_PROMPT;
         continue;
       }
-      const planned = await presentPlanForConfirmation(job.id, resultText(outcome.payload) || '');
+      const planned = await presentPlanForConfirmation(job.id, primaryText);
       if (planned.action === 'fallback') {
         planPhase = 'implementing';
         currentMode = job.mode;

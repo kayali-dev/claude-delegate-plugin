@@ -268,6 +268,16 @@ test('delegate_stats returns filtered audit aggregates and totals and rejects jo
     assert.equal(aggregate.rates.providerCompletion.rate, null);
     assert.equal(aggregate.rates.verificationPass.sampleSize, 0);
     assert.equal(aggregate.rates.ownerAcceptance.sampleSize, 0);
+    assert.deepEqual(aggregate.planFirst, {
+      requested: 0,
+      completed: 0,
+      degraded: 0,
+      recovered: 0,
+      pending: 0,
+      unknown: 0,
+      completionRate: null,
+      degradationRate: null
+    });
     assert.deepEqual(aggregate.totals, {
       jobs: 2,
       terminalStatuses: { completed: 1, failed: 1, cancelled: 0 },

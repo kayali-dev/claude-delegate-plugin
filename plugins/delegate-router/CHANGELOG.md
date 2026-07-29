@@ -2,6 +2,23 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.53.0 — 2026-07-29
+
+- Replaced packet-size plan allowance scaling with a compact structural
+  4,096-token default. Parseable overruns through 20% are recovered for
+  comparison, while invalid output and hard-limit runaways still degrade
+  non-blockingly with observed-vs-cap evidence.
+- Plan wall clock remains token-budget-derived, parent-clamped, and
+  operator-overridable; ambiguity comparison now waits through that same
+  bounded wall clock instead of timing out at an unrelated 30/120-second cap.
+- CLI and MCP starts now return an additive `launchNotice` when plan-first
+  completes, recovers, remains pending, or degrades. Degradation is included in
+  the launch response and durable job record without blocking the requested
+  worker.
+- `delegate_stats` and `delegate-jobs stats` now expose exact plan-first
+  completion, recovery, degradation, pending, and historical-unknown counts and
+  rates.
+
 ## 0.52.1 — 2026-07-28
 
 - Removed 26,639 lines of verification scratch (fifteen full TAP logs, load

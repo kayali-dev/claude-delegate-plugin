@@ -41,9 +41,12 @@ The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex w
 
 Per-job observed tokens and context occupancy are separate dimensions, neither of which is a subscription allowance percentage. `delegate_usage.tokenUsage` / `observed` contains input/output/total tokens and feeds the `maxOutputTokens` check; `chainCumulative` sums those token counters from the root job through the inspected continuation. Cursor ACP `usage_update {used,size}` is stored only as `contextOccupancy: { contextUsed, contextSize }`, never interpreted as output tokens and never compared with `maxOutputTokens`. Headless Cursor records tokens only from its final `result.usage` envelope. Routing continues to use the provider windows in `usage.json`.
 
-Plan-first uses a separate output sub-budget derived locally from packet
-size/structure, with a 4,096-token default floor and 16,384-token ceiling;
+Plan-first uses a separate 4,096-token structured output default that does not
+scale with packet bytes or directive markers; the prompt itself requires one
+compact structural answer. The configurable ceiling remains 16,384 tokens;
 `DELEGATE_PLAN_OUTPUT_TOKENS` overrides it without changing provider allowance.
+Parseable overruns through 20% are recorded and reused as `recovered`; anything
+above that hard limit, including the observed 66k/78k runaways, still fails.
 The sub-budget is still provider-reported output tokens, not quota percentage.
 Ambient monitoring names its terminal edge `budget-breach` for this per-job
 cap and `allowance-breach` for provider quota/rate exhaustion. A same-cause
@@ -53,6 +56,12 @@ remains visible.
 `delegate-jobs stats` reads the never-pruned audit log as an outcome ledger across managed jobs, direct Codex/Cursor shadows, and completed `claude-agent` stubs. Every new attempt and terminal/decision audit snapshot records broker, adapter, provider-CLI, policy, and event-schema versions; a stable task shape; the canonical packet sections that were present; real-tree verification outcome; bounded findings; the explicit owner decision; usage; and a redacted rejection reason when one exists. Provider CLI provenance reuses the managed adapter's existing local version check, direct Cursor's local `--version`, or Codex MCP `serverInfo`; it adds no provider/API round trip and spends no allowance. Historical rows remain readable with these fields absent.
 
 The ledger reports provider-completion, verification-pass, and owner-acceptance as three independent measurements. Each carries `{ numerator, sampleSize, minimumSample, status, rate }`; the minimum is 10, and `rate` is `null` with `status: "insufficient-data"` below it. Verification counts only broker-originated real-tree pass/fail/timeout labels. Owner acceptance counts only explicit `accepted`/`rejected` decisions. It never treats missing labels, `ready-for-review`, scope cleanliness, or provider silence as a positive label.
+
+The same response has an operational `planFirst` signal with exact
+`requested`, `completed`, `degraded`, `recovered`, `pending`, and historical
+`unknown` counts plus completion/degradation rates. This signal has no
+minimum-sample suppression: a 14/14 degradation era must display as
+`degradationRate: 1`, not disappear behind an insufficient-data label.
 
 `--since` / MCP `since` accepts a duration (`24h`, `7d`), ISO date (`2026-07-17`), or broker version (`0.42.0`); `--until` / MCP `until` supplies an exclusive ISO-date upper bound. Responses include broker-version and UTC-day cohorts with explicit ORPHANED counts, so a historical failure era remains visible without contaminating a selected current view. `--recommend-for <mode>` (optional `--recommend-access read|write`) or MCP `recommendFor` requests advisory outcome evidence. It uses only explicit owner-acceptance labels, requires at least 20 labels per provider, attaches a fixed 95% Wilson interval, and recommends only when the leading lower bound exceeds the runner-up upper bound. Otherwise it returns `insufficient-data`; it never changes the static router.
 

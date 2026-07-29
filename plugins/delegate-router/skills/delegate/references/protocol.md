@@ -145,7 +145,7 @@ provider.initialized, session.created, session.updated, turn.started, turn.compl
 message.user, message.delta, message.completed
 activity
 plan.updated, plan.ambiguity.started, plan.ambiguity.completed
-plan.presented, plan.confirmed, plan.declined, plan.degraded
+plan.presented, plan.confirmed, plan.declined, plan.recovered, plan.degraded
 compaction.started, compaction.completed
 tool.started, tool.status, tool.output, tool.completed
 file.changed, diff.updated
@@ -171,6 +171,10 @@ also updates the parent attempt with additive `planPass` state and the existing
 `planning.ambiguity` compatibility view. Readers must tolerate both fields
 being absent. The update contains closed status/reason/cost metadata only; it
 does not copy the plan packet or provider payload into the parent.
+`plan.recovered` means a parseable structural answer exceeded its nominal
+sub-budget by no more than 20%; it includes observed, nominal, hard-limit, and
+overrun fields. `plan.degraded` budget events carry observed-vs-cap numbers.
+Runaways beyond the hard limit remain `BUDGET_EXCEEDED` failures.
 
 `activity` contains only `{ kind: 'thinking' | 'output', at }`. Codex reasoning items plus Cursor ACP and headless thinking chunks produce transition markers at most once per two seconds; a bounded thought tail exists only in the provider process and is never written to the job record or journal. `provider.event` contains only a redacted event name and safe metadata. The raw transport stream and hidden reasoning remain excluded. An otherwise-unmapped Codex thread item additionally emits `provider.item` with `{ itemType, itemId, phase, item }`; the item is recursively redacted and capped by the ordinary event/string bounds, so the next provider item type remains inspectable without persisting an unbounded raw stream.
 

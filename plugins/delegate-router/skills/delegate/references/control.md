@@ -211,14 +211,26 @@ missing comparison candidate remains non-gating. No plan pass may accept itself
 or start write work.
 
 The default plan output sub-budget is deterministic and network-free. Packets
-at or below 5 KiB and 24 structural directive markers receive a 4,096-token
-floor. Each additional started 4 KiB of packet text and each additional started
-16 list/constraint/section markers adds 1,024 tokens, capped at 16,384.
+receive the same 4,096-token structured default regardless of byte length or
+directive-marker count: live measurements found plan cost nearly flat in those
+dimensions, while larger allowances moved spend upward. The plan prompt
+requires one compact structural JSON object, no narrated analysis or repeated
+packet, and an ordinary target below 500 words.
 `DELEGATE_PLAN_OUTPUT_TOKENS` remains an exact bounded override (128–16,384);
 an explicit smaller job-level `maxOutputTokens` still limits the primary plan,
 and the independent pass retains its existing share of that explicit overall
 cap. The stored `planning.planBudget` records the safe metrics, source, floor,
 ceiling, and effective limit without retaining another copy of the packet.
+Wall clock derives from that effective token limit (120–900 seconds),
+`DELEGATE_PLAN_TIMEOUT_SECONDS` overrides it, and the result is always clamped
+to the parent timeout.
+
+A reported overrun of at most 20% is recoverable only when the completed output
+already parses under the structural contract. It is recorded as `recovered`
+with observed, nominal, hard-limit, and overrun numbers and remains usable for
+comparison. The provider is interrupted above that narrow hard limit; invalid
+output is never recovered. Increasing the configured nominal budget therefore
+cannot absorb a 66k/78k runaway.
 
 When enabled, ambiguity detection sends the same WorkSpec to an independent
 cheap plan pass using a different provider or model. It compares only parsed
@@ -230,12 +242,21 @@ converted into a guessed ambiguity verdict.
 
 The independent child always projects its terminal outcome back onto the
 implement attempt as additive `planPass: { state, reason?, jobId,
-planStatus, errorCode?, outputTokenLimit, outputTokens, recordedAt }`.
+planStatus, errorCode?, outputTokenLimit, outputTokens, hardOutputTokenLimit?,
+recovery?, recordedAt }`; `state` may be `completed`, `recovered`, or
+`degraded`.
 `delegate_inspect` returns that field directly and TUI job detail renders a
 `PLAN DEGRADED` badge. Historical records with no `planPass` remain unchanged.
 A failed, cancelled, timed-out, or over-budget independent pass degrades to the
 single-plan confirmation/direct launch path; it never blocks the requested
 write and never remains visible only as an orphaned sibling.
+
+CLI `start` and MCP `delegate_start` wait through the bounded plan-first launch
+checkpoint. Their additive `launchNotice` says `completed`, `recovered`,
+`degraded`, or `pending`; degradation includes the reason and observed-vs-cap
+numbers and explicitly says the worker launch continues without a planning
+gate. A coordinator therefore cannot mistake an asynchronous degradation for a
+successful plan pass.
 
 A steer that reduces the remaining work can finish the job before any follow-up command arrives. Do not design a steer-then-cancel sequence around a shrinking task; cancel first if termination is the goal.
 

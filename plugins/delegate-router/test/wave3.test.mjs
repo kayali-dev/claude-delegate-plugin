@@ -197,6 +197,60 @@ test('outcome ledger separates sampled rates, cohorts fixed-era failures, and si
   assert.equal(projected.cohorts.brokerVersions[0].brokerVersion, '0.42.0');
 });
 
+test('outcome stats expose exact plan-first completion and degradation effectiveness', () => {
+  const degraded = Array.from({ length: 14 }, (_, index) => ({
+    jobId: `plan-degraded-${index}`,
+    at: index + 1,
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    outcome: { status: 'completed' },
+    taskShape: { mode: 'implement', access: 'write', planFirst: true },
+    planFirstOutcome: {
+      requested: true,
+      state: 'degraded',
+      completionReached: false,
+      degraded: true,
+      recovered: false
+    }
+  }));
+  const failedEra = aggregateAudit(degraded, { now: 100 });
+  assert.deepEqual(failedEra.planFirst, {
+    requested: 14,
+    completed: 0,
+    degraded: 14,
+    recovered: 0,
+    pending: 0,
+    unknown: 0,
+    completionRate: 0,
+    degradationRate: 1
+  });
+
+  const recovered = aggregateAudit([...degraded, {
+    jobId: 'plan-recovered',
+    at: 20,
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    outcome: { status: 'completed' },
+    taskShape: { mode: 'implement', access: 'write', planFirst: true },
+    planFirstOutcome: {
+      requested: true,
+      state: 'recovered',
+      completionReached: true,
+      degraded: false,
+      recovered: true,
+      comparisonVerdict: 'convergent'
+    }
+  }], { now: 100 });
+  assert.equal(recovered.planFirst.requested, 15);
+  assert.equal(recovered.planFirst.completed, 1);
+  assert.equal(recovered.planFirst.recovered, 1);
+  assert.equal(recovered.planFirst.degraded, 14);
+  assert.equal(recovered.planFirst.completionRate, 1 / 15);
+  assert.equal(recovered.planFirst.degradationRate, 14 / 15);
+});
+
 test('acceptance audit revisions coalesce without double-counting attempts or usage', () => {
   const terminal = {
     jobId: 'attempt-1',

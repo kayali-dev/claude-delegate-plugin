@@ -228,6 +228,7 @@ function projectRetainedAttemptEvidence(records, jobs = []) {
       eventSchemaVersion: record.eventSchemaVersion ?? ledger.provenance.eventSchemaVersion,
       taskShape: record.taskShape ?? ledger.taskShape,
       packetFeatures: record.packetFeatures ?? ledger.packetFeatures,
+      planFirstOutcome: record.planFirstOutcome ?? ledger.planFirstOutcome,
       verification: record.verification ?? job.verification ?? null,
       verificationOrigin: record.verificationOrigin ?? job.verificationOrigin ?? null,
       verificationOutcome: record.verificationOutcome ?? ledger.verificationOutcome,
@@ -328,6 +329,40 @@ export function outcomeRates(records = [], options = {}) {
   };
 }
 
+export function planFirstEffectiveness(records = []) {
+  const requested = records.flatMap((record) => {
+    if (record?.planFirstOutcome?.requested === true) return [record.planFirstOutcome];
+    if (record?.taskShape?.planFirst === true) {
+      return [{
+        requested: true,
+        state: 'unknown',
+        completionReached: false,
+        degraded: false,
+        recovered: false
+      }];
+    }
+    return [];
+  });
+  const completed = requested.filter((outcome) => outcome.completionReached === true
+    || ['completed', 'recovered'].includes(outcome.state)).length;
+  const degraded = requested.filter((outcome) => outcome.degraded === true
+    || outcome.state === 'degraded').length;
+  const recovered = requested.filter((outcome) => outcome.recovered === true
+    || outcome.state === 'recovered').length;
+  const pending = requested.filter((outcome) => outcome.state === 'pending').length;
+  const unknown = requested.length - completed - degraded - pending;
+  return {
+    requested: requested.length,
+    completed,
+    degraded,
+    recovered,
+    pending,
+    unknown: Math.max(0, unknown),
+    completionRate: requested.length ? completed / requested.length : null,
+    degradationRate: requested.length ? degraded / requested.length : null
+  };
+}
+
 function orphanedCount(records) {
   return records.filter((record) => record?.outcome?.errorCode === 'ORPHANED').length;
 }
@@ -415,6 +450,7 @@ function aggregateSelectedStats(selected, selection, now) {
     generatedAt: now,
     jobs: selected.length,
     rates: outcomeRates(records),
+    planFirst: planFirstEffectiveness(records),
     cohorts: outcomeCohorts(records),
     orphanedJobs: orphanedCount(records),
     groups

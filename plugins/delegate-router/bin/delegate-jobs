@@ -15,7 +15,7 @@ import {
   jobFiles,
   jobTranscript,
   jobUsage,
-  launchManagedJob,
+  launchManagedJobForCaller,
   maybePruneJobs,
   prepareManagedIntegration,
   preflightManagedIntegration,
@@ -28,8 +28,7 @@ import {
   resumeManagedJob,
   sliceDiff,
   sliceResultText,
-  submitControl,
-  waitForJob
+  submitControl
 } from './lib/control.mjs';
 import { listJobs, loadState, saveJob } from './lib/state.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
@@ -322,6 +321,7 @@ try {
   } else if (command === 'start') {
     const sources = intentSources(args);
     const options = startOptions(args);
+    const waitFor = value(args, '--wait-for') ?? (args.includes('--wait-for-session') ? 'session' : null);
     if (sources.length && options.prompt != null) throw new Error('choose a hand-written --prompt or intent-source flags, not both');
     if (!sources.length && args.includes('--accept-spec')) throw new Error('--accept-spec is valid only with intent-source compilation');
     let started;
@@ -333,34 +333,32 @@ try {
           json({ dryRun: true, compilation });
           started = null;
         } else {
-          started = launchManagedJob({
+          started = await launchManagedJobForCaller({
             ...options,
             ...previewOptionsFromCompilation(compilation),
             mode: compilation.mode,
             dryRun: true
-          });
+          }, waitFor);
           started.confirmationCard = compilation.card;
           started.specDigest = compilation.digest;
         }
       } else {
         const confirmed = await confirmCompilation(compilation, args);
-        started = launchManagedJob({
+        started = await launchManagedJobForCaller({
           ...options,
           ...launchOptionsFromCompilation(confirmed),
           mode: confirmed.mode,
           dryRun: false
-        });
+        }, waitFor);
       }
     } else {
-      started = launchManagedJob(options);
+      started = await launchManagedJobForCaller(options, waitFor);
     }
     if (!started) {
       // An incomplete compiled dry-run is a useful confirmation card, never a
       // launch attempt. The JSON was emitted above.
     } else {
-    const waitFor = value(args, '--wait-for') ?? (args.includes('--wait-for-session') ? 'session' : null);
     if (started.dryRun) json(started);
-    else if (waitFor) json(await waitForJob(started.id, waitFor));
     else json(started);
     if (!started.dryRun && args.includes('--wait')) {
       let job = requireJob(started.id);
@@ -432,6 +430,8 @@ try {
       printRate('Provider completion', stats.rates.providerCompletion);
       printRate('Verification pass', stats.rates.verificationPass);
       printRate('Owner acceptance', stats.rates.ownerAcceptance);
+      const planFirst = stats.planFirst;
+      console.log(`Plan-first: ${planFirst.completed}/${planFirst.requested} completed; ${planFirst.degraded} degraded; ${planFirst.recovered} marginal overrun(s) recovered; ${planFirst.pending} pending; ${planFirst.unknown} historical unknown`);
       if (stats.groups.length) console.log('Provider Model            Mode       Transport      Jobs Provider done Verification Owner accept');
       for (const row of stats.groups) {
         console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.transport || 'unknown').padEnd(14)} ${String(row.jobs).padStart(4)} ${rateCell(row.rates.providerCompletion).padStart(13)} ${rateCell(row.rates.verificationPass).padStart(12)} ${rateCell(row.rates.ownerAcceptance).padStart(12)}`);

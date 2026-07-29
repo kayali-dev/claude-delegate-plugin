@@ -196,6 +196,50 @@ export function acceptanceDecisionSnapshot(job = {}) {
   };
 }
 
+export function planFirstOutcomeSnapshot(job = {}) {
+  if (job.planFirst !== true) {
+    return {
+      requested: false,
+      state: 'not-requested',
+      completionReached: false,
+      degraded: false,
+      recovered: false,
+      comparisonVerdict: null,
+      reason: null,
+      outputTokenLimit: null,
+      outputTokens: null
+    };
+  }
+  const planning = job.planning;
+  const planPass = job.planPass;
+  const degradedSource = planPass?.state === 'degraded'
+    ? planPass
+    : planning?.state === 'degraded' ? planning : null;
+  const comparisonVerdict = planning?.comparison?.verdict || null;
+  const completionReached = Boolean(comparisonVerdict
+    || job.pendingInput?.kind === 'plan-confirmation'
+    || ['awaiting-confirmation', 'confirmed', 'declined'].includes(planning?.state));
+  const recovered = planPass?.state === 'recovered'
+    || planning?.budgetOutcome?.state === 'recovered';
+  const state = degradedSource
+    ? 'degraded'
+    : completionReached
+      ? recovered ? 'recovered' : 'completed'
+      : planning ? 'pending' : 'unknown';
+  const measured = degradedSource || planPass || planning?.budgetOutcome || planning;
+  return {
+    requested: true,
+    state,
+    completionReached: state === 'completed' || state === 'recovered',
+    degraded: state === 'degraded',
+    recovered: state === 'recovered',
+    comparisonVerdict,
+    reason: degradedSource?.reason || (state === 'recovered' ? measured?.reason || null : null),
+    outputTokenLimit: measured?.outputTokenLimit ?? planning?.planOutputTokenLimit ?? null,
+    outputTokens: measured?.outputTokens ?? measured?.observedOutputTokens ?? null
+  };
+}
+
 export function outcomeLedgerSnapshot(job = {}) {
   const provenance = job.outcomeProvenance || {
     schemaVersion: null,
@@ -226,6 +270,7 @@ export function outcomeLedgerSnapshot(job = {}) {
     },
     verificationOutcome: verificationOutcomeSnapshot(job),
     findings: findingsSnapshot(job),
+    planFirstOutcome: planFirstOutcomeSnapshot(job),
     acceptanceDecision,
     usage: job.usage || null,
     rejectionReason: acceptanceDecision.decision === 'rejected'

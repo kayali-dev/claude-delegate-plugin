@@ -4,12 +4,16 @@ import { auditUsageBands, readAuditLog, usageBandKey } from './stats.mjs';
 const PLAN_MAX_CHARS = 32_000;
 const PLAN_OUTPUT_TOKENS_FLOOR = 4_096;
 const PLAN_OUTPUT_TOKENS_CEILING = 16_384;
-const PLAN_OUTPUT_TOKENS_STEP = 1_024;
-const PLAN_SPEC_BASE_BYTES = 5 * 1_024;
-const PLAN_SPEC_BYTES_PER_STEP = 4 * 1_024;
-const PLAN_SPEC_BASE_DIRECTIVES = 24;
-const PLAN_SPEC_DIRECTIVES_PER_STEP = 16;
+const PLAN_RECOVERABLE_OVERRUN_RATIO = 0.20;
 const INTERROGATION_OUTPUT_TOKENS_DEFAULT = 1_024;
+// The wall clock a plan pass needs is a function of how much it is permitted to
+// emit. Scaling the token budget while leaving the timeout a fixed 120s left a
+// plan allowed 16,384 tokens unable to finish in the time it was given — the
+// same defect the token scaling fixed, one unit over. Deriving seconds from the
+// token budget keeps one scaling source, so the two cannot drift apart again.
+const PLAN_TOKENS_PER_SECOND = 30;
+const PLAN_TIMEOUT_FLOOR_SECONDS = 120;
+const PLAN_TIMEOUT_CEILING_SECONDS = 900;
 const APPROACH_KINDS = new Set([
   'inspect', 'edit', 'test', 'verify', 'docs', 'config', 'migration', 'refactor', 'other'
 ]);
@@ -22,10 +26,6 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Number.isSafeInteger(number)
     ? Math.min(Math.max(number, minimum), maximum)
     : fallback;
-}
-
-function positiveSteps(value, baseline, perStep) {
-  return value > baseline ? Math.ceil((value - baseline) / perStep) : 0;
 }
 
 export function planOutputTokenBudget(spec = '', env = process.env) {
@@ -51,22 +51,15 @@ export function planOutputTokenBudget(spec = '', env = process.env) {
     };
   }
 
-  const sizeSteps = positiveSteps(metrics.bytes, PLAN_SPEC_BASE_BYTES, PLAN_SPEC_BYTES_PER_STEP);
-  const complexitySteps = positiveSteps(
-    metrics.directiveMarkers,
-    PLAN_SPEC_BASE_DIRECTIVES,
-    PLAN_SPEC_DIRECTIVES_PER_STEP
-  );
   return {
-    limit: Math.min(
-      PLAN_OUTPUT_TOKENS_CEILING,
-      PLAN_OUTPUT_TOKENS_FLOOR + ((sizeSteps + complexitySteps) * PLAN_OUTPUT_TOKENS_STEP)
-    ),
-    source: 'packet-scaled-default',
+    // Live observations found plan output nearly flat across 2.6-6.1 KiB
+    // packets, while raising this allowance simply moved the observed spend
+    // upward. Packet bytes and directive markers remain useful diagnostics,
+    // but they no longer buy a larger response.
+    limit: PLAN_OUTPUT_TOKENS_FLOOR,
+    source: 'structured-default',
     floor: PLAN_OUTPUT_TOKENS_FLOOR,
     ceiling: PLAN_OUTPUT_TOKENS_CEILING,
-    sizeSteps,
-    complexitySteps,
     metrics
   };
 }
@@ -75,8 +68,38 @@ export function planOutputTokenLimit(env = process.env) {
   return planOutputTokenBudget('', env).limit;
 }
 
+export function planWallClockBudget(spec = '', env = process.env, parentTimeoutSeconds = null) {
+  const budget = planOutputTokenBudget(spec, env);
+  const configured = env.DELEGATE_PLAN_TIMEOUT_SECONDS;
+  const overridden = configured != null && String(configured).trim() !== '';
+  const derived = overridden
+    ? boundedInteger(configured, PLAN_TIMEOUT_FLOOR_SECONDS, 30, PLAN_TIMEOUT_CEILING_SECONDS)
+    : Math.min(
+      PLAN_TIMEOUT_CEILING_SECONDS,
+      Math.max(PLAN_TIMEOUT_FLOOR_SECONDS, Math.ceil(budget.limit / PLAN_TOKENS_PER_SECOND))
+    );
+  // A plan pass must never outlive the work it is planning. The previous
+  // Math.max(60, ...) could hand a plan more wall clock than its own parent.
+  const parent = Number(parentTimeoutSeconds);
+  const bounded = Number.isFinite(parent) && parent > 0 ? Math.min(derived, parent) : derived;
+  return {
+    seconds: bounded,
+    source: overridden ? 'environment-override' : 'token-budget-derived',
+    clampedToParent: bounded !== derived,
+    derivedSeconds: derived,
+    tokenLimit: budget.limit,
+    floor: PLAN_TIMEOUT_FLOOR_SECONDS,
+    ceiling: PLAN_TIMEOUT_CEILING_SECONDS
+  };
+}
+
 export function interrogationOutputTokenLimit(env = process.env) {
   return boundedInteger(env.DELEGATE_INTERROGATION_OUTPUT_TOKENS, INTERROGATION_OUTPUT_TOKENS_DEFAULT, 128, 8_192);
+}
+
+export function planHardOutputTokenLimit(limit) {
+  const nominal = Math.max(1, Number(limit) || PLAN_OUTPUT_TOKENS_FLOOR);
+  return Math.floor(nominal * (1 + PLAN_RECOVERABLE_OVERRUN_RATIO));
 }
 
 export function planFirstDefault(mode, options = {}, env = process.env) {
@@ -95,8 +118,12 @@ export function planPrompt(providerPacket) {
 
 PLAN PASS ONLY — READ-ONLY.
 Do not modify files, run destructive commands, or begin implementation. Inspect
-only what is needed to predict the work. End with exactly one fenced JSON object
-using this structural contract:
+only what is needed to predict the work. Be compact: do not narrate analysis,
+repeat the task packet, quote source, or explain the schema. Prefer short stable
+component names, combine related targets, and stop immediately after the JSON
+fence. The complete answer should normally stay under 500 words.
+
+Return exactly one fenced JSON object using this structural contract:
 
 \`\`\`json
 {
@@ -205,6 +232,47 @@ export function parseStructuralPlan(text) {
       assumptions: assumptions.sort((left, right) => left.topic.localeCompare(right.topic) || left.choice.localeCompare(right.choice)),
       risks
     }
+  };
+}
+
+export function assessStructuralPlanOutput(text, observedOutputTokens, outputTokenLimit) {
+  const observed = Number(observedOutputTokens);
+  const limit = Number(outputTokenLimit);
+  const parsed = parseStructuralPlan(text);
+  const bounded = Number.isFinite(observed) && Number.isFinite(limit) && limit > 0;
+  const overrunTokens = bounded ? Math.max(0, observed - limit) : null;
+  const overrunRatio = bounded ? overrunTokens / limit : null;
+  const hardLimit = bounded ? planHardOutputTokenLimit(limit) : null;
+  const base = {
+    parsed,
+    observedOutputTokens: Number.isFinite(observed) ? observed : null,
+    outputTokenLimit: Number.isFinite(limit) ? limit : null,
+    hardOutputTokenLimit: hardLimit,
+    overrunTokens,
+    overrunPercent: overrunRatio == null ? null : overrunRatio * 100
+  };
+  if (!bounded || observed <= limit) return { ...base, state: 'within-budget', recoverable: false };
+  if (!parsed.ok) {
+    return {
+      ...base,
+      state: 'rejected',
+      recoverable: false,
+      reason: `over-budget-plan-${parsed.reason}`
+    };
+  }
+  if (observed <= hardLimit) {
+    return {
+      ...base,
+      state: 'recovered',
+      recoverable: true,
+      reason: 'marginal-structural-plan-overrun'
+    };
+  }
+  return {
+    ...base,
+    state: 'rejected',
+    recoverable: false,
+    reason: 'runaway-plan-output-token-budget-exceeded'
   };
 }
 

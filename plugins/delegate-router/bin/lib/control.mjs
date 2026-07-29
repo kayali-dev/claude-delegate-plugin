@@ -29,12 +29,14 @@ import {
   verificationRepositoryRevision
 } from './verification-profile.mjs';
 import {
+  assessStructuralPlanOutput,
   ambiguityDefault,
   contractDigest,
   interrogationOutputTokenLimit,
   planFirstDefault,
   planOutputTokenBudget,
-  planPrompt
+  planPrompt,
+  planWallClockBudget
 } from './planning.mjs';
 import { createWorkSpec } from './work-model.mjs';
 import {
@@ -305,6 +307,7 @@ export function terminalAuditRecord(job, options = {}) {
     providerCompletion: ledger.providerCompletion,
     verificationOutcome: ledger.verificationOutcome,
     findings: ledger.findings,
+    planFirstOutcome: ledger.planFirstOutcome,
     acceptanceDecision: ledger.acceptanceDecision,
     rejectionReason: ledger.rejectionReason,
     nudgeCount: job.nudgeCount || 0,
@@ -3102,6 +3105,7 @@ export function createManagedJob(options) {
     compiledPlanBudget.limit,
     maxOutputTokens || compiledPlanBudget.limit
   );
+  const compiledPlanWallClock = planWallClockBudget(options.prompt, process.env, timeoutSeconds);
   const origin = launchOrigin({
     origin: options.origin,
     projectDir: options.originProjectDir,
@@ -3150,7 +3154,8 @@ export function createManagedJob(options) {
         ...compiledPlanBudget,
         limit: effectivePlanOutputTokenLimit,
         ...(effectivePlanOutputTokenLimit < compiledPlanBudget.limit ? { cappedByJobOutputBudget: true } : {})
-      }
+      },
+      planWallClock: compiledPlanWallClock
     } : null,
     approval: options.approval || 'auto',
     effort,
@@ -3354,7 +3359,7 @@ export function startAmbiguityProbe(id) {
       cwd: parent.cwd,
       prompt: planPrompt(originalPrompt),
       allowSensitive: parent.allowSensitive === true,
-      timeoutSeconds: Math.max(60, Math.min(parent.timeoutSeconds || 120, 120)),
+      timeoutSeconds: planWallClockBudget(originalPrompt, process.env, parent.timeoutSeconds).seconds,
       maxOutputTokens: budget,
       idempotencyKey: `ambiguity-${parent.id}`,
       groupId: `ambiguity-${parent.id}`,
@@ -3365,7 +3370,7 @@ export function startAmbiguityProbe(id) {
     });
     updateManagedJob(id, (current) => {
       const recordedOutcome = current.planPass?.jobId === child.id
-        && ['completed', 'degraded'].includes(current.planPass.state)
+        && ['completed', 'recovered', 'degraded'].includes(current.planPass.state)
         ? current.planPass
         : null;
       current.planning.externalOutputTokensReserved = recordedOutcome?.outputTokens ?? budget;
@@ -3381,7 +3386,8 @@ export function startAmbiguityProbe(id) {
           probeStatus: recordedOutcome.planStatus,
           outputTokens: recordedOutcome.outputTokens,
           costBasis: recordedOutcome.outputTokens == null ? 'reserved-cap' : 'observed',
-          ...(recordedOutcome.reason ? { reason: recordedOutcome.reason } : {})
+          ...(recordedOutcome.reason ? { reason: recordedOutcome.reason } : {}),
+          ...(recordedOutcome.recovery ? { recovery: recordedOutcome.recovery } : {})
         } : {})
       };
       if (!recordedOutcome) {
@@ -3438,22 +3444,49 @@ export function recordPlanPassOutcome(planJobOrId) {
   const parentId = planJob.planningFor;
   if (!loadJob(parentId)) return null;
   const totals = usageTotals(planJob.usage);
-  const degraded = planJob.status !== 'completed';
-  const reason = degraded ? planPassFailureReason(planJob) : null;
+  const outputTokenLimit = planJob.maxOutputTokens ?? null;
+  const assessment = assessStructuralPlanOutput(
+    planJob.result?.plan || planJob.resultText || planJob.result || '',
+    totals?.outputTokens,
+    outputTokenLimit
+  );
+  const budgetRecovery = assessment.state === 'recovered'
+    && (planJob.status === 'completed'
+      || (planJob.status === 'failed' && planJob.errorCode === 'BUDGET_EXCEEDED'));
+  const structurallyUsable = assessment.parsed.ok
+    && (assessment.state === 'within-budget' || budgetRecovery);
+  const degraded = !structurallyUsable || (planJob.status !== 'completed' && !budgetRecovery);
+  const state = degraded ? 'degraded' : budgetRecovery ? 'recovered' : 'completed';
+  const reason = degraded
+    ? assessment.state === 'rejected'
+      ? assessment.reason
+      : assessment.parsed.ok
+        ? planPassFailureReason(planJob)
+        : `plan-structural-output-invalid:${assessment.parsed.reason}`
+    : budgetRecovery ? 'marginal-structural-plan-overrun-recovered' : null;
+  const recovery = budgetRecovery ? {
+    observedOutputTokens: assessment.observedOutputTokens,
+    outputTokenLimit: assessment.outputTokenLimit,
+    hardOutputTokenLimit: assessment.hardOutputTokenLimit,
+    overrunTokens: assessment.overrunTokens,
+    overrunPercent: assessment.overrunPercent
+  } : null;
   let changed = false;
   updateManagedJob(parentId, (current) => {
     const previous = current.planPass;
     if (previous?.jobId === planJob.id
-      && previous.state === (degraded ? 'degraded' : 'completed')
+      && previous.state === state
       && previous.planStatus === planJob.status) return;
     current.planPass = {
-      state: degraded ? 'degraded' : 'completed',
+      state,
       ...(reason ? { reason } : {}),
       jobId: planJob.id,
       planStatus: planJob.status,
       ...(planJob.errorCode ? { errorCode: planJob.errorCode } : {}),
-      outputTokenLimit: planJob.maxOutputTokens ?? current.planning?.ambiguity?.outputTokenLimit ?? null,
+      outputTokenLimit: outputTokenLimit ?? current.planning?.ambiguity?.outputTokenLimit ?? null,
       outputTokens: totals?.outputTokens ?? null,
+      hardOutputTokenLimit: assessment.hardOutputTokenLimit,
+      ...(recovery ? { recovery } : {}),
       recordedAt: Date.now()
     };
     if (current.planning?.ambiguity?.jobId === planJob.id) {
@@ -3462,23 +3495,29 @@ export function recordPlanPassOutcome(planJobOrId) {
         ?? 0;
       current.planning.ambiguity = {
         ...current.planning.ambiguity,
-        state: degraded ? 'degraded' : 'completed',
+        state,
         probeStatus: planJob.status,
         outputTokens: totals?.outputTokens ?? null,
         costBasis: totals ? 'observed' : 'reserved-cap',
-        ...(reason ? { reason } : {})
+        ...(reason ? { reason } : {}),
+        ...(recovery ? { recovery } : {})
       };
     }
     changed = true;
   }, { incrementRevision: false });
   if (changed) {
-    appendJobEvent(parentId, degraded ? 'plan.degraded' : 'plan.ambiguity.completed', {
+    appendJobEvent(parentId, degraded ? 'plan.degraded' : budgetRecovery ? 'plan.recovered' : 'plan.ambiguity.completed', {
       stage: 'ambiguity-pass',
       jobId: planJob.id,
       status: planJob.status,
-      ...(reason ? { reason, fallback: 'single-plan-confirmation' } : {}),
+      ...(reason ? {
+        reason,
+        ...(degraded ? { fallback: 'single-plan-confirmation' } : {})
+      } : {}),
       outputTokens: totals?.outputTokens ?? null,
-      outputTokenLimit: planJob.maxOutputTokens ?? null
+      outputTokenLimit,
+      hardOutputTokenLimit: assessment.hardOutputTokenLimit,
+      ...(recovery ? { recovery } : {})
     });
   }
   return inspectJob(parentId);
@@ -3488,9 +3527,12 @@ export async function awaitAmbiguityProbe(id, options = {}) {
   const parent = inspectJob(id);
   const probeId = parent.planning?.ambiguity?.jobId;
   if (!probeId) return null;
-  const waitMs = Math.min(Math.max(Number(options.waitMs ?? 30_000), 0), 120_000);
-  const deadline = Date.now() + waitMs;
   let probe = inspectJob(probeId);
+  const plannedWaitMs = (Number(probe.timeoutSeconds
+    || parent.planning?.planWallClock?.seconds
+    || 120) * 1_000) + 5_000;
+  const waitMs = Math.min(Math.max(Number(options.waitMs ?? plannedWaitMs), 0), 905_000);
+  const deadline = Date.now() + waitMs;
   while (!TERMINAL_STATUSES.has(probe.status) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
     probe = inspectJob(probeId);
@@ -3834,6 +3876,14 @@ export function launchManagedJob(options) {
   });
   child.unref();
   return inspectJob(job.id);
+}
+
+export async function launchManagedJobForCaller(options, waitTarget = null) {
+  const launched = launchManagedJob(options);
+  if (launched.dryRun) return launched;
+  if (waitTarget) await waitForJob(launched.id, waitTarget);
+  if (launched.planFirst !== true) return inspectJob(launched.id);
+  return waitForPlanFirstLaunch(launched.id);
 }
 
 export function submitControl(id, command, expectedRevision) {
@@ -4245,6 +4295,61 @@ export function revertManagedJob(id, options = {}) {
 const WAIT_TARGETS = new Set(['session', 'turn', 'first-output']);
 const FIRST_OUTPUT_TYPES = new Set(['message.delta', 'message.completed', 'tool.started']);
 
+function planLaunchNotice(job) {
+  if (job.planFirst !== true) return null;
+  const primaryDegraded = job.planning?.state === 'degraded';
+  const independentDegraded = job.planPass?.state === 'degraded';
+  if (primaryDegraded || independentDegraded) {
+    const source = independentDegraded ? job.planPass : job.planning;
+    const observedOutputTokens = source?.outputTokens
+      ?? source?.budgetOutcome?.observedOutputTokens
+      ?? null;
+    const outputTokenLimit = source?.outputTokenLimit
+      ?? source?.budgetOutcome?.outputTokenLimit
+      ?? job.planning?.planOutputTokenLimit
+      ?? null;
+    const reason = source?.reason || 'plan-first-degraded';
+    const comparison = Number.isFinite(Number(observedOutputTokens)) && Number.isFinite(Number(outputTokenLimit))
+      ? `; observed ${observedOutputTokens} output tokens vs cap ${outputTokenLimit}`
+      : '';
+    return {
+      state: 'degraded',
+      level: 'warning',
+      reason,
+      observedOutputTokens,
+      outputTokenLimit,
+      blocking: false,
+      message: `PLAN-FIRST DEGRADED: ${reason}${comparison}. The requested launch continues without a planning gate.`
+    };
+  }
+  const comparisonVerdict = job.planning?.comparison?.verdict || null;
+  if (comparisonVerdict || job.pendingInput?.kind === 'plan-confirmation'
+    || ['awaiting-confirmation', 'confirmed', 'declined'].includes(job.planning?.state)) {
+    return {
+      state: job.planPass?.state === 'recovered'
+        || job.planning?.budgetOutcome?.state === 'recovered'
+        ? 'recovered'
+        : 'completed',
+      level: 'info',
+      comparisonVerdict,
+      blocking: false,
+      message: `PLAN-FIRST ${job.planPass?.state === 'recovered' ? 'RECOVERED' : 'COMPLETED'}${comparisonVerdict ? `: ${comparisonVerdict}` : ''}.`
+    };
+  }
+  if (TERMINAL_STATUSES.has(job.status)) {
+    return {
+      state: 'degraded',
+      level: 'warning',
+      reason: 'job-terminal-before-plan-confirmation',
+      observedOutputTokens: null,
+      outputTokenLimit: job.planning?.planOutputTokenLimit ?? null,
+      blocking: false,
+      message: 'PLAN-FIRST DEGRADED: the job became terminal before a plan comparison or confirmation was produced.'
+    };
+  }
+  return null;
+}
+
 // One bounded, cursor-driven poller covers all start milestones. The event
 // cursor advances through the journal once, so quiet polling never rescans a
 // growing history.
@@ -4263,6 +4368,36 @@ export async function waitForJob(id, target = 'session', timeoutMs = 30000) {
         : page.events.some((event) => FIRST_OUTPUT_TYPES.has(event.type));
     if (reached || TERMINAL_STATUSES.has(job.status) || Date.now() >= deadline) return job;
     await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+export async function waitForPlanFirstLaunch(id) {
+  const initial = inspectJob(id);
+  const configured = Number(process.env.DELEGATE_PLAN_LAUNCH_WAIT_SECONDS);
+  const derivedSeconds = Number(initial.planning?.planWallClock?.seconds || 120) + 10;
+  const waitSeconds = Number.isFinite(configured) && configured > 0
+    ? Math.min(configured, 900)
+    : Math.min(Math.max(derivedSeconds, 10), 900);
+  const deadline = Date.now() + (waitSeconds * 1_000);
+  for (;;) {
+    const job = inspectJob(id);
+    const notice = planLaunchNotice(job);
+    if (notice) return { ...job, launchNotice: notice };
+    if (Date.now() >= deadline) {
+      return {
+        ...job,
+        launchNotice: {
+          state: 'pending',
+          level: 'warning',
+          reason: 'plan-first-launch-wait-expired',
+          observedOutputTokens: null,
+          outputTokenLimit: job.planning?.planOutputTokenLimit ?? null,
+          blocking: false,
+          message: `PLAN-FIRST STILL PENDING after ${waitSeconds}s; no comparison or confirmation has completed. Do not assume planning succeeded.`
+        }
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
@@ -16,10 +17,14 @@ import {
   updateManagedJob
 } from '../bin/lib/control.mjs';
 import {
+  assessStructuralPlanOutput,
   compareStructuralPlans,
   contractDigest,
   parseStructuralPlan,
+  planHardOutputTokenLimit,
   planOutputTokenBudget,
+  planPrompt,
+  planWallClockBudget,
   planReviewPresentation
 } from '../bin/lib/planning.mjs';
 import { runManagedProvider } from '../bin/lib/providers.mjs';
@@ -28,6 +33,8 @@ import { projectJobAsWorkItem } from '../bin/lib/work-projection.mjs';
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
 const fakeCursor = path.join(testDir, 'fake-cursor-acp.mjs');
+const jobsCli = path.join(testDir, '..', 'bin', 'delegate-jobs');
+const controlMcp = path.join(testDir, '..', 'bin', 'delegate-control-mcp');
 
 function structuralPlan(overrides = {}) {
   return {
@@ -51,7 +58,8 @@ async function isolated(fn) {
     'DELEGATE_STATE_FILE', 'DELEGATE_CODEX_BIN', 'DELEGATE_CURSOR_BIN',
     'DELEGATE_CURSOR_LOGIN_SHELL', 'DELEGATE_MIN_CODEX_VERSION', 'DELEGATE_MIN_CURSOR_VERSION',
     'DELEGATE_ENABLED_PROVIDERS', 'DELEGATE_AMBIGUITY_CHECK', 'DELEGATE_SUPERVISOR',
-    'DELEGATE_PLAN_OUTPUT_TOKENS',
+    'DELEGATE_PLAN_OUTPUT_TOKENS', 'DELEGATE_PLAN_TIMEOUT_SECONDS',
+    'DELEGATE_PLAN_LAUNCH_WAIT_SECONDS',
     'FAKE_CODEX_REQUEST_LOG', 'FAKE_CURSOR_REQUEST_LOG', 'FAKE_CODEX_DIVERGENT_MODEL',
     'FAKE_CODEX_INCONCLUSIVE_MODEL', 'FAKE_CODEX_PLAN_OUTPUT_TOKENS',
     'FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL'
@@ -112,25 +120,74 @@ test('structural plan comparison distinguishes convergence, divergence, and inco
   assert.equal(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).ambiguityQuestion, null);
 });
 
-test('plan output budget scales from a substantial floor to a documented ceiling and remains overridable', () => {
+test('plan output budget stays structural instead of scaling on packet bytes and remains overridable', () => {
   const simple = planOutputTokenBudget('Objective: rename one local variable');
   assert.equal(simple.limit, 4_096);
   assert.equal(simple.floor, 4_096);
   assert.equal(simple.ceiling, 16_384);
-  assert.equal(simple.source, 'packet-scaled-default');
+  assert.equal(simple.source, 'structured-default');
 
   const complex = planOutputTokenBudget([
     'Objective: implement the complete cross-surface change',
     ...Array.from({ length: 50 }, (_, index) => `${index + 1}. Must preserve invariant ${index + 1}.`),
     'x'.repeat(13_000)
   ].join('\n'));
-  assert.ok(complex.limit > simple.limit);
-  assert.ok(complex.sizeSteps > 0);
-  assert.ok(complex.complexitySteps > 0);
+  assert.equal(complex.limit, simple.limit, 'packet size and directive markers do not buy more output');
+  assert.ok(complex.metrics.bytes > simple.metrics.bytes);
+  assert.ok(complex.metrics.directiveMarkers > simple.metrics.directiveMarkers);
 
   const bounded = planOutputTokenBudget(`${'x'.repeat(100_000)}\n${'- must preserve this\n'.repeat(500)}`);
-  assert.equal(bounded.limit, 16_384);
+  assert.equal(bounded.limit, 4_096);
   assert.equal(planOutputTokenBudget('tiny', { DELEGATE_PLAN_OUTPUT_TOKENS: '3072' }).limit, 3_072);
+});
+
+test('plan wall clock derives from the token budget instead of a fixed cap', () => {
+  const simple = planWallClockBudget('Objective: rename one local variable');
+  assert.equal(simple.floor, 120);
+  assert.equal(simple.source, 'token-budget-derived');
+  assert.ok(simple.seconds >= 120, 'small packets keep at least the previous cap');
+
+  const configured = planWallClockBudget('same packet', { DELEGATE_PLAN_OUTPUT_TOKENS: '16384' });
+  assert.ok(configured.seconds > simple.seconds, 'a larger explicit token budget earns more wall clock');
+  assert.equal(configured.tokenLimit, 16_384);
+  assert.ok(configured.seconds <= configured.ceiling);
+
+  const saturated = planWallClockBudget(`${'x'.repeat(100_000)}\n${'- must preserve this\n'.repeat(500)}`);
+  assert.equal(saturated.tokenLimit, 4_096);
+  assert.ok(saturated.seconds <= 900, 'the ceiling bounds a saturated budget');
+
+  // A plan pass must never outlive the work it plans; the previous
+  // Math.max(60, ...) could hand it more wall clock than its own parent.
+  const clamped = planWallClockBudget('x'.repeat(60_000), {}, 90);
+  assert.equal(clamped.seconds, 90);
+  assert.equal(clamped.clampedToParent, true);
+  assert.ok(clamped.derivedSeconds > 90);
+
+  const overridden = planWallClockBudget('tiny', { DELEGATE_PLAN_TIMEOUT_SECONDS: '300' });
+  assert.equal(overridden.seconds, 300);
+  assert.equal(overridden.source, 'environment-override');
+  assert.equal(planWallClockBudget('tiny', { DELEGATE_PLAN_TIMEOUT_SECONDS: '99999' }).seconds, 900);
+});
+
+test('compact plan framing and structural recovery accept marginal overruns but reject both observed runaways', () => {
+  const prompt = planPrompt('Objective: inspect the bounded change');
+  assert.match(prompt, /normally stay under 500 words/);
+  assert.match(prompt, /stop immediately after the JSON\s+fence/);
+  const valid = planText(structuralPlan());
+  const marginal = assessStructuralPlanOutput(valid, 4_162, 4_096);
+  assert.equal(marginal.state, 'recovered');
+  assert.equal(marginal.recoverable, true);
+  assert.equal(marginal.hardOutputTokenLimit, planHardOutputTokenLimit(4_096));
+
+  for (const [observed, cap] of [[66_428, 2_048], [77_912, 4_096]]) {
+    const runaway = assessStructuralPlanOutput(valid, observed, cap);
+    assert.equal(runaway.state, 'rejected');
+    assert.equal(runaway.recoverable, false);
+    assert.equal(runaway.reason, 'runaway-plan-output-token-budget-exceeded');
+  }
+  const invalid = assessStructuralPlanOutput('unfinished prose', 4_162, 4_096);
+  assert.equal(invalid.state, 'rejected');
+  assert.match(invalid.reason, /no-valid-structural-json/);
 });
 
 test('write dry-runs announce the stricter plan-first default and both explicit escape hatches without creating state', () => isolated((directory) => {
@@ -247,6 +304,41 @@ test('two independent cheap plan passes open only structural divergence question
   assert.equal(inconclusive.job.status, 'cancelled');
 }));
 
+test('a realistic five-kilobyte packet recovers a marginal plan overrun and reaches a comparison verdict', () => isolated(async (directory) => {
+  process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '4162';
+  process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL = 'luna';
+  const packet = [
+    'Objective: implement the bounded cross-surface change',
+    ...Array.from({ length: 20 }, (_, index) => `${index + 1}. Must preserve directive ${index + 1} and its focused regression.`),
+    `Relevant context: ${'bounded context '.repeat(245)}`
+  ].join('\n');
+  assert.ok(Buffer.byteLength(packet) >= 4_800 && Buffer.byteLength(packet) <= 5_800);
+  const created = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: packet,
+    planFirst: true,
+    ambiguityCheck: true
+  });
+  const running = runManagedProvider(created);
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
+  assert.equal(presented.planPass.state, 'recovered');
+  assert.equal(presented.planPass.outputTokenLimit, 4_096);
+  assert.equal(presented.planPass.outputTokens, 4_162);
+  assert.equal(presented.planning.comparison.verdict, 'convergent');
+  assert.ok(readJobEvents(created.id).some((event) => event.type === 'plan.recovered'));
+  submitControl(created.id, {
+    type: 'respond',
+    requestId: presented.pendingInput.requestId,
+    accept: true,
+    commandId: 'confirm-recovered-plan'
+  }, presented.revision);
+  await running;
+  assert.equal(inspectJob(created.id).status, 'completed');
+}));
+
 test('a failed independent plan pass degrades loudly on the implement attempt and never blocks its launch', () => isolated(async (directory) => {
   process.env.DELEGATE_PLAN_OUTPUT_TOKENS = '128';
   process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '200';
@@ -264,8 +356,10 @@ test('a failed independent plan pass degrades loudly on the implement attempt an
   const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation');
   assert.equal(presented.status, 'running');
   assert.equal(presented.planPass.state, 'degraded');
-  assert.equal(presented.planPass.reason, 'plan-output-token-budget-exceeded');
+  assert.equal(presented.planPass.reason, 'runaway-plan-output-token-budget-exceeded');
   assert.equal(presented.planPass.errorCode, 'BUDGET_EXCEEDED');
+  assert.equal(presented.planPass.outputTokenLimit, 128);
+  assert.equal(presented.planPass.outputTokens, 200);
   assert.match(presented.planPass.jobId, /^codex-/);
   assert.equal(presented.planning.ambiguity.state, 'degraded');
   assert.equal(presented.planning.comparison.verdict, 'inconclusive');
@@ -283,6 +377,70 @@ test('a failed independent plan pass degrades loudly on the implement attempt an
   assert.ok(readJobEvents(created.id).some((event) => event.type === 'plan.degraded'
     && event.data.jobId === completed.planPass.jobId
     && event.data.fallback === 'single-plan-confirmation'));
+}));
+
+test('CLI and MCP launch responses surface plan degradation with observed-versus-cap numbers', () => isolated(async (directory) => {
+  process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '66428';
+  process.env.DELEGATE_PLAN_LAUNCH_WAIT_SECONDS = '10';
+  const packet = [
+    '# Objective',
+    'Implement the bounded fake change.',
+    '# Allowed scope',
+    'Only the fake test workspace.',
+    '# Acceptance criteria',
+    'The fake provider completes.',
+    '# Return',
+    'Return the result.'
+  ].join('\n');
+  const assertWarning = (result) => {
+    assert.equal(result.launchNotice.state, 'degraded');
+    assert.equal(result.launchNotice.level, 'warning');
+    assert.equal(result.launchNotice.reason, 'runaway-plan-output-token-budget-exceeded');
+    assert.equal(result.launchNotice.observedOutputTokens, 66_428);
+    assert.equal(result.launchNotice.outputTokenLimit, 4_096);
+    assert.match(result.launchNotice.message, /observed 66428 output tokens vs cap 4096/);
+    assert.equal(result.launchNotice.blocking, false);
+  };
+
+  const cli = spawnSync(process.execPath, [
+    jobsCli, 'start',
+    '--provider', 'codex',
+    '--model', 'sol',
+    '--mode', 'implement',
+    '--cwd', directory,
+    '--prompt', packet
+  ], { encoding: 'utf8', env: process.env, timeout: 30_000 });
+  assert.equal(cli.status, 0, cli.stderr);
+  const cliResult = JSON.parse(cli.stdout);
+  assertWarning(cliResult);
+  await waitFor(cliResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status));
+
+  const request = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'delegate_start',
+      arguments: {
+        provider: 'codex',
+        model: 'sol',
+        mode: 'implement',
+        cwd: directory,
+        prompt: packet
+      }
+    }
+  };
+  const mcp = spawnSync(process.execPath, [controlMcp], {
+    input: `${JSON.stringify(request)}\n`,
+    encoding: 'utf8',
+    env: process.env,
+    timeout: 30_000
+  });
+  assert.equal(mcp.status, 0, mcp.stderr);
+  const response = JSON.parse(mcp.stdout.trim());
+  const mcpResult = JSON.parse(response.result.content[0].text);
+  assertWarning(mcpResult);
+  await waitFor(mcpResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status));
 }));
 
 test('interrogation rejects authority fields and records answer plus observed token cost as WorkItem finding evidence', () => isolated((directory) => {
