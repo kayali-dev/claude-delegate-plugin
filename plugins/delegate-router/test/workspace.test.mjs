@@ -162,6 +162,7 @@ test('a real managed provider process writes only in its isolated workspace and 
   }
   assert.equal(finished.status, 'completed', finished.error);
   assert.equal(finished.changedFiles.count, 1);
+  assert.equal(finished.changedFiles.countIsLowerBound, false);
   assert.equal(finished.changeSet.files[0].path, 'target.txt');
   assert.equal(finished.workspace.state, 'discarded');
   assert.equal(fs.existsSync(started.cwd), false);

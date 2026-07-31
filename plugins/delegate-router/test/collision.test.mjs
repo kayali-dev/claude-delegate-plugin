@@ -147,7 +147,7 @@ test('live collision hook emits one scoped edge, cools duplicate touches, and st
   assert.deepEqual(JSON.parse(first.stdout).hookSpecificOutput.watchPaths, [signal, owned]);
   monitor.scan();
   assert.equal(output.length, 1);
-  assert.match(output[0], new RegExp(`^delegate\\[workspace\\]: ${job.id} collision detected \\(src/owned\\.txt; base-drift recorded, checks stale\\)$`));
+  assert.match(output[0], new RegExp(`^delegate\\[workspace\\]: ${job.id} \\[origin\\.sessionId=${sessionId} isOwnSession=true observedAtRevision=0\\] collision detected \\(src/owned\\.txt; base-drift recorded, checks stale\\)$`));
 
   const stale = loadJob(job.id);
   assert.equal(stale.verification.state, 'stale');

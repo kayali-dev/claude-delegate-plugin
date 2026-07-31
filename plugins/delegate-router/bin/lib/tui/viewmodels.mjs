@@ -957,6 +957,19 @@ function derivedDrift(job) {
   };
 }
 
+function changedFileCount(job) {
+  const value = Number(job?.changedFiles?.count
+    ?? job?.changedFiles?.files?.length
+    ?? job?.changedFiles?.entries?.length
+    ?? 0);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function changedFileCountLabel(job) {
+  const count = changedFileCount(job);
+  return `${job?.changedFiles?.countIsLowerBound === true ? 'at least ' : ''}${count}`;
+}
+
 function compactFieldValue(value) {
   if (value == null || value === '' || (typeof value === 'number' && !Number.isFinite(value))) return null;
   if (Array.isArray(value)) {
@@ -1239,7 +1252,7 @@ function chainContent(store, job, ui, width) {
       rows: [
         { key: 'mode', value: round.mode },
         { key: 'status', value: round.status },
-        { key: 'files', value: Number(round.changedFiles?.count ?? round.changedFiles?.files?.length ?? round.changedFiles?.entries?.length ?? 0) },
+        { key: 'files', value: changedFileCountLabel(round) },
         { key: 'verifyExit', value: verifyExit },
         { key: 'objectiveMet', value: round.objectiveMet },
         { key: 'resultMarker', value: markers.join(', ') || null, style: blocked ? palette.badgeWarn : palette.dim },
@@ -1253,7 +1266,7 @@ function chainContent(store, job, ui, width) {
     summary: {
       text: joinDisplayParts([
         `${chain.jobs.length} rounds`,
-        `${chain.jobs.reduce((total, round) => total + Number(round.changedFiles?.count ?? round.changedFiles?.files?.length ?? round.changedFiles?.entries?.length ?? 0), 0)} files`,
+        `${chain.jobs.some((round) => round.changedFiles?.countIsLowerBound === true) ? 'at least ' : ''}${chain.jobs.reduce((total, round) => total + changedFileCount(round), 0)} files`,
         unusual ? `${unusual} unusual` : ''
       ])
     },
@@ -2033,9 +2046,10 @@ function workDiffShape(job, store) {
   const deletions = finiteCount(stat.totalDeletions);
   return {
     files,
+    countIsLowerBound: job?.changedFiles?.countIsLowerBound === true,
     additions,
     deletions,
-    label: `${files} files${CHROME_SEPARATOR}+${additions} ${CHROME_GLYPHS.minus}${deletions}`
+    label: `${job?.changedFiles?.countIsLowerBound === true ? 'at least ' : ''}${files} files${CHROME_SEPARATOR}+${additions} ${CHROME_GLYPHS.minus}${deletions}`
   };
 }
 
@@ -2254,7 +2268,7 @@ export function workViewModel(store, ui = {}, viewport = {}) {
       offset: 0,
       totalChars: rawDiff.length,
       nextOffset: null
-    }, { band: { path: `${shape.files} changed files`, additions: shape.additions, deletions: shape.deletions } }) : null;
+    }, { band: { path: `${shape.countIsLowerBound ? 'at least ' : ''}${shape.files} changed files`, additions: shape.additions, deletions: shape.deletions } }) : null;
     const diffContent = prepared?.rows?.length ? {
       kind: 'diff',
       virtual: true,

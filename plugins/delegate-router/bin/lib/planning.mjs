@@ -232,23 +232,39 @@ function structuralJsonCandidates(text) {
   return [...fenced.reverse(), ...wholeBody, ...balanced];
 }
 
-function normalizedString(value) {
+function displayString(value) {
   return typeof value === 'string' && value.trim()
-    ? value.trim().replace(/\s+/g, ' ').toLowerCase()
+    ? value.trim().replace(/\s+/g, ' ')
     : null;
 }
 
-function normalizedPath(value) {
-  const text = normalizedString(value);
+function foldedStringKey(value) {
+  return displayString(value)?.toLowerCase() || null;
+}
+
+function displayPath(value) {
+  const text = displayString(value);
   if (!text) return null;
   return text.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+/g, '/');
 }
 
-function uniqueStrings(values, normalize) {
+function foldedPathKey(value) {
+  return displayPath(value)?.toLowerCase() || null;
+}
+
+function uniqueStrings(values, normalize, comparisonKey) {
   if (!Array.isArray(values)) return null;
   const entries = values.map(normalize);
   if (entries.some((entry) => entry == null)) return null;
-  return [...new Set(entries)].sort();
+  const unique = new Map();
+  for (const entry of entries) {
+    const key = comparisonKey(entry);
+    if (!key || unique.has(key)) continue;
+    unique.set(key, entry);
+  }
+  return [...unique.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, entry]) => entry);
 }
 
 const SEMANTIC_WORD_ALIASES = new Map([
@@ -404,35 +420,38 @@ export function parseStructuralPlan(text) {
     } catch {}
   }
   if (!parsed) return { ok: false, reason: 'no-valid-structural-json' };
-  const files = uniqueStrings(parsed.targets?.files, normalizedPath);
-  const components = uniqueStrings(parsed.targets?.components, normalizedString);
+  const files = uniqueStrings(parsed.targets?.files, displayPath, foldedPathKey);
+  const components = uniqueStrings(parsed.targets?.components, displayString, foldedStringKey);
   if (!files || !components) return { ok: false, reason: 'invalid-target-shape' };
   if (!Array.isArray(parsed.approach) || !Array.isArray(parsed.assumptions) || !Array.isArray(parsed.risks)) {
     return { ok: false, reason: 'missing-structural-dimensions' };
   }
   const approach = parsed.approach.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-    const kind = normalizedString(entry.kind);
-    const component = normalizedString(entry.component);
+    const kind = foldedStringKey(entry.kind);
+    const component = displayString(entry.component);
     if (!kind || !APPROACH_KINDS.has(kind) || !component) return null;
     return { kind, component };
   });
   if (approach.some((entry) => entry == null)) return { ok: false, reason: 'invalid-approach-shape' };
   const assumptions = parsed.assumptions.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-    const topic = normalizedString(entry.topic);
-    const choice = normalizedString(entry.choice);
+    const topic = displayString(entry.topic);
+    const choice = displayString(entry.choice);
     return topic && choice ? { topic, choice } : null;
   });
   if (assumptions.some((entry) => entry == null)) return { ok: false, reason: 'invalid-assumption-shape' };
-  const risks = uniqueStrings(parsed.risks, normalizedString);
+  const risks = uniqueStrings(parsed.risks, displayString, foldedStringKey);
   if (!risks) return { ok: false, reason: 'invalid-risk-shape' };
   return {
     ok: true,
     plan: {
       targets: { files, components },
       approach,
-      assumptions: assumptions.sort((left, right) => left.topic.localeCompare(right.topic) || left.choice.localeCompare(right.choice)),
+      assumptions: assumptions.sort((left, right) => (
+        foldedStringKey(left.topic).localeCompare(foldedStringKey(right.topic))
+        || foldedStringKey(left.choice).localeCompare(foldedStringKey(right.choice))
+      )),
       risks
     }
   };
@@ -521,8 +540,8 @@ export function compareStructuralPlans(leftInput, rightInput) {
     const b = right.plan.targets[dimension];
     if (!a.length || !b.length) continue;
     comparable.push(`targets.${dimension}`);
-    const comparableA = dimension === 'components' ? a.map(semanticLabelKey) : a;
-    const comparableB = dimension === 'components' ? b.map(semanticLabelKey) : b;
+    const comparableA = dimension === 'components' ? a.map(semanticLabelKey) : a.map(foldedPathKey);
+    const comparableB = dimension === 'components' ? b.map(semanticLabelKey) : b.map(foldedPathKey);
     const shared = overlap(comparableA, comparableB);
     targetOverlaps.push(shared.length > 0);
     if (!shared.length) {

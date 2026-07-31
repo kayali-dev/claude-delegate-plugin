@@ -50,6 +50,18 @@ try {
     throw new Error('session-id-mismatch');
   }
   const projectDir = canonicalDirectory(process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd());
+  // Correlation is the only SessionStart work that determines which session
+  // receives future pushes. Persist it before inventory/context work so a
+  // slow or timed-out optional projection cannot strand the monitor in the
+  // much noisier workspace fallback.
+  const marker = writeSessionCorrelationMarker({
+    stateDirectory: dataDir(),
+    sessionId: payloadSessionId,
+    coordinatorPid: process.ppid,
+    projectDir,
+    workspaceId: projectDir
+  });
+  if (!marker.ok) warn(marker.reason, event);
   const contextEnabled = String(process.env.DELEGATE_NATIVE_CONTEXT ?? '1') !== '0';
   const jobs = listJobs();
   let context = null;
@@ -66,14 +78,6 @@ try {
     }
   }
 
-  const marker = writeSessionCorrelationMarker({
-    stateDirectory: dataDir(),
-    sessionId: payloadSessionId,
-    coordinatorPid: process.ppid,
-    projectDir,
-    workspaceId: projectDir
-  });
-  if (!marker.ok) warn(marker.reason, event);
   const plan = buildCollisionWatchPlan({
     jobs,
     env: process.env,

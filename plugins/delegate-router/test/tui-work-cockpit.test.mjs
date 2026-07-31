@@ -182,6 +182,22 @@ test('Review keeps diff, verification, scope drift, findings, and base revision 
   );
 });
 
+test('Review labels detection-only changed-file counts as lower bounds', () => {
+  const review = frame(1, {
+    candidate: {
+      containment: 'detection-only',
+      changedFiles: {
+        count: 9,
+        countIsLowerBound: true,
+        files: ['src/cockpit.mjs'],
+        entries: [{ path: 'src/cockpit.mjs' }]
+      }
+    }
+  });
+  const rendered = renderFrameToString(review, { trimEnd: true });
+  assert.match(rendered, /at least 9 files/);
+});
+
 test('Approve exposes only backed actions and never implies owner-tree application', () => {
   const shared = frame(2);
   assert.equal(shared.meta.acceptJobId, 'cursor-candidate-2222222');

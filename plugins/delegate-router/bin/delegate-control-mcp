@@ -79,7 +79,7 @@ const TOOLS = [
   { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, resultWindow: { type: 'object', additionalProperties: false, properties: { find: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } } } },
   { name: 'delegate_list', description: 'List recent delegation jobs, optionally filtered or summarized by fan-out group.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, activeOnly: { type: 'boolean' }, status: { type: 'array', items: { enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] } }, groupId: { type: 'string' }, groupSummary: { type: 'boolean' } } } },
   { name: 'delegate_stats', description: 'Return the local outcome ledger: separately sampled provider-completion, real-tree verification-pass, and owner-acceptance rates; exact plan-first completion/degradation counts; broker/date cohorts; transport groups; and an optional confidence-bounded routing recommendation that never changes the static route.', inputSchema: { type: 'object', additionalProperties: false, properties: {
-    since: { type: 'string', description: "Optional duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.58.0')." },
+    since: { type: 'string', description: "Optional duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.59.0')." },
     until: { type: 'string', description: "Optional exclusive ISO-date upper bound such as '2026-07-17'." },
     recommendFor: {
       type: 'object',
@@ -98,7 +98,7 @@ const TOOLS = [
   { name: 'delegate_events', description: 'Read normalized live events using a monotonic sequence cursor, with optional bounded long polling.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, waitMs: { type: 'integer', minimum: 0, maximum: 30000 }, types: { type: 'array', items: { type: 'string' } } } } },
   { name: 'delegate_transcript', description: 'Read user-visible messages, plans, tool activity, and errors, paginated by sequence cursor. Streaming deltas and raw tool output are omitted unless verbose is set. Hidden reasoning is never returned.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, afterSeq: { type: 'integer' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, verbose: { type: 'boolean' } } } },
   { name: 'delegate_diff', description: 'Return the latest recorded unified diff (windowed by offset/maxChars for large diffs), a per-file stat summary with statOnly, or a per-file filtered view with paths (e.g. the job allowedPaths).', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, statOnly: { type: 'boolean' }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 }, paths: { type: 'array', items: { type: 'string' } } } } },
-  { name: 'delegate_files', description: 'Return files reported as changed by the provider.', inputSchema: jobOnly() },
+  { name: 'delegate_files', description: 'Return broker-observed changed files and whether the count is only a lower bound.', inputSchema: jobOnly() },
   { name: 'delegate_steer', description: 'Correct an active job. Codex can steer the same turn; Cursor explicitly cancels and resumes.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision', 'text'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, expectedTurnId: { type: 'string' }, correctionId: { type: 'string' }, strategy: { enum: ['auto', 'same-turn', 'restart', 'next-turn'] }, text: { type: 'string' } } } },
   { name: 'delegate_cancel', description: 'Request provider-aware cancellation using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
   { name: 'delegate_release', description: 'Release a startPaused job to send its first prompt, using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
@@ -336,7 +336,16 @@ async function dispatch(name, args) {
     if (args.statOnly) return { ...diffStat(diff), attributionConfidence };
     return { ...sliceDiff(diff, args), attributionConfidence };
   }
-  if (name === 'delegate_files') return { files: jobFiles(args.jobId), attributionConfidence: inspectJob(args.jobId).attributionConfidence };
+  if (name === 'delegate_files') {
+    const job = inspectJob(args.jobId);
+    const files = jobFiles(args.jobId);
+    return {
+      files,
+      count: files.length,
+      countIsLowerBound: job.changedFiles?.countIsLowerBound === true,
+      attributionConfidence: job.attributionConfidence
+    };
+  }
   if (name === 'delegate_steer') return submitControl(args.jobId, { type: 'steer', correctionId: args.correctionId, strategy: args.strategy || 'auto', text: args.text, expectedTurnId: args.expectedTurnId }, args.expectedRevision);
   if (name === 'delegate_interrogate') return submitControl(args.jobId, { type: 'interrogate', question: args.question, commandId: args.commandId }, args.expectedRevision);
   if (name === 'delegate_verify') return reverifyManagedJob(args.jobId);
@@ -390,7 +399,7 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.58.0' }
+        serverInfo: { name: 'delegate-control', version: '0.59.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
     else if (request.method === 'tools/call') {

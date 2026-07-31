@@ -663,6 +663,7 @@ test('terminal audit log is one-line-per-transition, redacted, private, and neve
   assert.equal(record.jobId, job.id);
   assert.equal(record.provider, 'codex');
   assert.equal(record.changedFilesCount, 2);
+  assert.equal(record.changedFilesCountIsLowerBound, true);
   assert.equal(record.scopeViolationsCount, 1);
   assert.equal(record.outcome.status, 'failed');
   assert.equal(record.recordType, 'terminal');
@@ -1044,6 +1045,7 @@ test('list previews object results and exposes provenance fields', () => isolate
   assert.equal(listed.resultPreview, 'the final answer text');
   assert.equal(listed.resolvedModel, 'composer-2.5');
   assert.equal(listed.changedFiles.count, 2);
+  assert.equal(listed.changedFiles.countIsLowerBound, true);
 }));
 
 test('diff stat and windowing bound large diffs', async () => {

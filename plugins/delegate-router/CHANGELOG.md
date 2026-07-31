@@ -2,6 +2,20 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.59.0 — 2026-07-31
+
+- Preserve path, identifier, and prose casing in stored/presented structural
+  plans while retaining folded derived keys for matching and deduplication.
+- Make monitor pushes self-identifying with origin session, ownership,
+  observed revision, and gate expiry metadata; workspace fallback now states
+  that sibling-session jobs will be delivered, cross-session gates stay
+  visible without response affordances, and answered gates emit supersession.
+- Persist SessionStart correlation before optional inventory/context work and
+  prefer a directly supplied monitor session identity when available.
+- Mark detection-only changed-file counts as lower bounds across job,
+  acceptance, audit, MCP, monitor, and TUI surfaces; contained workspace counts
+  remain exact.
+
 ## 0.58.0 — 2026-07-31
 
 - Plan-confirmation monitor pushes now carry `requiresHumanDecision: true`,

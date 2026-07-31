@@ -133,12 +133,12 @@ test('needs-input monitor line gives both inline TUI and revisioned CLI answer p
   const edge = detectActionableEdges(snapshot({
     id: 'question-job',
     revision: 7,
-    pendingInput: { requestId: 'question-1', kind: 'question' },
+    pendingInput: { requestId: 'question-1', kind: 'question', expiresAt: NOW + 60_000 },
     phase: 'user-input-required'
-  }), { now: NOW })[0];
+  }), { now: NOW, recipientSessionId: 'session-default' })[0];
   assert.equal(
     formatEdgeLine(edge),
-    "delegate[delegate-router]: question-job needs-input (answer in TUI with a, or: delegate-jobs respond question-job --expected-revision 7 --request-id question-1 --answer '<answer>')"
+    `delegate[delegate-router]: question-job [origin.sessionId=session-default isOwnSession=true observedAtRevision=7 expiresAt=${NOW + 60_000}] needs-input (answer in TUI with a, or: delegate-jobs respond question-job --expected-revision 7 --request-id question-1 --answer '<answer>')`
   );
 });
 
@@ -146,16 +146,62 @@ test('needs-input monitor line keeps plan confirmation human-only without an exe
   const edge = detectActionableEdges(snapshot({
     id: 'plan-job',
     revision: 6,
-    pendingInput: { requestId: 'plan-1', kind: 'plan-confirmation', requiresHumanDecision: true },
+    pendingInput: { requestId: 'plan-1', kind: 'plan-confirmation', requiresHumanDecision: true, expiresAt: NOW + 60_000 },
     phase: 'user-input-required'
-  }), { now: NOW })[0];
+  }), { now: NOW, recipientSessionId: 'session-default' })[0];
   const line = formatEdgeLine(edge);
   assert.equal(edge.requiresHumanDecision, true);
   assert.equal(
     line,
-    'delegate[delegate-router]: plan-job needs-input [requiresHumanDecision=true] (human plan-confirmation open; inspect with: delegate-jobs inspect plan-job. This notification is not user acknowledgement, approval, or consent; an agent must not execute the decision unattended.)'
+    `delegate[delegate-router]: plan-job [origin.sessionId=session-default isOwnSession=true observedAtRevision=6 expiresAt=${NOW + 60_000}] needs-input [requiresHumanDecision=true] (human plan-confirmation open; inspect with: delegate-jobs inspect plan-job. This notification is not user acknowledgement, approval, or consent; an agent must not execute the decision unattended.)`
   );
   assert.doesNotMatch(line, /delegate-jobs respond|--accept|--reject|--answer|plan-1|expected-revision/);
+});
+
+test('cross-session event text identifies ownership and keeps gates visible but non-actionable', () => {
+  const failure = detectActionableEdges(snapshot({
+    id: 'other-failure',
+    revision: 9,
+    status: 'failed',
+    errorCode: 'PROVIDER_ERROR'
+  }), { now: NOW, recipientSessionId: 'session-recipient' })[0];
+  assert.match(formatEdgeLine(failure), /origin\.sessionId=session-default isOwnSession=false observedAtRevision=9/);
+
+  const gate = detectActionableEdges(snapshot({
+    id: 'other-gate',
+    revision: 6,
+    pendingInput: {
+      requestId: 'plan-other',
+      kind: 'plan-confirmation',
+      requiresHumanDecision: true,
+      expiresAt: NOW + 60_000
+    },
+    phase: 'user-input-required'
+  }), { now: NOW, recipientSessionId: 'session-recipient' })[0];
+  const line = formatEdgeLine(gate);
+  assert.match(line, /origin\.sessionId=session-default isOwnSession=false/);
+  assert.match(line, /cross-session visibility only; the owning session must answer/);
+  assert.doesNotMatch(line, /delegate-jobs inspect|delegate-jobs respond|--accept|--reject|--answer/);
+});
+
+test('an answered gate emits an immediate supersede signal with the old and current revisions', () => {
+  const policy = new NotificationPolicy({ cooldownMs: 30_000, maxLinesPerMinute: 20 });
+  policy.bootstrap([snapshot({ id: 'resolved-gate', revision: 5 })], { now: NOW, recipientSessionId: 'session-default' });
+  const opened = snapshot({
+    id: 'resolved-gate',
+    revision: 6,
+    pendingInput: { requestId: 'question-resolved', kind: 'question', expiresAt: NOW + 60_000 },
+    phase: 'user-input-required'
+  }, [event(1, 'input.requested', { requestId: 'question-resolved' })]);
+  assert.match(policy.observe([opened], { now: NOW + 1, recipientSessionId: 'session-default' })[0], /needs-input/);
+
+  const answered = snapshot({ id: 'resolved-gate', revision: 10 }, [
+    event(1, 'input.requested', { requestId: 'question-resolved' }),
+    event(2, 'input.resolved', { requestId: 'question-resolved', outcome: 'answered' }, NOW + 2)
+  ]);
+  assert.deepEqual(policy.observe([answered], { now: NOW + 2, recipientSessionId: 'session-default' }), [
+    `delegate[delegate-router]: resolved-gate [origin.sessionId=session-default isOwnSession=true observedAtRevision=10 expiresAt=${NOW + 60_000}] needs-input superseded (request question-resolved answered; emittedAtRevision=6)`
+  ]);
 });
 
 test('progress, deltas, tools, usage, and successful intermediate steps stay silent', () => {
@@ -183,6 +229,14 @@ test('provider completion alone stays silent until acceptance evidence is ready'
     changedFiles: { count: 2 },
     acceptance: { state: 'ready-for-review' }
   }), { now: NOW })[0]?.key, 'ready-for-review:write');
+
+  const lowerBound = detectActionableEdges(snapshot({
+    id: 'lower-bound-review',
+    status: 'completed',
+    changedFiles: { count: 9, countIsLowerBound: true },
+    acceptance: { state: 'ready-for-review' }
+  }), { now: NOW })[0];
+  assert.match(formatEdgeLine(lowerBound), /ready-for-review \(implement, at least 9 files, checks not run\)$/);
 });
 
 test('edge policy deduplicates, permits genuine re-entry, and holds per-job cooldown', () => {
@@ -385,7 +439,7 @@ test('monitor runtime observes a synthetic store edge without mutating it', (t) 
   fs.appendFileSync(path.join(jobs, 'codex-edge.events.jsonl'), `${JSON.stringify(event(2, 'job.completed', {}, NOW + 1000))}\n`);
   monitor.scan();
   assert.deepEqual(output, [
-    `delegate[${path.basename(root)}]: codex-edge ready-for-review (implement, 3 files, checks not run)`
+    `delegate[${path.basename(root)}]: codex-edge [origin.sessionId=session-edge isOwnSession=false observedAtRevision=unknown sessionCorrelation=unavailable] ready-for-review (implement, 3 files, checks not run)`
   ]);
 });
 
@@ -581,7 +635,7 @@ test('correlation failure records and visibly degrades session scope to workspac
   assert.equal(result.effectiveScope, 'workspace');
   assert.equal(result.degradation.reason, 'no-matching-session-marker');
   assert.deepEqual(output, [
-    `delegate[${path.basename(workspace)}]: monitor-scope degraded (session correlation no-matching-session-marker; using workspace scope)`
+    `delegate[${path.basename(workspace)}]: monitor-scope degraded (session correlation no-matching-session-marker; using workspace scope; you will receive other sessions' jobs, identified by origin.sessionId and isOwnSession)`
   ]);
   const records = fs.readdirSync(directory)
     .filter((name) => name.startsWith('resolution-'))
@@ -591,6 +645,35 @@ test('correlation failure records and visibly degrades session scope to workspac
   assert.equal(records[0].effectiveScope, 'workspace');
   assert.equal(records[0].reason, 'no-matching-session-marker');
   assert.equal(fs.statSync(path.join(directory, fs.readdirSync(directory).find((name) => name.startsWith('resolution-')))).mode & 0o777, 0o600);
+});
+
+test('direct monitor session identity bypasses marker correlation and SessionStart persists the marker first', () => {
+  const source = fs.readFileSync(path.join(pluginRoot, 'bin', 'delegate-session-hook'), 'utf8');
+  const markerWrite = source.indexOf('const marker = writeSessionCorrelationMarker({');
+  const optionalInventory = source.indexOf('const jobs = listJobs();');
+  assert.ok(markerWrite > 0 && markerWrite < optionalInventory);
+
+  const output = [];
+  const monitor = new DelegateMonitor({
+    env: {
+      DELEGATE_MONITOR_SCOPE: 'session',
+      CLAUDE_CODE_SESSION_ID: 'session-from-monitor-env'
+    },
+    projectDir: '/workspace/direct-session',
+    store: {
+      directory: '/workspace/direct-session/jobs',
+      stateDirectory: '/workspace/direct-session/state',
+      scan: () => [],
+      readPreference: () => null
+    },
+    emit: (line) => output.push(line)
+  });
+  const result = monitor.start();
+  monitor.stop();
+  assert.equal(result.effectiveScope, 'session');
+  assert.equal(result.degradation, null);
+  assert.equal(monitor.sessionId, 'session-from-monitor-env');
+  assert.deepEqual(output, []);
 });
 
 test('durable ancestor markers choose the nearest session, then its newest marker', (t) => {

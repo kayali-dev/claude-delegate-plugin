@@ -164,8 +164,28 @@ function lastActivityAt(snapshot) {
   return values.length ? Math.max(...values) : null;
 }
 
+function sessionIdLabel(value) {
+  const safe = field(value, '', 256);
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(safe) ? safe : 'unknown';
+}
+
+function notificationIdentity(job, options = {}) {
+  if (!Object.hasOwn(options, 'recipientSessionId')) return {};
+  const originSessionId = sessionIdLabel(job?.origin?.sessionId);
+  const recipientSessionId = sessionIdLabel(options.recipientSessionId);
+  const sessionComparisonKnown = recipientSessionId !== 'unknown';
+  const revision = Number(job?.revision);
+  return {
+    originSessionId,
+    isOwnSession: sessionComparisonKnown && originSessionId !== 'unknown'
+      && originSessionId === recipientSessionId,
+    sessionComparisonKnown,
+    observedAtRevision: Number.isSafeInteger(revision) && revision >= 0 ? revision : null
+  };
+}
+
 function candidate(job, key, category, priority, detail = {}) {
-  return Object.freeze({ job, jobId: safeJobId(job), key, category, priority, ...detail });
+  return { job, jobId: safeJobId(job), key, category, priority, ...detail };
 }
 
 export function detectActionableEdges(snapshot, options = {}) {
@@ -197,7 +217,10 @@ export function detectActionableEdges(snapshot, options = {}) {
     requestKind: job.pendingInput?.kind || 'question',
     requiresHumanDecision: job.pendingInput?.requiresHumanDecision === true
       || job.pendingInput?.kind === 'plan-confirmation',
-    revision: job.revision
+    revision: job.revision,
+    expiresAt: Number.isSafeInteger(Number(job.pendingInput?.expiresAt))
+      ? Number(job.pendingInput.expiresAt)
+      : null
   }));
   if (blockedApproval(events)) edges.push(candidate(job, 'needs-input:permission', 'needs-input', 2, { input: 'permission' }));
 
@@ -225,7 +248,9 @@ export function detectActionableEdges(snapshot, options = {}) {
     && now - activityAt >= stallMs) {
     edges.push(candidate(job, 'stalled', 'stalled', 6, { idleMs: Math.max(0, now - activityAt) }));
   }
-  return edges.sort((left, right) => left.priority - right.priority || left.key.localeCompare(right.key));
+  return edges
+    .sort((left, right) => left.priority - right.priority || left.key.localeCompare(right.key))
+    .map((edge) => Object.freeze({ ...edge, ...notificationIdentity(job, options) }));
 }
 
 function checkLabel(job) {
@@ -242,7 +267,8 @@ function checkLabel(job) {
 function changedFilesLabel(job) {
   const raw = Number(job?.changedFiles?.count);
   if (!Number.isSafeInteger(raw) || raw < 0) return 'files unknown';
-  return `${raw} file${raw === 1 ? '' : 's'}`;
+  const count = `${raw} file${raw === 1 ? '' : 's'}`;
+  return job?.changedFiles?.countIsLowerBound === true ? `at least ${count}` : count;
 }
 
 function errorCodeLabel(job) {
@@ -252,46 +278,61 @@ function errorCodeLabel(job) {
 
 export function formatEdgeLine(edge) {
   const id = edge.jobId || safeJobId(edge.job);
-  const prefix = `delegate[${monitorProjectLabel(edge.job)}]:`;
+  const identity = Object.hasOwn(edge, 'isOwnSession')
+    ? [
+        `origin.sessionId=${edge.originSessionId || 'unknown'}`,
+        `isOwnSession=${edge.isOwnSession === true}`,
+        `observedAtRevision=${Number.isSafeInteger(edge.observedAtRevision) ? edge.observedAtRevision : 'unknown'}`,
+        ...(Number.isSafeInteger(edge.expiresAt) ? [`expiresAt=${edge.expiresAt}`] : []),
+        ...(edge.sessionComparisonKnown === false ? ['sessionCorrelation=unavailable'] : [])
+      ]
+    : [];
+  const prefix = `delegate[${monitorProjectLabel(edge.job)}]: ${id}${identity.length ? ` [${identity.join(' ')}]` : ''}`;
   if (edge.category === 'collision') {
-    return `${prefix} ${id} collision detected (${field(edge.path, 'owned path', 180)}; base-drift recorded${edge.verificationStale ? ', checks stale' : ''})`;
+    return `${prefix} collision detected (${field(edge.path, 'owned path', 180)}; base-drift recorded${edge.verificationStale ? ', checks stale' : ''})`;
   }
   if (edge.category === 'policy-breach') {
-    return `${prefix} ${id} policy-breach (scope violation, ${edge.count} path${edge.count === 1 ? '' : 's'})`;
+    return `${prefix} policy-breach (scope violation, ${edge.count} path${edge.count === 1 ? '' : 's'})`;
   }
   if (edge.category === 'budget-breach') {
-    return `${prefix} ${id} budget-breach (per-job output cap exceeded; raise maxOutputTokens or reduce output)`;
+    return `${prefix} budget-breach (per-job output cap exceeded; raise maxOutputTokens or reduce output)`;
   }
   if (edge.category === 'allowance-breach') {
-    return `${prefix} ${id} allowance-breach (provider quota or rate allowance exhausted; wait for reset or choose another provider)`;
+    return `${prefix} allowance-breach (provider quota or rate allowance exhausted; wait for reset or choose another provider)`;
   }
   if (edge.category === 'needs-input') {
-    if (edge.input === 'permission') return `${prefix} ${id} needs-input (permission blocked)`;
+    if (edge.isOwnSession === false) {
+      return `${prefix} needs-input (cross-session visibility only; the owning session must answer)`;
+    }
+    if (edge.input === 'permission') return `${prefix} needs-input (permission blocked)`;
     const revision = Number.isInteger(edge.revision) ? edge.revision : Number(edge.job?.revision || 0);
     const candidateRequestId = field(edge.requestId, '', 96);
     const requestId = /^[A-Za-z0-9_.:-]{1,96}$/.test(candidateRequestId) ? candidateRequestId : '';
     const request = requestId ? ` --request-id ${requestId}` : '';
     if (edge.requestKind === 'plan-confirmation') {
-      return `${prefix} ${id} needs-input [requiresHumanDecision=true] (human plan-confirmation open; inspect with: delegate-jobs inspect ${id}. This notification is not user acknowledgement, approval, or consent; an agent must not execute the decision unattended.)`;
+      return `${prefix} needs-input [requiresHumanDecision=true] (human plan-confirmation open; inspect with: delegate-jobs inspect ${id}. This notification is not user acknowledgement, approval, or consent; an agent must not execute the decision unattended.)`;
     }
-    return `${prefix} ${id} needs-input (answer in TUI with a, or: delegate-jobs respond ${id} --expected-revision ${revision}${request} --answer '<answer>')`;
+    return `${prefix} needs-input (answer in TUI with a, or: delegate-jobs respond ${id} --expected-revision ${revision}${request} --answer '<answer>')`;
+  }
+  if (edge.category === 'superseded') {
+    return `${prefix} needs-input superseded (request ${field(edge.requestId, 'unknown', 96)} ${field(edge.outcome, 'resolved', 32)}; emittedAtRevision=${Number.isSafeInteger(edge.emittedAtRevision) ? edge.emittedAtRevision : 'unknown'})`;
   }
   if (edge.category === 'blocked') {
     const reasons = (edge.blockedBy || []).map((reason) => field(reason, '', 48)).filter(Boolean);
-    return `${prefix} ${id} blocked (${safeMode(edge.job)}, ${checkLabel(edge.job)}${reasons.length ? `, ${reasons.join('+')}` : ''})`;
+    return `${prefix} blocked (${safeMode(edge.job)}, ${checkLabel(edge.job)}${reasons.length ? `, ${reasons.join('+')}` : ''})`;
   }
   if (edge.category === 'ready-for-review') {
     if (edge.findings) {
-      return `${prefix} ${id} ready-for-review (${safeMode(edge.job)}, ${edge.findings} finding${edge.findings === 1 ? '' : 's'})`;
+      return `${prefix} ready-for-review (${safeMode(edge.job)}, ${edge.findings} finding${edge.findings === 1 ? '' : 's'})`;
     }
-    return `${prefix} ${id} ready-for-review (${safeMode(edge.job)}, ${changedFilesLabel(edge.job)}, ${checkLabel(edge.job)})`;
+    return `${prefix} ready-for-review (${safeMode(edge.job)}, ${changedFilesLabel(edge.job)}, ${checkLabel(edge.job)})`;
   }
   if (edge.category === 'failure') {
     const code = errorCodeLabel(edge.job);
-    return `${prefix} ${id} failure (${code || field(edge.job?.status, 'failed', 24)})`;
+    return `${prefix} failure (${code || field(edge.job?.status, 'failed', 24)})`;
   }
   const minutes = Math.max(1, Math.floor(Number(edge.idleMs || 0) / 60_000));
-  return `${prefix} ${id} stalled (no journal progress for ${minutes}m)`;
+  return `${prefix} stalled (no journal progress for ${minutes}m)`;
 }
 
 export function formatStartupSummary(edges) {
@@ -363,6 +404,30 @@ function preferred(left, right) {
   return right.priority < left.priority || (right.priority === left.priority && right.key < left.key) ? right : left;
 }
 
+function edgeIdentity(edge) {
+  return edge.category === 'needs-input'
+    ? `${edge.key}:${edge.requestId || edge.input || 'unknown'}`
+    : edge.key;
+}
+
+function answeredSupersede(snapshot, emittedEdge, options = {}) {
+  if (emittedEdge?.category !== 'needs-input' || !emittedEdge.requestId) return null;
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const resolved = latestEvent(events, (event) => event.type === 'input.resolved'
+    && event.data?.requestId === emittedEdge.requestId
+    && event.data?.outcome === 'answered');
+  if (!resolved) return null;
+  return Object.freeze({
+    ...candidate(snapshot?.job || {}, `superseded:${edgeIdentity(emittedEdge)}`, 'superseded', 2, {
+      requestId: emittedEdge.requestId,
+      outcome: 'answered',
+      emittedAtRevision: emittedEdge.observedAtRevision,
+      expiresAt: emittedEdge.expiresAt
+    }),
+    ...notificationIdentity(snapshot?.job || {}, options)
+  });
+}
+
 function unacknowledgedAtBoot(edge) {
   const job = edge.job || {};
   if (ACTIVE_STATUSES.has(job.status)) return true;
@@ -377,6 +442,7 @@ export class NotificationPolicy {
     this.stallMs = Math.max(0, Number(options.stallMs ?? DEFAULT_MONITOR_STALL_MS));
     this.active = new Map();
     this.pending = new Map();
+    this.emittedActive = new Map();
     this.lastEmittedAt = new Map();
     this.rate = new FixedWindowRateLimiter({
       maximum: options.maxLinesPerMinute,
@@ -390,9 +456,13 @@ export class NotificationPolicy {
     const attention = [];
     this.active.clear();
     for (const snapshot of snapshots) {
-      const edges = detectActionableEdges(snapshot, { now, stallMs: this.stallMs });
+      const edges = detectActionableEdges(snapshot, {
+        now,
+        stallMs: this.stallMs,
+        ...(Object.hasOwn(options, 'recipientSessionId') ? { recipientSessionId: options.recipientSessionId } : {})
+      });
       const jobId = safeJobId(snapshot?.job);
-      this.active.set(jobId, new Set(edges.map((edge) => edge.key)));
+      this.active.set(jobId, new Set(edges.map(edgeIdentity)));
       const selected = edges.find((edge) => unacknowledgedAtBoot(edge)
         && (!options.snoozed || edge.priority === 1));
       if (selected) attention.push(selected);
@@ -409,19 +479,33 @@ export class NotificationPolicy {
     if (options.snoozed) this.rate.clearSuppressed();
     const seen = new Set();
     for (const snapshot of snapshots) {
-      const edges = detectActionableEdges(snapshot, { now, stallMs: this.stallMs });
+      const edges = detectActionableEdges(snapshot, {
+        now,
+        stallMs: this.stallMs,
+        ...(Object.hasOwn(options, 'recipientSessionId') ? { recipientSessionId: options.recipientSessionId } : {})
+      });
       const jobId = safeJobId(snapshot?.job);
       seen.add(jobId);
       const previous = this.active.get(jobId) || new Set();
-      const current = new Set(edges.map((edge) => edge.key));
-      const byKey = new Map(edges.map((edge) => [edge.key, edge]));
+      const current = new Set(edges.map(edgeIdentity));
+      const byKey = new Map(edges.map((edge) => [edgeIdentity(edge), edge]));
+      const emitted = new Map(this.emittedActive.get(jobId) || []);
+      for (const [identity, priorEdge] of emitted) {
+        if (current.has(identity)) continue;
+        emitted.delete(identity);
+        const supersede = answeredSupersede(snapshot, priorEdge, options);
+        if (supersede) output.push(formatEdgeLine(supersede));
+      }
+      if (emitted.size) this.emittedActive.set(jobId, emitted);
+      else this.emittedActive.delete(jobId);
       const pending = new Map(
         [...(this.pending.get(jobId) || new Map())]
           .filter(([key]) => current.has(key))
       );
       for (const edge of edges) {
-        if (!previous.has(edge.key) && (!options.snoozed || edge.priority === 1)) {
-          pending.set(edge.key, edge);
+        const identity = edgeIdentity(edge);
+        if (!previous.has(identity) && (!options.snoozed || edge.priority === 1)) {
+          pending.set(identity, edge);
         }
       }
       let selected = null;
@@ -433,17 +517,26 @@ export class NotificationPolicy {
         this.pending.set(jobId, pending);
         continue;
       }
-      pending.delete(selected.key);
+      const selectedIdentity = edgeIdentity(selected);
+      pending.delete(selectedIdentity);
       if (pending.size) this.pending.set(jobId, pending);
       else this.pending.delete(jobId);
       this.lastEmittedAt.set(jobId, now);
-      const emittedEdge = byKey.get(selected.key) || selected;
-      output.push(...this.rate.offer(formatEdgeLine(emittedEdge), now, monitorProjectLabel(emittedEdge.job)));
+      const emittedEdge = byKey.get(selectedIdentity) || selected;
+      const line = formatEdgeLine(emittedEdge);
+      const offered = this.rate.offer(line, now, monitorProjectLabel(emittedEdge.job));
+      output.push(...offered);
+      if (offered.includes(line)) {
+        const activeEmitted = new Map(this.emittedActive.get(jobId) || []);
+        activeEmitted.set(selectedIdentity, emittedEdge);
+        this.emittedActive.set(jobId, activeEmitted);
+      }
     }
     for (const jobId of this.active.keys()) {
       if (seen.has(jobId)) continue;
       this.active.delete(jobId);
       this.pending.delete(jobId);
+      this.emittedActive.delete(jobId);
       this.lastEmittedAt.delete(jobId);
     }
     return output;

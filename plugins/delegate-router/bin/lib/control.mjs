@@ -284,6 +284,7 @@ export function terminalAuditRecord(job, options = {}) {
     containment: job.containment || (job.isolation === 'worktree' ? 'broker-workspace' : 'detection-only'),
     changeSetId: job.changeSet?.id || null,
     changedFilesCount: job.changedFiles?.count || 0,
+    changedFilesCountIsLowerBound: job.changedFiles != null && changedFilesCountIsLowerBound(job),
     scopeViolationsCount: job.scopeViolations?.length || 0,
     outcome: {
       status: job.status,
@@ -1025,7 +1026,6 @@ export function completeShadowJob(id, outcome = {}) {
       ...(finalHash ? { finalHash } : {})
     };
   });
-  const names = [...new Set(entries.map((entry) => entry.path).filter(Boolean))];
   const completedAt = Math.floor(Date.now() / 1000);
   appendJobEvent(id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', {
     status,
@@ -1037,7 +1037,7 @@ export function completeShadowJob(id, outcome = {}) {
     job.phase = status;
     job.completedAt = completedAt;
     job.durationMs = Math.max(0, completedAt * 1000 - Number(job.createdAt || completedAt) * 1000);
-    job.changedFiles = { count: names.length, files: names.slice(0, 50), entries };
+    job.changedFiles = changedFilesRecord(job, entries);
     if (outcome.providerSessionId) {
       job.providerSessionId = outcome.providerSessionId;
       job.session = outcome.providerSessionId;
@@ -1351,6 +1351,7 @@ export function inspectJob(id) {
   const shadow = job.managedBy === 'delegate-shadow' || isDirectTransport(job);
   return {
     ...job,
+    changedFiles: changedFilesView(job),
     verification: latestVerification(job),
     verificationEvidence: verificationEvidenceChain(job),
     ...activityFields(job),
@@ -1365,6 +1366,31 @@ export function inspectJob(id) {
   };
 }
 
+export function changedFilesCountIsLowerBound(job) {
+  const containment = job?.containment || (job?.isolation === 'worktree' ? 'broker-workspace' : 'detection-only');
+  return containment === 'detection-only';
+}
+
+export function changedFilesRecord(job, entries = []) {
+  const bounded = Array.isArray(entries) ? entries.filter((entry) => entry?.path) : [];
+  const names = [...new Set(bounded.map((entry) => entry.path))];
+  const byPath = new Map(bounded.map((entry) => [entry.path, entry]));
+  return {
+    count: names.length,
+    countIsLowerBound: changedFilesCountIsLowerBound(job),
+    files: names.slice(0, 50),
+    entries: names.slice(0, 1000).map((name) => byPath.get(name))
+  };
+}
+
+export function changedFilesView(job) {
+  if (!job?.changedFiles) return null;
+  return {
+    ...job.changedFiles,
+    countIsLowerBound: changedFilesCountIsLowerBound(job)
+  };
+}
+
 function workspaceChangedFiles(changeSet) {
   const entries = (changeSet?.files || []).map((file) => ({
     path: file.path,
@@ -1372,11 +1398,7 @@ function workspaceChangedFiles(changeSet) {
     baseOid: file.baseOid,
     resultOid: file.resultOid
   }));
-  return {
-    count: entries.length,
-    files: entries.map((entry) => entry.path).slice(0, 50),
-    entries: entries.slice(0, 1000)
-  };
+  return changedFilesRecord({ containment: 'broker-workspace' }, entries);
 }
 
 export function captureManagedWorkspace(id, options = {}) {
@@ -1438,7 +1460,7 @@ export function captureManagedWorkspace(id, options = {}) {
       id: job.id,
       workspace: job.workspace,
       changeSet: job.changeSet || null,
-      changedFiles: job.changedFiles || null,
+      changedFiles: changedFilesView(job),
       discarded
     };
   });
@@ -1828,7 +1850,7 @@ export function listManagedJobs(options = {}) {
         : typeof job.result?.text === 'string' && job.result.text.trim()
           ? job.result.text.slice(0, 200)
           : typeof job.result?.plan === 'string' ? job.result.plan.slice(0, 200) : null,
-      changedFiles: job.changedFiles || null,
+      changedFiles: changedFilesView(job),
       verification: job.verification || null,
       verificationOrigin: job.verificationOrigin || null,
       acceptance: job.acceptance || null,

@@ -343,6 +343,53 @@ test('delegate_stats returns filtered audit aggregates and totals and rejects jo
   }
 });
 
+test('delegate_files adds lower-bound metadata without changing its input schema', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-mcp-files-'));
+  const previousState = process.env.DELEGATE_STATE_FILE;
+  const previousProviders = process.env.DELEGATE_ENABLED_PROVIDERS;
+  process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
+  process.env.DELEGATE_ENABLED_PROVIDERS = 'codex';
+  try {
+    const { appendJobEvent, createManagedJob, updateManagedJob } = await import('../bin/lib/control.mjs');
+    const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'touch one observed file' });
+    appendJobEvent(job.id, 'file.changed', { path: 'observed.js', kind: 'update' });
+    updateManagedJob(job.id, (current) => {
+      current.status = 'completed';
+      current.phase = 'completed';
+      current.changedFiles = { count: 1, files: ['observed.js'] };
+    });
+
+    const child = spawn(process.execPath, [server], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE, DELEGATE_ENABLED_PROVIDERS: 'codex' }
+    });
+    const lines = readline.createInterface({ input: child.stdout });
+    const responses = [];
+    lines.on('line', (line) => responses.push(JSON.parse(line)));
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: 'delegate_files', arguments: { jobId: job.id }
+    } })}\n`);
+    await waitForCondition({
+      description: 'delegate_files lower-bound response',
+      timeoutMs: 2_000,
+      observe: () => responses[0] || null
+    });
+    child.stdin.end();
+    await waitForChildExit({ child, description: 'delegate_files MCP process to exit' });
+    const payload = JSON.parse(responses[0].result.content[0].text);
+    assert.equal(payload.count, 1);
+    assert.equal(payload.countIsLowerBound, true);
+    assert.equal(payload.attributionConfidence, 'best-effort');
+    assert.deepEqual(payload.files.map((entry) => entry.path), ['observed.js']);
+  } finally {
+    if (previousState == null) delete process.env.DELEGATE_STATE_FILE;
+    else process.env.DELEGATE_STATE_FILE = previousState;
+    if (previousProviders == null) delete process.env.DELEGATE_ENABLED_PROVIDERS;
+    else process.env.DELEGATE_ENABLED_PROVIDERS = previousProviders;
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+  }
+});
+
 test('delegate_respond waits for applied and rejected terminal command outcomes', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-control-mcp-respond-'));
   const previousState = process.env.DELEGATE_STATE_FILE;

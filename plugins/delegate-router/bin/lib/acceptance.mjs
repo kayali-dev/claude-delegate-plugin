@@ -75,6 +75,7 @@ export function acceptanceEvidence(job) {
     },
     changes: {
       count: Number.isSafeInteger(job?.changedFiles?.count) ? job.changedFiles.count : null,
+      countIsLowerBound: (job?.containment || (job?.isolation === 'worktree' ? 'broker-workspace' : 'detection-only')) === 'detection-only',
       files: Array.isArray(job?.changedFiles?.files) ? job.changedFiles.files.slice(0, 50) : []
     },
     verification,

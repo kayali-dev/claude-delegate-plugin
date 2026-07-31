@@ -27,6 +27,11 @@ export function normalizeMonitorProjectDirectory(value) {
   }
 }
 
+function monitorSessionId(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(text) ? text : null;
+}
+
 export function scopeMonitorSnapshots(snapshots, options = {}) {
   const scope = options.scope === 'project' ? 'workspace' : (options.scope || 'session');
   if (scope === 'off') return [];
@@ -56,7 +61,7 @@ function monitorWorkspaceLabel(workspaceId) {
 
 function correlationDegradationLine(workspaceId, reason) {
   const safeReason = String(reason || 'unavailable').replace(/[^A-Za-z0-9_.:-]/g, '-').slice(0, 80);
-  return `delegate[${monitorWorkspaceLabel(workspaceId)}]: monitor-scope degraded (session correlation ${safeReason}; using workspace scope)`;
+  return `delegate[${monitorWorkspaceLabel(workspaceId)}]: monitor-scope degraded (session correlation ${safeReason}; using workspace scope; you will receive other sessions' jobs, identified by origin.sessionId and isOwnSession)`;
 }
 
 function numericEnv(env, name, fallback, minimum = 0) {
@@ -93,13 +98,16 @@ export class DelegateMonitor {
       ...(options.preferenceFile ? { preferenceFile: options.preferenceFile } : {})
     });
     this.sessionId = null;
+    this.recipientSessionId = monitorSessionId(options.sessionId)
+      || monitorSessionId(this.env.CLAUDE_CODE_SESSION_ID)
+      || monitorSessionId(this.env.CLAUDE_SESSION_ID);
     this.effectiveScope = this.scope;
     this.correlation = null;
     this.degradation = null;
     this.degradationEmitted = false;
     if (this.scope === 'session') {
-      this.correlation = options.correlation || (options.sessionId
-        ? { ok: true, sessionId: options.sessionId, reason: null, recorded: true }
+      this.correlation = options.correlation || (this.recipientSessionId
+        ? { ok: true, sessionId: this.recipientSessionId, reason: null, recorded: true }
         : resolveMonitorSession({
             stateDirectory: this.store.stateDirectory,
             workspaceId: this.workspaceId,
@@ -109,6 +117,7 @@ export class DelegateMonitor {
           }));
       if (this.correlation.ok && this.correlation.sessionId) {
         this.sessionId = this.correlation.sessionId;
+        this.recipientSessionId = this.correlation.sessionId;
       } else {
         this.effectiveScope = 'workspace';
         this.degradation = {
@@ -148,8 +157,8 @@ export class DelegateMonitor {
       });
       const snoozed = preferenceSnoozed(this.store.readPreference(), now);
       const policyLines = this.started
-        ? this.policy.observe(snapshots, { now, snoozed })
-        : this.policy.bootstrap(snapshots, { now, snoozed });
+        ? this.policy.observe(snapshots, { now, snoozed, recipientSessionId: this.recipientSessionId })
+        : this.policy.bootstrap(snapshots, { now, snoozed, recipientSessionId: this.recipientSessionId });
       this.started = true;
       const lines = [...statusLines, ...policyLines];
       for (const line of lines) this.emit(line);

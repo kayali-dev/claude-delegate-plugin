@@ -44,6 +44,9 @@ and waits for revisioned `delegate_respond accept=true|false`. Acceptance
 continues the same provider thread/session into write mode; it never launches a
 fresh context. When budget permits, a second cheap plan from another provider
 or model is compared structurally by targets, approach shape, and assumptions.
+Structural normalization preserves the submitted spelling of paths, component
+names, assumptions, and risks for presentation and file resolution; folded
+forms exist only as derived matching/deduplication keys.
 The plan output sub-budget is computed locally from packet bytes plus list,
 constraint, and section markers: 4,096 tokens minimum, 1,024-token size and
 complexity steps, and a 16,384-token ceiling. It adds no provider round-trip;
@@ -234,7 +237,15 @@ Push defaults to this Claude session's own launches. New records retain
 rounds inherit both. A private SessionStart marker correlates the monitor. If
 that correlation is unavailable or ambiguous, the monitor records the failure,
 emits one workspace-labeled degradation line, and falls back to workspace
-scope rather than guessing a session. Use
+scope rather than guessing a session. The degradation line states that sibling
+sessions' jobs will now be delivered. Every per-job line includes
+`origin.sessionId`, boolean `isOwnSession`, and `observedAtRevision`; input gates
+also include `expiresAt`. Cross-session gates remain visible but omit response
+affordances because only the owning session can answer. An answered gate emits
+an immediate `needs-input superseded` line so an earlier push is not mistaken
+for a live decision window. If receiver identity itself is unavailable,
+`isOwnSession=false` is paired with `sessionCorrelation=unavailable` and means
+"not confirmed as own", not proof that the origin is foreign. Use
 `DELEGATE_MONITOR_SCOPE=workspace` to include sibling sessions in this
 worktree/project, `all` only for an explicit fleet overview, or `off` to disable
 push. Origin-less historical jobs stay silent except under `all`. Scope changes
@@ -289,6 +300,9 @@ collision edge per attempt/path and mark applicable verification
 record a degradation reason while coordinator-hook and post-hoc detection
 continue. These alerts are early detection only. They do not prevent, contain,
 or isolate writes; use worktree isolation when containment is required.
+Accordingly, every detection-only `changedFiles.count` is labeled with
+`countIsLowerBound: true`, and text/TUI count renderings say `at least`; only a
+broker-workspace count is presented as exact.
 
 Workspace isolation is additive and explicit. For a contained write attempt,
 set `isolation: "worktree"`, keep `sandbox=auto`, provide `allowedPaths`, and

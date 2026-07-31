@@ -146,6 +146,36 @@ test('structural plan comparison distinguishes convergence, divergence, and inco
   assert.equal(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).ambiguityQuestion, null);
 });
 
+test('structural plans preserve path and identifier case while matching and dedupe use derived folded keys', () => {
+  const parsed = parseStructuralPlan(planText(structuralPlan({
+    targets: {
+      files: ['src/genui/GenUiRenderer.tsx', 'src/genui/genuirenderer.tsx'],
+      components: ['ServiceMap']
+    },
+    approach: [{ kind: 'EDIT', component: 'RenderNode.service-map' }],
+    assumptions: [{ topic: 'interaction contract', choice: 'Use a pre-minted interactionId with onInteract.' }],
+    risks: ['Preserve SVG viewBox casing.']
+  })));
+
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.plan.targets.files, ['src/genui/GenUiRenderer.tsx']);
+  assert.deepEqual(parsed.plan.targets.components, ['ServiceMap']);
+  assert.deepEqual(parsed.plan.approach, [{ kind: 'edit', component: 'RenderNode.service-map' }]);
+  assert.deepEqual(parsed.plan.assumptions, [
+    { topic: 'interaction contract', choice: 'Use a pre-minted interactionId with onInteract.' }
+  ]);
+  assert.deepEqual(parsed.plan.risks, ['Preserve SVG viewBox casing.']);
+
+  const presentation = planReviewPresentation(parsed, { verdict: 'inconclusive', reason: 'not-run' }, { source: 'unavailable' });
+  assert.deepEqual(presentation.structuralPlan, parsed.plan);
+  assert.equal(compareStructuralPlans(parsed, planText(structuralPlan({
+    targets: { files: ['SRC/GENUI/GENUIRENDERER.TSX'], components: ['servicemap'] },
+    approach: [{ kind: 'edit', component: 'rendernode.service-map' }],
+    assumptions: [{ topic: 'INTERACTION CONTRACT', choice: 'use a pre-minted interactionid with oninteract' }],
+    risks: ['preserve svg viewbox casing']
+  }))).verdict, 'convergent');
+});
+
 test('declared assumption paraphrases reduce to the same ordered parser-precedence decision', () => {
   const leftChoice = 'preserve fenced and whole-body precedence; scan balanced brace-aware objects only as the final candidate source.';
   const rightChoice = 'preserve fenced json precedence, then whole-body json, then scan for a balanced object; retain structural validation reasons.';

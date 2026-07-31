@@ -9,6 +9,7 @@ import {
   awaitAmbiguityProbe,
   captureManagedWorkspace,
   claimCommands,
+  changedFilesRecord,
   completeCommand,
   completeIngestedFiles,
   DeltaRedactor,
@@ -1130,8 +1131,7 @@ function terminal(job, status, phase, extra = {}) {
           ...(finalHash ? { finalHash } : {})
         };
       });
-      const names = entries.map((file) => file.path);
-      changedFiles = { count: names.length, files: names.slice(0, 50), entries: entries.slice(0, 1000) };
+      changedFiles = changedFilesRecord(job, entries);
       finalHashes = Object.fromEntries(entries.filter((entry) => entry.finalHash).map((entry) => [entry.path, entry.finalHash]));
       if (job.allowedPaths?.length) {
         const violations = entries.filter((file) => !pathMatchesScope(file.path, job.allowedPaths));
@@ -1798,7 +1798,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.58.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.59.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2847,7 +2847,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.58.0' }
+      clientInfo: { name: 'delegate-router', version: '0.59.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
