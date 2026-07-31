@@ -3281,15 +3281,7 @@ export function createManagedJob(options) {
   }
 }
 
-function ambiguityCandidate(parent) {
-  const otherProvider = parent.provider === 'codex' ? 'cursor' : 'codex';
-  if (providerEnabled(otherProvider)) {
-    return {
-      provider: otherProvider,
-      model: otherProvider === 'codex' ? 'luna' : 'composer',
-      independentBy: 'provider'
-    };
-  }
+function ambiguityModelCandidate(parent) {
   if (parent.provider === 'codex') {
     return {
       provider: 'codex',
@@ -3301,6 +3293,65 @@ function ambiguityCandidate(parent) {
     provider: 'cursor',
     model: String(parent.requestedModel || parent.model).startsWith('grok') ? 'composer' : 'grok',
     independentBy: 'model'
+  };
+}
+
+function ambiguityCandidate(parent) {
+  const otherProvider = parent.provider === 'codex' ? 'cursor' : 'codex';
+  if (providerEnabled(otherProvider)) {
+    return {
+      provider: otherProvider,
+      model: otherProvider === 'codex' ? 'luna' : 'composer',
+      independentBy: 'provider'
+    };
+  }
+  return ambiguityModelCandidate(parent);
+}
+
+function planAttemptRole(planJob, parentId) {
+  return planJob.idempotencyKey === `ambiguity-fallback-${parentId}`
+    ? 'model-fallback'
+    : 'independent-probe';
+}
+
+function upsertPlanAttempt(attempts, attempt) {
+  const next = Array.isArray(attempts) ? [...attempts] : [];
+  const index = next.findIndex((entry) => entry?.jobId === attempt.jobId);
+  if (index >= 0) next[index] = { ...next[index], ...attempt };
+  else next.push(attempt);
+  return next;
+}
+
+function observedPlanAttemptTokens(attempts) {
+  const observed = attempts
+    .filter((attempt) => attempt?.outputTokens != null)
+    .map((attempt) => Number(attempt.outputTokens))
+    .filter(Number.isFinite);
+  return observed.length ? observed.reduce((total, value) => total + value, 0) : null;
+}
+
+function attributedPlanAttemptTokens(attempts) {
+  return attempts.reduce((total, attempt) => {
+    const observed = attempt?.outputTokens == null ? null : Number(attempt.outputTokens);
+    if (observed != null && Number.isFinite(observed)) return total + observed;
+    const reserved = Number(attempt?.outputTokenLimit);
+    return total + (Number.isFinite(reserved) ? reserved : 0);
+  }, 0);
+}
+
+function startedPlanAttempt(child, candidate, outputTokenLimit, role = 'independent-probe', triggerReason = null) {
+  return {
+    role,
+    jobId: child.id,
+    provider: candidate.provider,
+    model: candidate.model,
+    independentBy: candidate.independentBy,
+    state: 'running',
+    planStatus: child.status,
+    outputTokenLimit,
+    outputTokens: null,
+    costBasis: 'reserved-cap',
+    ...(triggerReason ? { triggerReason } : {})
   };
 }
 
@@ -3361,7 +3412,7 @@ export function startAmbiguityProbe(id) {
       effort: 'low',
       approval: 'auto',
       cwd: parent.cwd,
-      prompt: planPrompt(originalPrompt),
+      prompt: planPrompt(originalPrompt, candidate),
       allowSensitive: parent.allowSensitive === true,
       timeoutSeconds: planWallClockBudget(originalPrompt, process.env, parent.timeoutSeconds, { provider: candidate.provider }).seconds,
       maxOutputTokens: budget,
@@ -3377,7 +3428,13 @@ export function startAmbiguityProbe(id) {
         && ['completed', 'recovered', 'degraded'].includes(current.planPass.state)
         ? current.planPass
         : null;
-      current.planning.externalOutputTokensReserved = recordedOutcome?.outputTokens ?? budget;
+      const attempts = recordedOutcome?.attempts || upsertPlanAttempt(
+        current.planPass?.attempts,
+        startedPlanAttempt(child, candidate, budget)
+      );
+      const totalOutputTokens = observedPlanAttemptTokens(attempts);
+      const attributedOutputTokens = attributedPlanAttemptTokens(attempts);
+      current.planning.externalOutputTokensReserved = attributedOutputTokens;
       current.planning.ambiguity = {
         enabled: true,
         state: recordedOutcome?.state || 'running',
@@ -3386,6 +3443,9 @@ export function startAmbiguityProbe(id) {
         model: candidate.model,
         independentBy: candidate.independentBy,
         outputTokenLimit: budget,
+        attempts,
+        totalOutputTokens,
+        attributedOutputTokens,
         ...(recordedOutcome ? {
           probeStatus: recordedOutcome.planStatus,
           outputTokens: recordedOutcome.outputTokens,
@@ -3399,7 +3459,10 @@ export function startAmbiguityProbe(id) {
           state: 'running',
           jobId: child.id,
           outputTokenLimit: budget,
-          budgetSource: compiledPlanBudget.source
+          budgetSource: compiledPlanBudget.source,
+          attempts,
+          totalOutputTokens,
+          attributedOutputTokens
         };
       }
     }, { incrementRevision: false });
@@ -3442,11 +3505,21 @@ function planPassFailureReason(planJob) {
   return planJob.errorCode ? `plan-pass-failed:${planJob.errorCode}` : 'plan-pass-failed';
 }
 
+function degradedPlanPassReason(planJob, assessment, budgetRecovery, structurallyInvalid) {
+  if (structurallyInvalid) return `plan-structural-output-invalid:${assessment.parsed.reason}`;
+  if (assessment.state === 'rejected' && planJob.errorCode === 'BUDGET_EXCEEDED') return assessment.reason;
+  if (planJob.status !== 'completed' && !budgetRecovery) return planPassFailureReason(planJob);
+  if (assessment.state === 'rejected') return assessment.reason;
+  if (assessment.parsed.ok) return planPassFailureReason(planJob);
+  return `plan-structural-output-invalid:${assessment.parsed.reason}`;
+}
+
 export function recordPlanPassOutcome(planJobOrId) {
   const planJob = typeof planJobOrId === 'string' ? loadJob(planJobOrId) : planJobOrId;
   if (!planJob?.planningFor || !TERMINAL_STATUSES.has(planJob.status)) return null;
   const parentId = planJob.planningFor;
-  if (!loadJob(parentId)) return null;
+  const parent = loadJob(parentId);
+  if (!parent) return null;
   const totals = usageTotals(planJob.usage);
   const outputTokenLimit = planJob.maxOutputTokens ?? null;
   const assessment = assessStructuralPlanOutput(
@@ -3461,12 +3534,12 @@ export function recordPlanPassOutcome(planJobOrId) {
     && (assessment.state === 'within-budget' || budgetRecovery);
   const degraded = !structurallyUsable || (planJob.status !== 'completed' && !budgetRecovery);
   const state = degraded ? 'degraded' : budgetRecovery ? 'recovered' : 'completed';
+  const structurallyInvalid = planJob.status === 'completed'
+    && assessment.state === 'within-budget'
+    && !assessment.parsed.ok;
+  const parserReason = structurallyInvalid ? assessment.parsed.reason : null;
   const reason = degraded
-    ? assessment.state === 'rejected'
-      ? assessment.reason
-      : assessment.parsed.ok
-        ? planPassFailureReason(planJob)
-        : `plan-structural-output-invalid:${assessment.parsed.reason}`
+    ? degradedPlanPassReason(planJob, assessment, budgetRecovery, structurallyInvalid)
     : budgetRecovery ? 'marginal-structural-plan-overrun-recovered' : null;
   const recovery = budgetRecovery ? {
     observedOutputTokens: assessment.observedOutputTokens,
@@ -3475,36 +3548,83 @@ export function recordPlanPassOutcome(planJobOrId) {
     overrunTokens: assessment.overrunTokens,
     overrunPercent: assessment.overrunPercent
   } : null;
+  const attempt = {
+    role: planAttemptRole(planJob, parentId),
+    jobId: planJob.id,
+    provider: planJob.provider,
+    model: planJob.requestedModel || planJob.model,
+    independentBy: planJob.provider === parent.provider ? 'model' : 'provider',
+    state,
+    planStatus: planJob.status,
+    ...(reason ? { reason } : {}),
+    ...(parserReason ? { parserReason } : {}),
+    structurallyInvalid,
+    fallbackEligible: structurallyInvalid,
+    ...(planJob.errorCode ? { errorCode: planJob.errorCode } : {}),
+    outputTokenLimit,
+    outputTokens: totals?.outputTokens ?? null,
+    costBasis: totals ? 'observed' : 'reserved-cap',
+    hardOutputTokenLimit: assessment.hardOutputTokenLimit,
+    ...(recovery ? { recovery } : {}),
+    recordedAt: Date.now()
+  };
   let changed = false;
   updateManagedJob(parentId, (current) => {
-    const previous = current.planPass;
-    if (previous?.jobId === planJob.id
-      && previous.state === state
-      && previous.planStatus === planJob.status) return;
-    current.planPass = {
-      state,
-      ...(reason ? { reason } : {}),
-      jobId: planJob.id,
-      planStatus: planJob.status,
-      ...(planJob.errorCode ? { errorCode: planJob.errorCode } : {}),
-      outputTokenLimit: outputTokenLimit ?? current.planning?.ambiguity?.outputTokenLimit ?? null,
-      outputTokens: totals?.outputTokens ?? null,
-      hardOutputTokenLimit: assessment.hardOutputTokenLimit,
-      ...(recovery ? { recovery } : {}),
-      recordedAt: Date.now()
+    const previousAttempts = current.planPass?.attempts
+      || current.planning?.ambiguity?.attempts
+      || [];
+    const previousAttempt = previousAttempts.find((entry) => entry?.jobId === planJob.id);
+    if (previousAttempt?.state === state && previousAttempt?.planStatus === planJob.status) return;
+    const attempts = upsertPlanAttempt(previousAttempts, attempt);
+    const totalOutputTokens = observedPlanAttemptTokens(attempts);
+    const attributedOutputTokens = attributedPlanAttemptTokens(attempts);
+    const activeJobId = current.planning?.ambiguity?.jobId;
+    const isCurrentAttempt = !activeJobId || activeJobId === planJob.id;
+    const attemptTotals = {
+      attempts,
+      attemptCount: attempts.length,
+      totalOutputTokens,
+      attributedOutputTokens
     };
-    if (current.planning?.ambiguity?.jobId === planJob.id) {
-      current.planning.externalOutputTokensReserved = totals?.outputTokens
-        ?? current.planning.ambiguity.outputTokenLimit
-        ?? 0;
+    current.planning.externalOutputTokensReserved = attributedOutputTokens;
+    if (isCurrentAttempt) {
+      current.planPass = {
+        state,
+        ...(reason ? { reason } : {}),
+        ...(parserReason ? { parserReason } : {}),
+        structurallyInvalid,
+        fallbackEligible: structurallyInvalid,
+        jobId: planJob.id,
+        planStatus: planJob.status,
+        ...(planJob.errorCode ? { errorCode: planJob.errorCode } : {}),
+        outputTokenLimit: outputTokenLimit ?? current.planning?.ambiguity?.outputTokenLimit ?? null,
+        outputTokens: totals?.outputTokens ?? null,
+        hardOutputTokenLimit: assessment.hardOutputTokenLimit,
+        ...attemptTotals,
+        ...(recovery ? { recovery } : {}),
+        recordedAt: Date.now()
+      };
+    } else {
+      current.planPass = { ...current.planPass, ...attemptTotals };
+    }
+    if (isCurrentAttempt) {
       current.planning.ambiguity = {
         ...current.planning.ambiguity,
         state,
         probeStatus: planJob.status,
         outputTokens: totals?.outputTokens ?? null,
         costBasis: totals ? 'observed' : 'reserved-cap',
+        ...(parserReason ? { parserReason } : {}),
+        structurallyInvalid,
+        fallbackEligible: structurallyInvalid,
+        ...attemptTotals,
         ...(reason ? { reason } : {}),
         ...(recovery ? { recovery } : {})
+      };
+    } else {
+      current.planning.ambiguity = {
+        ...current.planning.ambiguity,
+        ...attemptTotals
       };
     }
     changed = true;
@@ -3516,8 +3636,16 @@ export function recordPlanPassOutcome(planJobOrId) {
       status: planJob.status,
       ...(reason ? {
         reason,
-        ...(degraded ? { fallback: 'single-plan-confirmation' } : {})
+        ...(degraded ? {
+          fallback: structurallyInvalid
+            ? 'model-independent-parent-provider'
+            : 'single-plan-confirmation'
+        } : {})
       } : {}),
+      ...(parserReason ? { parserReason } : {}),
+      structurallyInvalid,
+      fallbackEligible: structurallyInvalid,
+      attemptRole: attempt.role,
       outputTokens: totals?.outputTokens ?? null,
       outputTokenLimit,
       hardOutputTokenLimit: assessment.hardOutputTokenLimit,
@@ -3527,25 +3655,234 @@ export function recordPlanPassOutcome(planJobOrId) {
   return inspectJob(parentId);
 }
 
-export async function awaitAmbiguityProbe(id, options = {}) {
-  const parent = inspectJob(id);
-  const probeId = parent.planning?.ambiguity?.jobId;
-  if (!probeId) return null;
-  let probe = inspectJob(probeId);
-  const plannedWaitMs = (Number(probe.timeoutSeconds
+function startAmbiguityModelFallback(parentId, failedProbe) {
+  const parent = loadJob(parentId);
+  if (!parent) return null;
+  const attempts = parent.planPass?.attempts || parent.planning?.ambiguity?.attempts || [];
+  const failedAttempt = attempts.find((attempt) => attempt?.jobId === failedProbe.id);
+  if (failedAttempt?.fallbackEligible !== true) return null;
+  const existing = attempts.find((attempt) => attempt?.role === 'model-fallback');
+  if (existing?.jobId) return inspectJob(existing.jobId);
+  const candidate = ambiguityModelCandidate(parent);
+  let originalPrompt;
+  try { originalPrompt = fs.readFileSync(parent.promptPath, 'utf8'); }
+  catch (error) {
+    updateManagedJob(parentId, (current) => {
+      current.planPass = {
+        ...current.planPass,
+        fallbackUsed: true,
+        fallbackState: 'skipped',
+        fallbackReason: 'prompt-unavailable'
+      };
+      current.planning.ambiguity = {
+        ...current.planning.ambiguity,
+        fallbackUsed: true,
+        fallbackState: 'skipped',
+        fallbackReason: 'prompt-unavailable'
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(parentId, 'plan.degraded', {
+      stage: 'ambiguity-fallback',
+      reason: `prompt-unavailable: ${redact(error.message)}`,
+      triggerReason: failedAttempt.reason,
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
+  const compiledPlanBudget = planOutputTokenBudget(originalPrompt, process.env, { provider: candidate.provider });
+  const configuredLimit = compiledPlanBudget.limit;
+  const budget = parent.maxOutputTokens
+    ? Math.min(configuredLimit, Math.floor(parent.maxOutputTokens * 0.2))
+    : configuredLimit;
+  if (budget < 128) {
+    updateManagedJob(parentId, (current) => {
+      current.planPass = {
+        ...current.planPass,
+        fallbackUsed: true,
+        fallbackState: 'skipped',
+        fallbackReason: 'insufficient-output-token-budget'
+      };
+      current.planning.ambiguity = {
+        ...current.planning.ambiguity,
+        fallbackUsed: true,
+        fallbackState: 'skipped',
+        fallbackReason: 'insufficient-output-token-budget'
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(parentId, 'plan.degraded', {
+      stage: 'ambiguity-fallback',
+      reason: 'insufficient-output-token-budget',
+      triggerReason: failedAttempt.reason,
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
+  try {
+    const child = launchManagedJob({
+      provider: candidate.provider,
+      model: candidate.model,
+      mode: 'plan',
+      effort: 'low',
+      approval: 'auto',
+      cwd: parent.cwd,
+      prompt: planPrompt(originalPrompt, candidate),
+      allowSensitive: parent.allowSensitive === true,
+      timeoutSeconds: planWallClockBudget(originalPrompt, process.env, parent.timeoutSeconds, { provider: candidate.provider }).seconds,
+      maxOutputTokens: budget,
+      idempotencyKey: `ambiguity-fallback-${parent.id}`,
+      groupId: `ambiguity-${parent.id}`,
+      planningFor: parent.id,
+      planFirst: false,
+      ambiguityCheck: false,
+      reportLint: false
+    });
+    updateManagedJob(parentId, (current) => {
+      const currentAttempts = current.planPass?.attempts || current.planning?.ambiguity?.attempts;
+      const recordedAttempt = currentAttempts?.find((attempt) => attempt?.jobId === child.id
+        && ['completed', 'recovered', 'degraded'].includes(attempt.state));
+      const nextAttempts = upsertPlanAttempt(
+        currentAttempts,
+        recordedAttempt || startedPlanAttempt(child, candidate, budget, 'model-fallback', failedAttempt.reason)
+      );
+      const totalOutputTokens = observedPlanAttemptTokens(nextAttempts);
+      const attributedOutputTokens = attributedPlanAttemptTokens(nextAttempts);
+      current.planning.externalOutputTokensReserved = attributedOutputTokens;
+      current.planPass = {
+        state: recordedAttempt?.state || 'running',
+        ...(recordedAttempt?.reason ? { reason: recordedAttempt.reason } : {}),
+        ...(recordedAttempt?.parserReason ? { parserReason: recordedAttempt.parserReason } : {}),
+        structurallyInvalid: recordedAttempt?.structurallyInvalid === true,
+        fallbackEligible: false,
+        jobId: child.id,
+        ...(recordedAttempt?.planStatus ? { planStatus: recordedAttempt.planStatus } : {}),
+        ...(recordedAttempt?.errorCode ? { errorCode: recordedAttempt.errorCode } : {}),
+        outputTokenLimit: budget,
+        outputTokens: recordedAttempt?.outputTokens ?? null,
+        hardOutputTokenLimit: recordedAttempt?.hardOutputTokenLimit ?? null,
+        budgetSource: compiledPlanBudget.source,
+        fallbackUsed: true,
+        fallbackFromJobId: failedProbe.id,
+        fallbackTriggerReason: failedAttempt.reason,
+        attempts: nextAttempts,
+        attemptCount: nextAttempts.length,
+        totalOutputTokens,
+        attributedOutputTokens
+      };
+      current.planning.ambiguity = {
+        ...current.planning.ambiguity,
+        state: recordedAttempt?.state || 'running',
+        jobId: child.id,
+        provider: candidate.provider,
+        model: candidate.model,
+        independentBy: candidate.independentBy,
+        outputTokenLimit: budget,
+        fallbackUsed: true,
+        fallbackFromJobId: failedProbe.id,
+        fallbackTriggerReason: failedAttempt.reason,
+        attempts: nextAttempts,
+        attemptCount: nextAttempts.length,
+        totalOutputTokens,
+        attributedOutputTokens
+      };
+      if (recordedAttempt?.reason) current.planning.ambiguity.reason = recordedAttempt.reason;
+      else delete current.planning.ambiguity.reason;
+      if (recordedAttempt?.parserReason) current.planning.ambiguity.parserReason = recordedAttempt.parserReason;
+      else delete current.planning.ambiguity.parserReason;
+      current.planning.ambiguity.structurallyInvalid = recordedAttempt?.structurallyInvalid === true;
+      current.planning.ambiguity.fallbackEligible = false;
+    }, { incrementRevision: false });
+    appendJobEvent(parentId, 'plan.ambiguity.started', {
+      stage: 'ambiguity-fallback',
+      jobId: child.id,
+      provider: candidate.provider,
+      model: candidate.model,
+      independentBy: candidate.independentBy,
+      outputTokenLimit: budget,
+      triggerJobId: failedProbe.id,
+      triggerReason: failedAttempt.reason,
+      attemptRole: 'model-fallback'
+    });
+    return child;
+  } catch (error) {
+    const fallbackReason = `plan-pass-fallback-launch-failed:${redact(error.message)}`;
+    updateManagedJob(parentId, (current) => {
+      current.planPass = {
+        ...current.planPass,
+        fallbackUsed: true,
+        fallbackState: 'degraded',
+        fallbackReason
+      };
+      current.planning.ambiguity = {
+        ...current.planning.ambiguity,
+        fallbackUsed: true,
+        fallbackState: 'degraded',
+        fallbackReason
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(parentId, 'plan.degraded', {
+      stage: 'ambiguity-fallback',
+      reason: fallbackReason,
+      triggerReason: failedAttempt.reason,
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
+}
+
+async function waitForAmbiguityAttempt(probe, parent, options = {}) {
+  let current = inspectJob(probe.id);
+  const plannedWaitMs = (Number(current.timeoutSeconds
     || parent.planning?.planWallClock?.seconds
     || 120) * 1_000) + 5_000;
   const waitMs = Math.min(Math.max(Number(options.waitMs ?? plannedWaitMs), 0), 905_000);
   const deadline = Date.now() + waitMs;
-  while (!TERMINAL_STATUSES.has(probe.status) && Date.now() < deadline) {
+  while (!TERMINAL_STATUSES.has(current.status) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
-    probe = inspectJob(probeId);
+    current = inspectJob(probe.id);
   }
-  if (TERMINAL_STATUSES.has(probe.status)) {
-    recordPlanPassOutcome(probe);
+  return TERMINAL_STATUSES.has(current.status) ? current : null;
+}
+
+export async function awaitAmbiguityProbe(id, options = {}) {
+  const parent = inspectJob(id);
+  const probeId = parent.planning?.ambiguity?.jobId;
+  if (!probeId) return null;
+  const initialProbe = inspectJob(probeId);
+  const probe = await waitForAmbiguityAttempt(initialProbe, parent, options);
+  if (probe) {
+    const recorded = recordPlanPassOutcome(probe);
+    const attempt = recorded?.planPass?.attempts?.find((entry) => entry?.jobId === probe.id);
+    if (attempt?.fallbackEligible === true && attempt.role !== 'model-fallback') {
+      const fallback = startAmbiguityModelFallback(id, probe);
+      if (!fallback) return probe;
+      const fallbackProbe = await waitForAmbiguityAttempt(fallback, inspectJob(id), options);
+      if (fallbackProbe) {
+        recordPlanPassOutcome(fallbackProbe);
+        return fallbackProbe;
+      }
+      const fallbackTotals = usageTotals(inspectJob(fallback.id).usage);
+      updateManagedJob(id, (current) => {
+        current.planning.ambiguity = {
+          ...current.planning.ambiguity,
+          state: 'inconclusive',
+          probeStatus: inspectJob(fallback.id).status,
+          outputTokens: fallbackTotals?.outputTokens ?? null,
+          costBasis: fallbackTotals ? 'observed' : 'reserved-cap',
+          reason: 'comparison-fallback-wait-timeout'
+        };
+      }, { incrementRevision: false });
+      appendJobEvent(id, 'plan.degraded', {
+        stage: 'ambiguity-fallback',
+        reason: 'comparison-fallback-wait-timeout',
+        triggerReason: attempt.reason,
+        fallback: 'inconclusive-non-gating-comparison'
+      });
+      return null;
+    }
     return probe;
   }
-  const totals = usageTotals(probe.usage);
+  const liveProbe = inspectJob(probeId);
+  const totals = usageTotals(liveProbe.usage);
   const reserved = parent.planning?.ambiguity?.outputTokenLimit || 0;
   const attributed = totals?.outputTokens ?? reserved;
   updateManagedJob(id, (current) => {
@@ -3553,7 +3890,7 @@ export async function awaitAmbiguityProbe(id, options = {}) {
     current.planning.ambiguity = {
       ...current.planning.ambiguity,
       state: 'inconclusive',
-      probeStatus: probe.status,
+      probeStatus: liveProbe.status,
       outputTokens: totals?.outputTokens ?? null,
       costBasis: totals ? 'observed' : 'reserved-cap',
       reason: 'comparison-pass-wait-timeout'
@@ -4426,10 +4763,44 @@ export function revertManagedJob(id, options = {}) {
 const WAIT_TARGETS = new Set(['session', 'turn', 'first-output']);
 const FIRST_OUTPUT_TYPES = new Set(['message.delta', 'message.completed', 'tool.started']);
 
+function planAttemptVisibility(job) {
+  const attempts = job.planPass?.attempts || job.planning?.ambiguity?.attempts || [];
+  const planAttempts = attempts.map((attempt) => ({
+    role: attempt.role,
+    jobId: attempt.jobId,
+    provider: attempt.provider,
+    model: attempt.model,
+    state: attempt.state,
+    ...(attempt.reason ? { reason: attempt.reason } : {}),
+    ...(attempt.parserReason ? { parserReason: attempt.parserReason } : {}),
+    structurallyInvalid: attempt.structurallyInvalid === true,
+    outputTokens: attempt.outputTokens ?? null,
+    outputTokenLimit: attempt.outputTokenLimit ?? null,
+    costBasis: attempt.costBasis || null
+  }));
+  const structurallyInvalidReasons = [...new Set(planAttempts
+    .filter((attempt) => attempt.structurallyInvalid)
+    .map((attempt) => attempt.reason)
+    .filter(Boolean))];
+  return {
+    planAttempts,
+    planAttemptCount: planAttempts.length,
+    totalPlanOutputTokens: job.planPass?.totalOutputTokens
+      ?? job.planning?.ambiguity?.totalOutputTokens
+      ?? null,
+    structurallyInvalidReasons
+  };
+}
+
 function planLaunchNotice(job) {
   if (job.planFirst !== true) return null;
+  const attemptVisibility = planAttemptVisibility(job);
+  const structuralSuffix = attemptVisibility.structurallyInvalidReasons.length
+    ? ` Structurally invalid probe: ${attemptVisibility.structurallyInvalidReasons.join(', ')}.`
+    : '';
   const primaryDegraded = job.planning?.state === 'degraded';
-  const independentDegraded = job.planPass?.state === 'degraded';
+  const independentDegraded = job.planPass?.state === 'degraded'
+    && !(job.planPass?.fallbackEligible === true && job.planPass?.fallbackUsed !== true);
   if (primaryDegraded || independentDegraded) {
     const source = independentDegraded ? job.planPass : job.planning;
     const observedOutputTokens = source?.outputTokens
@@ -4449,8 +4820,9 @@ function planLaunchNotice(job) {
       reason,
       observedOutputTokens,
       outputTokenLimit,
+      ...attemptVisibility,
       blocking: false,
-      message: `PLAN-FIRST DEGRADED: ${reason}${comparison}. The requested launch continues without a planning gate.`
+      message: `PLAN-FIRST DEGRADED: ${reason}${comparison}.${structuralSuffix} The requested launch continues without a planning gate.`
     };
   }
   const comparisonVerdict = job.planning?.comparison?.verdict || null;
@@ -4463,8 +4835,12 @@ function planLaunchNotice(job) {
         : 'completed',
       level: 'info',
       comparisonVerdict,
+      ...(attemptVisibility.structurallyInvalidReasons[0]
+        ? { reason: attemptVisibility.structurallyInvalidReasons[0] }
+        : {}),
+      ...attemptVisibility,
       blocking: false,
-      message: `PLAN-FIRST ${job.planPass?.state === 'recovered' ? 'RECOVERED' : 'COMPLETED'}${comparisonVerdict ? `: ${comparisonVerdict}` : ''}.`
+      message: `PLAN-FIRST ${job.planPass?.state === 'recovered' ? 'RECOVERED' : 'COMPLETED'}${comparisonVerdict ? `: ${comparisonVerdict}` : ''}.${structuralSuffix}`
     };
   }
   if (TERMINAL_STATUSES.has(job.status)) {
@@ -4474,8 +4850,9 @@ function planLaunchNotice(job) {
       reason: 'job-terminal-before-plan-confirmation',
       observedOutputTokens: null,
       outputTokenLimit: job.planning?.planOutputTokenLimit ?? null,
+      ...attemptVisibility,
       blocking: false,
-      message: 'PLAN-FIRST DEGRADED: the job became terminal before a plan comparison or confirmation was produced.'
+      message: `PLAN-FIRST DEGRADED: the job became terminal before a plan comparison or confirmation was produced.${structuralSuffix}`
     };
   }
   return null;
@@ -4523,6 +4900,7 @@ export async function waitForPlanFirstLaunch(id) {
           reason: 'plan-first-launch-wait-expired',
           observedOutputTokens: null,
           outputTokenLimit: job.planning?.planOutputTokenLimit ?? null,
+          ...planAttemptVisibility(job),
           blocking: false,
           message: `PLAN-FIRST STILL PENDING after ${waitSeconds}s; no comparison or confirmation has completed. Do not assume planning succeeded.`
         }

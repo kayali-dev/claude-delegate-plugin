@@ -213,7 +213,13 @@ test('outcome stats expose exact plan-first completion and degradation effective
       state: 'degraded',
       completionReached: false,
       degraded: true,
-      recovered: false
+      recovered: false,
+      reason: index < 9
+        ? 'plan-structural-output-invalid:no-valid-structural-json'
+        : 'plan-pass-failed:TIMEOUT',
+      structurallyInvalidProbes: index < 9 ? 1 : 0,
+      otherDegradedProbes: index < 9 ? 0 : 1,
+      fallbackAttempts: index < 2 ? 1 : 0
     }
   }));
   const failedEra = aggregateAudit(degraded, { now: 100 });
@@ -222,6 +228,10 @@ test('outcome stats expose exact plan-first completion and degradation effective
     completed: 0,
     degraded: 14,
     recovered: 0,
+    structurallyInvalidProbes: 9,
+    structurallyInvalidReasons: { 'no-valid-structural-json': 9 },
+    otherDegradedProbes: 5,
+    fallbackAttempts: 2,
     pending: 0,
     unknown: 0,
     completionRate: 0,
@@ -242,16 +252,80 @@ test('outcome stats expose exact plan-first completion and degradation effective
       completionReached: true,
       degraded: false,
       recovered: true,
-      comparisonVerdict: 'convergent'
+      comparisonVerdict: 'convergent',
+      attempts: [
+        {
+          role: 'independent-probe',
+          state: 'degraded',
+          reason: 'plan-structural-output-invalid:invalid-target-shape',
+          parserReason: 'invalid-target-shape',
+          structurallyInvalid: true
+        },
+        {
+          role: 'model-fallback',
+          state: 'completed',
+          structurallyInvalid: false
+        }
+      ]
     }
   }], { now: 100 });
   assert.equal(recovered.planFirst.requested, 15);
   assert.equal(recovered.planFirst.completed, 1);
   assert.equal(recovered.planFirst.recovered, 1);
   assert.equal(recovered.planFirst.degraded, 14);
+  assert.equal(recovered.planFirst.structurallyInvalidProbes, 10);
+  assert.deepEqual(recovered.planFirst.structurallyInvalidReasons, {
+    'no-valid-structural-json': 9,
+    'invalid-target-shape': 1
+  });
+  assert.equal(recovered.planFirst.otherDegradedProbes, 5);
+  assert.equal(recovered.planFirst.fallbackAttempts, 3);
   assert.equal(recovered.planFirst.completionRate, 1 / 15);
   assert.equal(recovered.planFirst.degradationRate, 14 / 15);
 });
+
+test('CLI plan-first stats name structural parser reasons separately from other degradation', () => isolated(({ root }) => {
+  const record = {
+    jobId: 'fallback-completed',
+    at: Date.now(),
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    outcome: { status: 'completed' },
+    taskShape: { mode: 'implement', access: 'write', planFirst: true },
+    planFirstOutcome: {
+      requested: true,
+      state: 'completed',
+      completionReached: true,
+      degraded: false,
+      recovered: false,
+      attempts: [
+        {
+          role: 'independent-probe',
+          state: 'degraded',
+          reason: 'plan-structural-output-invalid:no-valid-structural-json',
+          parserReason: 'no-valid-structural-json',
+          structurallyInvalid: true
+        },
+        {
+          role: 'model-fallback',
+          state: 'completed',
+          structurallyInvalid: false
+        }
+      ]
+    }
+  };
+  const audit = path.join(root, 'state', 'audit.jsonl');
+  fs.mkdirSync(path.dirname(audit), { recursive: true });
+  fs.writeFileSync(audit, `${JSON.stringify(record)}\n`);
+  const cli = spawnSync(process.execPath, [path.join(pluginRoot, 'bin', 'delegate-jobs'), 'stats', '--since', '7d'], {
+    encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE }
+  });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /1 structurally invalid probe\(s\) \(no-valid-structural-json=1\)/);
+  assert.match(cli.stdout, /0 other degraded probe\(s\)/);
+  assert.match(cli.stdout, /1 model fallback attempt\(s\)/);
+}));
 
 test('acceptance audit revisions coalesce without double-counting attempts or usage', () => {
   const terminal = {

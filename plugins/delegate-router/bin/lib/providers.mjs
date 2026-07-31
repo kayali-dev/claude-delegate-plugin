@@ -1796,7 +1796,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.55.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.56.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -1864,7 +1864,7 @@ async function runCodex(job, driver) {
         current.phase = 'planning';
       }, { incrementRevision: false });
       startAmbiguityProbe(job.id);
-      await startTurn(planPrompt(promptFor(loadJob(job.id))), 'read-only');
+      await startTurn(planPrompt(promptFor(loadJob(job.id)), { provider: job.provider, model: job.model }), 'read-only');
     } else {
       await startTurn(promptFor(loadJob(job.id)));
     }
@@ -2845,7 +2845,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.55.0' }
+      clientInfo: { name: 'delegate-router', version: '0.56.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -2972,7 +2972,7 @@ async function runCursorAcpTransport(job, driver) {
         current.phase = 'planning';
       }, { incrementRevision: false });
       startAmbiguityProbe(job.id);
-      startPrompt(planPrompt(promptFor(loadJob(job.id))));
+      startPrompt(planPrompt(promptFor(loadJob(job.id)), { provider: job.provider, model: job.model }));
     } else {
       startPrompt(promptFor(loadJob(job.id)));
     }
@@ -3368,7 +3368,9 @@ async function runCursorHeadlessTransport(job, driver) {
     });
     planPhase = 'implementing';
   }
-  let text = planPhase === 'planning' ? planPrompt(promptFor(job)) : promptFor(job);
+  let text = planPhase === 'planning'
+    ? planPrompt(promptFor(job), { provider: job.provider, model: job.model })
+    : promptFor(job);
   let currentMode = planPhase === 'planning' ? 'plan' : job.mode;
   let cancelRequested = false;
   const pendingCorrections = [];

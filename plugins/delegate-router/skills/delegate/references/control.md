@@ -215,7 +215,11 @@ receive the same 4,096-token structured default regardless of byte length or
 directive-marker count: live measurements found plan cost nearly flat in those
 dimensions, while larger allowances moved spend upward. The plan prompt
 requires one compact structural JSON object, no narrated analysis or repeated
-packet, and an ordinary target below 500 words.
+packet, and an ordinary target below 500 words. Cursor plan lanes additionally
+require the final message to end with the fenced deliverable and contain
+nothing after it. Parsing still prefers fenced JSON and a whole-body object,
+then accepts a balanced object embedded in narration; the same structural
+target, approach, assumption, and risk validation applies afterward.
 `DELEGATE_PLAN_OUTPUT_TOKENS` remains an exact bounded override (128–16,384);
 an explicit smaller job-level `maxOutputTokens` still limits the primary plan,
 and the independent pass retains its existing share of that explicit overall
@@ -238,13 +242,21 @@ target files, components, ordered approach shape, and declared assumptions.
 Material divergence becomes a revisioned coordinator question before write
 work. Convergence proceeds after the ordinary plan confirmation. Invalid or
 unavailable structural evidence is reported as inconclusive and never
-converted into a guessed ambiguity verdict.
+converted into a guessed ambiguity verdict. When a completed, within-budget
+provider-independent probe returns structurally invalid output, the broker
+launches exactly one alternate-model probe on the parent provider. Timeout,
+quota, cancellation, budget, and provider failures never trigger that fallback,
+and an invalid fallback is not retried.
 
 The independent child always projects its terminal outcome back onto the
 implement attempt as additive `planPass: { state, reason?, jobId,
 planStatus, errorCode?, outputTokenLimit, outputTokens, hardOutputTokenLimit?,
-recovery?, recordedAt }`; `state` may be `completed`, `recovered`, or
-`degraded`.
+recovery?, attempts[], attemptCount, totalOutputTokens,
+attributedOutputTokens, recordedAt }`; `state` may be `running`, `completed`,
+`recovered`, or `degraded`. Each attempt retains its provider/model, role,
+parser reason when structurally invalid, observed or reserved cost basis, and
+token cap, so the rejected probe's spend remains visible after a successful
+fallback.
 `delegate_inspect` returns that field directly and TUI job detail renders a
 `PLAN DEGRADED` badge. Historical records with no `planPass` remain unchanged.
 A failed, cancelled, timed-out, or over-budget independent pass degrades to the
@@ -255,8 +267,10 @@ CLI `start` and MCP `delegate_start` wait through the bounded plan-first launch
 checkpoint. Their additive `launchNotice` says `completed`, `recovered`,
 `degraded`, or `pending`; degradation includes the reason and observed-vs-cap
 numbers and explicitly says the worker launch continues without a planning
-gate. A coordinator therefore cannot mistake an asynchronous degradation for a
-successful plan pass.
+gate. A completed fallback notice still carries the first probe's exact
+`plan-structural-output-invalid:<parser-reason>`, both attempt costs, and the
+comparison verdict. A coordinator therefore cannot mistake an asynchronous
+degradation for a successful plan pass.
 
 A steer that reduces the remaining work can finish the job before any follow-up command arrives. Do not design a steer-then-cancel sequence around a shrinking task; cancel first if termination is the goal.
 

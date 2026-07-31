@@ -30,14 +30,25 @@ function finish() {
     assumptions: [{ topic: 'ownership', choice: 'extend cursor core' }],
     risks: ['shared state']
   };
+  const planResponse = process.env.FAKE_CURSOR_PLAN_RESPONSE || 'valid';
   const answer = text.includes('PLAN PASS ONLY')
-    ? `\`\`\`json\n${JSON.stringify(structuralPlan)}\n\`\`\``
+    ? planResponse === 'invalid'
+      ? 'I inspected the task and prepared the requested plan, but there is no structural JSON deliverable.'
+      : planResponse === 'narrated-valid'
+        ? `I inspected the bounded task.\n\n${JSON.stringify(structuralPlan)}\n\nThat is the recommended plan.`
+        : `\`\`\`json\n${JSON.stringify(structuralPlan)}\n\`\`\``
     : text.includes('READ-ONLY INTERROGATION')
       ? `${text.match(/READ-ONLY INTERROGATION ([A-Za-z0-9_-]+)/)?.[1] || 'question'}: expected 2 but received 3; no action was taken`
       : `answer-${count}`;
   send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'agent_message_chunk', messageId: `message-${count}`, content: { type: 'text', text: answer } } } });
   send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'usage_update', used: 12, size: 1000 } } });
-  send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn', usage: { inputTokens: count * 5, outputTokens: count * 3 } } });
+  const configuredPlanTokens = Number(process.env.FAKE_CURSOR_PLAN_OUTPUT_TOKENS);
+  const outputTokens = text.includes('PLAN PASS ONLY')
+    && Number.isFinite(configuredPlanTokens)
+    && configuredPlanTokens >= 0
+    ? configuredPlanTokens
+    : count * 3;
+  send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn', usage: { inputTokens: count * 5, outputTokens } } });
 }
 
 lines.on('line', (line) => {

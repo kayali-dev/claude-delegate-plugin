@@ -59,7 +59,10 @@ The ledger reports provider-completion, verification-pass, and owner-acceptance 
 
 The same response has an operational `planFirst` signal with exact
 `requested`, `completed`, `degraded`, `recovered`, `pending`, and historical
-`unknown` counts plus completion/degradation rates. This signal has no
+`unknown` counts plus completion/degradation rates. It separately reports
+`structurallyInvalidProbes`, exact `structurallyInvalidReasons`,
+`otherDegradedProbes`, and `fallbackAttempts`, so a successful fallback does
+not erase the invalid probe or its parser reason. This signal has no
 minimum-sample suppression: a 14/14 degradation era must display as
 `degradationRate: 1`, not disappear behind an insufficient-data label.
 

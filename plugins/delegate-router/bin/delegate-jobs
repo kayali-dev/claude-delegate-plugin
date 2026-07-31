@@ -432,7 +432,10 @@ try {
       printRate('Verification pass', stats.rates.verificationPass);
       printRate('Owner acceptance', stats.rates.ownerAcceptance);
       const planFirst = stats.planFirst;
-      console.log(`Plan-first: ${planFirst.completed}/${planFirst.requested} completed; ${planFirst.degraded} degraded; ${planFirst.recovered} marginal overrun(s) recovered; ${planFirst.pending} pending; ${planFirst.unknown} historical unknown`);
+      const structuralReasons = Object.entries(planFirst.structurallyInvalidReasons || {})
+        .map(([reason, count]) => `${reason}=${count}`)
+        .join(', ');
+      console.log(`Plan-first: ${planFirst.completed}/${planFirst.requested} completed; ${planFirst.degraded} degraded; ${planFirst.recovered} marginal overrun(s) recovered; ${planFirst.structurallyInvalidProbes} structurally invalid probe(s)${structuralReasons ? ` (${structuralReasons})` : ''}; ${planFirst.otherDegradedProbes} other degraded probe(s); ${planFirst.fallbackAttempts} model fallback attempt(s); ${planFirst.pending} pending; ${planFirst.unknown} historical unknown`);
       if (stats.groups.length) console.log('Provider Model            Mode       Transport      Jobs Provider done Verification Owner accept');
       for (const row of stats.groups) {
         console.log(`${row.provider.padEnd(8)} ${row.model.padEnd(16)} ${row.mode.padEnd(10)} ${String(row.transport || 'unknown').padEnd(14)} ${String(row.jobs).padStart(4)} ${rateCell(row.rates.providerCompletion).padStart(13)} ${rateCell(row.rates.verificationPass).padStart(12)} ${rateCell(row.rates.ownerAcceptance).padStart(12)}`);

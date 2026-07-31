@@ -207,7 +207,11 @@ export function planFirstOutcomeSnapshot(job = {}) {
       comparisonVerdict: null,
       reason: null,
       outputTokenLimit: null,
-      outputTokens: null
+      outputTokens: null,
+      structurallyInvalidProbes: 0,
+      otherDegradedProbes: 0,
+      fallbackAttempts: 0,
+      attempts: []
     };
   }
   const planning = job.planning;
@@ -221,6 +225,22 @@ export function planFirstOutcomeSnapshot(job = {}) {
     || ['awaiting-confirmation', 'confirmed', 'declined'].includes(planning?.state));
   const recovered = planPass?.state === 'recovered'
     || planning?.budgetOutcome?.state === 'recovered';
+  const attempts = (planPass?.attempts || planning?.ambiguity?.attempts || []).map((attempt) => ({
+    role: attempt.role || null,
+    provider: attempt.provider || null,
+    model: attempt.model || null,
+    state: attempt.state || null,
+    ...(attempt.reason ? { reason: attempt.reason } : {}),
+    ...(attempt.parserReason ? { parserReason: attempt.parserReason } : {}),
+    structurallyInvalid: attempt.structurallyInvalid === true,
+    outputTokens: attempt.outputTokens ?? null,
+    outputTokenLimit: attempt.outputTokenLimit ?? null,
+    costBasis: attempt.costBasis || null
+  }));
+  const structurallyInvalidProbes = attempts.filter((attempt) => attempt.structurallyInvalid).length;
+  const otherDegradedProbes = attempts.filter((attempt) => attempt.state === 'degraded'
+    && !attempt.structurallyInvalid).length;
+  const fallbackAttempts = attempts.filter((attempt) => attempt.role === 'model-fallback').length;
   const state = degradedSource
     ? 'degraded'
     : completionReached
@@ -236,7 +256,15 @@ export function planFirstOutcomeSnapshot(job = {}) {
     comparisonVerdict,
     reason: degradedSource?.reason || (state === 'recovered' ? measured?.reason || null : null),
     outputTokenLimit: measured?.outputTokenLimit ?? planning?.planOutputTokenLimit ?? null,
-    outputTokens: measured?.outputTokens ?? measured?.observedOutputTokens ?? null
+    outputTokens: planPass?.totalOutputTokens
+      ?? planning?.ambiguity?.totalOutputTokens
+      ?? measured?.outputTokens
+      ?? measured?.observedOutputTokens
+      ?? null,
+    structurallyInvalidProbes,
+    otherDegradedProbes,
+    fallbackAttempts,
+    attempts
   };
 }
 

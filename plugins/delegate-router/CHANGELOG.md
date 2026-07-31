@@ -2,6 +2,21 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.56.0 — 2026-07-31
+
+- Accept a balanced JSON object embedded in narrated plan output only after the
+  existing fenced and whole-body parser paths, without weakening structural
+  validation. Cursor plan prompts now require the final message to end with the
+  fenced deliverable and contain nothing afterward.
+- When a completed, within-budget independent probe is structurally invalid,
+  run exactly one alternate-model fallback on the parent provider. Timeout,
+  quota, budget, cancellation, and provider failures do not retry, and every
+  failed or unusable plan remains non-blocking.
+- Preserve both plan attempts and their token costs on the parent job. Launch
+  notices and plan-first stats retain the exact
+  `plan-structural-output-invalid:<parser-reason>` and distinguish structural
+  invalidity from other degradation causes.
+
 ## 0.55.0 — 2026-07-29
 
 - Validate `delegate-jobs respond` and MCP `delegate_respond` against the

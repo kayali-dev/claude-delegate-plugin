@@ -171,6 +171,13 @@ also updates the parent attempt with additive `planPass` state and the existing
 `planning.ambiguity` compatibility view. Readers must tolerate both fields
 being absent. The update contains closed status/reason/cost metadata only; it
 does not copy the plan packet or provider payload into the parent.
+`planPass.attempts[]` is idempotent by child job id and distinguishes the
+`independent-probe` from the optional `model-fallback`; every entry carries its
+own observed/reserved token cost. A structurally invalid entry uses
+`plan-structural-output-invalid:<parser-reason>` plus the separate
+`parserReason`. Only a completed, within-budget structurally invalid first
+probe may start one parent-provider model fallback. Operational timeout, quota,
+budget, cancellation, and provider failures never retry.
 `plan.recovered` means a parseable structural answer exceeded its nominal
 sub-budget by no more than 20%; it includes observed, nominal, hard-limit, and
 overrun fields. `plan.degraded` budget events carry observed-vs-cap numbers.

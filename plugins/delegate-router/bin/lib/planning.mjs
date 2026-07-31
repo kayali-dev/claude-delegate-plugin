@@ -132,7 +132,13 @@ export function ambiguityDefault(options = {}, env = process.env) {
   return String(env.DELEGATE_AMBIGUITY_CHECK ?? '1') !== '0';
 }
 
-export function planPrompt(providerPacket) {
+export function planPrompt(providerPacket, lane = {}) {
+  const laneReinforcement = lane.provider === 'cursor'
+    ? `
+
+Cursor plan-lane delivery rule: your final message must END with the fenced JSON
+deliverable and contain nothing after the closing fence.`
+    : '';
   return `${providerPacket}
 
 PLAN PASS ONLY — READ-ONLY.
@@ -161,7 +167,7 @@ Return exactly one fenced JSON object using this structural contract:
 \`\`\`
 
 Use empty arrays when a dimension cannot be predicted. Do not perform the work;
-the coordinator must explicitly confirm the presented plan before any write.`;
+the coordinator must explicitly confirm the presented plan before any write.${laneReinforcement}`;
 }
 
 export const IMPLEMENT_CONFIRMED_PROMPT = [
@@ -180,13 +186,48 @@ export function interrogationPrompt(interrogationId, question) {
   ].join('\n');
 }
 
-function fencedJsonCandidates(text) {
+function balancedJsonCandidates(text) {
   const values = [];
-  const pattern = /```(?:json)?\s*([\s\S]*?)```/gi;
-  for (const match of String(text || '').matchAll(pattern)) values.push(match[1]);
-  const trimmed = String(text || '').trim();
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) values.push(trimmed);
+  const source = String(text || '');
+  const starts = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (!starts.length) {
+      if (character === '{') {
+        starts.push(index);
+        inString = false;
+        escaped = false;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === '{') starts.push(index);
+    else if (character === '}') {
+      const start = starts.pop();
+      values.push(source.slice(start, index + 1));
+    }
+  }
   return values.reverse();
+}
+
+function structuralJsonCandidates(text) {
+  const source = String(text || '');
+  const fenced = [];
+  const pattern = /```(?:json)?\s*([\s\S]*?)```/gi;
+  for (const match of source.matchAll(pattern)) fenced.push(match[1]);
+  const trimmed = source.trim();
+  const wholeBody = trimmed.startsWith('{') && trimmed.endsWith('}') ? [trimmed] : [];
+  const balanced = balancedJsonCandidates(source)
+    .filter((candidate) => candidate !== trimmed);
+  return [...fenced.reverse(), ...wholeBody, ...balanced];
 }
 
 function normalizedString(value) {
@@ -210,7 +251,7 @@ function uniqueStrings(values, normalize) {
 
 export function parseStructuralPlan(text) {
   let parsed = null;
-  for (const candidate of fencedJsonCandidates(String(text || '').slice(-PLAN_MAX_CHARS))) {
+  for (const candidate of structuralJsonCandidates(String(text || '').slice(-PLAN_MAX_CHARS))) {
     try {
       const value = JSON.parse(candidate);
       if (value && typeof value === 'object' && !Array.isArray(value)) {

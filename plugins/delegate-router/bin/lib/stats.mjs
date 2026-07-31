@@ -351,11 +351,45 @@ export function planFirstEffectiveness(records = []) {
     || outcome.state === 'recovered').length;
   const pending = requested.filter((outcome) => outcome.state === 'pending').length;
   const unknown = requested.length - completed - degraded - pending;
+  const structurallyInvalidReasons = {};
+  let structurallyInvalidProbes = 0;
+  let otherDegradedProbes = 0;
+  let fallbackAttempts = 0;
+  for (const outcome of requested) {
+    const attempts = Array.isArray(outcome.attempts) ? outcome.attempts : [];
+    if (attempts.length) {
+      for (const attempt of attempts) {
+        if (attempt?.structurallyInvalid === true) {
+          structurallyInvalidProbes += 1;
+          const parserReason = attempt.parserReason
+            || String(attempt.reason || '').replace(/^plan-structural-output-invalid:/, '')
+            || 'unknown';
+          structurallyInvalidReasons[parserReason] = (structurallyInvalidReasons[parserReason] || 0) + 1;
+        } else if (attempt?.state === 'degraded') otherDegradedProbes += 1;
+        if (attempt?.role === 'model-fallback') fallbackAttempts += 1;
+      }
+      continue;
+    }
+    const structuralCount = Number(outcome.structurallyInvalidProbes) || 0;
+    structurallyInvalidProbes += structuralCount;
+    otherDegradedProbes += Number(outcome.otherDegradedProbes) || 0;
+    fallbackAttempts += Number(outcome.fallbackAttempts) || 0;
+    if (structuralCount > 0) {
+      const parserReason = String(outcome.reason || '').startsWith('plan-structural-output-invalid:')
+        ? String(outcome.reason).slice('plan-structural-output-invalid:'.length)
+        : 'unknown';
+      structurallyInvalidReasons[parserReason] = (structurallyInvalidReasons[parserReason] || 0) + structuralCount;
+    }
+  }
   return {
     requested: requested.length,
     completed,
     degraded,
     recovered,
+    structurallyInvalidProbes,
+    structurallyInvalidReasons,
+    otherDegradedProbes,
+    fallbackAttempts,
     pending,
     unknown: Math.max(0, unknown),
     completionRate: requested.length ? completed / requested.length : null,

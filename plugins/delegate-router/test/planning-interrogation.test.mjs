@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   attributeInterrogationUsage,
+  awaitAmbiguityProbe,
   claimCommands,
   completeCommand,
   createManagedJob,
@@ -15,7 +16,8 @@ import {
   readJobEvents,
   recordInterrogationAnswer,
   submitControl,
-  updateManagedJob
+  updateManagedJob,
+  waitForPlanFirstLaunch
 } from '../bin/lib/control.mjs';
 import {
   assessStructuralPlanOutput,
@@ -64,7 +66,8 @@ async function isolated(fn) {
     'DELEGATE_PLAN_LAUNCH_WAIT_SECONDS',
     'FAKE_CODEX_REQUEST_LOG', 'FAKE_CURSOR_REQUEST_LOG', 'FAKE_CODEX_DIVERGENT_MODEL',
     'FAKE_CODEX_INCONCLUSIVE_MODEL', 'FAKE_CODEX_PLAN_OUTPUT_TOKENS',
-    'FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL'
+    'FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL', 'FAKE_CURSOR_PLAN_RESPONSE',
+    'FAKE_CURSOR_PLAN_OUTPUT_TOKENS'
   ];
   const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-plan-interrogate-'));
@@ -141,6 +144,31 @@ test('structural plan comparison distinguishes convergence, divergence, and inco
   assert.equal(inconclusive.verdict, 'inconclusive');
   assert.match(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).question, /INCONCLUSIVE/);
   assert.equal(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).ambiguityQuestion, null);
+});
+
+test('structural plan parsing accepts narrated balanced JSON last while preserving fenced precedence and exact failures', () => {
+  const expected = structuralPlan();
+  const narrated = [
+    'I inspected the requested surfaces and found the following bounded plan.',
+    JSON.stringify(expected),
+    'This is the plan I recommend after reviewing the repository.'
+  ].join('\n\n');
+  const parsed = parseStructuralPlan(narrated);
+  assert.equal(parsed.ok, true);
+  assert.equal(compareStructuralPlans(planText(expected), parsed).verdict, 'convergent');
+  assert.equal(parseStructuralPlan(`Narrated unmatched brace { before the deliverable.\n${JSON.stringify(expected)}`).ok, true);
+
+  assert.deepEqual(parseStructuralPlan('Narration only, with genuinely no object.'), {
+    ok: false,
+    reason: 'no-valid-structural-json'
+  });
+
+  const invalidFenced = planText({
+    ...expected,
+    targets: { files: 'src/core.js', components: ['core-engine'] }
+  });
+  const fencedWins = parseStructuralPlan(`${invalidFenced}\n${JSON.stringify(expected)}`);
+  assert.deepEqual(fencedWins, { ok: false, reason: 'invalid-target-shape' });
 });
 
 test('plan output budget stays structural instead of scaling on packet bytes and remains overridable', () => {
@@ -225,6 +253,10 @@ test('compact plan framing and structural recovery accept marginal overruns but 
   const prompt = planPrompt('Objective: inspect the bounded change');
   assert.match(prompt, /normally stay under 500 words/);
   assert.match(prompt, /stop immediately after the JSON\s+fence/);
+  assert.doesNotMatch(prompt, /final message must END with the fenced JSON/);
+  const cursorPrompt = planPrompt('Objective: inspect the bounded change', { provider: 'cursor', model: 'composer' });
+  assert.match(cursorPrompt, /final message must END with the fenced JSON/);
+  assert.match(cursorPrompt, /nothing after the closing fence/);
   const valid = planText(structuralPlan());
   const marginal = assessStructuralPlanOutput(valid, 4_162, 4_096);
   assert.equal(marginal.state, 'recovered');
@@ -554,6 +586,125 @@ test('two independent cheap plan passes open only structural divergence question
   assert.equal(inconclusive.job.status, 'cancelled');
 }));
 
+test('an invalid Cursor probe falls back once to a parent-provider model and preserves both attempt costs', () => isolated(async (directory) => {
+  process.env.DELEGATE_ENABLED_PROVIDERS = 'codex,cursor';
+  process.env.FAKE_CURSOR_PLAN_RESPONSE = 'invalid';
+  process.env.FAKE_CURSOR_PLAN_OUTPUT_TOKENS = '9024';
+  const cursorLog = path.join(directory, 'cursor-invalid-plan.jsonl');
+  process.env.FAKE_CURSOR_REQUEST_LOG = cursorLog;
+  const created = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    maxOutputTokens: 100_000,
+    planFirst: true,
+    ambiguityCheck: true
+  });
+  const running = runManagedProvider(created);
+  const launched = await waitForPlanFirstLaunch(created.id);
+  assert.equal(launched.launchNotice.state, 'completed');
+  assert.equal(launched.launchNotice.reason, 'plan-structural-output-invalid:no-valid-structural-json');
+  assert.match(launched.launchNotice.message, /Structurally invalid probe: plan-structural-output-invalid:no-valid-structural-json/);
+  const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
+  assert.equal(presented.planning.comparison.verdict, 'convergent');
+  assert.equal(presented.planPass.state, 'completed');
+  assert.equal(presented.planPass.attemptCount, 2);
+  assert.equal(presented.planPass.attempts.length, 2);
+  const [invalidProbe, fallback] = presented.planPass.attempts;
+  assert.equal(invalidProbe.role, 'independent-probe');
+  assert.equal(invalidProbe.provider, 'cursor');
+  assert.equal(invalidProbe.outputTokens, 9_024);
+  assert.equal(invalidProbe.reason, 'plan-structural-output-invalid:no-valid-structural-json');
+  assert.equal(invalidProbe.parserReason, 'no-valid-structural-json');
+  assert.equal(invalidProbe.structurallyInvalid, true);
+  assert.equal(fallback.role, 'model-fallback');
+  assert.equal(fallback.provider, 'codex');
+  assert.equal(fallback.model, 'luna');
+  assert.equal(fallback.state, 'completed');
+  assert.equal(presented.planPass.totalOutputTokens, invalidProbe.outputTokens + fallback.outputTokens);
+  assert.equal(presented.planning.externalOutputTokensReserved, presented.planPass.totalOutputTokens);
+  assert.equal(launched.launchNotice.planAttempts.length, 2);
+  assert.equal(launched.launchNotice.totalPlanOutputTokens, presented.planPass.totalOutputTokens);
+  assert.equal(readJobEvents(created.id).filter((event) => event.type === 'plan.ambiguity.started'
+    && event.data.attemptRole === 'model-fallback').length, 1);
+  const requests = fs.readFileSync(cursorLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const cursorPlanPrompt = requests.find((request) => request.method === 'session/prompt').params.prompt[0].text;
+  assert.match(cursorPlanPrompt, /final message must END with the fenced JSON/);
+  assert.match(cursorPlanPrompt, /nothing after the closing fence/);
+  submitControl(created.id, {
+    type: 'respond',
+    requestId: presented.pendingInput.requestId,
+    accept: true,
+    commandId: 'confirm-after-model-fallback'
+  }, presented.revision);
+  await running;
+  assert.equal(inspectJob(created.id).status, 'completed');
+}));
+
+test('timeout, quota, and provider failures never trigger the structural-invalid fallback', () => isolated(async (directory) => {
+  process.env.DELEGATE_ENABLED_PROVIDERS = 'codex,cursor';
+  for (const [name, errorCode] of [
+    ['timeout', 'TIMEOUT'],
+    ['quota', 'QUOTA_GUARD'],
+    ['provider', 'PROVIDER_ERROR']
+  ]) {
+    const cwd = path.join(directory, name);
+    fs.mkdirSync(cwd);
+    const parent = createManagedJob({
+      provider: 'codex',
+      model: 'sol',
+      mode: 'implement',
+      cwd,
+      prompt: `Implement the ${name} case`,
+      maxOutputTokens: 100_000,
+      planFirst: true,
+      ambiguityCheck: true
+    });
+    const probe = createManagedJob({
+      provider: 'cursor',
+      model: 'composer',
+      mode: 'plan',
+      cwd,
+      prompt: planPrompt(`Implement the ${name} case`, { provider: 'cursor', model: 'composer' }),
+      maxOutputTokens: 12_288,
+      planningFor: parent.id,
+      planFirst: false,
+      ambiguityCheck: false,
+      idempotencyKey: `ambiguity-${parent.id}`
+    });
+    updateManagedJob(parent.id, (job) => {
+      job.planning.ambiguity = {
+        enabled: true,
+        state: 'running',
+        jobId: probe.id,
+        provider: 'cursor',
+        model: 'composer',
+        independentBy: 'provider',
+        outputTokenLimit: 12_288
+      };
+      job.planPass = { state: 'running', jobId: probe.id, outputTokenLimit: 12_288 };
+    }, { incrementRevision: false });
+    updateManagedJob(probe.id, (job) => {
+      job.status = 'failed';
+      job.phase = 'failed';
+      job.errorCode = errorCode;
+      job.resultText = 'Provider stopped without a structural object.';
+      job.usage = { total: { inputTokens: 10, outputTokens: 25 } };
+    }, { incrementRevision: false });
+    const returned = await awaitAmbiguityProbe(parent.id);
+    assert.equal(returned.id, probe.id);
+    const inspected = inspectJob(parent.id);
+    assert.equal(inspected.planPass.attempts.length, 1, `${name} must not launch a fallback`);
+    assert.equal(inspected.planPass.attempts[0].fallbackEligible, false);
+    assert.equal(inspected.planPass.attempts[0].parserReason, undefined);
+    assert.equal(inspected.planPass.reason, `plan-pass-failed:${errorCode}`);
+    assert.equal(readJobEvents(parent.id).filter((event) => event.type === 'plan.ambiguity.started'
+      && event.data.attemptRole === 'model-fallback').length, 0);
+  }
+}));
+
 test('a realistic five-kilobyte packet recovers a marginal plan overrun and reaches a comparison verdict', () => isolated(async (directory) => {
   // Pin the allowance this test is exercising. It asserts that a MARGINAL
   // overrun recovers, which is a relationship between spend and cap, not a
@@ -616,6 +767,8 @@ test('a failed independent plan pass degrades loudly on the implement attempt an
   assert.equal(presented.planPass.outputTokenLimit, 128);
   assert.equal(presented.planPass.outputTokens, 200);
   assert.match(presented.planPass.jobId, /^codex-/);
+  assert.equal(presented.planPass.attempts.length, 1);
+  assert.equal(presented.planPass.attempts[0].fallbackEligible, false);
   assert.equal(presented.planning.ambiguity.state, 'degraded');
   assert.equal(presented.planning.comparison.verdict, 'inconclusive');
   submitControl(created.id, {
@@ -632,6 +785,8 @@ test('a failed independent plan pass degrades loudly on the implement attempt an
   assert.ok(readJobEvents(created.id).some((event) => event.type === 'plan.degraded'
     && event.data.jobId === completed.planPass.jobId
     && event.data.fallback === 'single-plan-confirmation'));
+  assert.equal(readJobEvents(created.id).filter((event) => event.type === 'plan.ambiguity.started'
+    && event.data.attemptRole === 'model-fallback').length, 0);
 }));
 
 test('CLI and MCP launch responses surface plan degradation with observed-versus-cap numbers', () => isolated(async (directory) => {
