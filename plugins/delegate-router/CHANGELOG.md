@@ -2,6 +2,15 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.57.0 — 2026-07-31
+
+- Compare shared-topic assumptions by normalized decisions instead of literal
+  prose, preserving genuine action and step-order conflicts while ignoring
+  case, punctuation, filler, and equivalent parser-precedence wording.
+- Normalize free-text component identities and make approach listing order
+  non-material. Divergence questions now include the differing left and right
+  decision summaries instead of reason codes alone.
+
 ## 0.56.0 — 2026-07-31
 
 - Accept a balanced JSON object embedded in narrated plan output only after the

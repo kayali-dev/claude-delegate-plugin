@@ -249,6 +249,147 @@ function uniqueStrings(values, normalize) {
   return [...new Set(entries)].sort();
 }
 
+const SEMANTIC_WORD_ALIASES = new Map([
+  ['comparators', 'compare'], ['comparator', 'compare'], ['comparisons', 'compare'],
+  ['comparison', 'compare'], ['comparing', 'compare'], ['compared', 'compare'],
+  ['normalizers', 'normalize'], ['normalizer', 'normalize'], ['normalization', 'normalize'],
+  ['normalizing', 'normalize'], ['normalized', 'normalize'],
+  ['validators', 'validate'], ['validator', 'validate'], ['validation', 'validate'],
+  ['validating', 'validate'], ['validated', 'validate'],
+  ['preserves', 'preserve'], ['preserved', 'preserve'], ['preserving', 'preserve'],
+  ['retains', 'retain'], ['retained', 'retain'], ['retaining', 'retain'],
+  ['scans', 'scan'], ['scanned', 'scan'], ['scanning', 'scan'],
+  ['rejects', 'reject'], ['rejected', 'reject'], ['rejecting', 'reject'],
+  ['allows', 'allow'], ['allowed', 'allow'], ['allowing', 'allow'],
+  ['persists', 'persist'], ['persisted', 'persist'], ['persisting', 'persist'],
+  ['saves', 'persist'], ['saved', 'persist'], ['saving', 'persist'], ['save', 'persist'],
+  ['notifies', 'notify'], ['notified', 'notify'], ['notifying', 'notify'],
+  ['plans', 'plan'], ['components', 'component'], ['assumptions', 'assumption'],
+  ['targets', 'target'], ['parsers', 'parser'], ['files', 'file'], ['objects', 'object'],
+  ['steps', 'step'], ['choices', 'choice'], ['decisions', 'decision'], ['updates', 'update'],
+  ['inputs', 'input'], ['outputs', 'output'], ['reasons', 'reason']
+]);
+const LABEL_FILLER_WORDS = new Set([
+  'a', 'an', 'the', 'component', 'implementation', 'logic', 'module', 'surface'
+]);
+const DECISION_FILLER_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'be', 'been', 'being', 'by', 'choice', 'decision',
+  'do', 'does', 'for', 'from', 'in', 'is', 'it', 'must', 'of', 'on', 'or', 'policy',
+  'required', 'same', 'should', 'that', 'the', 'this', 'to', 'was', 'were', 'will',
+  'with', 'would'
+]);
+const DECISION_NEGATIONS = new Set(['dont', 'never', 'no', 'not', 'without']);
+const DECISION_ACTIONS = new Map([
+  ['accept', 'accept'], ['allow', 'accept'], ['permit', 'accept'],
+  ['preserve', 'keep'], ['retain', 'keep'], ['keep', 'keep'],
+  ['scan', 'scan'], ['search', 'scan'], ['inspect', 'scan'],
+  ['reject', 'reject'], ['refuse', 'reject'],
+  ['skip', 'skip'], ['ignore', 'skip'], ['omit', 'skip'],
+  ['use', 'use'], ['select', 'use'], ['choose', 'use'],
+  ['replace', 'replace'], ['overwrite', 'replace'],
+  ['extend', 'extend'], ['add', 'extend'],
+  ['remove', 'remove'], ['delete', 'remove'],
+  ['validate', 'validate'], ['check', 'validate'],
+  ['persist', 'persist'], ['notify', 'notify'], ['report', 'notify']
+]);
+const DECISION_TERMS = new Map([
+  ['decisiontermfencedjson', 'fenced-json'],
+  ['decisiontermwholebodyjson', 'whole-body-json'],
+  ['decisiontermbalancedobject', 'balanced-object']
+]);
+
+function semanticSource(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[’']/g, '');
+}
+
+function semanticWords(value) {
+  return semanticSource(value).match(/[\p{L}\p{N}]+/gu) || [];
+}
+
+function canonicalSemanticWord(word) {
+  return SEMANTIC_WORD_ALIASES.get(word) || word;
+}
+
+function semanticLabelKey(value) {
+  const words = [...new Set(semanticWords(value).map(canonicalSemanticWord))];
+  const meaningful = words.filter((word) => !LABEL_FILLER_WORDS.has(word));
+  return (meaningful.length ? meaningful : words).sort().join('-');
+}
+
+function decisionText(value) {
+  return semanticSource(value)
+    .replace(/[-_/]+/g, ' ')
+    .replace(/\bfenced(?:\s+(?:json|object|code|block))?\b/g, ' decisiontermfencedjson ')
+    .replace(/\b(?:whole|entire)\s+body(?:\s+(?:json|object|document))?\b/g, ' decisiontermwholebodyjson ')
+    .replace(/\bbalanced(?:\s+brace\s+aware)?(?:\s+(?:json|brace))?\s+objects?\b/g, ' decisiontermbalancedobject ');
+}
+
+function anchoredDecision(tokens) {
+  if (tokens.filter((word) => DECISION_TERMS.has(word)).length < 2) return null;
+  const ordered = [];
+  let action = 'use';
+  let negated = false;
+  let pendingNegation = false;
+  for (const rawWord of tokens) {
+    const word = canonicalSemanticWord(rawWord);
+    if (DECISION_NEGATIONS.has(word)) {
+      pendingNegation = true;
+      continue;
+    }
+    const nextAction = DECISION_ACTIONS.get(word);
+    if (nextAction) {
+      action = nextAction;
+      negated = pendingNegation;
+      pendingNegation = false;
+      continue;
+    }
+    const term = DECISION_TERMS.get(word);
+    if (!term) continue;
+    const prefix = negated || pendingNegation ? 'not-' : '';
+    ordered.push(`${prefix}${action} ${term}`);
+    pendingNegation = false;
+  }
+  return ordered;
+}
+
+function canonicalDecisionWord(word) {
+  const canonical = canonicalSemanticWord(word);
+  if (DECISION_NEGATIONS.has(canonical)) return 'not';
+  return DECISION_ACTIONS.get(canonical) || canonical;
+}
+
+function normalizedDecision(choice) {
+  const source = decisionText(choice);
+  const words = semanticWords(source);
+  const anchored = anchoredDecision(words);
+  if (anchored) {
+    return {
+      key: `ordered:${anchored.join('>')}`,
+      summary: anchored.join(' -> ')
+    };
+  }
+
+  const hasExplicitOrder = /\b(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|then|next|finally|lastly)\b|\b\d+\s*[.)]|;/.test(source);
+  const marked = source
+    .replace(/\b(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|then|next|finally|lastly)\b\s*[:,.)-]*/g, '|')
+    .replace(/\b\d+\s*[.)]\s*/g, '|')
+    .replace(/;/g, hasExplicitOrder ? '|' : ' ');
+  const steps = marked.split('|').map((step) => [...new Set(semanticWords(step)
+    .map(canonicalDecisionWord)
+    .filter((word) => !DECISION_FILLER_WORDS.has(word)))]
+    .sort()
+    .join(' ')).filter(Boolean);
+  const normalized = hasExplicitOrder ? steps : [[...new Set(steps.flatMap((step) => step.split(' ')))].sort().join(' ')];
+  return {
+    key: `${hasExplicitOrder ? 'ordered' : 'decision'}:${normalized.join('>')}`,
+    summary: normalized.join(' -> ')
+  };
+}
+
 export function parseStructuralPlan(text) {
   let parsed = null;
   for (const candidate of structuralJsonCandidates(String(text || '').slice(-PLAN_MAX_CHARS))) {
@@ -341,8 +482,21 @@ function overlap(left, right) {
   return left.filter((value) => rightSet.has(value));
 }
 
-function structuralDifference(dimension, left, right, reason) {
-  return { dimension, left, right, reason };
+function structuralDifference(dimension, left, right, reason, details = {}) {
+  return { dimension, left, right, reason, ...details };
+}
+
+function assumptionIndex(assumptions) {
+  return new Map(assumptions.map((entry) => [semanticLabelKey(entry.topic), entry]));
+}
+
+function approachShape(approach) {
+  return approach.map((entry) => `${entry.kind}:${semanticLabelKey(entry.component)}`).sort();
+}
+
+function boundedDifferenceValue(value, limit = 240) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
 export function compareStructuralPlans(leftInput, rightInput) {
@@ -365,7 +519,9 @@ export function compareStructuralPlans(leftInput, rightInput) {
     const b = right.plan.targets[dimension];
     if (!a.length || !b.length) continue;
     comparable.push(`targets.${dimension}`);
-    const shared = overlap(a, b);
+    const comparableA = dimension === 'components' ? a.map(semanticLabelKey) : a;
+    const comparableB = dimension === 'components' ? b.map(semanticLabelKey) : b;
+    const shared = overlap(comparableA, comparableB);
     targetOverlaps.push(shared.length > 0);
     if (!shared.length) {
       differences.push(structuralDifference(`targets.${dimension}`, a, b, 'disjoint-target-sets'));
@@ -375,20 +531,28 @@ export function compareStructuralPlans(leftInput, rightInput) {
     comparable.push('approach.shape');
     const a = left.plan.approach.map((entry) => `${entry.kind}:${entry.component}`);
     const b = right.plan.approach.map((entry) => `${entry.kind}:${entry.component}`);
-    if (JSON.stringify(a) !== JSON.stringify(b)) {
-      differences.push(structuralDifference('approach.shape', a, b, 'ordered-approach-shapes-differ'));
+    if (JSON.stringify(approachShape(left.plan.approach)) !== JSON.stringify(approachShape(right.plan.approach))) {
+      differences.push(structuralDifference('approach.shape', a, b, 'approach-shapes-differ'));
     }
   }
-  const leftAssumptions = new Map(left.plan.assumptions.map((entry) => [entry.topic, entry.choice]));
-  const rightAssumptions = new Map(right.plan.assumptions.map((entry) => [entry.topic, entry.choice]));
+  const leftAssumptions = assumptionIndex(left.plan.assumptions);
+  const rightAssumptions = assumptionIndex(right.plan.assumptions);
   const sharedTopics = [...leftAssumptions.keys()].filter((topic) => rightAssumptions.has(topic)).sort();
   if (sharedTopics.length) {
     comparable.push('assumptions');
-    for (const topic of sharedTopics) {
-      const a = leftAssumptions.get(topic);
-      const b = rightAssumptions.get(topic);
-      if (a !== b) {
-        differences.push(structuralDifference(`assumptions.${topic}`, a, b, 'declared-assumptions-conflict'));
+    for (const topicKey of sharedTopics) {
+      const leftEntry = leftAssumptions.get(topicKey);
+      const rightEntry = rightAssumptions.get(topicKey);
+      const a = normalizedDecision(leftEntry.choice);
+      const b = normalizedDecision(rightEntry.choice);
+      if (a.key !== b.key) {
+        differences.push(structuralDifference(
+          `assumptions.${leftEntry.topic}`,
+          leftEntry.choice,
+          rightEntry.choice,
+          'declared-assumptions-conflict',
+          { decisions: { left: a.summary, right: b.summary } }
+        ));
       }
     }
   }
@@ -450,7 +614,11 @@ export function planReviewPresentation(primary, comparison, estimate) {
   const parsed = primary?.ok === true ? primary : parseStructuralPlan(primary);
   const plan = parsed.ok ? parsed.plan : null;
   const divergence = comparison?.verdict === 'divergent'
-    ? comparison.differences.map((entry) => `${entry.dimension}: ${entry.reason}`).join('; ')
+    ? comparison.differences.map((entry) => {
+      const left = boundedDifferenceValue(entry.decisions?.left || entry.left);
+      const right = boundedDifferenceValue(entry.decisions?.right || entry.right);
+      return `${entry.dimension} (${entry.reason}): left "${left}" vs right "${right}"`;
+    }).join('; ')
     : null;
   const ambiguityQuestion = divergence
     ? `The independent plans materially diverge: ${divergence}. Which structural reading should govern implementation?`

@@ -146,6 +146,88 @@ test('structural plan comparison distinguishes convergence, divergence, and inco
   assert.equal(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).ambiguityQuestion, null);
 });
 
+test('declared assumption paraphrases reduce to the same ordered parser-precedence decision', () => {
+  const leftChoice = 'preserve fenced and whole-body precedence; scan balanced brace-aware objects only as the final candidate source.';
+  const rightChoice = 'preserve fenced json precedence, then whole-body json, then scan for a balanced object; retain structural validation reasons.';
+  const left = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'assumptions.parser-precedence', choice: leftChoice }]
+  })));
+  const right = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'Assumptions / Parser Precedence', choice: rightChoice }]
+  })));
+
+  const comparison = compareStructuralPlans(left, right);
+  assert.equal(comparison.verdict, 'convergent');
+  assert.deepEqual(comparison.differences, []);
+  assert.equal(planReviewPresentation(left, comparison, { source: 'unavailable' }).ambiguityQuestion, null);
+});
+
+test('a genuine same-topic assumption conflict stays divergent and presents both decisions', () => {
+  const leftChoice = 'preserve fenced and whole-body precedence; scan balanced brace-aware objects only as the final candidate source.';
+  const rightChoice = 'preserve whole-body json precedence, then fenced json, then scan for a balanced object.';
+  const left = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'assumptions.parser-precedence', choice: leftChoice }]
+  })));
+  const right = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'assumptions.parser-precedence', choice: rightChoice }]
+  })));
+
+  const comparison = compareStructuralPlans(left, right);
+  assert.equal(comparison.verdict, 'divergent');
+  assert.equal(comparison.differences[0].reason, 'declared-assumptions-conflict');
+  assert.deepEqual(comparison.differences[0].decisions, {
+    left: 'keep fenced-json -> keep whole-body-json -> scan balanced-object',
+    right: 'keep whole-body-json -> keep fenced-json -> scan balanced-object'
+  });
+  const question = planReviewPresentation(left, comparison, { source: 'unavailable' }).ambiguityQuestion;
+  assert.match(question, /keep fenced-json -> keep whole-body-json/);
+  assert.match(question, /keep whole-body-json -> keep fenced-json/);
+});
+
+test('assumption normalization ignores case punctuation and filler but preserves enumerated order', () => {
+  const left = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'write lifecycle', choice: 'First: validate the input; then persist the output.' }]
+  })));
+  const equivalent = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'Lifecycle, Write', choice: '1) VALIDATE input. 2) Then save output!' }]
+  })));
+  assert.equal(compareStructuralPlans(left, equivalent).verdict, 'convergent');
+
+  const reordered = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'write lifecycle', choice: 'First persist the output; then validate the input.' }]
+  })));
+  assert.equal(compareStructuralPlans(left, reordered).verdict, 'divergent');
+});
+
+test('component wording and approach listing order alone are non-material while shape changes still diverge', () => {
+  const left = parseStructuralPlan(planText(structuralPlan({
+    targets: { files: ['src/core.js'], components: ['structural-plan comparator'] },
+    approach: [
+      { kind: 'edit', component: 'structural-plan comparator' },
+      { kind: 'test', component: 'decision normalization' }
+    ]
+  })));
+  const equivalent = parseStructuralPlan(planText(structuralPlan({
+    targets: { files: ['./src/core.js'], components: ['Plan structural comparison'] },
+    approach: [
+      { kind: 'test', component: 'normalization decision component' },
+      { kind: 'edit', component: 'plan structural comparison' }
+    ]
+  })));
+  assert.equal(compareStructuralPlans(left, equivalent).verdict, 'convergent');
+
+  const changed = parseStructuralPlan(planText(structuralPlan({
+    targets: { files: ['src/core.js'], components: ['Plan structural comparison'] },
+    approach: [
+      { kind: 'refactor', component: 'plan structural comparison' },
+      { kind: 'test', component: 'normalization decision component' }
+    ]
+  })));
+  const divergent = compareStructuralPlans(left, changed);
+  assert.equal(divergent.verdict, 'divergent');
+  assert.ok(divergent.differences.some((entry) => entry.dimension === 'approach.shape'));
+});
+
 test('structural plan parsing accepts narrated balanced JSON last while preserving fenced precedence and exact failures', () => {
   const expected = structuralPlan();
   const narrated = [
