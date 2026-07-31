@@ -2,6 +2,20 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.58.0 — 2026-07-31
+
+- Plan-confirmation monitor pushes now carry `requiresHumanDecision: true`,
+  name only the inspection pull path, and explicitly forbid unattended agent
+  decisions. They no longer include a pre-filled accept/reject command,
+  revision, or request id; owner CLI, TUI, and MCP response paths are unchanged.
+- Independent-plan records now separate provider lifecycle from output
+  validity and expose wasted observed/reserved output-token spend. Stats and
+  seven-day health report the comparable-plan rate and degrade loudly after
+  three structurally unparseable probes, while unusable passes remain
+  non-blocking.
+- Strengthened Cursor plan-lane final-answer framing against narration-only
+  completion while retaining the existing one-shot independent-model fallback.
+
 ## 0.57.0 — 2026-07-31
 
 - Compare shared-topic assumptions by normalized decisions instead of literal

@@ -257,6 +257,7 @@ async function presentPlanForConfirmation(jobId, primaryText) {
   const question = {
     requestId: planRequestId(jobId),
     kind: 'plan-confirmation',
+    requiresHumanDecision: true,
     question: presentation.question,
     options: ['accept-plan', 'decline-plan'],
     urgency: comparison.verdict === 'divergent' ? 'blocking' : 'normal',
@@ -286,6 +287,7 @@ async function presentPlanForConfirmation(jobId, primaryText) {
   }, { incrementRevision: false });
   appendJobEvent(jobId, 'plan.presented', {
     requestId: question.requestId,
+    requiresHumanDecision: true,
     predictedBlastRadius: presentation.predictedBlastRadius,
     estimate,
     comparison,
@@ -1796,7 +1798,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.57.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.58.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2845,7 +2847,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.57.0' }
+      clientInfo: { name: 'delegate-router', version: '0.58.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

@@ -37,6 +37,63 @@ test('delegate-health surfaces the never-pruned audit log path', () => isolated(
   assert.equal(JSON.parse(result.stdout).auditLogFile, path.join(directory, 'audit.jsonl'));
 }));
 
+test('delegate-health degrades loudly for three recent unparseable plan probes and names the rate', () => isolated((directory) => {
+  const attempts = [9_024, 7_804, 4_031].map((outputTokens, index) => ({
+    jobId: `probe-${index}`,
+    role: 'independent-probe',
+    state: 'degraded',
+    probeStatus: 'completed',
+    outputValidity: 'unparseable',
+    structurallyInvalid: true,
+    parserReason: 'no-valid-structural-json',
+    reason: 'plan-structural-output-invalid:no-valid-structural-json',
+    outputTokens,
+    wastedOutputTokens: outputTokens,
+    costBasis: 'observed'
+  }));
+  const record = {
+    jobId: 'recent-plan-health',
+    at: Date.now(),
+    provider: 'codex',
+    mode: 'implement',
+    taskShape: { planFirst: true },
+    planFirstOutcome: {
+      requested: true,
+      state: 'degraded',
+      degraded: true,
+      completionReached: false,
+      attempts
+    }
+  };
+  fs.writeFileSync(path.join(directory, 'audit.jsonl'), `${JSON.stringify(record)}\n`);
+  const env = { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE, DELEGATE_ENABLED_PROVIDERS: 'codex' };
+  const jsonResult = spawnSync(process.execPath, [path.join(plugin, 'bin', 'delegate-health'), '--quick', '--json'], {
+    encoding: 'utf8', env
+  });
+  assert.equal(jsonResult.status, 0, jsonResult.stderr);
+  const report = JSON.parse(jsonResult.stdout);
+  assert.equal(report.ok, false);
+  assert.deepEqual(report.planFirstProbeHealth, {
+    window: '7d',
+    status: 'degraded',
+    minimumRepeatedFailures: 3,
+    sampleSize: 3,
+    comparableProbes: 0,
+    unparseableProbes: 3,
+    validityRate: 0,
+    structurallyInvalidReasons: { 'no-valid-structural-json': 3 },
+    wastedOutputTokens: 20_859,
+    wastedOutputTokensObserved: 20_859,
+    wastedOutputTokensReserved: 0
+  });
+  const textResult = spawnSync(process.execPath, [path.join(plugin, 'bin', 'delegate-health'), '--quick'], {
+    encoding: 'utf8', env
+  });
+  assert.equal(textResult.status, 0, textResult.stderr);
+  assert.match(textResult.stdout, /Delegate Router .*: degraded/);
+  assert.match(textResult.stdout, /Plan probe output health \(7d\): DEGRADED — 0\/3 comparable \(0\.0% validity\), 3 unparseable, 20859 wasted output tokens \(20859 observed, 0 reserved\)/);
+}));
+
 test('Cursor-only control MCP advertises only Cursor and Codex MCP exposes no tools', async () => {
   const env = { ...process.env, DELEGATE_ENABLED_PROVIDERS: 'cursor' };
   const child = spawn(process.execPath, [path.join(plugin, 'bin', 'delegate-control-mcp')], { stdio: ['pipe', 'pipe', 'pipe'], env });

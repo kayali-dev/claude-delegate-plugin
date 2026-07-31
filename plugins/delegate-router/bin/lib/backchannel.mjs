@@ -152,6 +152,7 @@ export function normalizeCoordinatorQuestion(job, input = {}, options = {}) {
   return redact({
     requestId,
     kind: method === 'cursor/create_plan' ? 'plan-confirmation' : 'question',
+    ...(method === 'cursor/create_plan' ? { requiresHumanDecision: true } : {}),
     question: args.question,
     options: args.options,
     urgency: args.urgency,

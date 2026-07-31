@@ -173,7 +173,11 @@ being absent. The update contains closed status/reason/cost metadata only; it
 does not copy the plan packet or provider payload into the parent.
 `planPass.attempts[]` is idempotent by child job id and distinguishes the
 `independent-probe` from the optional `model-fallback`; every entry carries its
-own observed/reserved token cost. A structurally invalid entry uses
+own provider lifecycle in `probeStatus`, structural usability in
+`outputValidity: "pending" | "comparable" | "unparseable" | "unusable"`,
+and observed/reserved token cost. `wastedOutputTokens` names the charged cost of
+an attempt that produced no comparable plan, while total attributed planning
+cost remains separate. A structurally invalid entry uses
 `plan-structural-output-invalid:<parser-reason>` plus the separate
 `parserReason`. Only a completed, within-budget structurally invalid first
 probe may start one parent-provider model fallback. Operational timeout, quota,
@@ -243,7 +247,7 @@ plugin plus `--approve-mcps`. Injection failure emits
 server; it never fails the job.
 
 Back-channel and native Cursor questions share one redacted/bounded
-`pendingInput`: `{ requestId, kind: "question" | "plan-confirmation", question, options, urgency,
+`pendingInput`: `{ requestId, kind: "question" | "plan-confirmation", requiresHumanDecision?, question, options, urgency,
 context: { stuckOn, diffSoFar, optionsConsidered }, requestedAt, timeoutMs,
 expiresAt, defaultAction: "reject" }`. Phase becomes
 `user-input-required`; `input.requested` carries that shape, and revisioned MCP
@@ -257,6 +261,13 @@ request-answered records. Structured back-channel responses reject every field e
 `answer` and `steer`; the returned tool result explicitly preserves all
 original scope, permission, approval, budget, timeout, network, sandbox, and
 control constraints.
+
+Every `plan-confirmation` sets `requiresHumanDecision: true`. This is a
+machine-readable safety boundary, not a forge-resistant human-presence
+attestation: the current CLI, TUI, and MCP transports carry no authenticated
+proof that a human originated a command. Agents must therefore treat pushed
+notifications as inspection prompts only and must not execute the decision
+unattended. Timeout keeps `defaultAction: "reject"`.
 
 Question waiting time remains inside the original wall-clock deadline and is
 accumulated as `blockedMs` on an existing P2b attempt lease. While phase is

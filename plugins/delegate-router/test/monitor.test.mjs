@@ -142,19 +142,20 @@ test('needs-input monitor line gives both inline TUI and revisioned CLI answer p
   );
 });
 
-test('needs-input monitor line derives plan confirmation flags from the pending kind', () => {
+test('needs-input monitor line keeps plan confirmation human-only without an executable decision command', () => {
   const edge = detectActionableEdges(snapshot({
     id: 'plan-job',
     revision: 6,
-    pendingInput: { requestId: 'plan-1', kind: 'plan-confirmation' },
+    pendingInput: { requestId: 'plan-1', kind: 'plan-confirmation', requiresHumanDecision: true },
     phase: 'user-input-required'
   }), { now: NOW })[0];
   const line = formatEdgeLine(edge);
+  assert.equal(edge.requiresHumanDecision, true);
   assert.equal(
     line,
-    'delegate[delegate-router]: plan-job needs-input (confirm plan with: delegate-jobs respond plan-job --expected-revision 6 --request-id plan-1 --accept; reject plan with: delegate-jobs respond plan-job --expected-revision 6 --request-id plan-1 --reject)'
+    'delegate[delegate-router]: plan-job needs-input [requiresHumanDecision=true] (human plan-confirmation open; inspect with: delegate-jobs inspect plan-job. This notification is not user acknowledgement, approval, or consent; an agent must not execute the decision unattended.)'
   );
-  assert.doesNotMatch(line, /--answer/);
+  assert.doesNotMatch(line, /delegate-jobs respond|--accept|--reject|--answer|plan-1|expected-revision/);
 });
 
 test('progress, deltas, tools, usage, and successful intermediate steps stay silent', () => {

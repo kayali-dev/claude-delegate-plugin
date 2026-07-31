@@ -216,8 +216,9 @@ directive-marker count: live measurements found plan cost nearly flat in those
 dimensions, while larger allowances moved spend upward. The plan prompt
 requires one compact structural JSON object, no narrated analysis or repeated
 packet, and an ordinary target below 500 words. Cursor plan lanes additionally
-require the final message to end with the fenced deliverable and contain
-nothing after it. Parsing still prefers fenced JSON and a whole-body object,
+declare process narration without the deliverable invalid and require the
+entire final message to be the single fenced JSON object, with nothing before
+or after it. Parsing still prefers fenced JSON and a whole-body object,
 then accepts a balanced object embedded in narration; the same structural
 target, approach, assumption, and risk validation applies afterward.
 `DELEGATE_PLAN_OUTPUT_TOKENS` remains an exact bounded override (128–16,384);
@@ -250,13 +251,14 @@ and an invalid fallback is not retried.
 
 The independent child always projects its terminal outcome back onto the
 implement attempt as additive `planPass: { state, reason?, jobId,
-planStatus, errorCode?, outputTokenLimit, outputTokens, hardOutputTokenLimit?,
+planStatus, probeStatus, outputValidity, errorCode?, outputTokenLimit, outputTokens, hardOutputTokenLimit?,
 recovery?, attempts[], attemptCount, totalOutputTokens,
-attributedOutputTokens, recordedAt }`; `state` may be `running`, `completed`,
+attributedOutputTokens, wastedOutputTokens, recordedAt }`; `state` may be `running`, `completed`,
 `recovered`, or `degraded`. Each attempt retains its provider/model, role,
-parser reason when structurally invalid, observed or reserved cost basis, and
-token cap, so the rejected probe's spend remains visible after a successful
-fallback.
+provider lifecycle, independently readable output validity, parser reason when
+structurally invalid, observed or reserved cost basis, token cap, and wasted
+cost. A completed provider lifecycle can therefore coexist with
+`outputValidity: "unparseable"` without implying that comparison succeeded.
 `delegate_inspect` returns that field directly and TUI job detail renders a
 `PLAN DEGRADED` badge. Historical records with no `planPass` remain unchanged.
 A failed, cancelled, timed-out, or over-budget independent pass degrades to the
@@ -430,6 +432,13 @@ steps.
 Every line is compact, redacted, and carries the job id plus the launch
 workspace basename; inspect that job and its immutable `origin.sessionId`,
 `origin.workspaceId`, and `origin.projectDir` before acting.
+Plan-confirmation edges carry `requiresHumanDecision: true` in the derived
+payload, preserve it as `requiresHumanDecision=true` in the emitted line, and
+print only `delegate-jobs inspect <id>`, never a pre-filled
+accept/reject command, revision, or request id. The line explicitly says that
+it is not acknowledgement, approval, or consent and that an agent must not
+execute the decision unattended. The existing owner CLI, TUI, and MCP paths
+remain unchanged after human review.
 The origin is captured from `CLAUDE_PROJECT_DIR` at launch (falling back to the
 launching process cwd). `workspaceId` resolves the actual worktree/project
 identity through realpath, while `sessionId` comes from the launching Claude

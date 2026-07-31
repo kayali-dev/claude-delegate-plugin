@@ -14,6 +14,7 @@ import {
 import { resolveAttemptDriverMatrix } from './lib/attempt-driver.mjs';
 import { auditLogPath, effectiveUsage, enabledProviders, loadState, mutateState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
 import { maintenanceLogPath, measureStateStore } from './lib/store-maintenance.mjs';
+import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout, windowsHide: true });
@@ -40,6 +41,7 @@ const claudeBinary = executableOnPath('claude');
 const controlServer = path.join(path.dirname(fileURLToPath(import.meta.url)), 'delegate-control-mcp');
 const configuredProviders = enabledProviders();
 const store = measureStateStore();
+const recentPlanFirst = aggregateVisibilityStats(readAuditLog(), { since: '7d' }).planFirst;
 const packageInfo = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'));
 const report = {
   ok: true,
@@ -49,6 +51,10 @@ const report = {
   auditLogFile: auditLogPath(),
   maintenanceLogFile: maintenanceLogPath(),
   store,
+  planFirstProbeHealth: {
+    window: '7d',
+    ...recentPlanFirst.probeOutputHealth
+  },
   providerConfigFile: providerConfigPath(),
   enabledProviders: configuredProviders,
   node: { ok: Number(process.versions.node.split('.')[0]) >= 18, version: process.versions.node },
@@ -180,7 +186,8 @@ if (deep) {
 report.ok = report.node.ok && report.claude.installed && report.control.installed
   && (!report.codex.enabled || report.codex.installed)
   && (!report.cursor.enabled || report.cursor.installed)
-  && !report.store.overBudget;
+  && !report.store.overBudget
+  && report.planFirstProbeHealth.status !== 'degraded';
 if (!quick && report.cursor.enabled && report.cursor.installed) {
   report.ok = report.ok && report.cursor.status?.ok === true && report.cursor.models?.ok === true
     && report.cursor.projectConfig?.ok !== false && report.cursor.capabilityProbe?.ok === true;
@@ -197,6 +204,9 @@ else {
   console.log(`Audit log: ${report.auditLogFile}`);
   console.log(`State store: ${report.store.bytes} bytes in ${report.store.files} files; budget ${report.store.budgetBytes}; headroom ${report.store.headroomBytes}${report.store.complete ? '' : ' (bounded scan incomplete)'}`);
   console.log(`Maintenance log: ${report.maintenanceLogFile}`);
+  const probeHealth = report.planFirstProbeHealth;
+  const validity = probeHealth.validityRate == null ? 'n/a' : `${(probeHealth.validityRate * 100).toFixed(1)}%`;
+  console.log(`Plan probe output health (${probeHealth.window}): ${probeHealth.status.toUpperCase()} — ${probeHealth.comparableProbes}/${probeHealth.sampleSize} comparable (${validity} validity), ${probeHealth.unparseableProbes} unparseable, ${probeHealth.wastedOutputTokens} wasted output tokens (${probeHealth.wastedOutputTokensObserved} observed, ${probeHealth.wastedOutputTokensReserved} reserved)`);
   if (report.cursor.acp) console.log(`Cursor ACP: ${report.cursor.acp.ok ? 'available' : 'unavailable (headless fallback)'}`);
   if (report.cursor.projectConfig?.ok === false) console.log(`Cursor project config: invalid (${report.cursor.projectConfig.code}) ${report.cursor.projectConfig.file}`);
   if (report.cursor.capabilityProbe) {

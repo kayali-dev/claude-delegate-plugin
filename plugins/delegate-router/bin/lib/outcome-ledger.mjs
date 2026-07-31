@@ -209,6 +209,10 @@ export function planFirstOutcomeSnapshot(job = {}) {
       outputTokenLimit: null,
       outputTokens: null,
       structurallyInvalidProbes: 0,
+      comparableProbes: 0,
+      unparseableProbes: 0,
+      unusableProbes: 0,
+      wastedOutputTokens: 0,
       otherDegradedProbes: 0,
       fallbackAttempts: 0,
       attempts: []
@@ -225,19 +229,36 @@ export function planFirstOutcomeSnapshot(job = {}) {
     || ['awaiting-confirmation', 'confirmed', 'declined'].includes(planning?.state));
   const recovered = planPass?.state === 'recovered'
     || planning?.budgetOutcome?.state === 'recovered';
-  const attempts = (planPass?.attempts || planning?.ambiguity?.attempts || []).map((attempt) => ({
-    role: attempt.role || null,
-    provider: attempt.provider || null,
-    model: attempt.model || null,
-    state: attempt.state || null,
-    ...(attempt.reason ? { reason: attempt.reason } : {}),
-    ...(attempt.parserReason ? { parserReason: attempt.parserReason } : {}),
-    structurallyInvalid: attempt.structurallyInvalid === true,
-    outputTokens: attempt.outputTokens ?? null,
-    outputTokenLimit: attempt.outputTokenLimit ?? null,
-    costBasis: attempt.costBasis || null
-  }));
+  const attempts = (planPass?.attempts || planning?.ambiguity?.attempts || []).map((attempt) => {
+    const structurallyInvalid = attempt.structurallyInvalid === true;
+    const outputValidity = attempt.outputValidity
+      || (structurallyInvalid ? 'unparseable'
+        : ['completed', 'recovered'].includes(attempt.state) ? 'comparable'
+          : attempt.state === 'degraded' ? 'unusable' : null);
+    const attributedTokens = attempt.outputTokens ?? attempt.outputTokenLimit ?? 0;
+    const wastedOutputTokens = attempt.wastedOutputTokens
+      ?? (outputValidity && outputValidity !== 'comparable' ? attributedTokens : 0);
+    return {
+      role: attempt.role || null,
+      provider: attempt.provider || null,
+      model: attempt.model || null,
+      state: attempt.state || null,
+      probeStatus: attempt.probeStatus || attempt.planStatus || null,
+      outputValidity,
+      ...(attempt.reason ? { reason: attempt.reason } : {}),
+      ...(attempt.parserReason ? { parserReason: attempt.parserReason } : {}),
+      structurallyInvalid,
+      outputTokens: attempt.outputTokens ?? null,
+      outputTokenLimit: attempt.outputTokenLimit ?? null,
+      wastedOutputTokens: Math.max(0, Number(wastedOutputTokens) || 0),
+      costBasis: attempt.costBasis || null
+    };
+  });
   const structurallyInvalidProbes = attempts.filter((attempt) => attempt.structurallyInvalid).length;
+  const comparableProbes = attempts.filter((attempt) => attempt.outputValidity === 'comparable').length;
+  const unparseableProbes = attempts.filter((attempt) => attempt.outputValidity === 'unparseable').length;
+  const unusableProbes = attempts.filter((attempt) => attempt.outputValidity === 'unusable').length;
+  const wastedOutputTokens = attempts.reduce((total, attempt) => total + attempt.wastedOutputTokens, 0);
   const otherDegradedProbes = attempts.filter((attempt) => attempt.state === 'degraded'
     && !attempt.structurallyInvalid).length;
   const fallbackAttempts = attempts.filter((attempt) => attempt.role === 'model-fallback').length;
@@ -262,6 +283,10 @@ export function planFirstOutcomeSnapshot(job = {}) {
       ?? measured?.observedOutputTokens
       ?? null,
     structurallyInvalidProbes,
+    comparableProbes,
+    unparseableProbes,
+    unusableProbes,
+    wastedOutputTokens,
     otherDegradedProbes,
     fallbackAttempts,
     attempts

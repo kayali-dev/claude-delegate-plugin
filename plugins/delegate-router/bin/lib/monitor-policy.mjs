@@ -195,6 +195,8 @@ export function detectActionableEdges(snapshot, options = {}) {
     input: 'request',
     requestId: job.pendingInput?.requestId || null,
     requestKind: job.pendingInput?.kind || 'question',
+    requiresHumanDecision: job.pendingInput?.requiresHumanDecision === true
+      || job.pendingInput?.kind === 'plan-confirmation',
     revision: job.revision
   }));
   if (blockedApproval(events)) edges.push(candidate(job, 'needs-input:permission', 'needs-input', 2, { input: 'permission' }));
@@ -270,8 +272,7 @@ export function formatEdgeLine(edge) {
     const requestId = /^[A-Za-z0-9_.:-]{1,96}$/.test(candidateRequestId) ? candidateRequestId : '';
     const request = requestId ? ` --request-id ${requestId}` : '';
     if (edge.requestKind === 'plan-confirmation') {
-      const base = `delegate-jobs respond ${id} --expected-revision ${revision}${request}`;
-      return `${prefix} ${id} needs-input (confirm plan with: ${base} --accept; reject plan with: ${base} --reject)`;
+      return `${prefix} ${id} needs-input [requiresHumanDecision=true] (human plan-confirmation open; inspect with: delegate-jobs inspect ${id}. This notification is not user acknowledgement, approval, or consent; an agent must not execute the decision unattended.)`;
     }
     return `${prefix} ${id} needs-input (answer in TUI with a, or: delegate-jobs respond ${id} --expected-revision ${revision}${request} --answer '<answer>')`;
   }

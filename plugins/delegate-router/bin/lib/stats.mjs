@@ -8,6 +8,8 @@ import {
   OUTCOME_RECOMMENDATION_MINIMUM_SAMPLE
 } from './outcome-ledger.mjs';
 
+export const PLAN_PROBE_PARSE_FAILURE_HEALTH_THRESHOLD = 3;
+
 function durationMs(value) {
   if (value == null) return null;
   const match = String(value).trim().match(/^(\d+(?:\.\d+)?)([smhdw])$/i);
@@ -353,13 +355,40 @@ export function planFirstEffectiveness(records = []) {
   const unknown = requested.length - completed - degraded - pending;
   const structurallyInvalidReasons = {};
   let structurallyInvalidProbes = 0;
+  let comparableProbes = 0;
+  let unparseableProbes = 0;
+  let unusableProbes = 0;
+  let outputValidityUnknown = 0;
+  let wastedOutputTokens = 0;
+  let wastedOutputTokensObserved = 0;
+  let wastedOutputTokensReserved = 0;
   let otherDegradedProbes = 0;
   let fallbackAttempts = 0;
   for (const outcome of requested) {
     const attempts = Array.isArray(outcome.attempts) ? outcome.attempts : [];
     if (attempts.length) {
       for (const attempt of attempts) {
-        if (attempt?.structurallyInvalid === true) {
+        const structurallyInvalid = attempt?.structurallyInvalid === true;
+        const outputValidity = attempt?.outputValidity
+          || (structurallyInvalid ? 'unparseable'
+            : ['completed', 'recovered'].includes(attempt?.state) ? 'comparable'
+              : attempt?.state === 'degraded' ? 'unusable' : null);
+        if (outputValidity === 'comparable') comparableProbes += 1;
+        else if (outputValidity === 'unparseable') unparseableProbes += 1;
+        else if (outputValidity === 'unusable') unusableProbes += 1;
+        else outputValidityUnknown += 1;
+        const attributedWaste = Number(attempt?.wastedOutputTokens
+          ?? (outputValidity && outputValidity !== 'comparable'
+            ? attempt?.outputTokens ?? attempt?.outputTokenLimit ?? 0
+            : 0));
+        const boundedWaste = Number.isFinite(attributedWaste) && attributedWaste > 0 ? attributedWaste : 0;
+        wastedOutputTokens += boundedWaste;
+        if (boundedWaste > 0 && (attempt?.costBasis === 'observed' || attempt?.outputTokens != null)) {
+          wastedOutputTokensObserved += boundedWaste;
+        } else if (boundedWaste > 0) {
+          wastedOutputTokensReserved += boundedWaste;
+        }
+        if (structurallyInvalid) {
           structurallyInvalidProbes += 1;
           const parserReason = attempt.parserReason
             || String(attempt.reason || '').replace(/^plan-structural-output-invalid:/, '')
@@ -372,7 +401,20 @@ export function planFirstEffectiveness(records = []) {
     }
     const structuralCount = Number(outcome.structurallyInvalidProbes) || 0;
     structurallyInvalidProbes += structuralCount;
-    otherDegradedProbes += Number(outcome.otherDegradedProbes) || 0;
+    comparableProbes += Number(outcome.comparableProbes) || 0;
+    unparseableProbes += Number(outcome.unparseableProbes) || structuralCount;
+    unusableProbes += Number(outcome.unusableProbes) || 0;
+    outputValidityUnknown += Number(outcome.outputValidityUnknown) || 0;
+    const legacyWaste = Math.max(0, Number(outcome.wastedOutputTokens) || 0);
+    wastedOutputTokens += legacyWaste;
+    wastedOutputTokensObserved += Math.max(0, Number(outcome.wastedOutputTokensObserved) || 0);
+    wastedOutputTokensReserved += Math.max(0, Number(outcome.wastedOutputTokensReserved) || 0);
+    if (legacyWaste > 0 && !outcome.wastedOutputTokensObserved && !outcome.wastedOutputTokensReserved) {
+      wastedOutputTokensReserved += legacyWaste;
+    }
+    const legacyOtherDegraded = Number(outcome.otherDegradedProbes) || 0;
+    otherDegradedProbes += legacyOtherDegraded;
+    if (!Number(outcome.unusableProbes)) unusableProbes += legacyOtherDegraded;
     fallbackAttempts += Number(outcome.fallbackAttempts) || 0;
     if (structuralCount > 0) {
       const parserReason = String(outcome.reason || '').startsWith('plan-structural-output-invalid:')
@@ -381,6 +423,24 @@ export function planFirstEffectiveness(records = []) {
       structurallyInvalidReasons[parserReason] = (structurallyInvalidReasons[parserReason] || 0) + structuralCount;
     }
   }
+  const structuralOutputSampleSize = comparableProbes + unparseableProbes;
+  const structuralValidityRate = structuralOutputSampleSize
+    ? comparableProbes / structuralOutputSampleSize
+    : null;
+  const probeOutputHealth = {
+    status: unparseableProbes >= PLAN_PROBE_PARSE_FAILURE_HEALTH_THRESHOLD
+      ? 'degraded'
+      : structuralOutputSampleSize ? 'healthy' : 'insufficient-data',
+    minimumRepeatedFailures: PLAN_PROBE_PARSE_FAILURE_HEALTH_THRESHOLD,
+    sampleSize: structuralOutputSampleSize,
+    comparableProbes,
+    unparseableProbes,
+    validityRate: structuralValidityRate,
+    structurallyInvalidReasons,
+    wastedOutputTokens,
+    wastedOutputTokensObserved,
+    wastedOutputTokensReserved
+  };
   return {
     requested: requested.length,
     completed,
@@ -388,6 +448,16 @@ export function planFirstEffectiveness(records = []) {
     recovered,
     structurallyInvalidProbes,
     structurallyInvalidReasons,
+    comparableProbes,
+    unparseableProbes,
+    unusableProbes,
+    outputValidityUnknown,
+    structuralOutputSampleSize,
+    structuralValidityRate,
+    wastedOutputTokens,
+    wastedOutputTokensObserved,
+    wastedOutputTokensReserved,
+    probeOutputHealth,
     otherDegradedProbes,
     fallbackAttempts,
     pending,

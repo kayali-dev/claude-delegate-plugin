@@ -6,6 +6,9 @@ import { spawn } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  normalizeCoordinatorQuestion,
+} from '../bin/lib/backchannel.mjs';
+import {
   createManagedJob,
   inspectJob,
   readJobEvents,
@@ -22,6 +25,21 @@ const server = path.join(pluginRoot, 'bin', 'delegate-backchannel-mcp');
 const jobsCli = path.join(pluginRoot, 'bin', 'delegate-jobs');
 const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
 const fakeCursor = path.join(testDir, 'fake-cursor-parity.mjs');
+
+test('normalized plan requests require a human decision while free-form questions do not', () => {
+  const job = { id: 'cursor-plan', cwd: process.cwd() };
+  const plan = normalizeCoordinatorQuestion(job, {
+    question: 'Approve this plan?'
+  }, { method: 'cursor/create_plan', requestId: 'plan-request', requestedAt: 100, timeoutMs: 500 });
+  const question = normalizeCoordinatorQuestion(job, {
+    question: 'Which file?',
+    urgency: 'normal'
+  }, { method: 'ask_coordinator', requestId: 'question-request', requestedAt: 100, timeoutMs: 500 });
+  assert.equal(plan.kind, 'plan-confirmation');
+  assert.equal(plan.requiresHumanDecision, true);
+  assert.equal(plan.defaultAction, 'reject');
+  assert.equal(Object.hasOwn(question, 'requiresHumanDecision'), false);
+});
 
 async function isolated(t, provider, fn, extra = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-backchannel-'));

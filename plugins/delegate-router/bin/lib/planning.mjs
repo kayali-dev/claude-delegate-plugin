@@ -136,8 +136,10 @@ export function planPrompt(providerPacket, lane = {}) {
   const laneReinforcement = lane.provider === 'cursor'
     ? `
 
-Cursor plan-lane delivery rule: your final message must END with the fenced JSON
-deliverable and contain nothing after the closing fence.`
+CURSOR PLAN-LANE FINAL-ANSWER CONTRACT: process narration without the structural
+JSON deliverable is invalid. Your entire final message must be the single fenced
+JSON object requested above: begin with the opening fence, end with the closing
+fence, and emit nothing before or after it.`
     : '';
   return `${providerPacket}
 

@@ -3339,6 +3339,13 @@ function attributedPlanAttemptTokens(attempts) {
   }, 0);
 }
 
+function wastedPlanAttemptTokens(attempts) {
+  return attempts.reduce((total, attempt) => {
+    const wasted = Number(attempt?.wastedOutputTokens);
+    return total + (Number.isFinite(wasted) && wasted > 0 ? wasted : 0);
+  }, 0);
+}
+
 function startedPlanAttempt(child, candidate, outputTokenLimit, role = 'independent-probe', triggerReason = null) {
   return {
     role,
@@ -3348,8 +3355,11 @@ function startedPlanAttempt(child, candidate, outputTokenLimit, role = 'independ
     independentBy: candidate.independentBy,
     state: 'running',
     planStatus: child.status,
+    probeStatus: child.status,
+    outputValidity: 'pending',
     outputTokenLimit,
     outputTokens: null,
+    wastedOutputTokens: 0,
     costBasis: 'reserved-cap',
     ...(triggerReason ? { triggerReason } : {})
   };
@@ -3434,6 +3444,7 @@ export function startAmbiguityProbe(id) {
       );
       const totalOutputTokens = observedPlanAttemptTokens(attempts);
       const attributedOutputTokens = attributedPlanAttemptTokens(attempts);
+      const wastedOutputTokens = wastedPlanAttemptTokens(attempts);
       current.planning.externalOutputTokensReserved = attributedOutputTokens;
       current.planning.ambiguity = {
         enabled: true,
@@ -3446,8 +3457,10 @@ export function startAmbiguityProbe(id) {
         attempts,
         totalOutputTokens,
         attributedOutputTokens,
+        wastedOutputTokens,
         ...(recordedOutcome ? {
-          probeStatus: recordedOutcome.planStatus,
+          probeStatus: recordedOutcome.probeStatus || recordedOutcome.planStatus,
+          outputValidity: recordedOutcome.outputValidity,
           outputTokens: recordedOutcome.outputTokens,
           costBasis: recordedOutcome.outputTokens == null ? 'reserved-cap' : 'observed',
           ...(recordedOutcome.reason ? { reason: recordedOutcome.reason } : {}),
@@ -3462,7 +3475,10 @@ export function startAmbiguityProbe(id) {
           budgetSource: compiledPlanBudget.source,
           attempts,
           totalOutputTokens,
-          attributedOutputTokens
+          attributedOutputTokens,
+          wastedOutputTokens,
+          probeStatus: child.status,
+          outputValidity: 'pending'
         };
       }
     }, { incrementRevision: false });
@@ -3537,6 +3553,9 @@ export function recordPlanPassOutcome(planJobOrId) {
   const structurallyInvalid = planJob.status === 'completed'
     && assessment.state === 'within-budget'
     && !assessment.parsed.ok;
+  const outputValidity = structurallyUsable
+    ? 'comparable'
+    : structurallyInvalid ? 'unparseable' : 'unusable';
   const parserReason = structurallyInvalid ? assessment.parsed.reason : null;
   const reason = degraded
     ? degradedPlanPassReason(planJob, assessment, budgetRecovery, structurallyInvalid)
@@ -3548,6 +3567,10 @@ export function recordPlanPassOutcome(planJobOrId) {
     overrunTokens: assessment.overrunTokens,
     overrunPercent: assessment.overrunPercent
   } : null;
+  const attributedAttemptTokens = totals?.outputTokens ?? outputTokenLimit ?? 0;
+  const wastedOutputTokens = outputValidity === 'comparable'
+    ? 0
+    : Math.max(0, Number(attributedAttemptTokens) || 0);
   const attempt = {
     role: planAttemptRole(planJob, parentId),
     jobId: planJob.id,
@@ -3556,6 +3579,8 @@ export function recordPlanPassOutcome(planJobOrId) {
     independentBy: planJob.provider === parent.provider ? 'model' : 'provider',
     state,
     planStatus: planJob.status,
+    probeStatus: planJob.status,
+    outputValidity,
     ...(reason ? { reason } : {}),
     ...(parserReason ? { parserReason } : {}),
     structurallyInvalid,
@@ -3563,6 +3588,7 @@ export function recordPlanPassOutcome(planJobOrId) {
     ...(planJob.errorCode ? { errorCode: planJob.errorCode } : {}),
     outputTokenLimit,
     outputTokens: totals?.outputTokens ?? null,
+    wastedOutputTokens,
     costBasis: totals ? 'observed' : 'reserved-cap',
     hardOutputTokenLimit: assessment.hardOutputTokenLimit,
     ...(recovery ? { recovery } : {}),
@@ -3578,13 +3604,15 @@ export function recordPlanPassOutcome(planJobOrId) {
     const attempts = upsertPlanAttempt(previousAttempts, attempt);
     const totalOutputTokens = observedPlanAttemptTokens(attempts);
     const attributedOutputTokens = attributedPlanAttemptTokens(attempts);
+    const totalWastedOutputTokens = wastedPlanAttemptTokens(attempts);
     const activeJobId = current.planning?.ambiguity?.jobId;
     const isCurrentAttempt = !activeJobId || activeJobId === planJob.id;
     const attemptTotals = {
       attempts,
       attemptCount: attempts.length,
       totalOutputTokens,
-      attributedOutputTokens
+      attributedOutputTokens,
+      wastedOutputTokens: totalWastedOutputTokens
     };
     current.planning.externalOutputTokensReserved = attributedOutputTokens;
     if (isCurrentAttempt) {
@@ -3596,6 +3624,8 @@ export function recordPlanPassOutcome(planJobOrId) {
         fallbackEligible: structurallyInvalid,
         jobId: planJob.id,
         planStatus: planJob.status,
+        probeStatus: planJob.status,
+        outputValidity,
         ...(planJob.errorCode ? { errorCode: planJob.errorCode } : {}),
         outputTokenLimit: outputTokenLimit ?? current.planning?.ambiguity?.outputTokenLimit ?? null,
         outputTokens: totals?.outputTokens ?? null,
@@ -3612,6 +3642,7 @@ export function recordPlanPassOutcome(planJobOrId) {
         ...current.planning.ambiguity,
         state,
         probeStatus: planJob.status,
+        outputValidity,
         outputTokens: totals?.outputTokens ?? null,
         costBasis: totals ? 'observed' : 'reserved-cap',
         ...(parserReason ? { parserReason } : {}),
@@ -3646,7 +3677,10 @@ export function recordPlanPassOutcome(planJobOrId) {
       structurallyInvalid,
       fallbackEligible: structurallyInvalid,
       attemptRole: attempt.role,
+      probeStatus: planJob.status,
+      outputValidity,
       outputTokens: totals?.outputTokens ?? null,
+      wastedOutputTokens,
       outputTokenLimit,
       hardOutputTokenLimit: assessment.hardOutputTokenLimit,
       ...(recovery ? { recovery } : {})
@@ -3746,6 +3780,7 @@ function startAmbiguityModelFallback(parentId, failedProbe) {
       );
       const totalOutputTokens = observedPlanAttemptTokens(nextAttempts);
       const attributedOutputTokens = attributedPlanAttemptTokens(nextAttempts);
+      const wastedOutputTokens = wastedPlanAttemptTokens(nextAttempts);
       current.planning.externalOutputTokensReserved = attributedOutputTokens;
       current.planPass = {
         state: recordedAttempt?.state || 'running',
@@ -3755,6 +3790,8 @@ function startAmbiguityModelFallback(parentId, failedProbe) {
         fallbackEligible: false,
         jobId: child.id,
         ...(recordedAttempt?.planStatus ? { planStatus: recordedAttempt.planStatus } : {}),
+        probeStatus: recordedAttempt?.probeStatus || child.status,
+        outputValidity: recordedAttempt?.outputValidity || 'pending',
         ...(recordedAttempt?.errorCode ? { errorCode: recordedAttempt.errorCode } : {}),
         outputTokenLimit: budget,
         outputTokens: recordedAttempt?.outputTokens ?? null,
@@ -3766,7 +3803,8 @@ function startAmbiguityModelFallback(parentId, failedProbe) {
         attempts: nextAttempts,
         attemptCount: nextAttempts.length,
         totalOutputTokens,
-        attributedOutputTokens
+        attributedOutputTokens,
+        wastedOutputTokens
       };
       current.planning.ambiguity = {
         ...current.planning.ambiguity,
@@ -3782,7 +3820,10 @@ function startAmbiguityModelFallback(parentId, failedProbe) {
         attempts: nextAttempts,
         attemptCount: nextAttempts.length,
         totalOutputTokens,
-        attributedOutputTokens
+        attributedOutputTokens,
+        wastedOutputTokens,
+        probeStatus: recordedAttempt?.probeStatus || child.status,
+        outputValidity: recordedAttempt?.outputValidity || 'pending'
       };
       if (recordedAttempt?.reason) current.planning.ambiguity.reason = recordedAttempt.reason;
       else delete current.planning.ambiguity.reason;
@@ -3866,7 +3907,9 @@ export async function awaitAmbiguityProbe(id, options = {}) {
           ...current.planning.ambiguity,
           state: 'inconclusive',
           probeStatus: inspectJob(fallback.id).status,
+          outputValidity: 'unusable',
           outputTokens: fallbackTotals?.outputTokens ?? null,
+          wastedOutputTokens: fallbackTotals?.outputTokens ?? fallback.maxOutputTokens ?? 0,
           costBasis: fallbackTotals ? 'observed' : 'reserved-cap',
           reason: 'comparison-fallback-wait-timeout'
         };
@@ -3891,7 +3934,9 @@ export async function awaitAmbiguityProbe(id, options = {}) {
       ...current.planning.ambiguity,
       state: 'inconclusive',
       probeStatus: liveProbe.status,
+      outputValidity: 'unusable',
       outputTokens: totals?.outputTokens ?? null,
+      wastedOutputTokens: attributed,
       costBasis: totals ? 'observed' : 'reserved-cap',
       reason: 'comparison-pass-wait-timeout'
     };
@@ -4771,11 +4816,14 @@ function planAttemptVisibility(job) {
     provider: attempt.provider,
     model: attempt.model,
     state: attempt.state,
+    probeStatus: attempt.probeStatus || attempt.planStatus || null,
+    outputValidity: attempt.outputValidity || null,
     ...(attempt.reason ? { reason: attempt.reason } : {}),
     ...(attempt.parserReason ? { parserReason: attempt.parserReason } : {}),
     structurallyInvalid: attempt.structurallyInvalid === true,
     outputTokens: attempt.outputTokens ?? null,
     outputTokenLimit: attempt.outputTokenLimit ?? null,
+    wastedOutputTokens: attempt.wastedOutputTokens ?? 0,
     costBasis: attempt.costBasis || null
   }));
   const structurallyInvalidReasons = [...new Set(planAttempts
@@ -4788,6 +4836,9 @@ function planAttemptVisibility(job) {
     totalPlanOutputTokens: job.planPass?.totalOutputTokens
       ?? job.planning?.ambiguity?.totalOutputTokens
       ?? null,
+    wastedPlanOutputTokens: job.planPass?.wastedOutputTokens
+      ?? job.planning?.ambiguity?.wastedOutputTokens
+      ?? 0,
     structurallyInvalidReasons
   };
 }

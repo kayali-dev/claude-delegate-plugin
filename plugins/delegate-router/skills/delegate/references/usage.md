@@ -61,8 +61,13 @@ The same response has an operational `planFirst` signal with exact
 `requested`, `completed`, `degraded`, `recovered`, `pending`, and historical
 `unknown` counts plus completion/degradation rates. It separately reports
 `structurallyInvalidProbes`, exact `structurallyInvalidReasons`,
-`otherDegradedProbes`, and `fallbackAttempts`, so a successful fallback does
-not erase the invalid probe or its parser reason. This signal has no
+`otherDegradedProbes`, `fallbackAttempts`, independent comparable/unparseable/
+unusable output counts, `structuralValidityRate`, and observed-versus-reserved
+`wastedOutputTokens`, so a successful fallback does not erase the invalid
+probe, parser reason, or spend. `probeOutputHealth` becomes `degraded` after
+three structurally unparseable probes and names the exact comparable rate.
+`delegate-health` evaluates the same signal over seven days and includes it in
+top-level readiness without blocking any launch. This signal has no
 minimum-sample suppression: a 14/14 degradation era must display as
 `degradationRate: 1`, not disappear behind an insufficient-data label.
 

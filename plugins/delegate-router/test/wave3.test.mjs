@@ -230,6 +230,27 @@ test('outcome stats expose exact plan-first completion and degradation effective
     recovered: 0,
     structurallyInvalidProbes: 9,
     structurallyInvalidReasons: { 'no-valid-structural-json': 9 },
+    comparableProbes: 0,
+    unparseableProbes: 9,
+    unusableProbes: 5,
+    outputValidityUnknown: 0,
+    structuralOutputSampleSize: 9,
+    structuralValidityRate: 0,
+    wastedOutputTokens: 0,
+    wastedOutputTokensObserved: 0,
+    wastedOutputTokensReserved: 0,
+    probeOutputHealth: {
+      status: 'degraded',
+      minimumRepeatedFailures: 3,
+      sampleSize: 9,
+      comparableProbes: 0,
+      unparseableProbes: 9,
+      validityRate: 0,
+      structurallyInvalidReasons: { 'no-valid-structural-json': 9 },
+      wastedOutputTokens: 0,
+      wastedOutputTokensObserved: 0,
+      wastedOutputTokensReserved: 0
+    },
     otherDegradedProbes: 5,
     fallbackAttempts: 2,
     pending: 0,
@@ -259,12 +280,20 @@ test('outcome stats expose exact plan-first completion and degradation effective
           state: 'degraded',
           reason: 'plan-structural-output-invalid:invalid-target-shape',
           parserReason: 'invalid-target-shape',
-          structurallyInvalid: true
+          structurallyInvalid: true,
+          outputValidity: 'unparseable',
+          outputTokens: 7_804,
+          wastedOutputTokens: 7_804,
+          costBasis: 'observed'
         },
         {
           role: 'model-fallback',
           state: 'completed',
-          structurallyInvalid: false
+          structurallyInvalid: false,
+          outputValidity: 'comparable',
+          outputTokens: 500,
+          wastedOutputTokens: 0,
+          costBasis: 'observed'
         }
       ]
     }
@@ -280,11 +309,19 @@ test('outcome stats expose exact plan-first completion and degradation effective
   });
   assert.equal(recovered.planFirst.otherDegradedProbes, 5);
   assert.equal(recovered.planFirst.fallbackAttempts, 3);
+  assert.equal(recovered.planFirst.comparableProbes, 1);
+  assert.equal(recovered.planFirst.unparseableProbes, 10);
+  assert.equal(recovered.planFirst.unusableProbes, 5);
+  assert.equal(recovered.planFirst.structuralOutputSampleSize, 11);
+  assert.equal(recovered.planFirst.structuralValidityRate, 1 / 11);
+  assert.equal(recovered.planFirst.wastedOutputTokens, 7_804);
+  assert.equal(recovered.planFirst.wastedOutputTokensObserved, 7_804);
+  assert.equal(recovered.planFirst.probeOutputHealth.status, 'degraded');
   assert.equal(recovered.planFirst.completionRate, 1 / 15);
   assert.equal(recovered.planFirst.degradationRate, 14 / 15);
 });
 
-test('CLI plan-first stats name structural parser reasons separately from other degradation', () => isolated(({ root }) => {
+test('CLI plan-first stats shouts a zero-for-three parse rate and wasted output spend', () => isolated(({ root }) => {
   const record = {
     jobId: 'fallback-completed',
     at: Date.now(),
@@ -295,24 +332,23 @@ test('CLI plan-first stats name structural parser reasons separately from other 
     taskShape: { mode: 'implement', access: 'write', planFirst: true },
     planFirstOutcome: {
       requested: true,
-      state: 'completed',
-      completionReached: true,
-      degraded: false,
+      state: 'degraded',
+      completionReached: false,
+      degraded: true,
       recovered: false,
-      attempts: [
-        {
+      attempts: [9_024, 7_804, 4_031].map((outputTokens, index) => ({
           role: 'independent-probe',
           state: 'degraded',
+          probeStatus: 'completed',
+          outputValidity: 'unparseable',
           reason: 'plan-structural-output-invalid:no-valid-structural-json',
           parserReason: 'no-valid-structural-json',
-          structurallyInvalid: true
-        },
-        {
-          role: 'model-fallback',
-          state: 'completed',
-          structurallyInvalid: false
-        }
-      ]
+          structurallyInvalid: true,
+          outputTokens,
+          wastedOutputTokens: outputTokens,
+          costBasis: 'observed',
+          jobId: `invalid-${index}`
+        }))
     }
   };
   const audit = path.join(root, 'state', 'audit.jsonl');
@@ -322,9 +358,10 @@ test('CLI plan-first stats name structural parser reasons separately from other 
     encoding: 'utf8', env: { ...process.env, DELEGATE_STATE_FILE: process.env.DELEGATE_STATE_FILE }
   });
   assert.equal(cli.status, 0, cli.stderr);
-  assert.match(cli.stdout, /1 structurally invalid probe\(s\) \(no-valid-structural-json=1\)/);
+  assert.match(cli.stdout, /3 structurally invalid probe\(s\) \(no-valid-structural-json=3\)/);
   assert.match(cli.stdout, /0 other degraded probe\(s\)/);
-  assert.match(cli.stdout, /1 model fallback attempt\(s\)/);
+  assert.match(cli.stdout, /0 model fallback attempt\(s\)/);
+  assert.match(cli.stdout, /PLAN PROBE OUTPUT HEALTH: DEGRADED; 0\/3 comparable \(0\.0% validity\); 3 unparseable; 0 otherwise unusable; 20859 wasted output tokens \(20859 observed, 0 reserved\)/);
 }));
 
 test('acceptance audit revisions coalesce without double-counting attempts or usage', () => {

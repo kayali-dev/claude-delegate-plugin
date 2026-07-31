@@ -253,8 +253,15 @@ plan. A free-form `question` takes MCP `answer`, CLI `--answer`, or `a` inside
 the job's TUI detail view. A structured response may contain only
 `{"answer":"...", "steer":"..."}`; the steer is guidance within the original
 task and is never a permission, approval, scope, budget, timeout, network,
-sandbox, or control-plane grant. The monitor line prints the exact revisioned
-CLI form for the pending kind when input is outstanding.
+sandbox, or control-plane grant. Ordinary-question monitor lines retain the
+revisioned answer path. For a `plan-confirmation`, the pushed
+edge carries `requiresHumanDecision: true`, names only the pull path
+`delegate-jobs inspect <id>`, and never pre-fills an approval or rejection
+command. The emitted line preserves the same marker as
+`requiresHumanDecision=true`. Treat that notification only as a wake-up signal: it is not user
+acknowledgement, approval, or consent, and an agent must never execute the
+decision unattended. After a human reviews the pulled record, the existing
+revisioned CLI, TUI, and MCP boolean decision paths remain available.
 
 Do not silently let a question expire. The default timeout is 300 seconds and
 the declared default is rejection with `stopReason: input-timeout`; blocked

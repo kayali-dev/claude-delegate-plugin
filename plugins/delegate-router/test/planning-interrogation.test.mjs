@@ -337,8 +337,8 @@ test('compact plan framing and structural recovery accept marginal overruns but 
   assert.match(prompt, /stop immediately after the JSON\s+fence/);
   assert.doesNotMatch(prompt, /final message must END with the fenced JSON/);
   const cursorPrompt = planPrompt('Objective: inspect the bounded change', { provider: 'cursor', model: 'composer' });
-  assert.match(cursorPrompt, /final message must END with the fenced JSON/);
-  assert.match(cursorPrompt, /nothing after the closing fence/);
+  assert.match(cursorPrompt, /process narration without the structural\s+JSON deliverable is invalid/);
+  assert.match(cursorPrompt, /entire final message must be the single fenced\s+JSON object/);
   const valid = planText(structuralPlan());
   const marginal = assessStructuralPlanOutput(valid, 4_162, 4_096);
   assert.equal(marginal.state, 'recovered');
@@ -401,6 +401,10 @@ test('plan-first confirmation continues the same Codex thread and switches only 
   const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
   assert.equal(presented.status, 'running');
   assert.equal(presented.planning.state, 'awaiting-confirmation');
+  assert.equal(presented.pendingInput.requiresHumanDecision, true);
+  assert.equal(presented.pendingInput.defaultAction, 'reject');
+  const requested = readJobEvents(created.id).find((event) => event.type === 'input.requested');
+  assert.equal(requested.data.requiresHumanDecision, true);
   assert.deepEqual(presented.planning.presentation.predictedBlastRadius.files, ['a.js', 'test/a.test.js']);
   submitControl(created.id, {
     type: 'respond',
@@ -701,20 +705,28 @@ test('an invalid Cursor probe falls back once to a parent-provider model and pre
   assert.equal(invalidProbe.reason, 'plan-structural-output-invalid:no-valid-structural-json');
   assert.equal(invalidProbe.parserReason, 'no-valid-structural-json');
   assert.equal(invalidProbe.structurallyInvalid, true);
+  assert.equal(invalidProbe.probeStatus, 'completed');
+  assert.equal(invalidProbe.outputValidity, 'unparseable');
+  assert.equal(invalidProbe.wastedOutputTokens, 9_024);
   assert.equal(fallback.role, 'model-fallback');
   assert.equal(fallback.provider, 'codex');
   assert.equal(fallback.model, 'luna');
   assert.equal(fallback.state, 'completed');
+  assert.equal(fallback.probeStatus, 'completed');
+  assert.equal(fallback.outputValidity, 'comparable');
+  assert.equal(fallback.wastedOutputTokens, 0);
   assert.equal(presented.planPass.totalOutputTokens, invalidProbe.outputTokens + fallback.outputTokens);
+  assert.equal(presented.planPass.wastedOutputTokens, invalidProbe.outputTokens);
   assert.equal(presented.planning.externalOutputTokensReserved, presented.planPass.totalOutputTokens);
   assert.equal(launched.launchNotice.planAttempts.length, 2);
   assert.equal(launched.launchNotice.totalPlanOutputTokens, presented.planPass.totalOutputTokens);
+  assert.equal(launched.launchNotice.wastedPlanOutputTokens, invalidProbe.outputTokens);
   assert.equal(readJobEvents(created.id).filter((event) => event.type === 'plan.ambiguity.started'
     && event.data.attemptRole === 'model-fallback').length, 1);
   const requests = fs.readFileSync(cursorLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
   const cursorPlanPrompt = requests.find((request) => request.method === 'session/prompt').params.prompt[0].text;
-  assert.match(cursorPlanPrompt, /final message must END with the fenced JSON/);
-  assert.match(cursorPlanPrompt, /nothing after the closing fence/);
+  assert.match(cursorPlanPrompt, /process narration without the structural\s+JSON deliverable is invalid/);
+  assert.match(cursorPlanPrompt, /entire final message must be the single fenced\s+JSON object/);
   submitControl(created.id, {
     type: 'respond',
     requestId: presented.pendingInput.requestId,
