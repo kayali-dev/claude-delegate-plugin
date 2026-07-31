@@ -133,6 +133,17 @@ test('P3 derives verification, records real-tree evidence, gates additive accept
   assert.equal(passed.acceptance.decidedBy, 'broker');
   assert.notEqual(passed.acceptance.state, 'accepted');
 
+  const caveated = await cursorWrite(scenario(root, 'caveated'), {
+    verify: {
+      command: `node -e 'console.warn("WARN Unsupported engine: wanted: {\\"node\\":\\">=24\\"} (current: {\\"node\\":\\"v22.20.0\\"})")'`,
+      timeoutSeconds: 10
+    }
+  });
+  assert.equal(caveated.verification.state, 'passed');
+  assert.equal(caveated.verification.exitCode, 0);
+  assert.equal(caveated.verification.caveats.length, 1);
+  assert.match(caveated.verification.caveats[0], /Unsupported engine.*node.*>=24.*v22\.20\.0/);
+
   const failed = await cursorWrite(scenario(root, 'failed'), {
     verify: { command: 'node -e "console.log(\'fail 2\'); process.exit(2)"', timeoutSeconds: 10 }
   });

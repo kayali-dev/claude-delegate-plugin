@@ -206,12 +206,13 @@ the same provider thread/session into write mode. Use
 explicitly trivial change; `--no-ambiguity-check` skips only the independent
 comparison pass. A lane that lacks negotiated `planMode` is refused before
 dispatch. An operational plan-turn failure after a capable lane has started
-retains the existing recorded fallback to the explicitly requested launch; a
-missing comparison candidate remains non-gating. No plan pass may accept itself
-or start write work.
+degrades the primary plan and opens the same explicit confirmation boundary;
+it never enters write mode automatically. A missing comparison candidate
+remains non-gating, but the primary plan confirmation still applies. No plan
+pass may accept itself or start write work.
 
 The default plan output sub-budget is deterministic and network-free. Packets
-receive the same 4,096-token structured default regardless of byte length or
+receive the same 8,192-token structured default regardless of byte length or
 directive-marker count: live measurements found plan cost nearly flat in those
 dimensions, while larger allowances moved spend upward. The plan prompt
 requires one compact structural JSON object, no narrated analysis or repeated
@@ -226,7 +227,7 @@ an explicit smaller job-level `maxOutputTokens` still limits the primary plan,
 and the independent pass retains its existing share of that explicit overall
 cap. The stored `planning.planBudget` records the safe metrics, source, floor,
 ceiling, and effective limit without retaining another copy of the packet.
-Wall clock derives from that effective token limit (120–900 seconds),
+Wall clock derives from that effective token limit (300–900 seconds),
 `DELEGATE_PLAN_TIMEOUT_SECONDS` overrides it, and the result is always clamped
 to the parent timeout.
 
@@ -236,6 +237,13 @@ with observed, nominal, hard-limit, and overrun numbers and remains usable for
 comparison. The provider is interrupted above that narrow hard limit; invalid
 output is never recovered. Increasing the configured nominal budget therefore
 cannot absorb a 66k/78k runaway.
+
+If the primary plan exceeds that hard limit, the broker retries it exactly once
+at the smaller of the stored ceiling and the job-level cap. The initial limit
+does not change, and packet size still buys no additional allowance. A valid
+retry proceeds to ordinary confirmation; an invalid or over-budget retry sets
+`planning.state: "degraded"` and waits for explicit confirmation before write
+access.
 
 When enabled, ambiguity detection sends the same WorkSpec to an independent
 cheap plan pass using a different provider or model. It compares only parsed
@@ -262,14 +270,14 @@ cost. A completed provider lifecycle can therefore coexist with
 `delegate_inspect` returns that field directly and TUI job detail renders a
 `PLAN DEGRADED` badge. Historical records with no `planPass` remain unchanged.
 A failed, cancelled, timed-out, or over-budget independent pass degrades to the
-single-plan confirmation/direct launch path; it never blocks the requested
-write and never remains visible only as an orphaned sibling.
+single primary-plan confirmation path; it never remains visible only as an
+orphaned sibling and never authorizes write access by itself.
 
 CLI `start` and MCP `delegate_start` wait through the bounded plan-first launch
 checkpoint. Their additive `launchNotice` says `completed`, `recovered`,
 `degraded`, or `pending`; degradation includes the reason and observed-vs-cap
-numbers and explicitly says the worker launch continues without a planning
-gate. A completed fallback notice still carries the first probe's exact
+numbers and explicitly says write access is paused for confirmation. A
+completed fallback notice still carries the first probe's exact
 `plan-structural-output-invalid:<parser-reason>`, both attempt costs, and the
 comparison verdict. A coordinator therefore cannot mistake an asynchronous
 degradation for a successful plan pass.
@@ -538,6 +546,9 @@ after; movement makes the evidence stale and blocks acceptance. Zero-change
 jobs never run verification. A nonzero verdict or timeout does not rewrite the
 provider outcome: status remains `completed`, while `delegate-jobs wait` keeps
 its existing exit 6 behavior for a nonzero verification exit.
+Engine and toolchain warnings in otherwise successful output are retained in
+`verification.caveats[]`; they add an asterisk to the evidence without changing
+`state: "passed"`.
 
 For a completed shared-tree job whose recorded result is no longer current,
 run `delegate-jobs verify <job-id>` or MCP `delegate_verify`. This is a local
@@ -553,7 +564,7 @@ captured change set would verify the wrong artifact.
 
 Adapters assert their CLI versions before opening a provider session. `DELEGATE_MIN_CODEX_VERSION` and `DELEGATE_MIN_CURSOR_VERSION` override the validated built-in floors (`0.144.0` and `2026.7.0` respectively); a lower observed version fails with non-retryable `PROVIDER_TOO_OLD` and reports both versions.
 
-Profiles live under `${DELEGATE_PROFILES_DIR:-~/.delegate/profiles}/<name>.md`; simple frontmatter supplies mode/model/effort/allowedPaths/reportSchema defaults and explicit start options win. The body must contain `{{objective}}`. Packet lint warns when Objective, Allowed scope, Acceptance criteria, or Return is missing. The bundled `independent-review` profile is used only when no local override exists. Optional `reportSchema` instructs a final fenced JSON block; a conforming final object becomes `result.structured`, `objectiveMet` is surfaced, and missing or nonconforming output sets `structuredMissing` without changing terminal status.
+Profiles live under `${DELEGATE_PROFILES_DIR:-~/.delegate/profiles}/<name>.md`; simple frontmatter supplies mode/model/effort/allowedPaths/reportSchema defaults and explicit start options win. The body must contain `{{objective}}`. Packet lint warns when Objective, Allowed scope, Acceptance criteria, or Return is missing. On caller-facing write launches, missing `Allowed scope` additionally blocks launch unless explicit `allowedPaths` are supplied or `allowUnscopedWrite=true` / `--allow-unscoped-write` records an intentional unfenced override. Dry-runs remain available and report the blocker. The bundled `independent-review` profile is used only when no local override exists. Optional `reportSchema` instructs a final fenced JSON block; a conforming final object becomes `result.structured`, `objectiveMet` is surfaced, and missing or nonconforming output sets `structuredMissing` without changing terminal status.
 
 The bundled independent-review profile uses the canonical review object: `objectiveMet` is boolean; `findings` is an array of `{ severity: 'blocking' | 'non-blocking', file, line, summary, evidence }`; and `clean` is true when no findings remain. Structured output remains best-effort and the inline prose findings remain required, but coordinators should triage `result.structured.findings` by severity before reading the prose fallback.
 
@@ -572,7 +583,7 @@ On timeout, output-budget exhaustion, quota exhaustion, or agent failure:
 
 `delegate_inspect` exposes `resumable: { ok, reason }` from the same predicate used by `delegate_resume`, plus `driftReport: { modified, newFiles, outsideScope }`. For manual rollback, run `delegate-jobs revert <id> --dry-run` first. Revert requires a terminal job, restores only non-overlapping files whose current content still matches the recorded final state, and reports `{ reverted, skipped, conflicts }`; it never overwrites pre-existing or later edits.
 
-Long result text can be read with `delegate_inspect.resultWindow` or `delegate-jobs result --find/--offset/--max-chars`; offsets and `nextOffset` are absolute. A cancel queued during retry backoff is applied as `cancel-before-retry` before another provider starts, while steering between attempts is rejected clearly.
+Use `delegate_inspect view="summary"` or `delegate-jobs inspect --view summary` for the compact monitoring projection; `full` remains the default and is required for `resultWindow`. `delegate_list` / `delegate-jobs list` accept `phase`, and `blockedOnInput=true` / `--blocked-on-input` selects only live human gates. Long result text can be read with `delegate_inspect.resultWindow` or `delegate-jobs result --find/--offset/--max-chars`; offsets and `nextOffset` are absolute. A cancel queued during retry backoff is applied as `cancel-before-retry` before another provider starts, while steering between attempts is rejected clearly.
 
 ## Acceptance
 

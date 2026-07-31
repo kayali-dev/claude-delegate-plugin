@@ -66,7 +66,7 @@ async function isolated(fn) {
     'DELEGATE_PLAN_LAUNCH_WAIT_SECONDS',
     'FAKE_CODEX_REQUEST_LOG', 'FAKE_CURSOR_REQUEST_LOG', 'FAKE_CODEX_DIVERGENT_MODEL',
     'FAKE_CODEX_INCONCLUSIVE_MODEL', 'FAKE_CODEX_PLAN_OUTPUT_TOKENS',
-    'FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL', 'FAKE_CURSOR_PLAN_RESPONSE',
+    'FAKE_CODEX_PLAN_RETRY_OUTPUT_TOKENS', 'FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL', 'FAKE_CURSOR_PLAN_RESPONSE',
     'FAKE_CURSOR_PLAN_OUTPUT_TOKENS'
   ];
   const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
@@ -869,7 +869,7 @@ test('a realistic five-kilobyte packet recovers a marginal plan overrun and reac
   assert.equal(inspectJob(created.id).status, 'completed');
 }));
 
-test('a failed independent plan pass degrades loudly on the implement attempt and never blocks its launch', () => isolated(async (directory) => {
+test('a failed independent plan pass degrades loudly and requires one explicit implement confirmation', () => isolated(async (directory) => {
   process.env.DELEGATE_PLAN_OUTPUT_TOKENS = '128';
   process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '200';
   process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL = 'luna';
@@ -913,6 +913,112 @@ test('a failed independent plan pass degrades loudly on the implement attempt an
     && event.data.attemptRole === 'model-fallback').length, 0);
 }));
 
+test('a primary plan that breaches the hard limit retries once at the stored ceiling and succeeds', () => isolated(async (directory) => {
+  process.env.DELEGATE_PLAN_OUTPUT_TOKENS = '8192';
+  process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '12139';
+  process.env.FAKE_CODEX_PLAN_RETRY_OUTPUT_TOKENS = '12000';
+  const created = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    planFirst: true,
+    ambiguityCheck: false
+  });
+  const running = runManagedProvider(created);
+  const presented = await waitFor(
+    created.id,
+    (job) => job.pendingInput?.kind === 'plan-confirmation',
+    "pendingInput.kind === 'plan-confirmation' after the ceiling retry"
+  );
+  assert.equal(presented.planning.state, 'awaiting-confirmation');
+  assert.equal(presented.planning.retryCount, 1);
+  assert.equal(presented.planning.planBudget.limit, 8192);
+  assert.equal(presented.planning.planBudget.ceiling, 16384);
+  assert.equal(presented.planning.planBudget.retryLimit, 16384);
+  assert.equal(presented.planning.planOutputTokenLimit, 16384);
+  const events = readJobEvents(created.id);
+  assert.deepEqual(events.filter((event) => event.type === 'usage.updated')
+    .map((event) => event.data.last?.outputTokens), [12139, 12000]);
+  assert.deepEqual(presented.planning.attempts.map((attempt) => ({
+    attempt: attempt.attempt,
+    state: attempt.state,
+    outputTokens: attempt.outputTokens,
+    outputTokenLimit: attempt.outputTokenLimit
+  })), [
+    { attempt: 1, state: 'retrying', outputTokens: 12139, outputTokenLimit: 8192 },
+    { attempt: 2, state: 'completed', outputTokens: 12000, outputTokenLimit: 16384 }
+  ]);
+  assert.equal(events.filter((event) => event.type === 'plan.retry.started').length, 1);
+  assert.equal(events.filter((event) => event.type === 'plan.retry.completed').length, 1);
+  assert.equal(events.filter((event) => event.type === 'plan.degraded').length, 0);
+  submitControl(created.id, {
+    type: 'respond',
+    requestId: presented.pendingInput.requestId,
+    accept: true,
+    commandId: 'confirm-plan-after-ceiling-retry'
+  }, presented.revision);
+  await running;
+  assert.equal(inspectJob(created.id).status, 'completed');
+}));
+
+test('a degraded write plan remains gated and a human decline has a healthy declined conclusion', () => isolated(async (directory) => {
+  process.env.DELEGATE_PLAN_OUTPUT_TOKENS = '8192';
+  process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS = '12139';
+  process.env.FAKE_CODEX_PLAN_RETRY_OUTPUT_TOKENS = '20000';
+  const created = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    planFirst: true,
+    ambiguityCheck: false
+  });
+  const running = runManagedProvider(created);
+  const gated = await waitFor(
+    created.id,
+    (job) => job.planning?.state === 'degraded' && job.pendingInput?.kind === 'plan-confirmation',
+    "planning.state === 'degraded' at a human gate"
+  );
+  assert.equal(gated.status, 'running');
+  assert.equal(gated.phase, 'user-input-required');
+  assert.equal(gated.attention.state, 'user-input-required');
+  assert.equal(gated.planning.confirmationRequired, true);
+  assert.equal(gated.planning.retryCount, 1);
+  assert.equal(readJobEvents(created.id).filter((event) => event.type === 'file.changed').length, 0);
+  submitControl(created.id, {
+    type: 'respond',
+    requestId: gated.pendingInput.requestId,
+    accept: false,
+    commandId: 'decline-degraded-plan'
+  }, gated.revision);
+  await running;
+  const declined = inspectJob(created.id);
+  assert.equal(declined.status, 'cancelled');
+  assert.equal(declined.phase, 'plan-declined');
+  assert.deepEqual(declined.conclusion, {
+    disposition: 'declined',
+    health: 'healthy',
+    reason: 'plan-declined'
+  });
+  const declinedEvent = readJobEvents(created.id).find((event) => event.type === 'plan.declined');
+  assert.deepEqual(declinedEvent.data.conclusion, declined.conclusion);
+
+  const failed = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'failed comparison' });
+  updateManagedJob(failed.id, (current) => {
+    current.status = 'failed';
+    current.phase = 'failed';
+    current.errorCode = 'PROVIDER_ERROR';
+  });
+  assert.deepEqual(inspectJob(failed.id).conclusion, {
+    disposition: 'failed',
+    health: 'unhealthy',
+    reason: 'PROVIDER_ERROR'
+  });
+}));
+
 test('CLI and MCP launch responses surface plan degradation with observed-versus-cap numbers', () => isolated(async (directory) => {
   // Pin the cap this test reports on. It asserts that a runaway surfaces with
   // observed-versus-cap numbers, which is a relationship, not a property of
@@ -935,9 +1041,20 @@ test('CLI and MCP launch responses surface plan degradation with observed-versus
     assert.equal(result.launchNotice.level, 'warning');
     assert.equal(result.launchNotice.reason, 'runaway-plan-output-token-budget-exceeded');
     assert.equal(result.launchNotice.observedOutputTokens, 66_428);
-    assert.equal(result.launchNotice.outputTokenLimit, 4_096);
-    assert.match(result.launchNotice.message, /observed 66428 output tokens vs cap 4096/);
-    assert.equal(result.launchNotice.blocking, false);
+    assert.equal(result.launchNotice.outputTokenLimit, 16_384);
+    assert.match(result.launchNotice.message, /observed 66428 output tokens vs cap 16384/);
+    assert.equal(result.launchNotice.blocking, true);
+    assert.match(result.launchNotice.message, /paused for explicit plan confirmation/);
+  };
+  const decline = async (id, commandId) => {
+    const gated = await waitFor(id, (job) => job.pendingInput?.kind === 'plan-confirmation', 'degraded plan confirmation gate');
+    submitControl(id, {
+      type: 'respond',
+      requestId: gated.pendingInput.requestId,
+      accept: false,
+      commandId
+    }, gated.revision);
+    return waitFor(id, (job) => job.status === 'cancelled', 'declined job to become cancelled');
   };
 
   const cli = spawnSync(process.execPath, [
@@ -946,12 +1063,13 @@ test('CLI and MCP launch responses surface plan degradation with observed-versus
     '--model', 'sol',
     '--mode', 'implement',
     '--cwd', directory,
+    '--no-ambiguity-check',
     '--prompt', packet
   ], { encoding: 'utf8', env: process.env, timeout: 30_000 });
   assert.equal(cli.status, 0, cli.stderr);
   const cliResult = JSON.parse(cli.stdout);
   assertWarning(cliResult);
-  await waitFor(cliResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status), 'job status to become terminal');
+  await decline(cliResult.id, 'decline-cli-degraded-plan');
 
   const request = {
     jsonrpc: '2.0',
@@ -964,6 +1082,7 @@ test('CLI and MCP launch responses surface plan degradation with observed-versus
         model: 'sol',
         mode: 'implement',
         cwd: directory,
+        ambiguityCheck: false,
         prompt: packet
       }
     }
@@ -978,7 +1097,7 @@ test('CLI and MCP launch responses surface plan degradation with observed-versus
   const response = JSON.parse(mcp.stdout.trim());
   const mcpResult = JSON.parse(response.result.content[0].text);
   assertWarning(mcpResult);
-  await waitFor(mcpResult.id, (job) => ['completed', 'failed', 'cancelled'].includes(job.status), 'job status to become terminal');
+  await decline(mcpResult.id, 'decline-mcp-degraded-plan');
 }));
 
 test('interrogation rejects authority fields and records answer plus observed token cost as WorkItem finding evidence', () => isolated((directory) => {

@@ -290,7 +290,8 @@ export function terminalAuditRecord(job, options = {}) {
       status: job.status,
       stoppedReason: job.stoppedReason || null,
       errorCode: job.errorCode || null,
-      error: job.error || null
+      error: job.error || null,
+      conclusion: job.conclusion || jobConclusion(job)
     },
     usage: job.usage || null,
     verification,
@@ -1346,6 +1347,46 @@ function activityFields(job) {
   };
 }
 
+function pendingInputSummary(pendingInput) {
+  if (!pendingInput || typeof pendingInput !== 'object') return null;
+  return {
+    requestId: pendingInput.requestId || null,
+    kind: pendingInput.kind || 'question',
+    requiresHumanDecision: pendingInput.requiresHumanDecision === true
+      || pendingInput.kind === 'plan-confirmation',
+    expiresAt: Number.isSafeInteger(Number(pendingInput.expiresAt))
+      ? Number(pendingInput.expiresAt)
+      : null
+  };
+}
+
+export function jobAttention(job) {
+  if (job?.pendingInput?.timedOut === true
+    || (job?.phase !== 'user-input-required' && !job?.pendingInput)) return null;
+  return {
+    state: 'user-input-required',
+    ...pendingInputSummary(job.pendingInput)
+  };
+}
+
+export function jobConclusion(job) {
+  if (!TERMINAL_STATUSES.has(job?.status)) return null;
+  const declined = job.phase === 'plan-declined'
+    || job.stoppedReason === 'plan-declined'
+    || job.stopReason === 'plan-declined';
+  const disposition = declined ? 'declined' : job.status;
+  const health = disposition === 'failed' ? 'unhealthy'
+    : disposition === 'cancelled' ? 'unknown'
+      : 'healthy';
+  return {
+    disposition,
+    health,
+    reason: declined
+      ? 'plan-declined'
+      : job.stoppedReason || job.stopReason || job.errorCode || null
+  };
+}
+
 export function inspectJob(id) {
   const job = reconcileJob(id);
   const shadow = job.managedBy === 'delegate-shadow' || isDirectTransport(job);
@@ -1354,6 +1395,8 @@ export function inspectJob(id) {
     changedFiles: changedFilesView(job),
     verification: latestVerification(job),
     verificationEvidence: verificationEvidenceChain(job),
+    attention: jobAttention(job),
+    conclusion: jobConclusion(job),
     ...activityFields(job),
     resumable: jobResumability(job),
     driftReport: driftReportFor(job),
@@ -1363,6 +1406,22 @@ export function inspectJob(id) {
     shadow,
     direct: isDirectTransport(job),
     legacy: job.managedBy !== 'delegate-control' && job.managedBy !== 'delegate-agent-hook' && !shadow
+  };
+}
+
+export function inspectJobSummary(id) {
+  const job = inspectJob(id);
+  return {
+    id: job.id,
+    status: job.status,
+    phase: job.phase || null,
+    origin: { sessionId: job.origin?.sessionId || null },
+    pendingInput: pendingInputSummary(job.pendingInput),
+    attention: job.attention,
+    acceptance: { state: job.acceptance?.state || null },
+    changedFiles: { count: Number.isSafeInteger(job.changedFiles?.count) ? job.changedFiles.count : null },
+    verification: { state: job.verification?.state || null },
+    conclusion: job.conclusion
   };
 }
 
@@ -1800,6 +1859,7 @@ function rootJobIdOf(job) {
 export function listManagedJobs(options = {}) {
   const limit = Math.min(Math.max(Number(options.limit || 20), 1), 100);
   const statuses = options.status?.length ? new Set([].concat(options.status)) : null;
+  const phases = options.phase?.length ? new Set([].concat(options.phase)) : null;
   const jobs = [];
   for (const raw of listJobs()) {
     let job = raw;
@@ -1808,6 +1868,9 @@ export function listManagedJobs(options = {}) {
     }
     if (options.activeOnly && TERMINAL_STATUSES.has(job.status)) continue;
     if (statuses && !statuses.has(job.status)) continue;
+    if (phases && !phases.has(job.phase)) continue;
+    if (options.blockedOnInput === true
+      && !(job.phase === 'user-input-required' && job.pendingInput && job.pendingInput.timedOut !== true)) continue;
     if (options.groupId && job.groupId !== options.groupId) continue;
     jobs.push({
       id: job.id,
@@ -1816,6 +1879,9 @@ export function listManagedJobs(options = {}) {
       mode: job.mode || null,
       status: job.status,
       phase: job.phase || null,
+      pendingInput: pendingInputSummary(job.pendingInput),
+      attention: jobAttention(job),
+      conclusion: jobConclusion(job),
       revision: job.revision ?? null,
       cwd: job.cwd || null,
       ownerCwd: job.ownerCwd || null,
@@ -2971,6 +3037,13 @@ function resolveManagedJobOptions(options, id) {
   if (planFirst) scheduleAttemptWorkflow({ provider, transport }, 'plan-first');
   if (isolation === 'worktree') scheduleAttemptWorkflow({ provider, transport }, 'contained-worktree');
   const originalAllowedPaths = validatedAllowedPaths(options.allowedPaths);
+  const missingAllowedScope = Array.isArray(options.packetWarnings)
+    && options.packetWarnings.includes('missing section: Allowed scope');
+  const allowUnscopedWrite = options.allowUnscopedWrite === true;
+  const unscopedWriteBlocked = WRITE_MODES.has(mode)
+    && missingAllowedScope
+    && !originalAllowedPaths?.length
+    && !allowUnscopedWrite;
   const ingestPlan = planIngestFiles(id, ingestFiles);
   const allowedPaths = validatedAllowedPaths(originalAllowedPaths == null
     ? null
@@ -3030,6 +3103,8 @@ function resolveManagedJobOptions(options, id) {
     cwd,
     transport,
     originalAllowedPaths,
+    allowUnscopedWrite,
+    unscopedWriteBlocked,
     allowedPaths,
     pathClaims,
     resourceClaims,
@@ -3047,6 +3122,7 @@ function resolveManagedJobOptions(options, id) {
 
 export function previewManagedJob(options) {
   const prepared = prepareManagedOptions(options, { reportLint: false });
+  prepared._preview = true;
   prepared.planFirst = planFirstDefault(prepared.mode || 'consult', prepared);
   prepared.ambiguityCheck = prepared.planFirst && ambiguityDefault(prepared);
   const provider = validateProvider(prepared.provider);
@@ -3072,6 +3148,9 @@ export function previewManagedJob(options) {
     transport: resolved.transport,
     cwd: resolved.cwd,
     originalAllowedPaths: resolved.originalAllowedPaths,
+    allowUnscopedWrite: resolved.allowUnscopedWrite,
+    launchBlocked: resolved.unscopedWriteBlocked,
+    launchBlockers: resolved.unscopedWriteBlocked ? ['missing-allowed-scope'] : [],
     allowedPaths: resolved.allowedPaths,
     pathClaims: resolved.pathClaims,
     resourceClaims: resolved.resourceClaims,
@@ -3119,7 +3198,7 @@ export function createManagedJob(options) {
   const resolved = resolveManagedJobOptions(options, id);
   const {
     sensitivePromptDetected, timeoutSeconds, maxOutputTokens, idempotencyKey, groupId, retryPolicy,
-    mode, isolation, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, workSpec, cwd: ownerCwd, transport, originalAllowedPaths, allowedPaths, pathClaims, resourceClaims, effort, sandbox,
+    mode, isolation, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, workSpec, cwd: ownerCwd, transport, originalAllowedPaths, allowUnscopedWrite, allowedPaths, pathClaims, resourceClaims, effort, sandbox,
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
   const now = Math.floor(Date.now() / 1000);
@@ -3167,6 +3246,9 @@ export function createManagedJob(options) {
     planning: planFirst ? {
       state: 'pending',
       confirmationRequired: true,
+      retryCount: 0,
+      activeAttempt: 1,
+      attempts: [],
       ambiguity: {
         enabled: ambiguityCheck,
         state: ambiguityCheck ? 'pending' : 'skipped',
@@ -3200,6 +3282,12 @@ export function createManagedJob(options) {
     cursorWorktreeBase,
     sandbox,
     originalAllowedPaths,
+    allowUnscopedWrite,
+    scopePolicy: {
+      state: originalAllowedPaths?.length ? 'explicit-paths'
+        : allowUnscopedWrite ? 'explicit-unscoped-override' : 'packet-declared',
+      packetSectionPresent: !options.packetWarnings?.includes('missing section: Allowed scope')
+    },
     allowedPaths,
     pathClaims,
     resourceClaims,
@@ -4287,6 +4375,12 @@ export function launchManagedJob(options) {
 }
 
 export async function launchManagedJobForCaller(options, waitTarget = null) {
+  if (options.dryRun !== true) {
+    const policy = previewManagedJob({ ...options, dryRun: true });
+    if (policy.launchBlocked) {
+      throw brokerError('INVALID_REQUEST', 'write launch requires an Allowed scope section or explicit allowedPaths; use allowUnscopedWrite=true / --allow-unscoped-write only for an intentional unfenced write');
+    }
+  }
   const launched = launchManagedJob(options);
   if (launched.dryRun) return launched;
   if (waitTarget) await waitForJob(launched.id, waitTarget);
@@ -4666,6 +4760,7 @@ export function resumeManagedJob(id, options) {
     cursorWorktreeBase: options.cursorWorktreeBase ?? parent.cursorWorktreeBase ?? null,
     sandbox: options.sandbox ?? parent.sandbox ?? null,
     allowedPaths: options.allowedPaths ?? parent.originalAllowedPaths ?? parent.allowedPaths ?? null,
+    allowUnscopedWrite: options.allowUnscopedWrite ?? parent.allowUnscopedWrite ?? false,
     planFirst: options.planFirst,
     ambiguityCheck: options.ambiguityCheck,
     autoNudge: options.autoNudge ?? parent.autoNudge ?? false,
@@ -4894,8 +4989,8 @@ function planLaunchNotice(job) {
       observedOutputTokens,
       outputTokenLimit,
       ...attemptVisibility,
-      blocking: false,
-      message: `PLAN-FIRST DEGRADED: ${reason}${comparison}.${structuralSuffix} The requested launch continues without a planning gate.`
+      blocking: job.pendingInput?.kind === 'plan-confirmation',
+      message: `PLAN-FIRST DEGRADED: ${reason}${comparison}.${structuralSuffix} Write access is paused for explicit plan confirmation.`
     };
   }
   const comparisonVerdict = job.planning?.comparison?.verdict || null;
@@ -4912,7 +5007,7 @@ function planLaunchNotice(job) {
         ? { reason: attemptVisibility.structurallyInvalidReasons[0] }
         : {}),
       ...attemptVisibility,
-      blocking: false,
+      blocking: job.pendingInput?.kind === 'plan-confirmation',
       message: `PLAN-FIRST ${job.planPass?.state === 'recovered' ? 'RECOVERED' : 'COMPLETED'}${comparisonVerdict ? `: ${comparisonVerdict}` : ''}.${structuralSuffix}`
     };
   }

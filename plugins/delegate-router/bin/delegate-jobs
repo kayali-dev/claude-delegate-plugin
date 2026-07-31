@@ -11,6 +11,9 @@ import {
   filterDiffPaths,
   groupSummary,
   inspectJob,
+  inspectJobSummary,
+  jobAttention,
+  jobConclusion,
   jobDiff,
   jobFiles,
   jobTranscript,
@@ -44,15 +47,15 @@ import {
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <hand-written-packet> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--isolation shared|worktree --path-claims a,b [--resource-claims id,id]] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--no-plan-first] [--no-ambiguity-check] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <hand-written-packet> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-unscoped-write] [--isolation shared|worktree --path-claims a,b [--resource-claims id,id]] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--no-plan-first] [--no-ambiguity-check] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
   delegate-jobs start --provider codex|cursor [--intent sentence] [--from-diff] [--failure-output text] [--todo path[:line]] [--task-record path] [--from-conventions] --allowed-paths a,b --acceptance criterion [--acceptance criterion ...] --timeout-seconds N --max-rounds N --max-output-tokens N [existing start options] [--accept-spec]
   delegate-jobs spec [--intent sentence] [--from-diff] [--failure-output text] [--todo path[:line]] [--task-record path] [--from-conventions] [--mode mode] [--cwd path] [--allowed-paths a,b] [--acceptance criterion ...] [--verify-command command|--verify-exception reason] [--timeout-seconds N --max-rounds N --max-output-tokens N] [--json]
-  delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--group id] [--json]
+  delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--phase p] [--blocked-on-input] [--group id] [--json]
   delegate-jobs work [--json] [--id <job-or-work-id>]
   delegate-jobs group <id> [--json]
   delegate-jobs stats [--since 7d|2026-07-17|0.42.0] [--until 2026-07-17] [--recommend-for mode] [--recommend-access read|write] [--json]
   delegate-jobs audit backfill [--json]
-  delegate-jobs inspect <job-id> [--json]
+  delegate-jobs inspect <job-id> [--view summary|full] [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
   delegate-jobs transcript <job-id> [--after N] [--limit N] [--verbose] [--json]
   delegate-jobs wait <job-id> [--timeout-seconds N]   # exits 0 completed, 3 failed, 4 cancelled, 5 no changes, 6 verification failed, 75 timeout
@@ -65,7 +68,7 @@ function usage() {
   delegate-jobs respond <job-id> --expected-revision N [--request-id id] [--answer text|--accept|--reject|--response-json json] [--command-id id]
   delegate-jobs verify <job-id>   # reruns only the recorded command on the current tree; exits 6 unless the new evidence passes
   delegate-jobs accept|reject <job-id> [--reason text]
-  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-unscoped-write] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs review-round <job-id> --prompt <findings-or-file> [--prompt-file path]
   delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs workspace discard <job-id>
@@ -241,6 +244,7 @@ function startOptions(args) {
     addDirs: values(args, '--add-dir'), approveMcps: args.includes('--approve-mcps'),
     cursorWorktree: args.includes('--cursor-worktree'), cursorWorktreeBase: value(args, '--cursor-worktree-base'),
     allowedPaths: allowedPathsOption(args),
+    allowUnscopedWrite: args.includes('--allow-unscoped-write'),
     isolation: value(args, '--isolation'),
     pathClaims: value(args, '--path-claims')?.split(',').map((item) => item.trim()).filter(Boolean),
     resourceClaims: value(args, '--resource-claims')?.split(',').map((item) => item.trim()).filter(Boolean),
@@ -375,7 +379,7 @@ try {
   } else if (command === 'status') {
     // A bare positional is a job id — but flag values (--limit 3) must not be
     // mistaken for one.
-    const valueFlags = new Set(['--limit', '--status', '--group']);
+    const valueFlags = new Set(['--limit', '--status', '--phase', '--group']);
     let id;
     for (let i = 0; i < args.length; i += 1) {
       if (args[i].startsWith('--')) { if (valueFlags.has(args[i])) i += 1; continue; }
@@ -386,14 +390,25 @@ try {
     let jobs = id ? [requireJob(id)] : listJobs().map((job) => (job.status === 'running' ? reconcileJob(job.id) : job));
     if (args.includes('--active')) jobs = jobs.filter((job) => !terminal(job.status));
     if (statusFilter) jobs = jobs.filter((job) => job.status === statusFilter);
+    const phaseFilter = value(args, '--phase');
+    if (phaseFilter) jobs = jobs.filter((job) => job.phase === phaseFilter);
+    if (args.includes('--blocked-on-input')) {
+      jobs = jobs.filter((job) => job.phase === 'user-input-required'
+        && job.pendingInput && job.pendingInput.timedOut !== true);
+    }
     const groupId = value(args, '--group');
     if (groupId) jobs = jobs.filter((job) => job.groupId === groupId);
     if (!id) jobs = jobs.slice(0, Number(value(args, '--limit', 20)));
+    jobs = jobs.map((job) => ({
+      ...job,
+      attention: jobAttention(job),
+      conclusion: jobConclusion(job)
+    }));
     if (args.includes('--json')) json(jobs);
     else if (!jobs.length) console.log('No delegation jobs.');
     else {
-      console.log('Job ID                         Provider Status     Phase       Acceptance       Model');
-      for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(11)} ${(job.acceptance?.state || '-').padEnd(16)} ${displayModel(job)}`);
+      console.log('Job ID                         Provider Status     Phase                 Conclusion Acceptance       Model');
+      for (const job of jobs) console.log(`${job.id.padEnd(30)} ${(job.provider || '').padEnd(8)} ${(job.status || '').padEnd(10)} ${(job.phase || '').padEnd(21)} ${(job.conclusion?.disposition || '-').padEnd(10)} ${(job.acceptance?.state || '-').padEnd(16)} ${displayModel(job)}`);
     }
     for (const job of jobs) renderVerificationOrigin(job);
   } else if (command === 'work') {
@@ -470,7 +485,9 @@ try {
     if (args.includes('--json')) json(result);
     else console.log(`Scanned ${result.scanned} terminal jobs; backfilled ${result.backfilled}.`);
   } else if (command === 'inspect') {
-    json(inspectJob(args[0]));
+    const view = value(args, '--view', 'full');
+    if (!['summary', 'full'].includes(view)) throw new Error("--view must be 'summary' or 'full'");
+    json(view === 'summary' ? inspectJobSummary(args[0]) : inspectJob(args[0]));
   } else if (command === 'events') {
     const id = args[0];
     let afterSeq = Number(value(args, '--after', 0));
@@ -619,6 +636,7 @@ try {
       cursorWorktree: args.includes('--cursor-worktree') ? true : undefined,
       cursorWorktreeBase: value(args, '--cursor-worktree-base'),
       allowedPaths: value(args, '--allowed-paths')?.split(',').map((item) => item.trim()).filter(Boolean),
+      allowUnscopedWrite: args.includes('--allow-unscoped-write') ? true : undefined,
       allowSensitive: args.includes('--allow-sensitive') ? true : undefined,
       overrideLimit: args.includes('--override-limit'), overrideWriter: args.includes('--override-writer')
     }));

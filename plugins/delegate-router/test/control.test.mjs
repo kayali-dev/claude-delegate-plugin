@@ -12,12 +12,14 @@ import {
   createManagedJob,
   hashWorkingFile,
   inspectJob,
+  inspectJobSummary,
   jobDiff,
   jobFiles,
   jobTranscript,
   jobTranscriptPage,
   jobUsage,
   launchManagedJob,
+  launchManagedJobForCaller,
   listManagedJobs,
   pruneJobs,
   readJobEventPage,
@@ -33,6 +35,7 @@ import { filterDiffPaths, pathMatchesScope, validatedAllowedPaths } from '../bin
 import { auditLogPath, loadJob, loadState, saveJob, saveState, setWindow } from '../bin/lib/state.mjs';
 
 const jobsCli = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'delegate-jobs');
+const controlMcp = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'delegate-control-mcp');
 
 async function isolated(fn) {
   const previous = process.env.DELEGATE_STATE_FILE;
@@ -845,6 +848,114 @@ test('list returns compact summaries newest first with active filtering', () => 
   assert.deepEqual(active.jobs.map((job) => job.id), [second.id]);
   const failed = listManagedJobs({ status: ['completed'] });
   assert.deepEqual(failed.jobs.map((job) => job.id), [first.id]);
+}));
+
+test('inspect summary is materially smaller while retaining monitor-critical fields', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task' });
+  const tail = 'verification output '.repeat(240);
+  updateManagedJob(job.id, (current) => {
+    current.status = 'completed';
+    current.phase = 'completed';
+    current.origin = { ...current.origin, sessionId: 'session-summary-size' };
+    current.result = tail;
+    current.resultText = tail;
+    current.changedFiles = {
+      count: 5,
+      files: ['a.js', 'b.js', 'c.js', 'd.js', 'e.js'],
+      entries: ['a.js', 'b.js', 'c.js', 'd.js', 'e.js'].map((file) => ({ path: file, finalHash: 'a'.repeat(64) }))
+    };
+    current.verification = { state: 'passed', exitCode: 0, outputTail: tail, caveats: [] };
+    current.verificationEvidence = [structuredClone(current.verification)];
+    current.acceptance = {
+      state: 'ready-for-review',
+      evidence: { verification: structuredClone(current.verification), changes: structuredClone(current.changedFiles) }
+    };
+  });
+  const full = inspectJob(job.id);
+  const summary = inspectJobSummary(job.id);
+  const fullBytes = Buffer.byteLength(JSON.stringify(full));
+  const summaryBytes = Buffer.byteLength(JSON.stringify(summary));
+  assert.ok(summaryBytes < fullBytes / 10, `summary=${summaryBytes} full=${fullBytes}`);
+  assert.deepEqual(summary, {
+    id: job.id,
+    status: 'completed',
+    phase: 'completed',
+    origin: { sessionId: 'session-summary-size' },
+    pendingInput: null,
+    attention: null,
+    acceptance: { state: 'ready-for-review' },
+    changedFiles: { count: 5 },
+    verification: { state: 'passed' },
+    conclusion: { disposition: 'completed', health: 'healthy', reason: null }
+  });
+}));
+
+test('phase and blocked-on-input filters return exactly live human gates on library, CLI, and MCP surfaces', () => isolated((directory) => {
+  const gated = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'gated' });
+  const ordinary = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'ordinary' });
+  const expired = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'expired' });
+  const completed = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'completed' });
+  updateManagedJob(gated.id, (current) => {
+    current.status = 'running';
+    current.phase = 'user-input-required';
+    current.pid = process.pid;
+    current.pendingInput = { requestId: 'gate-1', kind: 'plan-confirmation', requiresHumanDecision: true };
+  });
+  updateManagedJob(ordinary.id, (current) => {
+    current.status = 'running';
+    current.phase = 'running';
+    current.pid = process.pid;
+  });
+  updateManagedJob(expired.id, (current) => {
+    current.status = 'running';
+    current.phase = 'user-input-required';
+    current.pid = process.pid;
+    current.pendingInput = { requestId: 'gate-expired', kind: 'question', timedOut: true };
+  });
+  updateManagedJob(completed.id, (current) => {
+    current.status = 'completed';
+    current.phase = 'completed';
+  });
+
+  assert.deepEqual(listManagedJobs({ phase: ['user-input-required'] }).jobs.map((row) => row.id).sort(), [expired.id, gated.id].sort());
+  assert.deepEqual(listManagedJobs({ blockedOnInput: true }).jobs.map((row) => row.id), [gated.id]);
+
+  const cli = spawnSync(process.execPath, [jobsCli, 'list', '--blocked-on-input', '--json'], {
+    env: process.env,
+    encoding: 'utf8'
+  });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(JSON.parse(cli.stdout).map((row) => row.id), [gated.id]);
+
+  const mcp = spawnSync(process.execPath, [controlMcp], {
+    env: process.env,
+    encoding: 'utf8',
+    input: `${JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: 'delegate_list', arguments: { blockedOnInput: true } }
+    })}\n`
+  });
+  assert.equal(mcp.status, 0, mcp.stderr);
+  const result = JSON.parse(JSON.parse(mcp.stdout.trim()).result.content[0].text);
+  assert.deepEqual(result.jobs.map((row) => row.id), [gated.id]);
+}));
+
+test('write launch scope warnings block by default with explicit scoped and unscoped escape hatches', () => isolated(async (directory) => {
+  await assert.rejects(() => launchManagedJobForCaller({
+    provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task', planFirst: false
+  }), /write launch requires an Allowed scope section or explicit allowedPaths/);
+
+  const scoped = await launchManagedJobForCaller({
+    provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task',
+    allowedPaths: ['src'], planFirst: false, dryRun: true
+  });
+  assert.equal(scoped.launchBlocked, false);
+  const override = await launchManagedJobForCaller({
+    provider: 'codex', mode: 'implement', cwd: directory, prompt: 'task',
+    allowUnscopedWrite: true, planFirst: false, dryRun: true
+  });
+  assert.equal(override.launchBlocked, false);
+  assert.equal(override.allowUnscopedWrite, true);
 }));
 
 test('delta redactor suppresses secrets split across chunk boundaries', async () => {

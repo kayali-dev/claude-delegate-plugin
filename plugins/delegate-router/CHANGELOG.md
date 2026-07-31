@@ -2,6 +2,30 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.60.0 — 2026-07-31
+
+- Pause write-mode jobs at an explicit human plan-confirmation gate whenever
+  primary planning degrades. Missing `Allowed scope` is now a caller-facing
+  write-launch blocker unless `allowedPaths` or the explicit
+  `allowUnscopedWrite` / `--allow-unscoped-write` escape hatch is supplied.
+- Retry a primary plan exactly once at its already-recorded ceiling after a
+  hard-limit breach. Initial allowances remain fixed by provider/configuration;
+  packet bytes and directive counts still do not scale the budget.
+- Preserve successful verification verdicts while extracting engine and
+  toolchain warnings into additive `verification.caveats[]`.
+- Add `delegate_inspect view=summary` / `delegate-jobs inspect --view summary`;
+  full remains the default. Add `phase` and `blockedOnInput` list filters to MCP
+  and CLI monitoring surfaces.
+- Publish additive `attention.state: "user-input-required"` and terminal
+  `conclusion: { disposition, health, reason }` vocabulary across records and
+  events. A declined plan retains legacy `status: "cancelled"` while reporting
+  `disposition: "declined"` and healthy gate operation.
+- Keep shared-tree isolation as the compatibility default: worktree isolation
+  still requires a Git repository, explicit path claims, sandboxing, and has
+  continuation/integration constraints that would reject legitimate existing
+  launches. Containment remains one flag plus claims away with
+  `isolation=worktree` / `--isolation worktree`.
+
 ## 0.59.0 — 2026-07-31
 
 - Preserve path, identifier, and prose casing in stored/presented structural

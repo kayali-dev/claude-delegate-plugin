@@ -10,8 +10,24 @@ function verificationFailure(job, message, redact, exitCode = 127) {
     state: 'failed',
     exitCode,
     durationMs: 0,
-    outputTail: redact(message, '', 2000)
+    outputTail: redact(message, '', 2000),
+    caveats: verificationCaveats(message).map((entry) => redact(entry, '', 500))
   };
+}
+
+export function verificationCaveats(output) {
+  const patterns = [
+    /\b(?:npm|pnpm|yarn)?\s*(?:warn(?:ing)?\s*)?(?:ebadengine|unsupported engine)\b/i,
+    /\bunsupported\s+(?:node|runtime|engine|toolchain|platform|architecture)\b/i,
+    /\b(?:requires?|wanted)\s*:?\s*(?:\{|["']?)(?:node|npm|pnpm|yarn|python|ruby|java|go|rustc|cargo)\b/i
+  ];
+  const caveats = [];
+  for (const rawLine of String(output || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || !patterns.some((pattern) => pattern.test(line))) continue;
+    caveats.push(line.slice(0, 500));
+  }
+  return [...new Set(caveats)].slice(0, 20);
 }
 
 function verificationCommands(job) {
@@ -150,6 +166,7 @@ export async function executeVerification(job, options = {}) {
     completedAtMs,
     durationMs: completedAtMs - started,
     outputTail: redact(output.slice(-2000), '', 2000),
+    caveats: verificationCaveats(output).map((entry) => redact(entry, '', 500)),
     input: before,
     completedInput: after,
     inputChanged,

@@ -172,6 +172,17 @@ Use empty arrays when a dimension cannot be predicted. Do not perform the work;
 the coordinator must explicitly confirm the presented plan before any write.${laneReinforcement}`;
 }
 
+export function planRetryPrompt(providerPacket, lane = {}, retryLimit = PLAN_OUTPUT_TOKENS_CEILING) {
+  return `${planPrompt(providerPacket, lane)}
+
+RETRY 1 OF 1. The previous plan attempt exceeded its hard output limit and was
+not usable. Produce a fresh compact structural object within ${retryLimit}
+output tokens. Do not repeat analysis from the previous attempt. If this retry
+cannot satisfy the contract, stop with the best bounded structural object you
+can produce; the broker will degrade to explicit confirmation rather than
+starting write work automatically.`;
+}
+
 export const IMPLEMENT_CONFIRMED_PROMPT = [
   'The coordinator explicitly confirmed the presented plan.',
   'Continue in this same provider session and implement it under the original objective, scope, permissions, sandbox, network, timeout, and token budget.',

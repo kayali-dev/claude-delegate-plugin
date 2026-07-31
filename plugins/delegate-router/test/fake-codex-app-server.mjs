@@ -71,13 +71,17 @@ function complete() {
   send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-fake', turnId, item: { type: 'agentMessage', id: 'message-1', text: reply, phase: 'final_answer', memoryCitation: null }, completedAtMs: Date.now() } });
   send({ jsonrpc: '2.0', method: 'turn/diff/updated', params: { threadId: 'thread-fake', turnId, diff: 'diff --git a/a.js b/a.js' } });
   const configuredPlanTokens = Number(process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS);
+  const configuredRetryPlanTokens = Number(process.env.FAKE_CODEX_PLAN_RETRY_OUTPUT_TOKENS);
   const configuredPlanModel = String(process.env.FAKE_CODEX_PLAN_OUTPUT_TOKENS_MODEL || '');
   const useConfiguredPlanTokens = planPass
     && Number.isFinite(configuredPlanTokens)
     && configuredPlanTokens >= 0
     && (!configuredPlanModel || String(threadModel).includes(configuredPlanModel));
-  sendUsage(turnId, useConfiguredPlanTokens
-    ? configuredPlanTokens
+  const retryPlanTokens = planPass && turnCount > 1
+    && Number.isFinite(configuredRetryPlanTokens) && configuredRetryPlanTokens >= 0;
+  sendUsage(turnId, retryPlanTokens
+    ? configuredRetryPlanTokens
+    : useConfiguredPlanTokens ? configuredPlanTokens
     : Math.max(2, turnCount * 10 + (interrogationQuestion ? 4 : 0)));
   send({ jsonrpc: '2.0', method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 41, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, secondary: { usedPercent: 7, resetsAt: Math.floor(Date.now() / 1000) + 604800 } } } });
   send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-fake', turn: { id: turnId, status: 'completed', items: [], itemsView: 'full', error: null, startedAt: 1, completedAt: 2, durationMs: 100 } } });
@@ -200,7 +204,9 @@ lines.on('line', async (line) => {
     clearTimeout(timer);
     send({ jsonrpc: '2.0', id: request.id, result: {} });
     const turnId = activeTurn;
-    activeTurn = null;
-    send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-fake', turn: { id: turnId, status: 'interrupted', items: [], itemsView: 'full', error: null } } });
+    if (turnId) {
+      activeTurn = null;
+      send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-fake', turn: { id: turnId, status: 'interrupted', items: [], itemsView: 'full', error: null } } });
+    }
   }
 });

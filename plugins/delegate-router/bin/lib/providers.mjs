@@ -16,6 +16,7 @@ import {
   diffStat,
   hashWorkingFile,
   inspectJob,
+  jobConclusion,
   jobFiles,
   pathMatchesScope,
   recordInterrogationAnswer,
@@ -73,6 +74,7 @@ import {
   parseStructuralPlan,
   planHardOutputTokenLimit,
   planPrompt,
+  planRetryPrompt,
   planRequestId,
   planReviewPresentation
 } from './planning.mjs';
@@ -216,6 +218,76 @@ function planningActive(job) {
   return job.planFirst === true && !['confirmed', 'declined', 'degraded'].includes(job.planning?.state);
 }
 
+function primaryPlanOutputTokens(job, usage = job?.usage) {
+  const attempt = job?.planning?.currentAttemptOutputTokens == null
+    ? Number.NaN
+    : Number(job.planning.currentAttemptOutputTokens);
+  if (Number.isFinite(attempt) && attempt >= 0) return attempt;
+  const last = usageTotals(usage?.last);
+  if (last) return last.outputTokens;
+  return usageTotals(usage)?.outputTokens ?? null;
+}
+
+function primaryPlanAttempt(assessment, state, reason = null) {
+  return {
+    attempt: 1,
+    state,
+    outputValidity: assessment?.parsed?.ok ? 'comparable' : 'unusable',
+    outputTokenLimit: assessment?.outputTokenLimit ?? null,
+    hardOutputTokenLimit: assessment?.hardOutputTokenLimit ?? null,
+    outputTokens: assessment?.observedOutputTokens ?? null,
+    ...(reason ? { reason } : {}),
+    recordedAt: Date.now()
+  };
+}
+
+function beginPrimaryPlanRetry(jobId, assessment, reason, options = {}) {
+  const current = inspectJob(jobId);
+  const initialLimit = Number(current.planning?.planOutputTokenLimit);
+  const ceiling = Number(current.planning?.planBudget?.ceiling);
+  const retryLimit = Math.min(
+    Number.isFinite(ceiling) ? ceiling : initialLimit,
+    current.maxOutputTokens || (Number.isFinite(ceiling) ? ceiling : initialLimit)
+  );
+  const overBudget = Number(assessment?.observedOutputTokens) > initialLimit;
+  if (!overBudget || current.planning?.retryCount >= 1
+    || !Number.isFinite(retryLimit) || retryLimit <= initialLimit) return null;
+  updateManagedJob(jobId, (job) => {
+    job.planning = {
+      ...job.planning,
+      state: 'running',
+      confirmationRequired: true,
+      retryCount: 1,
+      activeAttempt: 2,
+      currentAttemptOutputTokens: null,
+      planOutputTokenLimit: retryLimit,
+      planBudget: { ...job.planning.planBudget, retryLimit },
+      attempts: [
+        ...(job.planning.attempts || []),
+        primaryPlanAttempt(assessment, 'retrying', reason)
+      ],
+      budgetOutcome: {
+        state: 'retrying',
+        reason,
+        observedOutputTokens: assessment.observedOutputTokens,
+        outputTokenLimit: initialLimit,
+        hardOutputTokenLimit: assessment.hardOutputTokenLimit,
+        retryOutputTokenLimit: retryLimit
+      }
+    };
+    job.phase = 'planning';
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, 'plan.retry.started', {
+    attempt: 2,
+    reason,
+    previousOutputTokens: assessment.observedOutputTokens,
+    previousOutputTokenLimit: initialLimit,
+    outputTokenLimit: retryLimit,
+    ceiling
+  }, options);
+  return { retryLimit };
+}
+
 function planConfirmationTimeout(job) {
   const seconds = Number(process.env.DELEGATE_PLAN_CONFIRM_TIMEOUT_SECONDS ?? 3600);
   const configured = (Number.isFinite(seconds) ? Math.min(Math.max(seconds, 10), 86400) : 3600) * 1000;
@@ -228,8 +300,9 @@ async function presentPlanForConfirmation(jobId, primaryText) {
   const primary = parseStructuralPlan(primaryText);
   if (!primary.ok) {
     const assessment = assessPrimaryPlanBudget(jobId, primaryText);
-    recordPrimaryPlanDegradation(jobId, `primary-plan-${primary.reason}`, assessment);
-    return { action: 'fallback', reason: primary.reason };
+    const reason = `primary-plan-${primary.reason}`;
+    recordPrimaryPlanDegradation(jobId, reason, assessment);
+    return presentDegradedPlanForConfirmation(jobId, reason);
   }
   const probe = await awaitAmbiguityProbe(jobId);
   const planPass = inspectJob(jobId).planPass;
@@ -258,6 +331,7 @@ async function presentPlanForConfirmation(jobId, primaryText) {
   const question = {
     requestId: planRequestId(jobId),
     kind: 'plan-confirmation',
+    attention: { state: 'user-input-required' },
     requiresHumanDecision: true,
     question: presentation.question,
     options: ['accept-plan', 'decline-plan'],
@@ -298,6 +372,59 @@ async function presentPlanForConfirmation(jobId, primaryText) {
   return { action: 'await-confirmation', question, presentation };
 }
 
+function presentDegradedPlanForConfirmation(jobId, reason) {
+  const job = inspectJob(jobId);
+  const requestedAt = Date.now();
+  const timeoutMs = planConfirmationTimeout(job);
+  const presentation = {
+    degraded: true,
+    reason,
+    structuralPlan: null,
+    predictedBlastRadius: ['unknown because the structural plan was unusable'],
+    question: `Planning degraded (${reason}). Confirm whether this job may enter write mode without a valid structural plan.`
+  };
+  const question = {
+    requestId: planRequestId(jobId),
+    kind: 'plan-confirmation',
+    attention: { state: 'user-input-required' },
+    requiresHumanDecision: true,
+    question: presentation.question,
+    options: ['accept-plan', 'decline-plan'],
+    urgency: 'blocking',
+    context: {
+      stuckOn: 'degraded plan confirmation',
+      diffSoFar: '',
+      optionsConsidered: ['accept-plan', 'decline-plan'],
+      predictedBlastRadius: presentation.predictedBlastRadius,
+      degradedReason: reason
+    },
+    requestedAt,
+    timeoutMs,
+    expiresAt: requestedAt + timeoutMs,
+    defaultAction: 'reject'
+  };
+  beginCoordinatorQuestion(jobId, question, 'plan-first');
+  updateManagedJob(jobId, (current) => {
+    current.planning = {
+      ...current.planning,
+      state: 'degraded',
+      degraded: true,
+      confirmationRequired: true,
+      presentation,
+      confirmationRequestId: question.requestId
+    };
+  }, { incrementRevision: false });
+  appendJobEvent(jobId, 'plan.presented', {
+    requestId: question.requestId,
+    requiresHumanDecision: true,
+    degraded: true,
+    reason,
+    predictedBlastRadius: presentation.predictedBlastRadius
+  });
+  appendJobEvent(jobId, 'input.requested', question);
+  return { action: 'await-confirmation', question, presentation };
+}
+
 function answerPlanCommand(jobId, claimed) {
   const command = claimed.command;
   const job = inspectJob(jobId);
@@ -315,9 +442,13 @@ function answerPlanCommand(jobId, claimed) {
   resolveCoordinatorQuestion(jobId, pending, 'answered', 'plan-first');
   const decision = command.accept ? 'confirmed' : 'declined';
   updateManagedJob(jobId, (current) => {
+    const confirmedDegradedPlan = current.planning?.state === 'degraded'
+      || current.planning?.degraded === true;
     current.planning = {
       ...current.planning,
       state: decision,
+      degraded: confirmedDegradedPlan,
+      confirmedFromState: command.accept && confirmedDegradedPlan ? 'degraded' : undefined,
       confirmationRequired: false,
       confirmedAt: command.accept ? Date.now() : null,
       declinedAt: command.accept ? null : Date.now()
@@ -328,7 +459,10 @@ function answerPlanCommand(jobId, claimed) {
   appendJobEvent(jobId, command.accept ? 'plan.confirmed' : 'plan.declined', {
     requestId: pending.requestId,
     sameProviderSession: true,
-    writeStarted: false
+    writeStarted: false,
+    ...(command.accept ? {} : {
+      conclusion: { disposition: 'declined', health: 'healthy', reason: 'plan-declined' }
+    })
   });
   appendJobEvent(jobId, 'input.resolved', {
     requestId: pending.requestId,
@@ -975,7 +1109,14 @@ function persistProviderCliVersion(jobId, info, source = 'cli-version-check') {
 
 export function recordUsage(job, usage, options = {}) {
   appendJobEvent(job.id, 'usage.updated', usage, options);
-  updateManagedJob(job.id, (current) => { current.usage = usage; }, { incrementRevision: false });
+  const reportedPlanTokens = primaryPlanOutputTokens({ planning: {} }, usage);
+  updateManagedJob(job.id, (current) => {
+    current.usage = usage;
+    if (!current.planningFor && current.planning?.state === 'running'
+      && Number.isFinite(reportedPlanTokens)) {
+      current.planning.currentAttemptOutputTokens = reportedPlanTokens;
+    }
+  }, { incrementRevision: false });
   attributeInterrogationUsage(job.id, usage);
   const totals = usageTotals(usage);
   const current = loadJob(job.id) || job;
@@ -985,11 +1126,14 @@ export function recordUsage(job, usage, options = {}) {
     ? current.maxOutputTokens
     : current.planning?.planOutputTokenLimit);
   const planActive = Boolean(current.planningFor) || current.planning?.state === 'running';
-  if (planActive && Number.isFinite(planLimit) && totals?.outputTokens > planHardOutputTokenLimit(planLimit)) {
-    return brokerError('BUDGET_EXCEEDED', `plan pass output token usage ${totals.outputTokens} exceeded its ${planLimit} token budget and ${planHardOutputTokenLimit(planLimit)} hard runaway limit`, {
+  const observedPlanOutputTokens = current.planningFor
+    ? totals?.outputTokens ?? null
+    : primaryPlanOutputTokens(current, usage);
+  if (planActive && Number.isFinite(planLimit) && observedPlanOutputTokens > planHardOutputTokenLimit(planLimit)) {
+    return brokerError('BUDGET_EXCEEDED', `plan pass output token usage ${observedPlanOutputTokens} exceeded its ${planLimit} token budget and ${planHardOutputTokenLimit(planLimit)} hard runaway limit`, {
       provider: job.provider,
       maxOutputTokens: planLimit,
-      observedOutputTokens: totals.outputTokens,
+      observedOutputTokens: observedPlanOutputTokens,
       planPass: !current.planningFor,
       independentPlanPass: Boolean(current.planningFor)
     });
@@ -1010,12 +1154,43 @@ export function recordUsage(job, usage, options = {}) {
 
 function assessPrimaryPlanBudget(jobId, text) {
   const current = inspectJob(jobId);
-  const totals = usageTotals(current.usage);
   const assessment = assessStructuralPlanOutput(
     text,
-    totals?.outputTokens,
+    primaryPlanOutputTokens(current),
     current.planning?.planOutputTokenLimit
   );
+  if (current.planning?.retryCount >= 1) {
+    updateManagedJob(jobId, (job) => {
+      const attempts = [...(job.planning?.attempts || [])];
+      const entry = {
+        ...primaryPlanAttempt(assessment,
+          assessment.state === 'rejected' ? 'degraded' : 'completed',
+          assessment.reason || null),
+        attempt: 2
+      };
+      const index = attempts.findIndex((attempt) => attempt?.attempt === 2);
+      if (index >= 0) attempts[index] = entry;
+      else attempts.push(entry);
+      job.planning = {
+        ...job.planning,
+        attempts,
+        budgetOutcome: {
+          state: assessment.state === 'rejected' ? 'degraded' : 'retry-completed',
+          reason: assessment.reason || null,
+          observedOutputTokens: assessment.observedOutputTokens,
+          outputTokenLimit: assessment.outputTokenLimit,
+          hardOutputTokenLimit: assessment.hardOutputTokenLimit
+        }
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(jobId, 'plan.retry.completed', {
+      attempt: 2,
+      state: assessment.state,
+      outputValidity: assessment.parsed.ok ? 'comparable' : 'unusable',
+      observedOutputTokens: assessment.observedOutputTokens,
+      outputTokenLimit: assessment.outputTokenLimit
+    });
+  }
   if (assessment.state === 'recovered') {
     const recovery = {
       state: 'recovered',
@@ -1039,8 +1214,7 @@ function assessPrimaryPlanBudget(jobId, text) {
 
 function recordPrimaryPlanDegradation(jobId, reason, assessment = null, options = {}) {
   const current = inspectJob(jobId);
-  const totals = usageTotals(current.usage);
-  const outputTokens = assessment?.observedOutputTokens ?? totals?.outputTokens ?? null;
+  const outputTokens = assessment?.observedOutputTokens ?? primaryPlanOutputTokens(current) ?? null;
   const outputTokenLimit = assessment?.outputTokenLimit
     ?? current.planning?.planOutputTokenLimit
     ?? null;
@@ -1048,7 +1222,8 @@ function recordPrimaryPlanDegradation(jobId, reason, assessment = null, options 
     job.planning = {
       ...job.planning,
       state: 'degraded',
-      confirmationRequired: false,
+      degraded: true,
+      confirmationRequired: true,
       reason,
       outputTokens,
       outputTokenLimit,
@@ -1067,7 +1242,7 @@ function recordPrimaryPlanDegradation(jobId, reason, assessment = null, options 
     reason,
     observedOutputTokens: outputTokens,
     maxOutputTokens: outputTokenLimit,
-    fallback: 'explicitly-requested-direct-write'
+    fallback: 'explicit-confirmation-required'
   }, options);
 }
 
@@ -1177,6 +1352,17 @@ function terminal(job, status, phase, extra = {}) {
     }
   }
   if (!deferVerification) {
+    extra = {
+      ...extra,
+      conclusion: jobConclusion({
+        ...(loadJob(job.id) || job),
+        ...extra,
+        status,
+        phase
+      })
+    };
+  }
+  if (!deferVerification) {
     appendJobEvent(job.id, status === 'completed' ? 'job.completed' : status === 'cancelled' ? 'job.cancelled' : 'error', extra);
   }
   updateManagedJob(job.id, (current) => {
@@ -1283,6 +1469,7 @@ function terminal(job, status, phase, extra = {}) {
       current.baseDrift = current.baseDriftPaths.length > 0;
       current.acceptance = buildAcceptance(current);
     }
+    if (!deferVerification) current.conclusion = jobConclusion(current);
   });
   if (deferVerification) {
     appendJobEvent(job.id, 'job.state', { status: 'running', phase: 'verifying' });
@@ -1746,12 +1933,11 @@ async function runCodex(job, driver) {
         const exceeded = recordUsage(job, params.tokenUsage, options);
         if (exceeded?.planPass && !planPassError) {
           planPassError = exceeded;
-          appendJobEvent(job.id, 'plan.degraded', {
+          appendJobEvent(job.id, 'plan.output-limit-exceeded', {
             stage: 'primary-plan',
             reason: 'plan-output-token-sub-budget-exceeded',
             observedOutputTokens: exceeded.observedOutputTokens,
-            maxOutputTokens: exceeded.maxOutputTokens,
-            fallback: 'explicitly-requested-direct-write'
+            maxOutputTokens: exceeded.maxOutputTokens
           }, options);
           const turnId = params.turnId || inspectJob(job.id).providerTurnId;
           if (turnId) {
@@ -1798,7 +1984,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.59.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.60.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2012,24 +2198,34 @@ async function runCodex(job, driver) {
             ? assessment.reason
             : planPassError ? 'plan-output-token-sub-budget-exceeded' : null;
           if (budgetFailure || completed.turn.status === 'failed') {
+            const retry = budgetFailure
+              ? beginPrimaryPlanRetry(job.id, assessment, budgetFailure)
+              : null;
+            if (retry) {
+              planPassError = null;
+              await startTurn(planRetryPrompt(
+                promptFor(loadJob(job.id)),
+                { provider: job.provider, model: job.model },
+                retry.retryLimit
+              ), 'read-only');
+              continue;
+            }
+            const reason = budgetFailure || 'provider-plan-turn-failed';
             recordPrimaryPlanDegradation(
               job.id,
-              budgetFailure || 'provider-plan-turn-failed',
+              reason,
               assessment
             );
-            planPhase = 'implementing';
-            await startTurn(IMPLEMENT_CONFIRMED_PROMPT, codexSandboxMode(loadJob(job.id)));
-            continue;
-          }
-          const planned = await presentPlanForConfirmation(job.id, primaryText);
-          if (planned.action === 'fallback') {
-            planPhase = 'implementing';
-            await startTurn(IMPLEMENT_CONFIRMED_PROMPT, codexSandboxMode(loadJob(job.id)));
-          } else {
+            presentDegradedPlanForConfirmation(job.id, reason);
             planPhase = 'awaiting-confirmation';
             turnDone = new Promise(() => {});
             turnResolve = null;
+            continue;
           }
+          const planned = await presentPlanForConfirmation(job.id, primaryText);
+          planPhase = 'awaiting-confirmation';
+          turnDone = new Promise(() => {});
+          turnResolve = null;
           continue;
         }
         if (queuedPrompts.length) {
@@ -2847,7 +3043,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.59.0' }
+      clientInfo: { name: 'delegate-router', version: '0.60.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -2961,6 +3157,7 @@ async function runCursorAcpTransport(job, driver) {
 
     const startPrompt = (text) => {
       messageParts.length = 0;
+      planHolder.entries = null;
       cancelSignalSent = false;
       appendJobEvent(job.id, 'turn.started', { transport: 'acp' }, { sessionId });
       promptPromise = driver.prompt(() => rpc.request('session/prompt', {
@@ -3114,12 +3311,11 @@ async function runCursorAcpTransport(job, driver) {
         const exceeded = recordUsage(job, completed.response.usage, { sessionId });
         if (exceeded?.planPass && !planPassError) {
           planPassError = exceeded;
-          appendJobEvent(job.id, 'plan.degraded', {
+          appendJobEvent(job.id, 'plan.output-limit-exceeded', {
             stage: 'primary-plan',
             reason: 'plan-output-token-sub-budget-exceeded',
             observedOutputTokens: exceeded.observedOutputTokens,
-            maxOutputTokens: exceeded.maxOutputTokens,
-            fallback: 'explicitly-requested-direct-write'
+            maxOutputTokens: exceeded.maxOutputTokens
           }, { sessionId });
         } else if (exceeded && !budgetError) {
           budgetError = exceeded;
@@ -3138,21 +3334,25 @@ async function runCursorAcpTransport(job, driver) {
           ? assessment.reason
           : planPassError ? 'plan-output-token-sub-budget-exceeded' : null;
         if (budgetFailure) {
+          const retry = beginPrimaryPlanRetry(job.id, assessment, budgetFailure, { sessionId });
+          if (retry) {
+            planPassError = null;
+            startPrompt(planRetryPrompt(
+              promptFor(loadJob(job.id)),
+              { provider: job.provider, model: job.model },
+              retry.retryLimit
+            ));
+            continue;
+          }
           recordPrimaryPlanDegradation(job.id, budgetFailure, assessment, { sessionId });
-          planPhase = 'implementing';
-          await setSessionMode('agent', job.mode);
-          startPrompt(IMPLEMENT_CONFIRMED_PROMPT);
+          presentDegradedPlanForConfirmation(job.id, budgetFailure);
+          planPhase = 'awaiting-confirmation';
+          promptPromise = new Promise(() => {});
           continue;
         }
         const planned = await presentPlanForConfirmation(job.id, planText);
-        if (planned.action === 'fallback') {
-          planPhase = 'implementing';
-          await setSessionMode('agent', job.mode);
-          startPrompt(IMPLEMENT_CONFIRMED_PROMPT);
-        } else {
-          planPhase = 'awaiting-confirmation';
-          promptPromise = new Promise(() => {});
-        }
+        planPhase = 'awaiting-confirmation';
+        promptPromise = new Promise(() => {});
         continue;
       }
       if (activeInterrogation) {
@@ -3332,6 +3532,47 @@ function createCursorChat(binary, job) {
   return sessionId ? { sessionId: String(sessionId), fallback: null } : { sessionId: null, fallback: 'create-chat-output-unrecognized' };
 }
 
+async function awaitHeadlessPlanConfirmation(job, planned, deadline) {
+  while (true) {
+    if (Date.now() >= Math.min(deadline, planned.question.expiresAt)) {
+      resolveCoordinatorQuestion(job.id, planned.question, 'timeout', 'plan-first');
+      appendJobEvent(job.id, 'input.resolved', {
+        requestId: planned.question.requestId,
+        outcome: 'timeout',
+        defaultAction: 'reject',
+        stopReason: 'input-timeout'
+      });
+      throw brokerError('USER_INPUT_REQUIRED', 'plan confirmation timed out; default action rejected implementation', {
+        provider: job.provider,
+        stopReason: 'input-timeout'
+      });
+    }
+    for (const claimed of claimProviderCommands(job.id)) {
+      const answer = answerPlanCommand(job.id, claimed);
+      if (answer?.decision === 'confirmed') return 'confirmed';
+      if (answer?.decision === 'declined') {
+        terminal(loadJob(job.id), 'cancelled', 'plan-declined', {
+          stoppedReason: 'plan-declined',
+          result: loadJob(job.id).result
+        });
+        return 'terminal';
+      }
+      if (!answer && claimed.command.type === 'cancel') {
+        completeCommand(job.id, claimed, { ok: true, appliedAs: 'cancel' });
+        terminal(loadJob(job.id), 'cancelled', 'cancelled');
+        return 'terminal';
+      }
+      if (!answer) {
+        completeCommand(job.id, claimed, {
+          ok: false,
+          error: `job is waiting for plan confirmation; ${claimed.command.type} is unavailable`
+        });
+      }
+    }
+    await delay(100);
+  }
+}
+
 async function runCursorHeadlessTransport(job, driver) {
   const binary = resolveCursorBinary();
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
@@ -3344,6 +3585,7 @@ async function runCursorHeadlessTransport(job, driver) {
   const model = resolveCursorModel(job.model, ids);
   let resume = job.providerSessionId;
   let planPhase = planningActive(job) ? 'planning' : 'disabled';
+  let initialPlanGate = null;
   if (!resume) {
     const created = createCursorChat(binary, job);
     if (created.sessionId) {
@@ -3355,20 +3597,10 @@ async function runCursorHeadlessTransport(job, driver) {
     }
   }
   if (planPhase === 'planning' && !resume) {
-    updateManagedJob(job.id, (current) => {
-      current.planning = {
-        ...current.planning,
-        state: 'degraded',
-        confirmationRequired: false,
-        reason: 'headless-session-precreation-unavailable'
-      };
-    }, { incrementRevision: false });
-    appendJobEvent(job.id, 'plan.degraded', {
-      stage: 'primary-plan',
-      reason: 'headless-session-precreation-unavailable',
-      fallback: 'explicitly-requested-direct-write'
-    });
-    planPhase = 'implementing';
+    const reason = 'headless-session-precreation-unavailable';
+    recordPrimaryPlanDegradation(job.id, reason);
+    initialPlanGate = presentDegradedPlanForConfirmation(job.id, reason);
+    planPhase = 'awaiting-confirmation';
   }
   let text = planPhase === 'planning'
     ? planPrompt(promptFor(job), { provider: job.provider, model: job.model })
@@ -3398,6 +3630,13 @@ async function runCursorHeadlessTransport(job, driver) {
   }
 
   try {
+    if (initialPlanGate) {
+      const decision = await awaitHeadlessPlanConfirmation(job, initialPlanGate, deadline);
+      if (decision === 'terminal') return;
+      planPhase = 'implementing';
+      currentMode = job.mode;
+      text = IMPLEMENT_CONFIRMED_PROMPT;
+    }
     if (planPhase === 'planning') {
       updateManagedJob(job.id, (current) => {
         current.planning = { ...current.planning, state: 'running', startedAt: Date.now(), sandbox: 'read-only' };
@@ -3434,12 +3673,11 @@ async function runCursorHeadlessTransport(job, driver) {
         const exceeded = mapCursorHeadlessEvent(job, event, { deltas, assistantParts, ephemeral });
         if (exceeded?.planPass && !planPassError) {
           planPassError = exceeded;
-          appendJobEvent(job.id, 'plan.degraded', {
+          appendJobEvent(job.id, 'plan.output-limit-exceeded', {
             stage: 'primary-plan',
             reason: 'plan-output-token-sub-budget-exceeded',
             observedOutputTokens: exceeded.observedOutputTokens,
-            maxOutputTokens: exceeded.maxOutputTokens,
-            fallback: 'explicitly-requested-direct-write'
+            maxOutputTokens: exceeded.maxOutputTokens
           }, { sessionId: resume });
         } else if (exceeded && !budgetError) {
           budgetError = exceeded;
@@ -3534,61 +3772,29 @@ async function runCursorHeadlessTransport(job, driver) {
         ? assessment.reason
         : planPassError ? 'plan-output-token-sub-budget-exceeded' : null;
       if (budgetFailure) {
+        const retry = beginPrimaryPlanRetry(job.id, assessment, budgetFailure, { sessionId: resume });
+        if (retry) {
+          planPassError = null;
+          currentMode = 'plan';
+          text = planRetryPrompt(
+            promptFor(loadJob(job.id)),
+            { provider: job.provider, model: job.model },
+            retry.retryLimit
+          );
+          continue;
+        }
         recordPrimaryPlanDegradation(job.id, budgetFailure, assessment, { sessionId: resume });
-        planPhase = 'implementing';
-        currentMode = job.mode;
-        text = IMPLEMENT_CONFIRMED_PROMPT;
-        continue;
+        const degraded = presentDegradedPlanForConfirmation(job.id, budgetFailure);
+        const decision = await awaitHeadlessPlanConfirmation(job, degraded, deadline);
+        if (decision === 'terminal') return;
+      } else {
+        const planned = await presentPlanForConfirmation(job.id, primaryText);
+        const decision = await awaitHeadlessPlanConfirmation(job, planned, deadline);
+        if (decision === 'terminal') return;
       }
-      const planned = await presentPlanForConfirmation(job.id, primaryText);
-      if (planned.action === 'fallback') {
-        planPhase = 'implementing';
-        currentMode = job.mode;
-        text = IMPLEMENT_CONFIRMED_PROMPT;
-        continue;
-      }
-      planPhase = 'awaiting-confirmation';
-      let decided = false;
-      while (!decided) {
-        if (Date.now() >= Math.min(deadline, planned.question.expiresAt)) {
-          resolveCoordinatorQuestion(job.id, planned.question, 'timeout', 'plan-first');
-          appendJobEvent(job.id, 'input.resolved', {
-            requestId: planned.question.requestId,
-            outcome: 'timeout',
-            defaultAction: 'reject',
-            stopReason: 'input-timeout'
-          });
-          throw brokerError('USER_INPUT_REQUIRED', 'plan confirmation timed out; default action rejected implementation', {
-            provider: job.provider,
-            stopReason: 'input-timeout'
-          });
-        }
-        for (const claimed of claimProviderCommands(job.id)) {
-          const answer = answerPlanCommand(job.id, claimed);
-          if (answer?.decision === 'confirmed') {
-            planPhase = 'implementing';
-            currentMode = job.mode;
-            text = IMPLEMENT_CONFIRMED_PROMPT;
-            decided = true;
-          } else if (answer?.decision === 'declined') {
-            terminal(loadJob(job.id), 'cancelled', 'plan-declined', {
-              stoppedReason: 'plan-declined',
-              result: loadJob(job.id).result
-            });
-            return;
-          } else if (!answer && claimed.command.type === 'cancel') {
-            completeCommand(job.id, claimed, { ok: true, appliedAs: 'cancel' });
-            terminal(loadJob(job.id), 'cancelled', 'cancelled');
-            return;
-          } else if (!answer) {
-            completeCommand(job.id, claimed, {
-              ok: false,
-              error: `job is waiting for plan confirmation; ${claimed.command.type} is unavailable`
-            });
-          }
-        }
-        if (!decided) await delay(100);
-      }
+      planPhase = 'implementing';
+      currentMode = job.mode;
+      text = IMPLEMENT_CONFIRMED_PROMPT;
       continue;
     }
     if (activeInterrogation) {

@@ -42,6 +42,17 @@ test('control MCP initializes and exposes the complete supervision surface', asy
         delete legacy.properties.isolation;
         delete legacy.properties.pathClaims;
         delete legacy.properties.resourceClaims;
+        delete legacy.properties.allowUnscopedWrite;
+      }
+      if (name === 'delegate_resume') {
+        delete legacy.properties.allowUnscopedWrite;
+      }
+      if (name === 'delegate_inspect') {
+        delete legacy.properties.view;
+      }
+      if (name === 'delegate_list') {
+        delete legacy.properties.phase;
+        delete legacy.properties.blockedOnInput;
       }
       if (name === 'delegate_stats') {
         delete legacy.properties.until;
@@ -57,6 +68,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   );
   const start = responses[1].result.tools.find((tool) => tool.name === 'delegate_start');
   const inspect = responses[1].result.tools.find((tool) => tool.name === 'delegate_inspect');
+  const list = responses[1].result.tools.find((tool) => tool.name === 'delegate_list');
   const respond = responses[1].result.tools.find((tool) => tool.name === 'delegate_respond');
   const resume = responses[1].result.tools.find((tool) => tool.name === 'delegate_resume');
   const stats = responses[1].result.tools.find((tool) => tool.name === 'delegate_stats');
@@ -86,6 +98,12 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.ok(start.inputSchema.properties.waitForSession);
   assert.ok(start.inputSchema.properties.dryRun);
   assert.ok(inspect.inputSchema.properties.resultWindow);
+  assert.deepEqual(inspect.inputSchema.properties.view.enum, ['summary', 'full']);
+  assert.equal(inspect.inputSchema.properties.view.default, 'full');
+  assert.ok(list.inputSchema.properties.phase);
+  assert.ok(list.inputSchema.properties.blockedOnInput);
+  assert.ok(start.inputSchema.properties.allowUnscopedWrite);
+  assert.ok(resume.inputSchema.properties.allowUnscopedWrite);
   assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_release'));
   assert.deepEqual(respond.inputSchema.required, ['jobId', 'expectedRevision']);
   for (const option of ['requestId', 'answer', 'accept', 'response', 'commandId']) assert.ok(respond.inputSchema.properties[option], `delegate_respond.${option}`);

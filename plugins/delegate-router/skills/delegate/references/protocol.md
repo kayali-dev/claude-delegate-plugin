@@ -146,6 +146,7 @@ message.user, message.delta, message.completed
 activity
 plan.updated, plan.ambiguity.started, plan.ambiguity.completed
 plan.presented, plan.confirmed, plan.declined, plan.recovered, plan.degraded
+plan.output-limit-exceeded, plan.retry.started, plan.retry.completed
 compaction.started, compaction.completed
 tool.started, tool.status, tool.output, tool.completed
 file.changed, diff.updated
@@ -184,8 +185,11 @@ probe may start one parent-provider model fallback. Operational timeout, quota,
 budget, cancellation, and provider failures never retry.
 `plan.recovered` means a parseable structural answer exceeded its nominal
 sub-budget by no more than 20%; it includes observed, nominal, hard-limit, and
-overrun fields. `plan.degraded` budget events carry observed-vs-cap numbers.
-Runaways beyond the hard limit remain `BUDGET_EXCEEDED` failures.
+overrun fields. A primary runaway emits `plan.output-limit-exceeded`, retries
+once at the stored ceiling, and emits `plan.retry.started` /
+`plan.retry.completed`. Exhausting that retry emits `plan.degraded` with
+observed-vs-cap numbers and opens an explicit confirmation gate; it does not
+start write work.
 Parsed structural plans retain the original case of file paths and all
 human-facing identifiers/prose. Case folding is a derived comparison and
 deduplication key only; it is never written back to `planning.primary` or
@@ -254,7 +258,9 @@ Back-channel and native Cursor questions share one redacted/bounded
 `pendingInput`: `{ requestId, kind: "question" | "plan-confirmation", requiresHumanDecision?, question, options, urgency,
 context: { stuckOn, diffSoFar, optionsConsidered }, requestedAt, timeoutMs,
 expiresAt, defaultAction: "reject" }`. Phase becomes
-`user-input-required`; `input.requested` carries that shape, and revisioned MCP
+`user-input-required`; the record additionally projects
+`attention: { state: "user-input-required", ...requestIdentity }` and
+`input.requested` carries the same attention state. Revisioned MCP
 `delegate_respond`, CLI `delegate-jobs respond`, or the TUI `a` action for a
 free-form question queues `input.response.requested`. A `plan-confirmation`
 requires `accept=true|false` / `--accept` / `--reject`; answer-only input is
@@ -301,6 +307,13 @@ evidence and digest it was made against and performs no source operation.
 Existing consumers may continue branching on `status === "completed"`.
 `delegate-jobs wait` keeps exit 5 for zero observed changes and 6 for nonzero
 verification.
+
+Terminal records and terminal events add
+`conclusion: { disposition, health, reason }`. Legacy `status` values do not
+change. In particular, declining a plan remains `status: "cancelled"` for
+compatibility but has `disposition: "declined"`, `health: "healthy"`, and
+`reason: "plan-declined"`; provider failure has `disposition: "failed"` and
+`health: "unhealthy"`.
 
 `delegate-jobs verify` and MCP `delegate_verify` append fresh local evidence
 for a verification-blocked managed shared-tree job by executing only its private recorded

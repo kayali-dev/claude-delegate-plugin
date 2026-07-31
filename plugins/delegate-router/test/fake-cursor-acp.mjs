@@ -43,10 +43,16 @@ function finish() {
   send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'agent_message_chunk', messageId: `message-${count}`, content: { type: 'text', text: answer } } } });
   send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cursor-session', update: { sessionUpdate: 'usage_update', used: 12, size: 1000 } } });
   const configuredPlanTokens = Number(process.env.FAKE_CURSOR_PLAN_OUTPUT_TOKENS);
+  const configuredRetryPlanTokens = Number(process.env.FAKE_CURSOR_PLAN_RETRY_OUTPUT_TOKENS);
   const outputTokens = text.includes('PLAN PASS ONLY')
-    && Number.isFinite(configuredPlanTokens)
-    && configuredPlanTokens >= 0
-    ? configuredPlanTokens
+    && count > 1
+    && Number.isFinite(configuredRetryPlanTokens)
+    && configuredRetryPlanTokens >= 0
+    ? configuredRetryPlanTokens
+    : text.includes('PLAN PASS ONLY')
+      && Number.isFinite(configuredPlanTokens)
+      && configuredPlanTokens >= 0
+      ? configuredPlanTokens
     : count * 3;
   send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn', usage: { inputTokens: count * 5, outputTokens } } });
 }

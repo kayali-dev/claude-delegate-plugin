@@ -152,6 +152,7 @@ export function normalizeCoordinatorQuestion(job, input = {}, options = {}) {
   return redact({
     requestId,
     kind: method === 'cursor/create_plan' ? 'plan-confirmation' : 'question',
+    attention: { state: 'user-input-required' },
     ...(method === 'cursor/create_plan' ? { requiresHumanDecision: true } : {}),
     question: args.question,
     options: args.options,
@@ -177,6 +178,14 @@ export function beginCoordinatorQuestion(jobId, question, origin = 'backchannel'
     current.phase = 'user-input-required';
     current.stopReason = 'USER_INPUT_REQUIRED';
     current.pendingInput = { ...question, origin };
+    current.attention = {
+      state: 'user-input-required',
+      requestId: question.requestId,
+      kind: question.kind || 'question',
+      requiresHumanDecision: question.requiresHumanDecision === true
+        || question.kind === 'plan-confirmation',
+      expiresAt: question.expiresAt || null
+    };
     if (current.attemptLease) {
       current.attemptLease = {
         ...current.attemptLease,
@@ -204,11 +213,13 @@ export function resolveCoordinatorQuestion(jobId, question, outcome, origin = 'b
       current.phase = 'prompting';
       current.stopReason = null;
       current.pendingInput = null;
+      current.attention = null;
       current.lastInputResponse = { requestId: question.requestId, respondedAt: finishedAt };
     } else {
       current.phase = 'user-input-required';
       current.stopReason = 'input-timeout';
       current.pendingInput = { ...question, origin, timedOut: true, timedOutAt: finishedAt };
+      current.attention = null;
     }
   });
 }
