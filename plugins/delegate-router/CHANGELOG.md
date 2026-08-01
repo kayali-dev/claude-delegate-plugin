@@ -2,6 +2,17 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.64.0 — 2026-08-01
+
+- Canonicalize newline-composite Cursor input request IDs at ACP ingestion,
+  publish their aliases under one canonical gate, accept any published ID, and
+  reject unmatched response IDs synchronously before command intake.
+- Attach the latest bounded ACP checklist to Cursor plan confirmations without
+  promoting it to a structural plan or ambiguity-comparison input.
+- After an unanswered gate auto-rejects, retain timed-out question evidence
+  while clearing live attention and the stale `user-input-required` phase
+  across fleet, monitor, native-context, and TUI projections.
+
 ## 0.63.0 — 2026-08-01
 
 - Add a declared-and-observed `structuralPlanOutput` attempt capability. The

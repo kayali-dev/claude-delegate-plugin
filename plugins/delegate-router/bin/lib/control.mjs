@@ -73,7 +73,11 @@ import {
 } from './store-maintenance.mjs';
 import { listSupervisorLeases } from './supervisor-common.mjs';
 import { executeVerification } from './verification-runner.mjs';
-import { validatePendingResponse } from './response-contract.mjs';
+import {
+  pendingRequestIds,
+  pendingRequestMatches,
+  validatePendingResponse
+} from './response-contract.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -1351,14 +1355,20 @@ function activityFields(job) {
 
 function pendingInputSummary(pendingInput) {
   if (!pendingInput || typeof pendingInput !== 'object') return null;
+  const requestAliases = pendingRequestIds(pendingInput).filter((requestId) => requestId !== pendingInput.requestId);
   return {
     requestId: pendingInput.requestId || null,
+    ...(requestAliases.length ? { requestAliases } : {}),
     kind: pendingInput.kind || 'question',
     requiresHumanDecision: pendingInput.requiresHumanDecision === true
       || pendingInput.kind === 'plan-confirmation',
     expiresAt: Number.isSafeInteger(Number(pendingInput.expiresAt))
       ? Number(pendingInput.expiresAt)
-      : null
+      : null,
+    ...(pendingInput.timedOut === true ? {
+      timedOut: true,
+      timedOutAt: Number.isFinite(Number(pendingInput.timedOutAt)) ? Number(pendingInput.timedOutAt) : null
+    } : {})
   };
 }
 
@@ -4502,9 +4512,9 @@ export function submitControl(id, command, expectedRevision) {
       }
     }
     if (command.type === 'respond') {
-      if (!job.pendingInput) throw brokerError('INVALID_REQUEST', 'the job has no pending worker question or plan request', { provider: job.provider });
-      if (command.requestId && command.requestId !== job.pendingInput.requestId) {
-        throw brokerError('REVISION_CONFLICT', `response targets ${command.requestId}, current pending request is ${job.pendingInput.requestId}`, {
+      if (!job.pendingInput || job.pendingInput.timedOut === true) throw brokerError('INVALID_REQUEST', 'the job has no live pending worker question or plan request', { provider: job.provider });
+      if (command.requestId && !pendingRequestMatches(job.pendingInput, command.requestId)) {
+        throw brokerError('REVISION_CONFLICT', `response targets ${command.requestId}, current pending request accepts ${pendingRequestIds(job.pendingInput).join(', ')}`, {
           provider: job.provider, currentRevision: job.revision
         });
       }
@@ -4520,7 +4530,14 @@ export function submitControl(id, command, expectedRevision) {
       });
     }
     const record = command.type === 'respond'
-      ? redact({ ...command, requestId: command.requestId || job.pendingInput.requestId, commandId, expectedRevision, requestedAt: Date.now() })
+      ? redact({
+          ...command,
+          requestId: job.pendingInput.requestId,
+          ...(command.requestId && command.requestId !== job.pendingInput.requestId ? { requestAlias: command.requestId } : {}),
+          commandId,
+          expectedRevision,
+          requestedAt: Date.now()
+        })
       : command.type === 'interrogate'
         ? redact({
             type: 'interrogate',
@@ -4568,7 +4585,7 @@ export function submitControl(id, command, expectedRevision) {
         : command.type === 'release' ? 'job.release.requested'
           : command.type === 'interrogate' ? 'interrogation.requested' : 'input.response.requested';
     appendUnlocked(job, type, command.type === 'respond'
-      ? { commandId, requestId: record.requestId, answer: record.answer, accept: record.accept, response: record.response }
+      ? { commandId, requestId: record.requestId, requestAlias: record.requestAlias, answer: record.answer, accept: record.accept, response: record.response }
       : command.type === 'interrogate'
         ? {
             commandId,
@@ -4621,7 +4638,7 @@ function resolvedResponseResult(job, intake, events = []) {
   }
   const resolvedEvent = [...events].reverse().find((event) =>
     event.type === 'input.resolved' && event.data?.requestId === requestId);
-  const requestStillPending = job.pendingInput?.requestId === requestId && job.pendingInput?.timedOut !== true;
+  const requestStillPending = pendingRequestMatches(job.pendingInput, requestId) && job.pendingInput?.timedOut !== true;
   if (requestStillPending && !resolvedEvent) return null;
   const outcome = requestKind === 'plan-confirmation'
     ? resolvedEvent?.data?.outcome === 'accepted' || control?.accept === true ? 'accepted' : 'rejected'
@@ -4995,6 +5012,8 @@ function planAttemptVisibility(job) {
 
 function planLaunchNotice(job) {
   if (job.planFirst !== true) return null;
+  const livePlanConfirmation = job.pendingInput?.kind === 'plan-confirmation'
+    && job.pendingInput.timedOut !== true;
   const attemptVisibility = planAttemptVisibility(job);
   const structuralSuffix = attemptVisibility.structurallyInvalidReasons.length
     ? ` Structurally invalid probe: ${attemptVisibility.structurallyInvalidReasons.join(', ')}.`
@@ -5022,7 +5041,7 @@ function planLaunchNotice(job) {
       observedOutputTokens,
       outputTokenLimit,
       ...attemptVisibility,
-      blocking: job.pendingInput?.kind === 'plan-confirmation',
+      blocking: livePlanConfirmation,
       message: `PLAN-FIRST DEGRADED: ${reason}${comparison}.${structuralSuffix} Write access is paused for explicit plan confirmation.`
     };
   }
@@ -5040,7 +5059,7 @@ function planLaunchNotice(job) {
         ? { reason: attemptVisibility.structurallyInvalidReasons[0] }
         : {}),
       ...attemptVisibility,
-      blocking: job.pendingInput?.kind === 'plan-confirmation',
+      blocking: livePlanConfirmation,
       message: `PLAN-FIRST ${job.planPass?.state === 'recovered' ? 'RECOVERED' : 'COMPLETED'}${comparisonVerdict ? `: ${comparisonVerdict}` : ''}.${structuralSuffix}`
     };
   }

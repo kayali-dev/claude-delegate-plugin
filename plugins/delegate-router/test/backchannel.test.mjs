@@ -30,7 +30,13 @@ test('normalized plan requests require a human decision while free-form question
   const job = { id: 'cursor-plan', cwd: process.cwd() };
   const plan = normalizeCoordinatorQuestion(job, {
     question: 'Approve this plan?'
-  }, { method: 'cursor/create_plan', requestId: 'plan-request', requestedAt: 100, timeoutMs: 500 });
+  }, {
+    method: 'cursor/create_plan',
+    requestIds: ['plan-request', 'plan-provider-alias'],
+    planEntries: ['Inspect the current checklist'],
+    requestedAt: 100,
+    timeoutMs: 500
+  });
   const question = normalizeCoordinatorQuestion(job, {
     question: 'Which file?',
     urgency: 'normal'
@@ -38,6 +44,9 @@ test('normalized plan requests require a human decision while free-form question
   assert.equal(plan.kind, 'plan-confirmation');
   assert.equal(plan.requiresHumanDecision, true);
   assert.equal(plan.defaultAction, 'reject');
+  assert.equal(plan.requestId, 'plan-request');
+  assert.deepEqual(plan.requestAliases, ['plan-provider-alias']);
+  assert.deepEqual(plan.planEntries, ['Inspect the current checklist']);
   assert.equal(Object.hasOwn(question, 'requiresHumanDecision'), false);
 });
 
@@ -225,6 +234,8 @@ test('back-channel rejects structured authority and times out with a durable def
     assert.match(result.content[0].text, /default action rejected continuation/);
     const timedOut = inspectJob(job.id);
     assert.equal(timedOut.stopReason, 'input-timeout');
+    assert.equal(timedOut.phase, 'input-timeout');
+    assert.equal(timedOut.attention, null);
     assert.equal(timedOut.pendingInput.timedOut, true);
     assert.equal(timedOut.stalled, false);
     assert.equal(timedOut.attemptLease.blockedAt, null);

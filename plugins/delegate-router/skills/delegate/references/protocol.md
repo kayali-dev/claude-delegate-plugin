@@ -257,7 +257,7 @@ plugin plus `--approve-mcps`. Injection failure emits
 server; it never fails the job.
 
 Back-channel and native Cursor questions share one redacted/bounded
-`pendingInput`: `{ requestId, kind: "question" | "plan-confirmation", requiresHumanDecision?, question, options, urgency,
+`pendingInput`: `{ requestId, requestAliases?, kind: "question" | "plan-confirmation", requiresHumanDecision?, question, planEntries?, options, urgency,
 context: { stuckOn, diffSoFar, optionsConsidered }, requestedAt, timeoutMs,
 expiresAt, defaultAction: "reject" }`. Phase becomes
 `user-input-required`; the record additionally projects
@@ -274,6 +274,18 @@ request-answered records. Structured back-channel responses reject every field e
 original scope, permission, approval, budget, timeout, network, sandbox, and
 control constraints.
 
+There is exactly one live input gate per job. Cursor provider IDs containing
+newline-separated aliases are split before persistence: `requestId` is the
+canonical first ID and `requestAliases[]` contains the remaining published IDs.
+A response may name any of them; intake stores the canonical ID. An ID outside
+that set is rejected synchronously without queuing a command. A genuinely
+distinct request arriving while one is live is rejected as another pending
+request, so two decision surfaces are never collapsed into one record.
+
+For Cursor ACP `cursor/create_plan`, `planEntries[]` carries the latest bounded,
+redacted ACP checklist held by the adapter. It is not assigned to
+`planning.primary`, presented as structural JSON, or compared for ambiguity.
+
 Every `plan-confirmation` sets `requiresHumanDecision: true`. This is a
 machine-readable safety boundary, not a forge-resistant human-presence
 attestation: the current CLI, TUI, and MCP transports carry no authenticated
@@ -285,7 +297,11 @@ Question waiting time remains inside the original wall-clock deadline and is
 accumulated as `blockedMs` on an existing P2b attempt lease. While phase is
 `user-input-required`, derived activity never reports a stall. Expiry always
 rejects continuation with `USER_INPUT_REQUIRED`, `defaultAction: reject`, and
-`stopReason: input-timeout`; no answer or plan approval is fabricated.
+`stopReason: input-timeout`; no answer or plan approval is fabricated. The
+historical `pendingInput` gains `timedOut` and `timedOutAt`, phase becomes
+`input-timeout` until ordinary terminalization, and `attention` becomes null.
+Fleet and `blockedOnInput` projections therefore agree that no live answer is
+pending while inspection retains the expired question.
 `cursor/update_todos` and `cursor/task` remain non-round-trip progress inputs.
 
 ACP permissions remain deny-by-default. Force-level jobs choose only an advertised `allow_once`; `allow_always` is never selected. Approval events carry normalized tool kind, repo-relative paths under cwd (plus explicit outside paths), domain, command, and `ambiguous: true` for shell-like requests lacking a structured command.

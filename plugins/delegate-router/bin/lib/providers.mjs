@@ -84,6 +84,7 @@ import {
   createAttemptDriver
 } from './attempt-driver.mjs';
 import { executeVerification } from './verification-runner.mjs';
+import { pendingRequestIds, pendingRequestMatches } from './response-contract.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
@@ -431,8 +432,8 @@ function answerPlanCommand(jobId, claimed) {
   const pending = job.pendingInput;
   if (pending?.origin !== 'plan-first' || pending.kind !== 'plan-confirmation') return null;
   if (command.type !== 'respond') return null;
-  if (command.requestId && command.requestId !== pending.requestId) {
-    completeCommand(jobId, claimed, { ok: false, error: `response targets ${command.requestId}; pending request is ${pending.requestId}` });
+  if (command.requestId && !pendingRequestMatches(pending, command.requestId)) {
+    completeCommand(jobId, claimed, { ok: false, error: `response targets ${command.requestId}; pending request accepts ${pendingRequestIds(pending).join(', ')}` });
     return { decision: 'invalid' };
   }
   if (typeof command.accept !== 'boolean') {
@@ -1984,7 +1985,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.63.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.64.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -3102,14 +3103,17 @@ async function runCursorAcpTransport(job, driver) {
       }
       if (pendingInput) throw brokerError('USER_INPUT_REQUIRED', `another Cursor input request is already pending: ${pendingInput.requestId}`, { provider: job.provider });
       ephemeral.output();
-      const requestId = String(params.requestId || params.id || params.toolCallId || `cursor-input-${crypto.randomUUID()}`);
+      const providerRequestIds = cursorProviderIdentifiers(params.requestId || params.id || params.toolCallId);
+      if (!providerRequestIds.length) providerRequestIds.push(`cursor-input-${crypto.randomUUID()}`);
       const timeout = Math.max(1, Math.min(cursorInputTimeoutMs(), deadline - Date.now()));
       const durable = normalizeCoordinatorQuestion(loadJob(job.id), params, {
         method,
-        requestId,
+        requestIds: providerRequestIds,
+        planEntries: method === 'cursor/create_plan' ? planHolder.entries : null,
         requestedAt: Date.now(),
         timeoutMs: timeout
       });
+      const requestId = durable.requestId;
       beginCoordinatorQuestion(job.id, durable, 'cursor-acp');
       appendJobEvent(job.id, 'input.requested', durable, { sessionId });
       return new Promise((resolve, reject) => {
@@ -3131,7 +3135,15 @@ async function runCursorAcpTransport(job, driver) {
           reject(error);
         }, timeout);
         timer.unref?.();
-        pendingInput = { requestId, method, question: durable, resolve, reject, timer };
+        pendingInput = {
+          requestId,
+          ...(durable.requestAliases?.length ? { requestAliases: durable.requestAliases } : {}),
+          method,
+          question: durable,
+          resolve,
+          reject,
+          timer
+        };
       });
     }
   });
@@ -3140,7 +3152,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.63.0' }
+      clientInfo: { name: 'delegate-router', version: '0.64.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -3328,8 +3340,8 @@ async function runCursorAcpTransport(job, driver) {
         } else if (command.type === 'respond') {
           if (!pendingInput) {
             completeCommand(job.id, claimed, { ok: false, error: 'no Cursor input request is pending' });
-          } else if (command.requestId && command.requestId !== pendingInput.requestId) {
-            completeCommand(job.id, claimed, { ok: false, error: `response targets ${command.requestId}; pending request is ${pendingInput.requestId}` });
+          } else if (command.requestId && !pendingRequestMatches(pendingInput, command.requestId)) {
+            completeCommand(job.id, claimed, { ok: false, error: `response targets ${command.requestId}; pending request accepts ${pendingRequestIds(pendingInput).join(', ')}` });
           } else {
             const response = cursorInputResponse(pendingInput.method, command);
             const requestId = pendingInput.requestId;

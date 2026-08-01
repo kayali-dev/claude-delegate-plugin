@@ -141,7 +141,7 @@ input.on('line', (line) => {
   } else if (message.method === 'session/set_config_option') {
     send({ jsonrpc: '2.0', id: message.id, result: {} });
   } else if (message.method === 'session/prompt') {
-    if (scenario === 'ask-question' || scenario === 'create-plan' || scenario === 'permission-force') {
+    if (scenario === 'ask-question' || scenario === 'create-plan' || scenario === 'create-plan-alias' || scenario === 'permission-force') {
       pendingPromptId = message.id;
       pendingCustomId = nextServerId++;
       if (scenario === 'permission-force') {
@@ -158,12 +158,25 @@ input.on('line', (line) => {
         });
         return;
       }
+      if (scenario.startsWith('create-plan')) {
+        send({ jsonrpc: '2.0', method: 'session/update', params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'plan',
+            entries: [
+              'Confirm the retry contract',
+              'Edit only if verification finds a gap',
+              'Run the focused handoff test'
+            ]
+          }
+        } });
+      }
       send({
         jsonrpc: '2.0', id: pendingCustomId,
         method: scenario === 'ask-question' ? 'cursor/ask_question' : 'cursor/create_plan',
         params: scenario === 'ask-question'
           ? { requestId: 'question-1', question: 'Which target?' }
-          : { requestId: 'plan-1', plan: [{ step: 'Edit one file' }] }
+          : { requestId: 'call-plan-1\nfc_plan_1' }
       });
     } else {
       send({ jsonrpc: '2.0', method: 'session/update', params: {

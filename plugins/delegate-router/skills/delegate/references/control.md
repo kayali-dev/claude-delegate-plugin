@@ -320,7 +320,17 @@ Cursor `cursor/ask_question` and `cursor/create_plan` requests are blocking cont
 - Plan confirmation: MCP `delegate_respond accept=true|false`, or `delegate-jobs respond <id> --expected-revision N --request-id ... --accept` / `--reject`.
 - Free-form question: MCP `delegate_respond answer="..."`, or `delegate-jobs respond <id> --expected-revision N --request-id ... --answer "..."`.
 
-An answer-only plan response fails before command intake and names `--accept` / `--reject`. CLI and MCP return only after the command is applied or rejected; success identifies the resolved request, its kind, and its outcome instead of reporting intake as `accepted`. Retry the same response with the same `commandId`. No answer or plan approval is fabricated. `DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS` (default 300) bounds the wait; expiry rejects the provider request and fails with `stopReason: input-timeout`.
+ACP newline-composite IDs are canonicalized before `pendingInput` is published.
+Use its canonical `requestId` or any `requestAliases[]` entry; both resolve the
+same gate. Any other ID fails at submit time and creates no command. The broker
+admits only one live gate per job, so a distinct ACP or back-channel request is
+rejected while another is pending rather than being hidden behind it.
+
+Cursor `plan-confirmation` records include the adapter's current bounded
+`planEntries[]` checklist. Review it inline, but do not treat it as
+`planning.primary` or structural ambiguity evidence.
+
+An answer-only plan response fails before command intake and names `--accept` / `--reject`. CLI and MCP return only after the command is applied or rejected; success identifies the resolved request, its kind, and its outcome instead of reporting intake as `accepted`. Retry the same response with the same `commandId`. No answer or plan approval is fabricated. `DELEGATE_CURSOR_INPUT_TIMEOUT_SECONDS` (default 300) bounds the wait; expiry rejects the provider request and fails with `stopReason: input-timeout`. The expired question remains inspectable with `timedOut: true`, while phase and attention no longer report a live input gate.
 
 Managed sessions also receive the separate `delegate-backchannel-mcp`.
 Codex and Cursor headless use it for the free-form question path that ACP

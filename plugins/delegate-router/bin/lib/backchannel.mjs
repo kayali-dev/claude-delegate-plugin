@@ -11,7 +11,11 @@ import {
   updateManagedJob
 } from './control.mjs';
 import { brokerError } from './errors.mjs';
-import { validateBackchannelResponse } from './response-contract.mjs';
+import {
+  pendingRequestIds,
+  pendingRequestMatches,
+  validateBackchannelResponse
+} from './response-contract.mjs';
 import { jobsDir, loadJob } from './state.mjs';
 
 const QUESTION_MAX = 8_192;
@@ -20,6 +24,8 @@ const OPTION_COUNT_MAX = 12;
 const MILESTONE_MAX = 4_096;
 const DIFF_MAX_DEFAULT = 12_000;
 const ANSWER_MAX = 16_384;
+const PLAN_ENTRY_COUNT_MAX = 64;
+const REQUEST_ID_COUNT_MAX = 16;
 const URGENCIES = new Set(['low', 'normal', 'high', 'blocking']);
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 export const BACKCHANNEL_TOOLS = Object.freeze([
@@ -127,6 +133,34 @@ function cursorQuestionText(method, params = {}) {
   return 'The worker needs coordinator guidance before work can continue.';
 }
 
+function durableQuestionId(value) {
+  const requested = String(value || '');
+  return /^[A-Za-z0-9_.:-]{1,128}$/.test(requested)
+    ? requested
+    : `worker-question-${requested
+      ? crypto.createHash('sha256').update(requested).digest('hex').slice(0, 24)
+      : crypto.randomUUID()}`;
+}
+
+function coordinatorRequestIdentity(input, options) {
+  const supplied = Array.isArray(options.requestIds)
+    ? options.requestIds
+    : [options.requestId || input.requestId || input.id || input.toolCallId || ''];
+  const requestIds = [...new Set(supplied.slice(0, REQUEST_ID_COUNT_MAX)
+    .filter((value) => value != null && String(value).length > 0)
+    .map(durableQuestionId))];
+  if (!requestIds.length) requestIds.push(durableQuestionId(''));
+  return {
+    requestId: requestIds[0],
+    ...(requestIds.length > 1 ? { requestAliases: requestIds.slice(1) } : {})
+  };
+}
+
+function boundedPlanEntries(value) {
+  if (!Array.isArray(value)) return [];
+  return redact(value.slice(0, PLAN_ENTRY_COUNT_MAX), '', OPTION_MAX);
+}
+
 export function normalizeCoordinatorQuestion(job, input = {}, options = {}) {
   const method = options.method || 'ask_coordinator';
   const args = method === 'ask_coordinator'
@@ -138,23 +172,28 @@ export function normalizeCoordinatorQuestion(job, input = {}, options = {}) {
       };
   const requestedAt = Number(options.requestedAt || Date.now());
   const timeoutMs = Number(options.timeoutMs || inputTimeoutMs(job));
-  const requestedId = String(options.requestId || input.requestId || input.id || input.toolCallId || '');
-  const requestId = /^[A-Za-z0-9_.:-]{1,128}$/.test(requestedId)
-    ? requestedId
-    : `worker-question-${requestedId
-      ? crypto.createHash('sha256').update(requestedId).digest('hex').slice(0, 24)
-      : crypto.randomUUID()}`;
+  const requestIdentity = coordinatorRequestIdentity(input, options);
+  const planEntries = method === 'cursor/create_plan'
+    ? boundedPlanEntries(options.planEntries ?? input.entries ?? input.plan?.entries ?? input.plan)
+    : [];
   const cap = diffCap();
   const diffSoFar = String(redact(jobDiff(job.id), '', cap));
+  const {
+    requestId: ignoredRequestId,
+    id: ignoredId,
+    toolCallId: ignoredToolCallId,
+    ...decisionInput
+  } = input;
   const stuckOn = method === 'cursor/create_plan'
-    ? String(redact(JSON.stringify(redact(input, '', QUESTION_MAX)), '', QUESTION_MAX))
+    ? String(redact(JSON.stringify(redact(decisionInput, '', QUESTION_MAX)), '', QUESTION_MAX))
     : args.question;
   return redact({
-    requestId,
+    ...requestIdentity,
     kind: method === 'cursor/create_plan' ? 'plan-confirmation' : 'question',
     attention: { state: 'user-input-required' },
     ...(method === 'cursor/create_plan' ? { requiresHumanDecision: true } : {}),
     question: args.question,
+    ...(planEntries.length ? { planEntries } : {}),
     options: args.options,
     urgency: args.urgency,
     context: {
@@ -173,7 +212,7 @@ export function beginCoordinatorQuestion(jobId, question, origin = 'backchannel'
   return updateManagedJob(jobId, (current) => {
     if (TERMINAL.has(current.status)) throw brokerError('JOB_TERMINAL', `job is already ${current.status}`, { provider: current.provider });
     if (current.pendingInput && current.pendingInput.timedOut !== true) {
-      throw brokerError('USER_INPUT_REQUIRED', `another worker question is already pending: ${current.pendingInput.requestId}`, { provider: current.provider });
+      throw brokerError('USER_INPUT_REQUIRED', `another worker question is already pending: ${pendingRequestIds(current.pendingInput).join(', ')}`, { provider: current.provider });
     }
     current.phase = 'user-input-required';
     current.stopReason = 'USER_INPUT_REQUIRED';
@@ -181,6 +220,7 @@ export function beginCoordinatorQuestion(jobId, question, origin = 'backchannel'
     current.attention = {
       state: 'user-input-required',
       requestId: question.requestId,
+      ...(question.requestAliases?.length ? { requestAliases: question.requestAliases } : {}),
       kind: question.kind || 'question',
       requiresHumanDecision: question.requiresHumanDecision === true
         || question.kind === 'plan-confirmation',
@@ -216,7 +256,7 @@ export function resolveCoordinatorQuestion(jobId, question, outcome, origin = 'b
       current.attention = null;
       current.lastInputResponse = { requestId: question.requestId, respondedAt: finishedAt };
     } else {
-      current.phase = 'user-input-required';
+      current.phase = 'input-timeout';
       current.stopReason = 'input-timeout';
       current.pendingInput = { ...question, origin, timedOut: true, timedOutAt: finishedAt };
       current.attention = null;
@@ -253,8 +293,8 @@ export async function askCoordinator(jobId, rawArgs) {
     for (const claimed of claimCommands(jobId, { includeTypes: ['respond'] })) {
       try {
         const command = claimed.command;
-        if (command.requestId && command.requestId !== question.requestId) {
-          completeCommand(jobId, claimed, { ok: false, error: `response targets ${command.requestId}; pending request is ${question.requestId}` });
+        if (command.requestId && !pendingRequestMatches(question, command.requestId)) {
+          completeCommand(jobId, claimed, { ok: false, error: `response targets ${command.requestId}; pending request accepts ${pendingRequestIds(question).join(', ')}` });
           continue;
         }
         const response = answerFromCommand(command);

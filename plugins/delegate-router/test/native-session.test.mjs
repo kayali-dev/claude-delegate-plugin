@@ -111,6 +111,13 @@ test('native context is bounded, closed-field redacted, and orders actionable st
       pendingInput: { question: 'secret question' },
       updatedAt: 49
     }),
+    job('codex-expired-b-abcdef', {
+      status: 'running',
+      phase: 'input-timeout',
+      stopReason: 'input-timeout',
+      pendingInput: { question: 'expired secret question', timedOut: true },
+      updatedAt: 49
+    }),
     job('codex-review-c-abcdef', {
       acceptance: { state: 'ready-for-review' },
       providerSessionId: 'provider-session',
@@ -139,6 +146,7 @@ test('native context is bounded, closed-field redacted, and orders actionable st
   assert.ok(!context.includes('do-not-render-this-path'));
   assert.ok(!context.includes('secret diff'));
   assert.ok(!context.includes('secret free-form error'));
+  assert.ok(!context.includes('human input: codex-expired-b-abcdef'));
   assert.equal(NATIVE_CONTEXT_MAX_BYTES, 2_048);
 });
 

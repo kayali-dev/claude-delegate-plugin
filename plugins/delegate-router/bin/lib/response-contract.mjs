@@ -1,5 +1,7 @@
 import { brokerError } from './errors.mjs';
 
+const REQUEST_ID_COUNT_MAX = 16;
+
 const AUTHORITY_FIELDS = new Set([
   'allowedPaths', 'scope', 'permissions', 'approval', 'approvals', 'budget',
   'timeout', 'timeoutSeconds', 'network', 'sandbox', 'sandboxOff',
@@ -10,6 +12,19 @@ function responseObject(command) {
   return command.response && typeof command.response === 'object' && !Array.isArray(command.response)
     ? command.response
     : null;
+}
+
+export function pendingRequestIds(pending) {
+  if (!pending || typeof pending !== 'object') return [];
+  const values = [
+    pending.requestId,
+    ...(Array.isArray(pending.requestAliases) ? pending.requestAliases : [])
+  ].slice(0, REQUEST_ID_COUNT_MAX);
+  return [...new Set(values.filter((value) => typeof value === 'string' && value.length > 0))];
+}
+
+export function pendingRequestMatches(pending, requestId) {
+  return typeof requestId === 'string' && pendingRequestIds(pending).includes(requestId);
 }
 
 export function validateBackchannelResponse(command) {

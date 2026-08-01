@@ -279,7 +279,11 @@ Managed Codex, Cursor ACP, and Cursor headless workers receive a broker-owned
 question-only back-channel. A worker's `ask_coordinator` call enters
 `user-input-required` with one normalized, redacted question plus bounded
 stuck context, diff so far, and options considered. Inspect the current
-revision and follow the pending request's contract. A `plan-confirmation`
+revision and follow the pending request's contract. Only one live input gate
+may exist per job. Cursor newline-composite request IDs are split at ingestion:
+`pendingInput.requestId` is canonical and `requestAliases[]` lists every other
+published ID accepted for that same gate. An ID outside that set fails before
+command intake. A `plan-confirmation`
 requires the boolean MCP decision `delegate_respond accept=true|false`, or CLI
 `delegate-jobs respond <id> --expected-revision N --request-id <request> --accept`
 or the same command with `--reject`; a free-form `--answer` is invalid for a
@@ -296,11 +300,16 @@ command. The emitted line preserves the same marker as
 acknowledgement, approval, or consent, and an agent must never execute the
 decision unattended. After a human reviews the pulled record, the existing
 revisioned CLI, TUI, and MCP boolean decision paths remain available.
+Cursor ACP plan confirmations also carry the latest bounded `planEntries[]`
+checklist inline. Those entries are decision evidence only: they are not a
+structural-plan artifact and never enter the ambiguity comparator.
 
 Do not silently let a question expire. The default timeout is 300 seconds and
 the declared default is rejection with `stopReason: input-timeout`; blocked
 time still consumes the original job wall-clock budget but is excluded from
-stall detection. `report_progress` and Cursor's native todo/task updates need
+stall detection. Expiry clears live attention, moves phase out of
+`user-input-required`, and retains `pendingInput.timedOut` as history rather
+than an answerable gate. `report_progress` and Cursor's native todo/task updates need
 no response. If MCP injection is unavailable, the job uses its previous
 stop-and-report behavior. Cursor coordinator corrections remain restart-only,
 even when the worker reached the coordinator live through this back-channel.

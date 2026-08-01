@@ -175,6 +175,13 @@ test('job detail pins live planning state at the transcript tail and obeys heigh
   const relaxed = detailViewModel(store, ui, { width: 120, height: HEIGHT_PRESSURE_MAX_ROWS + 1 });
   assert.equal(relaxed.panes[0].summary.rows.length, 2, 'relaxed height retains plan state and the tab quantity summary');
   assert.match(relaxed.panes[0].summary.rows[1].text, /40 blocks/);
+
+  job.phase = 'input-timeout';
+  job.stopReason = 'input-timeout';
+  job.pendingInput = { ...job.pendingInput, timedOut: true, timedOutAt: NOW - 1_000 };
+  const timedOut = detailViewModel(store, ui, { width: 120, height: HEIGHT_PRESSURE_MAX_ROWS });
+  assert.doesNotMatch(timedOut.panes[0].summary.rows[0].text, /confirmation pending/);
+  assert.equal(timedOut.panes[0].summary.rows[0].badge, undefined);
 });
 
 test('job detail rereads planning state without reselecting and exposes the complete appended Plan tab', () => {

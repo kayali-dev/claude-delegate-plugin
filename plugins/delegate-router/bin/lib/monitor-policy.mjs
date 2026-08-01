@@ -104,6 +104,9 @@ function blockedApproval(events) {
 }
 
 function inputOutstanding(job, events) {
+  if (job?.pendingInput?.timedOut === true
+    || job?.phase === 'input-timeout'
+    || job?.stopReason === 'input-timeout') return false;
   if (job?.pendingInput && job.pendingInput.timedOut !== true) return true;
   if (job?.phase === 'user-input-required') return true;
   const requested = latestEvent(events, (event) => event.type === 'input.requested');

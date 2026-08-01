@@ -1257,6 +1257,7 @@ function planningDegradationReason(job) {
 }
 
 function planningConfirmationPending(job) {
+  if (job.pendingInput?.timedOut === true || job.phase === 'input-timeout') return false;
   if (job.pendingInput?.kind === 'plan-confirmation') return true;
   const state = planningState(job);
   return job.planning?.confirmationRequired === true && !['confirmed', 'declined'].includes(state);

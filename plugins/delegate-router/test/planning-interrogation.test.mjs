@@ -714,6 +714,8 @@ test('plan-first confirmation continues the same Codex thread and switches only 
   });
   const running = runManagedProvider(created);
   const presented = await waitFor(created.id, (job) => job.pendingInput?.kind === 'plan-confirmation', "pendingInput.kind === 'plan-confirmation'");
+  assert.equal(presented.provider, 'codex');
+  assert.equal(Object.hasOwn(presented.pendingInput, 'requestAliases'), false);
   assert.equal(presented.status, 'running');
   assert.equal(presented.planning.state, 'awaiting-confirmation');
   assert.equal(presented.pendingInput.requiresHumanDecision, true);

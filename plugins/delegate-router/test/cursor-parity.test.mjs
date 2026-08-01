@@ -274,7 +274,7 @@ test('ACP installed-build fallback closes anonymous message bursts at tools with
   assert.equal(new TranscriptProjector().project(events).filter((block) => block.kind === 'message').length, 3);
 }));
 
-for (const scenario of ['ask-question', 'create-plan']) {
+for (const scenario of ['ask-question', 'create-plan', 'create-plan-alias']) {
   test(`${scenario} blocks for revisioned coordinator response and idempotent retry`, async () => isolated(async (cwd) => {
     const job = createManagedJob({ provider: 'cursor', mode: 'review', model: 'composer-2.5[fast=true]', cwd, prompt: 'review' });
     const running = runManagedProvider(job);
@@ -283,11 +283,49 @@ for (const scenario of ['ask-question', 'create-plan']) {
       return current.pendingInput ? current : null;
     }, 'a pending Cursor input request');
     assert.equal(waiting.phase, 'user-input-required');
+    const isPlan = scenario.startsWith('create-plan');
+    if (isPlan) {
+      assert.equal(waiting.pendingInput.requestId, 'call-plan-1');
+      assert.deepEqual(waiting.pendingInput.requestAliases, ['fc_plan_1']);
+      assert.equal(waiting.pendingInput.requiresHumanDecision, true);
+      assert.equal(waiting.pendingInput.defaultAction, 'reject');
+      assert.deepEqual(waiting.pendingInput.planEntries, [
+        'Confirm the retry contract',
+        'Edit only if verification finds a gap',
+        'Run the focused handoff test'
+      ]);
+      assert.equal(waiting.planning?.primary ?? null, null);
+      assert.equal(waiting.planning?.comparison ?? null, null);
+      assert.ok(!JSON.stringify(waiting.pendingInput).includes('call-plan-1\\nfc_plan_1'));
+    }
+    if (scenario === 'create-plan') {
+      const beforeMismatchRevision = waiting.revision;
+      const mismatch = await runNode([
+        jobsCli,
+        'respond',
+        job.id,
+        '--expected-revision', String(waiting.revision),
+        '--request-id', 'not-a-pending-request',
+        '--command-id', 'wrong-cursor-plan-id',
+        '--accept'
+      ]);
+      assert.equal(mismatch.status, 1);
+      assert.equal(mismatch.stdout, '');
+      assert.match(mismatch.stderr, /response targets not-a-pending-request/);
+      const afterMismatch = inspectJob(job.id);
+      assert.equal(afterMismatch.revision, beforeMismatchRevision);
+      assert.equal(afterMismatch.controls?.['wrong-cursor-plan-id'], undefined);
+      assert.equal(readJobEvents(job.id).some((event) => event.type === 'command.rejected'
+        && event.data.commandId === 'wrong-cursor-plan-id'), false);
+    }
     const commandId = `${scenario}-response`;
+    const responseRequestId = scenario === 'create-plan-alias'
+      ? waiting.pendingInput.requestAliases[0]
+      : waiting.pendingInput.requestId;
     const command = scenario === 'ask-question'
-      ? { type: 'respond', commandId, requestId: waiting.pendingInput.requestId, answer: 'src' }
-      : { type: 'respond', commandId, requestId: waiting.pendingInput.requestId, accept: false, answer: 'revise scope' };
-    const responseArgs = [jobsCli, 'respond', job.id, '--expected-revision', String(waiting.revision), '--request-id', waiting.pendingInput.requestId, '--command-id', commandId];
+      ? { type: 'respond', commandId, requestId: responseRequestId, answer: 'src' }
+      : { type: 'respond', commandId, requestId: responseRequestId, accept: false, answer: 'revise scope' };
+    const responseArgs = [jobsCli, 'respond', job.id, '--expected-revision', String(waiting.revision), '--request-id', responseRequestId, '--command-id', commandId];
     if (scenario === 'ask-question') responseArgs.push('--answer', 'src');
     else responseArgs.push('--reject', '--answer', 'revise scope');
     const cli = await runNode(responseArgs);
@@ -296,15 +334,28 @@ for (const scenario of ['ask-question', 'create-plan']) {
     assert.equal(responseResult.command.claimed, true);
     assert.equal(responseResult.command.state, 'applied');
     assert.equal(responseResult.request.answered, true);
-    assert.equal(responseResult.request.kind, scenario === 'create-plan' ? 'plan-confirmation' : 'question');
-    assert.equal(responseResult.request.outcome, scenario === 'create-plan' ? 'rejected' : 'answered');
+    assert.equal(responseResult.request.id, waiting.pendingInput.requestId);
+    assert.equal(responseResult.request.kind, isPlan ? 'plan-confirmation' : 'question');
+    assert.equal(responseResult.request.outcome, isPlan ? 'rejected' : 'answered');
     const duplicate = submitControl(job.id, command, waiting.revision);
     assert.equal(duplicate.duplicate, true);
     await running;
     const completed = inspectJob(job.id);
     assert.equal(completed.status, 'completed');
     assert.equal(completed.pendingInput, null);
-    assert.ok(readJobEvents(job.id).some((event) => event.type === 'input.resolved' && event.data.outcome === 'answered'));
+    const events = readJobEvents(job.id);
+    assert.ok(events.some((event) => event.type === 'input.resolved' && event.data.outcome === 'answered'));
+    if (isPlan) {
+      const requested = events.find((event) => event.type === 'input.requested');
+      assert.equal(requested.data.requestId, 'call-plan-1');
+      assert.deepEqual(requested.data.requestAliases, ['fc_plan_1']);
+      assert.ok(!JSON.stringify(events).includes('call-plan-1\\nfc_plan_1'));
+    }
+    if (scenario === 'create-plan-alias') {
+      const submitted = events.find((event) => event.type === 'input.response.requested');
+      assert.equal(submitted.data.requestId, 'call-plan-1');
+      assert.equal(submitted.data.requestAlias, 'fc_plan_1');
+    }
   }, scenario));
 }
 
@@ -315,6 +366,8 @@ test('blocking Cursor input rejects after the configured timeout with a durable 
   const failed = inspectJob(job.id);
   assert.equal(failed.status, 'failed');
   assert.equal(failed.stopReason, 'input-timeout');
+  assert.equal(failed.phase, 'failed');
+  assert.equal(failed.attention, null);
   assert.equal(failed.pendingInput.timedOut, true);
 }, 'ask-question'));
 

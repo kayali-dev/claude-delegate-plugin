@@ -908,17 +908,33 @@ test('phase and blocked-on-input filters return exactly live human gates on libr
   });
   updateManagedJob(expired.id, (current) => {
     current.status = 'running';
-    current.phase = 'user-input-required';
+    current.phase = 'input-timeout';
     current.pid = process.pid;
-    current.pendingInput = { requestId: 'gate-expired', kind: 'question', timedOut: true };
+    current.pendingInput = { requestId: 'gate-expired', kind: 'question', timedOut: true, timedOutAt: 1234 };
+    current.attention = null;
   });
   updateManagedJob(completed.id, (current) => {
     current.status = 'completed';
     current.phase = 'completed';
   });
 
-  assert.deepEqual(listManagedJobs({ phase: ['user-input-required'] }).jobs.map((row) => row.id).sort(), [expired.id, gated.id].sort());
+  assert.deepEqual(listManagedJobs({ phase: ['user-input-required'] }).jobs.map((row) => row.id), [gated.id]);
   assert.deepEqual(listManagedJobs({ blockedOnInput: true }).jobs.map((row) => row.id), [gated.id]);
+  const expiredRow = listManagedJobs({ phase: ['input-timeout'] }).jobs.find((row) => row.id === expired.id);
+  assert.deepEqual(expiredRow.pendingInput, {
+    requestId: 'gate-expired',
+    kind: 'question',
+    requiresHumanDecision: false,
+    expiresAt: null,
+    timedOut: true,
+    timedOutAt: 1234
+  });
+  assert.equal(expiredRow.attention, null);
+  const expiredRevision = inspectJob(expired.id).revision;
+  assert.throws(() => submitControl(expired.id, {
+    type: 'respond', requestId: 'gate-expired', answer: 'too late', commandId: 'expired-response'
+  }, expiredRevision), (error) => error.code === 'INVALID_REQUEST' && /no live pending/.test(error.message));
+  assert.equal(inspectJob(expired.id).controls?.['expired-response'], undefined);
 
   const cli = spawnSync(process.execPath, [jobsCli, 'list', '--blocked-on-input', '--json'], {
     env: process.env,
@@ -926,6 +942,15 @@ test('phase and blocked-on-input filters return exactly live human gates on libr
   });
   assert.equal(cli.status, 0, cli.stderr);
   assert.deepEqual(JSON.parse(cli.stdout).map((row) => row.id), [gated.id]);
+  const expiredCli = spawnSync(process.execPath, [jobsCli, 'list', '--phase', 'input-timeout', '--json'], {
+    env: process.env,
+    encoding: 'utf8'
+  });
+  assert.equal(expiredCli.status, 0, expiredCli.stderr);
+  const expiredCliRow = JSON.parse(expiredCli.stdout).find((row) => row.id === expired.id);
+  assert.equal(expiredCliRow.phase, 'input-timeout');
+  assert.equal(expiredCliRow.pendingInput.timedOut, true);
+  assert.equal(expiredCliRow.attention, null);
 
   const mcp = spawnSync(process.execPath, [controlMcp], {
     env: process.env,

@@ -90,6 +90,21 @@ test('monitor edge detection covers every actionable class in priority order', (
   }
 });
 
+test('an auto-rejected timed-out question is not emitted as live input attention', () => {
+  const edges = detectActionableEdges(snapshot({
+    id: 'timed-out-input',
+    status: 'failed',
+    phase: 'failed',
+    stopReason: 'input-timeout',
+    errorCode: 'USER_INPUT_REQUIRED',
+    pendingInput: { requestId: 'expired-question', kind: 'question', timedOut: true }
+  }, [
+    event(1, 'input.requested', { requestId: 'expired-question' }),
+    event(2, 'input.resolved', { requestId: 'expired-question', outcome: 'timeout', defaultAction: 'reject' })
+  ]), { now: NOW, stallMs: 10 * 60 * 1000 });
+  assert.equal(edges.some((edge) => edge.key.startsWith('needs-input:')), false);
+});
+
 test('budget and allowance edges use distinct remedies and suppress only same-cause terminal redundancy', () => {
   const budgetPolicy = new NotificationPolicy({ cooldownMs: 0, maxLinesPerMinute: 20 });
   budgetPolicy.bootstrap([snapshot({ id: 'budget-once' })], { now: NOW });
