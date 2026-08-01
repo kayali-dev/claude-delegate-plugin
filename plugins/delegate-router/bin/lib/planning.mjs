@@ -398,11 +398,15 @@ function normalizedDecision(choice) {
   if (anchored) {
     return {
       key: `ordered:${anchored.join('>')}`,
-      summary: anchored.join(' -> ')
+      summary: anchored.join(' -> '),
+      ordered: true,
+      orderEvidence: 'anchored-precedence',
+      parts: anchored
     };
   }
 
-  const hasExplicitOrder = /\b(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|then|next|finally|lastly)\b|\b\d+\s*[.)]|;/.test(source);
+  const explicitSequence = /\b(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|then|next|finally|lastly)\b|\b\d+\s*[.)]/.test(source);
+  const hasExplicitOrder = explicitSequence || source.includes(';');
   const marked = source
     .replace(/\b(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|then|next|finally|lastly)\b\s*[:,.)-]*/g, '|')
     .replace(/\b\d+\s*[.)]\s*/g, '|')
@@ -415,7 +419,10 @@ function normalizedDecision(choice) {
   const normalized = hasExplicitOrder ? steps : [[...new Set(steps.flatMap((step) => step.split(' ')))].sort().join(' ')];
   return {
     key: `${hasExplicitOrder ? 'ordered' : 'decision'}:${normalized.join('>')}`,
-    summary: normalized.join(' -> ')
+    summary: normalized.join(' -> '),
+    ordered: hasExplicitOrder,
+    orderEvidence: explicitSequence ? 'explicit-sequence' : null,
+    parts: normalized
   };
 }
 
@@ -518,12 +525,198 @@ function structuralDifference(dimension, left, right, reason, details = {}) {
   return { dimension, left, right, reason, ...details };
 }
 
+function structuralSignal(dimension, strength, effect, reason, details = {}) {
+  return { dimension, strength, effect, reason, ...details };
+}
+
+function blockingDifference(dimension, left, right, reason, details = {}) {
+  return structuralDifference(dimension, left, right, reason, {
+    strength: 'strong',
+    blocking: true,
+    ...details
+  });
+}
+
+function nonBlockingVariance(dimension, left, right, reason, strength = 'weak', details = {}) {
+  return structuralDifference(dimension, left, right, reason, {
+    strength,
+    blocking: false,
+    ...details
+  });
+}
+
 function assumptionIndex(assumptions) {
   return new Map(assumptions.map((entry) => [semanticLabelKey(entry.topic), entry]));
 }
 
 function approachShape(approach) {
   return approach.map((entry) => `${entry.kind}:${semanticLabelKey(entry.component)}`).sort();
+}
+
+function sameMembers(left, right) {
+  return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+}
+
+function labelTokens(value) {
+  return new Set(semanticLabelKey(value).split('-').filter(Boolean));
+}
+
+function labelOverlap(left, right) {
+  const a = labelTokens(left);
+  const b = labelTokens(right);
+  if (!a.size || !b.size) return 0;
+  return [...a].filter((token) => b.has(token)).length / Math.min(a.size, b.size);
+}
+
+function relatedLabelPairs(left, right) {
+  return left.flatMap((a) => right
+    .map((b) => ({ left: a, right: b, overlap: labelOverlap(a, b) }))
+    .filter((entry) => entry.overlap >= 0.5))
+    .sort((a, b) => b.overlap - a.overlap)
+    .slice(0, 12);
+}
+
+function decisionPartTerm(part) {
+  const separator = part.indexOf(' ');
+  return separator < 0 ? part : part.slice(separator + 1);
+}
+
+function sharedOrderIsInverted(leftDecision, rightDecision) {
+  if (!leftDecision.orderEvidence || !rightDecision.orderEvidence) return false;
+  const termIndex = (parts) => {
+    const result = new Map();
+    for (const part of parts) {
+      const term = decisionPartTerm(part);
+      if (!result.has(term)) result.set(term, result.size);
+    }
+    return result;
+  };
+  const left = termIndex(leftDecision.parts);
+  const right = termIndex(rightDecision.parts);
+  const shared = [...left.keys()].filter((term) => right.has(term));
+  for (let a = 0; a < shared.length; a += 1) {
+    for (let b = a + 1; b < shared.length; b += 1) {
+      const first = shared[a];
+      const second = shared[b];
+      if ((left.get(first) - left.get(second)) * (right.get(first) - right.get(second)) < 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function decisionTerms(choice) {
+  const terms = semanticWords(decisionText(choice))
+    .map((word) => DECISION_TERMS.get(word))
+    .filter(Boolean);
+  return [...new Set(terms)];
+}
+
+function exclusiveDecisionScopeConflict(leftChoice, rightChoice) {
+  const exclusive = (choice) => /\b(?:exclusively|only|solely)\b/.test(semanticSource(choice));
+  const leftExclusive = exclusive(leftChoice);
+  const rightExclusive = exclusive(rightChoice);
+  if (!leftExclusive && !rightExclusive) return false;
+  const leftTerms = decisionTerms(leftChoice);
+  const rightTerms = decisionTerms(rightChoice);
+  if (!leftTerms.length || !rightTerms.length) return false;
+  if (leftExclusive && rightExclusive) return !sameMembers(leftTerms, rightTerms);
+  const allowed = new Set(leftExclusive ? leftTerms : rightTerms);
+  const asserted = leftExclusive ? rightTerms : leftTerms;
+  return asserted.some((term) => !allowed.has(term));
+}
+
+function explicitDecisionConflict(leftChoice, rightChoice, leftDecision, rightDecision) {
+  if (leftDecision.key === rightDecision.key) return false;
+  if (sharedOrderIsInverted(leftDecision, rightDecision)) return true;
+  if (exclusiveDecisionScopeConflict(leftChoice, rightChoice)) return true;
+
+  const words = (choice) => [...new Set(semanticWords(choice)
+    .map(canonicalDecisionWord)
+    .filter((word) => !DECISION_FILLER_WORDS.has(word)))].sort();
+  const leftWords = words(leftChoice);
+  const rightWords = words(rightChoice);
+  const leftNegated = leftWords.includes('not');
+  const rightNegated = rightWords.includes('not');
+  if (leftNegated !== rightNegated) {
+    const leftAssertion = leftWords.filter((word) => word !== 'not');
+    const rightAssertion = rightWords.filter((word) => word !== 'not');
+    const sharedAssertion = overlap(leftAssertion, rightAssertion);
+    const assertionCoverage = sharedAssertion.length
+      / Math.max(1, Math.min(leftAssertion.length, rightAssertion.length));
+    const decisionActions = new Set(DECISION_ACTIONS.values());
+    const sharedAction = sharedAssertion.some((word) => decisionActions.has(word));
+    if (assertionCoverage >= 0.75 && (sharedAction || sharedAssertion.length >= 3)) return true;
+  }
+
+  const defaultSubject = (choice) => {
+    const sourceWords = semanticWords(choice).map(canonicalDecisionWord);
+    const index = sourceWords.indexOf('default');
+    if (index < 1) return null;
+    const knownSubjects = new Set([
+      'broker', 'codex', 'cursor', 'direct', 'headless', 'inline', 'isolated',
+      'shared', 'supervisor', 'worktree'
+    ]);
+    return sourceWords.slice(0, index).filter((word) => knownSubjects.has(word)).at(-1) || null;
+  };
+  const leftDefault = defaultSubject(leftChoice);
+  const rightDefault = defaultSubject(rightChoice);
+  if (leftDefault && rightDefault && leftDefault !== rightDefault) return true;
+
+  const opposingActions = [
+    ['accept', 'reject'],
+    ['extend', 'remove'],
+    ['keep', 'remove'],
+    ['use', 'replace']
+  ];
+  const actionWords = new Set(opposingActions.flat());
+  const leftActions = leftWords.filter((word) => actionWords.has(word));
+  const rightActions = rightWords.filter((word) => actionWords.has(word));
+  const leftSubjects = leftWords.filter((word) => !actionWords.has(word) && word !== 'not');
+  const rightSubjects = rightWords.filter((word) => !actionWords.has(word) && word !== 'not');
+  const sharedSubjects = overlap(leftSubjects, rightSubjects);
+  const subjectCoverage = sharedSubjects.length / Math.max(1, Math.min(leftSubjects.length, rightSubjects.length));
+  return leftActions.length === 1
+    && rightActions.length === 1
+    && subjectCoverage >= 0.75
+    && opposingActions.some(([a, b]) => (
+      (leftActions[0] === a && rightActions[0] === b)
+      || (leftActions[0] === b && rightActions[0] === a)
+    ));
+}
+
+function directApproachConflicts(left, right) {
+  const index = (approach) => {
+    const result = new Map();
+    for (const entry of approach) {
+      const key = semanticLabelKey(entry.component);
+      if (!result.has(key)) result.set(key, { component: entry.component, kinds: new Set() });
+      result.get(key).kinds.add(entry.kind);
+    }
+    return result;
+  };
+  const a = index(left);
+  const b = index(right);
+  return [...a.keys()].filter((key) => b.has(key) && overlap([...a.get(key).kinds], [...b.get(key).kinds]).length === 0)
+    .map((key) => ({
+      component: a.get(key).component,
+      leftKinds: [...a.get(key).kinds].sort(),
+      rightKinds: [...b.get(key).kinds].sort()
+    }));
+}
+
+function comparisonEvidence(assessment, signals, blocking) {
+  const conflict = signals.filter((signal) => signal.effect === 'conflict');
+  const agreement = signals.filter((signal) => signal.effect === 'agreement');
+  return {
+    assessment,
+    blocking,
+    strongestAgreement: agreement.find((signal) => signal.strength === 'strong')?.dimension || null,
+    strongestConflict: conflict.find((signal) => signal.strength === 'strong')?.dimension || null,
+    weakDimensions: signals.filter((signal) => signal.strength === 'weak' && signal.effect === 'variance')
+      .map((signal) => signal.dimension)
+  };
 }
 
 function boundedDifferenceValue(value, limit = 240) {
@@ -545,26 +738,84 @@ export function compareStructuralPlans(leftInput, rightInput) {
   }
   const comparable = [];
   const differences = [];
-  const targetOverlaps = [];
-  for (const dimension of ['files', 'components']) {
-    const a = left.plan.targets[dimension];
-    const b = right.plan.targets[dimension];
-    if (!a.length || !b.length) continue;
-    comparable.push(`targets.${dimension}`);
-    const comparableA = dimension === 'components' ? a.map(semanticLabelKey) : a.map(foldedPathKey);
-    const comparableB = dimension === 'components' ? b.map(semanticLabelKey) : b.map(foldedPathKey);
-    const shared = overlap(comparableA, comparableB);
-    targetOverlaps.push(shared.length > 0);
+  const variances = [];
+  const signals = [];
+  let targetAgreement = false;
+
+  const leftFiles = left.plan.targets.files;
+  const rightFiles = right.plan.targets.files;
+  if (leftFiles.length && rightFiles.length) {
+    comparable.push('targets.files');
+    const a = leftFiles.map(foldedPathKey);
+    const b = rightFiles.map(foldedPathKey);
+    const shared = overlap(a, b);
     if (!shared.length) {
-      differences.push(structuralDifference(`targets.${dimension}`, a, b, 'disjoint-target-sets'));
+      const difference = blockingDifference('targets.files', leftFiles, rightFiles, 'disjoint-target-sets');
+      differences.push(difference);
+      signals.push(structuralSignal('targets.files', 'strong', 'conflict', difference.reason));
+    } else {
+      targetAgreement = true;
+      signals.push(structuralSignal('targets.files', 'strong', 'agreement', 'concrete-file-targets-overlap', {
+        shared: overlap(leftFiles.map(foldedPathKey), rightFiles.map(foldedPathKey))
+      }));
+      if (!sameMembers(a, b)) {
+        const variance = nonBlockingVariance(
+          'targets.files', leftFiles, rightFiles, 'partially-overlapping-file-targets', 'moderate'
+        );
+        variances.push(variance);
+        signals.push(structuralSignal('targets.files', 'moderate', 'variance', variance.reason));
+      }
     }
   }
+
+  const leftComponents = left.plan.targets.components;
+  const rightComponents = right.plan.targets.components;
+  if (leftComponents.length && rightComponents.length) {
+    comparable.push('targets.components');
+    const a = leftComponents.map(semanticLabelKey);
+    const b = rightComponents.map(semanticLabelKey);
+    const shared = overlap(a, b);
+    if (shared.length) targetAgreement = true;
+    if (!sameMembers(a, b)) {
+      const variance = nonBlockingVariance(
+        'targets.components',
+        leftComponents,
+        rightComponents,
+        'component-labels-vary',
+        'weak',
+        { relatedLabels: relatedLabelPairs(leftComponents, rightComponents) }
+      );
+      variances.push(variance);
+      signals.push(structuralSignal('targets.components', 'weak', 'variance', variance.reason));
+    } else {
+      signals.push(structuralSignal('targets.components', 'weak', 'agreement', 'component-labels-match'));
+    }
+  }
+
   if (left.plan.approach.length && right.plan.approach.length) {
     comparable.push('approach.shape');
     const a = left.plan.approach.map((entry) => `${entry.kind}:${entry.component}`);
     const b = right.plan.approach.map((entry) => `${entry.kind}:${entry.component}`);
-    if (JSON.stringify(approachShape(left.plan.approach)) !== JSON.stringify(approachShape(right.plan.approach))) {
-      differences.push(structuralDifference('approach.shape', a, b, 'approach-shapes-differ'));
+    const normalizedA = approachShape(left.plan.approach);
+    const normalizedB = approachShape(right.plan.approach);
+    const directConflicts = directApproachConflicts(left.plan.approach, right.plan.approach);
+    if (JSON.stringify(normalizedA) !== JSON.stringify(normalizedB)) {
+      const kindsA = left.plan.approach.map((entry) => entry.kind);
+      const kindsB = right.plan.approach.map((entry) => entry.kind);
+      const strength = directConflicts.length || !sameMembers(kindsA, kindsB) ? 'moderate' : 'weak';
+      const variance = nonBlockingVariance(
+        'approach.shape', a, b, 'approach-content-labels-or-granularity-vary', strength,
+        { operationDifferences: directConflicts }
+      );
+      variances.push(variance);
+      signals.push(structuralSignal('approach.shape', strength, 'variance', variance.reason));
+    } else if (JSON.stringify(left.plan.approach.map((entry) => `${entry.kind}:${semanticLabelKey(entry.component)}`))
+        !== JSON.stringify(right.plan.approach.map((entry) => `${entry.kind}:${semanticLabelKey(entry.component)}`))) {
+      const variance = nonBlockingVariance('approach.order', a, b, 'approach-order-varies');
+      variances.push(variance);
+      signals.push(structuralSignal('approach.order', 'weak', 'variance', variance.reason));
+    } else {
+      signals.push(structuralSignal('approach.shape', 'moderate', 'agreement', 'approach-content-matches'));
     }
   }
   const leftAssumptions = assumptionIndex(left.plan.assumptions);
@@ -578,12 +829,23 @@ export function compareStructuralPlans(leftInput, rightInput) {
       const a = normalizedDecision(leftEntry.choice);
       const b = normalizedDecision(rightEntry.choice);
       if (a.key !== b.key) {
-        differences.push(structuralDifference(
-          `assumptions.${leftEntry.topic}`,
-          leftEntry.choice,
-          rightEntry.choice,
-          'declared-assumptions-conflict',
-          { decisions: { left: a.summary, right: b.summary } }
+        const dimension = `assumptions.${leftEntry.topic}`;
+        const decisions = { left: a.summary, right: b.summary };
+        if (explicitDecisionConflict(leftEntry.choice, rightEntry.choice, a, b)) {
+          differences.push(blockingDifference(
+            dimension, leftEntry.choice, rightEntry.choice, 'declared-assumptions-conflict', { decisions }
+          ));
+          signals.push(structuralSignal(dimension, 'strong', 'conflict', 'declared-assumptions-conflict'));
+        } else {
+          const variance = nonBlockingVariance(
+            dimension, leftEntry.choice, rightEntry.choice, 'assumption-wording-varies', 'weak', { decisions }
+          );
+          variances.push(variance);
+          signals.push(structuralSignal(dimension, 'weak', 'variance', variance.reason));
+        }
+      } else {
+        signals.push(structuralSignal(
+          `assumptions.${leftEntry.topic}`, 'moderate', 'agreement', 'declared-assumptions-match'
         ));
       }
     }
@@ -594,17 +856,23 @@ export function compareStructuralPlans(leftInput, rightInput) {
       reason: 'material-structural-divergence',
       comparedDimensions: comparable,
       differences,
+      variances,
+      signals,
+      evidence: comparisonEvidence('material-conflict', signals, true),
       plans: { left: left.plan, right: right.plan }
     };
   }
   const approachCompared = comparable.includes('approach.shape');
-  const targetCompared = targetOverlaps.length > 0;
-  if (comparable.length >= 2 && approachCompared && targetCompared && targetOverlaps.some(Boolean)) {
+  if (comparable.length >= 2 && approachCompared && targetAgreement) {
+    const assessment = variances.length ? 'same-work-different-naming' : 'substantive-agreement';
     return {
       verdict: 'convergent',
-      reason: 'structural-target-and-approach-agreement',
+      reason: variances.length ? 'structural-agreement-with-naming-variance' : 'structural-target-and-approach-agreement',
       comparedDimensions: comparable,
       differences: [],
+      variances,
+      signals,
+      evidence: comparisonEvidence(assessment, signals, false),
       plans: { left: left.plan, right: right.plan }
     };
   }
@@ -613,6 +881,9 @@ export function compareStructuralPlans(leftInput, rightInput) {
     reason: 'insufficient-comparable-structural-dimensions',
     comparedDimensions: comparable,
     differences: [],
+    variances,
+    signals,
+    evidence: comparisonEvidence(variances.length ? 'weak-variance-only' : 'insufficient-evidence', signals, false),
     plans: { left: left.plan, right: right.plan }
   };
 }
@@ -652,13 +923,24 @@ export function planReviewPresentation(primary, comparison, estimate) {
       return `${entry.dimension} (${entry.reason}): left "${left}" vs right "${right}"`;
     }).join('; ')
     : null;
+  const variance = comparison?.verdict !== 'divergent' && comparison?.variances?.length
+    ? comparison.variances.map((entry) => {
+      const left = boundedDifferenceValue(entry.decisions?.left || entry.left);
+      const right = boundedDifferenceValue(entry.decisions?.right || entry.right);
+      return `${entry.dimension} (${entry.strength}): left "${left}" vs right "${right}"`;
+    }).join('; ')
+    : null;
   const ambiguityQuestion = divergence
     ? `The independent plans materially diverge: ${divergence}. Which structural reading should govern implementation?`
     : null;
   const comparisonSummary = comparison?.verdict === 'inconclusive'
-    ? `Ambiguity comparison is INCONCLUSIVE (${comparison.reason}); no ambiguity verdict was inferred.`
+    ? variance
+      ? `Ambiguity comparison is INCONCLUSIVE (${comparison.reason}); the observed differences are weak naming or organization variance, not a demonstrated conflict: ${variance}. No ambiguity verdict was inferred.`
+      : `Ambiguity comparison is INCONCLUSIVE (${comparison.reason}); no ambiguity verdict was inferred.`
     : comparison?.verdict === 'convergent'
-      ? 'Independent plans converge structurally; no ambiguity question was opened.'
+      ? variance
+        ? `Independent plans describe the same work, different naming or organization: ${variance}. This is non-blocking variance, not a conflict; no ambiguity question was opened.`
+        : 'Independent plans converge structurally; no ambiguity question was opened.'
       : ambiguityQuestion;
   return {
     structuralPlan: plan,

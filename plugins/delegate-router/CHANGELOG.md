@@ -2,6 +2,20 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.62.0 — 2026-08-01
+
+- Weight structural ambiguity evidence by reliability: agreed concrete file
+  targets now outweigh component naming, approach organization, and unproven
+  prose variance, while disjoint files and explicit same-topic contradictions
+  remain blocking. Additive variance metadata and plan-confirmation wording say
+  when independent plans describe the same work with different naming; the
+  existing `convergent` / `divergent` / `inconclusive` verdict enum is unchanged.
+- Preserve asymmetric true positives by comparing pairwise precedence among
+  shared decision terms even when one plan omits another term. High-confidence
+  negation, opposing-default/action, and known exclusive-scope inversions also
+  remain strong blocking assumption conflicts without restoring prose-based
+  false positives.
+
 ## 0.61.0 — 2026-08-01
 
 - Keep live plan-first state visible throughout job detail with a bounded sticky

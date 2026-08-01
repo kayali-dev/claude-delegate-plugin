@@ -57,6 +57,39 @@ function planText(value) {
   return `\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
 }
 
+function approachEntries(entries) {
+  return entries.map((entry) => {
+    const separator = entry.indexOf(':');
+    return { kind: entry.slice(0, separator), component: entry.slice(separator + 1) };
+  });
+}
+
+function assertNonBlockingNamingVariance(left, right, expectedDimensions) {
+  const parsedLeft = parseStructuralPlan(planText(left));
+  const parsedRight = parseStructuralPlan(planText(right));
+  const comparison = compareStructuralPlans(parsedLeft, parsedRight);
+  assert.equal(comparison.verdict, 'convergent');
+  assert.equal(comparison.evidence?.assessment, 'same-work-different-naming');
+  assert.equal(comparison.evidence?.blocking, false);
+  assert.ok(comparison.signals.some((signal) => (
+    signal.dimension === 'targets.files'
+    && signal.strength === 'strong'
+    && signal.effect === 'agreement'
+  )));
+  for (const dimension of expectedDimensions) {
+    assert.ok(comparison.variances.some((entry) => (
+      entry.dimension === dimension
+      && entry.blocking === false
+      && ['weak', 'moderate'].includes(entry.strength)
+    )), `missing non-blocking ${dimension} variance: ${JSON.stringify(comparison)}`);
+  }
+  const presentation = planReviewPresentation(parsedLeft, comparison, { source: 'unavailable' });
+  assert.equal(presentation.ambiguityQuestion, null);
+  assert.match(presentation.question, /same work, different naming/i);
+  assert.match(presentation.question, /not a conflict/i);
+  return comparison;
+}
+
 async function isolated(fn) {
   const keys = [
     'DELEGATE_STATE_FILE', 'DELEGATE_CODEX_BIN', 'DELEGATE_CURSOR_BIN',
@@ -141,7 +174,13 @@ test('structural plan comparison distinguishes convergence, divergence, and inco
   assert.match(planReviewPresentation(left, divergent, { source: 'unavailable' }).ambiguityQuestion, /materially diverge/i);
 
   const inconclusive = compareStructuralPlans(left, parseStructuralPlan('A persuasive prose plan with no structural JSON.'));
-  assert.equal(inconclusive.verdict, 'inconclusive');
+  assert.deepEqual(inconclusive, {
+    verdict: 'inconclusive',
+    reason: 'one-or-both-plans-lack-valid-structural-output',
+    inputs: { left: 'valid', right: 'no-valid-structural-json' },
+    comparedDimensions: [],
+    differences: []
+  });
   assert.match(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).question, /INCONCLUSIVE/);
   assert.equal(planReviewPresentation(left, inconclusive, { source: 'unavailable' }).ambiguityQuestion, null);
 });
@@ -192,6 +231,138 @@ test('declared assumption paraphrases reduce to the same ordered parser-preceden
   assert.equal(planReviewPresentation(left, comparison, { source: 'unavailable' }).ambiguityQuestion, null);
 });
 
+test('six verbatim component slug pairs are non-blocking naming variance when concrete files agree', () => {
+  const leftComponents = [
+    'degraded-plan-confirmation',
+    'inspect-summary-view',
+    'ceiling-bounded-plan-retry',
+    'canonical-lifecycle-vocabulary',
+    'input-blocked-list-filter',
+    'verification-caveats'
+  ];
+  const rightComponents = [
+    'degraded-plan-confirmation-policy',
+    'inspect-summary-projection',
+    'plan-budget-ceiling-retry',
+    'lifecycle-outcome-vocabulary',
+    'list-input-filter',
+    'verification-engine-caveats'
+  ];
+  assertNonBlockingNamingVariance(
+    structuralPlan({ targets: { files: ['plugins/delegate-router/bin/lib/planning.mjs'], components: leftComponents } }),
+    structuralPlan({ targets: { files: ['plugins/delegate-router/bin/lib/planning.mjs'], components: rightComponents } }),
+    ['targets.components']
+  );
+});
+
+test('verbatim long worktree-default prose is non-blocking when both decisions keep shared default and worktree opt-in', () => {
+  const leftChoice = 'Retain shared isolation as the default because mandatory worktrees would reject non-Git roots, unsupported Git shapes, sandbox-off, ingest, addDirs, and auto-fix workflows; keep worktree containment explicitly selectable through the existing isolation flag and prerequisites.';
+  const rightChoice = 'Keep shared isolation as the backward-compatible default; make degraded write plans require confirmation and retain explicit worktree isolation as the discard-capable opt-in.';
+  assertNonBlockingNamingVariance(
+    structuralPlan({ assumptions: [{ topic: 'assumptions.worktree-default', choice: leftChoice }] }),
+    structuralPlan({ assumptions: [{ topic: 'assumptions.worktree-default', choice: rightChoice }] }),
+    ['assumptions.assumptions.worktree-default']
+  );
+});
+
+test('verbatim multi-item approach grouping and slug variance are non-blocking when concrete files agree', () => {
+  const leftApproach = approachEntries([
+    'edit:write-launch-scope-policy',
+    'edit:degraded-plan-confirmation',
+    'edit:ceiling-bounded-plan-retry',
+    'edit:verification-caveats',
+    'edit:inspect-summary-view',
+    'edit:input-blocked-list-filter',
+    'edit:canonical-lifecycle-vocabulary',
+    'test:degraded-plan-confirmation',
+    'test:ceiling-bounded-plan-retry',
+    'test:verification-caveats',
+    'test:inspect-summary-view',
+    'test:input-blocked-list-filter',
+    'test:canonical-lifecycle-vocabulary',
+    'docs:consumer-contract-docs',
+    'verify:full-suite-proof'
+  ]);
+  const rightApproach = approachEntries([
+    'inspect:degraded-plan-confirmation-policy',
+    'edit:degraded-plan-confirmation-policy',
+    'test:degraded-plan-confirmation-policy',
+    'edit:plan-budget-ceiling-retry',
+    'test:plan-budget-ceiling-retry',
+    'edit:verification-engine-caveats',
+    'test:verification-engine-caveats',
+    'edit:inspect-summary-projection',
+    'test:inspect-summary-projection',
+    'edit:list-input-filter',
+    'test:list-input-filter',
+    'edit:lifecycle-outcome-vocabulary',
+    'test:lifecycle-outcome-vocabulary',
+    'docs:lifecycle-outcome-vocabulary',
+    'verify:all-p2-regressions'
+  ]);
+  assertNonBlockingNamingVariance(
+    structuralPlan({ approach: leftApproach }),
+    structuralPlan({ approach: rightApproach }),
+    ['approach.shape']
+  );
+});
+
+test('verbatim sticky-plan assumption and approach differences are non-blocking when concrete files agree', () => {
+  const leftApproach = approachEntries([
+    'edit:pane-summary-height-pressure',
+    'edit:detail-plan-summary',
+    'edit:detail-plan-tab',
+    'edit:detail-plan-navigation',
+    'edit:keymap-registry',
+    'test:tui-plan-regressions',
+    'docs:tui-reference',
+    'docs:unreleased-changelog',
+    'verify:tui-plan-regressions'
+  ]);
+  const rightApproach = approachEntries([
+    'edit:detail-plan-summary',
+    'edit:detail-plan-tab',
+    'edit:detail-tab-navigation',
+    'edit:keymap-generated-docs',
+    'test:plan-surface-tests',
+    'verify:detail-plan-summary',
+    'docs:keymap-generated-docs'
+  ]);
+  const leftAssumptions = [
+    { topic: 'assumptions.palette', choice: 'Reuse existing semantic and surface tokens; introduce no palette token.' },
+    { topic: 'assumptions.summary-pressure', choice: 'Use pane-summary rows for plan state plus existing tab metrics above 30 rows, and retain only the coordinator-critical plan row at 30 rows or fewer.' }
+  ];
+  const rightAssumptions = [
+    { topic: 'assumptions.palette', choice: 'Reuse existing semantic and surface tokens; introduce no new palette token.' },
+    { topic: 'assumptions.summary-pressure', choice: 'Use the existing pane summary strip and reduce plan summary rows under the documented 30-row height-pressure threshold.' }
+  ];
+  const comparison = assertNonBlockingNamingVariance(
+    structuralPlan({ approach: leftApproach, assumptions: leftAssumptions }),
+    structuralPlan({ approach: rightApproach, assumptions: rightAssumptions }),
+    ['assumptions.assumptions.palette', 'assumptions.assumptions.summary-pressure', 'approach.shape']
+  );
+  assert.equal(comparison.variances.filter((entry) => entry.dimension.startsWith('assumptions.')).length, 2);
+});
+
+test('disjoint concrete file targets remain a strong blocking divergence', () => {
+  const comparison = compareStructuralPlans(
+    parseStructuralPlan(planText(structuralPlan({
+      targets: { files: ['plugins/delegate-router/bin/lib/planning.mjs'], components: ['structural-plan-comparison'] }
+    }))),
+    parseStructuralPlan(planText(structuralPlan({
+      targets: { files: ['plugins/delegate-router/bin/lib/control.mjs'], components: ['structural-plan-comparison'] }
+    })))
+  );
+  assert.equal(comparison.verdict, 'divergent');
+  assert.equal(comparison.evidence?.assessment, 'material-conflict');
+  assert.equal(comparison.evidence?.blocking, true);
+  assert.ok(comparison.differences.some((entry) => (
+    entry.dimension === 'targets.files'
+    && entry.strength === 'strong'
+    && entry.blocking === true
+  )));
+});
+
 test('a genuine same-topic assumption conflict stays divergent and presents both decisions', () => {
   const leftChoice = 'preserve fenced and whole-body precedence; scan balanced brace-aware objects only as the final candidate source.';
   const rightChoice = 'preserve whole-body json precedence, then fenced json, then scan for a balanced object.';
@@ -204,7 +375,11 @@ test('a genuine same-topic assumption conflict stays divergent and presents both
 
   const comparison = compareStructuralPlans(left, right);
   assert.equal(comparison.verdict, 'divergent');
+  assert.equal(comparison.evidence.assessment, 'material-conflict');
+  assert.equal(comparison.evidence.blocking, true);
   assert.equal(comparison.differences[0].reason, 'declared-assumptions-conflict');
+  assert.equal(comparison.differences[0].strength, 'strong');
+  assert.equal(comparison.differences[0].blocking, true);
   assert.deepEqual(comparison.differences[0].decisions, {
     left: 'keep fenced-json -> keep whole-body-json -> scan balanced-object',
     right: 'keep whole-body-json -> keep fenced-json -> scan balanced-object'
@@ -212,6 +387,81 @@ test('a genuine same-topic assumption conflict stays divergent and presents both
   const question = planReviewPresentation(left, comparison, { source: 'unavailable' }).ambiguityQuestion;
   assert.match(question, /keep fenced-json -> keep whole-body-json/);
   assert.match(question, /keep whole-body-json -> keep fenced-json/);
+});
+
+test('verbatim asymmetric terse precedence inversion remains a strong blocking conflict', () => {
+  const leftChoice = 'preserve fenced and whole-body precedence; scan balanced brace-aware objects only as the final candidate source.';
+  const rightChoice = 'scan balanced objects FIRST, before any fenced block.';
+  const left = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'assumptions.parser-precedence', choice: leftChoice }]
+  })));
+  const right = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{ topic: 'assumptions.parser-precedence', choice: rightChoice }]
+  })));
+
+  const comparison = compareStructuralPlans(left, right);
+  assert.equal(comparison.verdict, 'divergent');
+  assert.equal(comparison.evidence.assessment, 'material-conflict');
+  assert.equal(comparison.evidence.blocking, true);
+  assert.equal(comparison.differences[0].dimension, 'assumptions.assumptions.parser-precedence');
+  assert.equal(comparison.differences[0].reason, 'declared-assumptions-conflict');
+  assert.equal(comparison.differences[0].strength, 'strong');
+  assert.equal(comparison.differences[0].blocking, true);
+});
+
+test('opposing defaults on the same assumption topic remain a strong blocking conflict', () => {
+  const left = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{
+      topic: 'assumptions.worktree-default',
+      choice: 'Keep shared isolation as the default and keep worktree isolation opt-in.'
+    }]
+  })));
+  const right = parseStructuralPlan(planText(structuralPlan({
+    assumptions: [{
+      topic: 'assumptions.worktree-default',
+      choice: 'Keep worktree isolation as the default and retain shared isolation only for compatibility.'
+    }]
+  })));
+  const comparison = compareStructuralPlans(left, right);
+  assert.equal(comparison.verdict, 'divergent');
+  assert.equal(comparison.evidence.blocking, true);
+  assert.equal(comparison.differences[0].dimension, 'assumptions.assumptions.worktree-default');
+  assert.equal(comparison.differences[0].strength, 'strong');
+});
+
+test('high-confidence asymmetric negation, exclusive scope, and terse-versus-verbose opposition remain blocking', () => {
+  const cases = [
+    {
+      topic: 'assumptions.worktree-use',
+      left: 'Never use worktree isolation outside Git repositories.',
+      right: 'Use worktree isolation outside Git repositories when the caller explicitly opts in.'
+    },
+    {
+      topic: 'assumptions.parser-scope',
+      left: 'Use only fenced JSON.',
+      right: 'Use fenced JSON and whole-body JSON.'
+    },
+    {
+      topic: 'assumptions.worktree-default',
+      left: 'Keep shared isolation as the default.',
+      right: 'Remove shared isolation as the default because mandatory worktrees should govern every write.'
+    }
+  ];
+
+  for (const entry of cases) {
+    const comparison = compareStructuralPlans(
+      parseStructuralPlan(planText(structuralPlan({
+        assumptions: [{ topic: entry.topic, choice: entry.left }]
+      }))),
+      parseStructuralPlan(planText(structuralPlan({
+        assumptions: [{ topic: entry.topic, choice: entry.right }]
+      })))
+    );
+    assert.equal(comparison.verdict, 'divergent', `${entry.topic}: ${JSON.stringify(comparison)}`);
+    assert.equal(comparison.evidence.blocking, true);
+    assert.equal(comparison.differences[0].reason, 'declared-assumptions-conflict');
+    assert.equal(comparison.differences[0].strength, 'strong');
+  }
 });
 
 test('assumption normalization ignores case punctuation and filler but preserves enumerated order', () => {
@@ -229,7 +479,7 @@ test('assumption normalization ignores case punctuation and filler but preserves
   assert.equal(compareStructuralPlans(left, reordered).verdict, 'divergent');
 });
 
-test('component wording and approach listing order alone are non-material while shape changes still diverge', () => {
+test('component wording and approach ordering are weak while approach content remains non-blocking moderate evidence', () => {
   const left = parseStructuralPlan(planText(structuralPlan({
     targets: { files: ['src/core.js'], components: ['structural-plan comparator'] },
     approach: [
@@ -253,9 +503,13 @@ test('component wording and approach listing order alone are non-material while 
       { kind: 'test', component: 'normalization decision component' }
     ]
   })));
-  const divergent = compareStructuralPlans(left, changed);
-  assert.equal(divergent.verdict, 'divergent');
-  assert.ok(divergent.differences.some((entry) => entry.dimension === 'approach.shape'));
+  const contentVariance = compareStructuralPlans(left, changed);
+  assert.equal(contentVariance.verdict, 'convergent');
+  assert.ok(contentVariance.variances.some((entry) => (
+    entry.dimension === 'approach.shape'
+    && entry.strength === 'moderate'
+    && entry.blocking === false
+  )));
 });
 
 test('structural plan parsing accepts narrated balanced JSON last while preserving fenced precedence and exact failures', () => {

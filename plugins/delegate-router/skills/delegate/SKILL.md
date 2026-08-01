@@ -44,6 +44,18 @@ and waits for revisioned `delegate_respond accept=true|false`. Acceptance
 continues the same provider thread/session into write mode; it never launches a
 fresh context. When budget permits, a second cheap plan from another provider
 or model is compared structurally by targets, approach shape, and assumptions.
+Concrete file overlap is strong agreement; disjoint file targets and explicit
+same-topic decision contradictions are blocking conflicts. Component names,
+approach ordering/granularity, and unmatched assumption wording are weak;
+approach-content differences are moderate. They remain visible as additive
+weighted variance evidence but do not overrule agreed file targets. The verdict
+remains `convergent`, `divergent`, or
+`inconclusive`; same-work naming variance is non-blocking metadata, not a fourth
+verdict.
+Contradiction evidence includes reversed pairwise precedence among shared
+anchored terms even when one plan omits other terms, high-overlap polarity
+inversion, opposing defaults/actions, and exclusive scope over known decision
+terms. Omission or verbosity without one of those conflicts remains variance.
 Structural normalization preserves the submitted spelling of paths, component
 names, assumptions, and risks for presentation and file resolution; folded
 forms exist only as derived matching/deduplication keys.
@@ -54,8 +66,10 @@ complexity steps, and a 16,384-token ceiling. It adds no provider round-trip;
 smaller job-level `maxOutputTokens` can still cap the plan. If the independent
 pass fails, the implement attempt retains additive `planPass` state, reason,
 job id, observed cost, and limit in inspect/TUI while launch continues.
-Only material structural divergence opens an ambiguity question; inconclusive
-comparison says so and does not gate on a guessed verdict. For a genuinely
+Only material structural divergence opens an ambiguity question; non-blocking
+variance is presented as the same work with different naming or organization,
+while inconclusive comparison says so and does not gate on a guessed verdict.
+For a genuinely
 trivial write, use MCP `delegate_start_trivial` or CLI
 `delegate-jobs start --no-plan-first`; add `--no-ambiguity-check` to keep the
 primary confirmation while skipping the second pass. These are explicit

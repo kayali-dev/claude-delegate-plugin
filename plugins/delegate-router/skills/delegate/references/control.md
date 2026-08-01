@@ -247,7 +247,23 @@ access.
 
 When enabled, ambiguity detection sends the same WorkSpec to an independent
 cheap plan pass using a different provider or model. It compares only parsed
-target files, components, ordered approach shape, and declared assumptions.
+target files, components, approach shape, and declared assumptions, but weights
+those dimensions by evidentiary strength. Concrete file overlap is strong
+agreement. Disjoint file targets, explicit contradictory decisions on a shared
+assumption topic are blocking conflicts. Component labels, approach
+ordering/granularity/content, and prose that differs without proving a
+contradiction remain visible as additive
+`variances` and `signals`; agreed files outweigh that planner-authored noise.
+The verdict enum remains `convergent`, `divergent`, or `inconclusive`, so
+same-work naming variance is non-blocking without surprising existing
+consumers. Its confirmation presentation says that the plans describe the same
+work with different naming or organization instead of calling it a conflict.
+Same-topic contradiction detection compares pairwise precedence among shared
+anchored decision terms, so a terse plan cannot hide an inverted relationship
+by omitting an unrelated term. High-overlap negation, opposing defaults/actions,
+and explicit exclusive scope over known decision terms are also strong; plain
+omission, extra justification, or arbitrary vocabulary remains non-blocking
+unless it proves an incompatible claim.
 Material divergence becomes a revisioned coordinator question before write
 work. Convergence proceeds after the ordinary plan confirmation. Invalid or
 unavailable structural evidence is reported as inconclusive and never
