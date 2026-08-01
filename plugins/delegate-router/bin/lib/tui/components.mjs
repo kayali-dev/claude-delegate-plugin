@@ -18,6 +18,16 @@ function inner(rect) {
   };
 }
 
+function summaryRows(summary) {
+  if (summary == null) return [];
+  if (summary && typeof summary === 'object' && Array.isArray(summary.rows)) return summary.rows.filter((row) => row != null);
+  return [summary];
+}
+
+function summaryHeight(summary, available) {
+  return Math.min(Math.max(0, Number(available || 0)), summaryRows(summary).length);
+}
+
 // This is the sole pane-to-display mapping. Selection scrolling, click hit
 // testing, wrapping, highlighting, and painting must all use this exact rect.
 export function paneContentRect(pane, options = {}) {
@@ -31,15 +41,17 @@ export function paneContentRect(pane, options = {}) {
   const padded = pane.border === false && options.scrollbar === true && base.width > SPACE.scrollbarMargin
     ? { ...base, width: base.width - SPACE.scrollbarMargin }
     : base;
-  if (!pane.summary || padded.height <= 0) return padded;
-  return { ...padded, y: padded.y + 1, height: Math.max(0, padded.height - 1) };
+  const height = summaryHeight(pane.summary, padded.height);
+  if (!height) return padded;
+  return { ...padded, y: padded.y + height, height: Math.max(0, padded.height - height) };
 }
 
 export function paneSummaryRect(pane, options = {}) {
   if (!pane?.summary) return null;
   const withoutSummary = paneContentRect({ ...pane, summary: null }, options);
-  if (!withoutSummary.height) return null;
-  return { x: withoutSummary.x, y: withoutSummary.y, width: withoutSummary.width, height: 1 };
+  const height = summaryHeight(pane.summary, withoutSummary.height);
+  if (!height) return null;
+  return { x: withoutSummary.x, y: withoutSummary.y, width: withoutSummary.width, height };
 }
 
 function textOf(cell) {
@@ -1011,23 +1023,27 @@ export function paintDiffLine(grid, rect, diff = {}, options = {}) {
 
 export function paintSummaryStrip(grid, rect, summary = {}, ownerStyle = palette.surface) {
   if (!rect || !rect.width || !rect.height) return;
-  const source = typeof summary === 'string' ? { text: summary } : summary;
-  const style = mergeStyle(ownerStyle, source.style || palette.metadata);
-  grid.fill(rect.x, rect.y, rect.width, 1, ' ', ownerStyle);
-  const badge = source.badge;
-  const badgeText = badge ? formatDisplayValue(badge.text ?? badge) : '';
-  const badgeWidth = Math.min(displayWidth(badgeText), Math.max(0, Math.floor(rect.width / 2)));
-  const width = Math.max(0, rect.width - badgeWidth - (badgeText ? SPACE.tableColumn : 0));
-  if (Array.isArray(source.segments)) writeSegments(grid, rect.x, rect.y, source.segments, width, style);
-  else grid.write(rect.x, rect.y, truncateToWidth(formatDisplayValue(source.text), width, { ellipsis: true }), style, width);
-  if (badgeWidth) {
-    grid.write(
-      rect.x + rect.width - badgeWidth,
-      rect.y,
-      truncateToWidth(badgeText, badgeWidth, { ellipsis: true }),
-      mergeStyle(ownerStyle, badge.style || palette.badgeWarn),
-      badgeWidth
-    );
+  grid.fill(rect.x, rect.y, rect.width, rect.height, ' ', ownerStyle);
+  const rows = summaryRows(summary);
+  for (let row = 0; row < Math.min(rect.height, rows.length); row += 1) {
+    const source = typeof rows[row] === 'string' ? { text: rows[row] } : rows[row] || {};
+    const style = mergeStyle(ownerStyle, source.style || palette.metadata);
+    const badge = source.badge;
+    const badgeText = badge ? formatDisplayValue(badge.text ?? badge) : '';
+    const badgeWidth = Math.min(displayWidth(badgeText), Math.max(0, Math.floor(rect.width / 2)));
+    const width = Math.max(0, rect.width - badgeWidth - (badgeText ? SPACE.tableColumn : 0));
+    const y = rect.y + row;
+    if (Array.isArray(source.segments)) writeSegments(grid, rect.x, y, source.segments, width, style);
+    else grid.write(rect.x, y, truncateToWidth(formatDisplayValue(source.text), width, { ellipsis: true }), style, width);
+    if (badgeWidth) {
+      grid.write(
+        rect.x + rect.width - badgeWidth,
+        y,
+        truncateToWidth(badgeText, badgeWidth, { ellipsis: true }),
+        mergeStyle(ownerStyle, badge.style || palette.badgeWarn),
+        badgeWidth
+      );
+    }
   }
 }
 
@@ -1427,8 +1443,8 @@ function paintScrollIndicator(grid, pane, contentRect, metrics) {
   }
   const x = pane.rect.x + pane.rect.width - 1;
   const bordered = pane.border !== false;
-  // The summary strip is part of the pane's interior chrome, so the rail stays
-  // continuous beside it even though only the rows below it scroll.
+  // Summary strips are part of the pane's interior chrome, so the rail stays
+  // continuous beside them even though only the rows below them scroll.
   const top = bordered ? pane.rect.y + SPACE.paneRow : pane.rect.y;
   const bottom = bordered ? pane.rect.y + pane.rect.height - SPACE.paneRow : pane.rect.y + pane.rect.height;
   const height = Math.max(0, bottom - top);

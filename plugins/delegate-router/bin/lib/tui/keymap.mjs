@@ -113,6 +113,12 @@ export const KEYMAP = Object.freeze([
   }),
   entry({ keys: ['[', ']'], relation: 'pair', label: 'previous / next tab', action: 'detail.tab.cycle', scope: ['detail'], class: 'navigation', footer: true, footerLabel: 'tabs', footerOrder: 0, menu: false, when: (ctx) => Number(ctx.tabCount || 0) > 1 }),
   entry({ keys: ['1', '6'], relation: 'range', label: 'open tab by number', action: 'detail.tab.open', scope: ['detail'], class: 'navigation', menu: false }),
+  entry({
+    keys: ['P'], label: 'open live Plan', action: 'detail.plan', scope: ['detail'], class: 'view',
+    footer: true, footerLabel: 'plan',
+    when: (ctx) => Boolean(ctx.hasPlanning),
+    unavailableReason: (ctx) => ctx.hasPlanning ? null : 'job has no planning state'
+  }),
   entry({ keys: ['[', ']'], relation: 'pair', label: 'previous / next cockpit mode', action: 'work.tab.cycle', scope: ['work'], class: 'navigation', footer: true, footerLabel: 'modes', footerOrder: 0, menu: false, when: (ctx) => Number(ctx.tabCount || 0) > 1 }),
   entry({ keys: ['1', '6'], relation: 'range', label: 'open cockpit mode by number', action: 'work.tab.open', scope: ['work'], class: 'navigation', menu: false }),
   entry({ keys: ['Left', 'Right'], relation: 'pair', label: 'previous / next WorkItem', action: 'work.item.cycle', scope: ['work'], class: 'navigation', footer: true, footerLabel: 'WorkItem', footerOrder: 25, menu: false, when: (ctx) => Number(ctx.workItemCount || 0) > 1 }),
@@ -496,6 +502,7 @@ export function keymapContext(frame = {}, ui = {}, store = {}) {
     errorCount: Number(frame.meta?.errorCount || 0),
     warningCount: Number(frame.meta?.warningCount || 0),
     scopeViolationCount: Number(frame.meta?.scopeViolationCount || 0),
+    hasPlanning: Boolean(job?.planning),
     job
   });
 }

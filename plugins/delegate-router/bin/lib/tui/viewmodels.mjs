@@ -16,7 +16,7 @@ import { formatTranscriptBlock, transcriptAnomalyEntries, TranscriptProjector, w
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
 
-export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
+export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain', 'Plan']);
 export const WORK_TABS = Object.freeze(['Compose', 'Review', 'Approve', 'Compare', 'Replay', 'Converge']);
 
 export const HELP_ITEMS = Object.freeze(KEYMAP.map((item) => Object.freeze({
@@ -1221,7 +1221,140 @@ function detailChain(store, job) {
 }
 
 function detailTabs(store, job) {
-  return job.rootJobId || detailChain(store, job).jobs.length > 1 ? DETAIL_TABS : DETAIL_TABS.slice(0, 5);
+  const base = job.rootJobId || detailChain(store, job).jobs.length > 1
+    ? DETAIL_TABS.slice(0, 6)
+    : DETAIL_TABS.slice(0, 5);
+  return job.planning ? [...base, DETAIL_TABS.at(-1)] : base;
+}
+
+function structuralPlan(job) {
+  return job.planning?.primary || job.planning?.presentation?.structuralPlan || null;
+}
+
+function planningState(job) {
+  const planning = job.planning || {};
+  if (planning.state === 'degraded') return 'degraded';
+  if (planning.state === 'awaiting-confirmation') return 'awaiting-confirmation';
+  if (planning.state === 'confirmed') return 'confirmed';
+  if (planning.state === 'declined') return 'declined';
+  if (planning.degraded === true) return 'degraded';
+  if (structuralPlan(job)) return 'planned';
+  return formatDisplayValue(planning.state) || 'pending';
+}
+
+function planningComparison(job) {
+  return job.planning?.comparison || job.planning?.presentation?.comparison || null;
+}
+
+function planningDegradationReason(job) {
+  if (planningState(job) !== 'degraded') return null;
+  return job.planning?.presentation?.reason
+    || job.planning?.reason
+    || job.planning?.budgetOutcome?.reason
+    || job.planning?.ambiguity?.reason
+    || job.planPass?.reason
+    || 'unspecified';
+}
+
+function planningConfirmationPending(job) {
+  if (job.pendingInput?.kind === 'plan-confirmation') return true;
+  const state = planningState(job);
+  return job.planning?.confirmationRequired === true && !['confirmed', 'declined'].includes(state);
+}
+
+function planningSnapshot(job) {
+  const comparison = planningComparison(job);
+  return {
+    state: planningState(job),
+    verdict: formatDisplayValue(comparison?.verdict) || null,
+    comparisonReason: formatDisplayValue(comparison?.reason) || null,
+    degradationReason: formatDisplayValue(planningDegradationReason(job)) || null,
+    confirmationPending: planningConfirmationPending(job)
+  };
+}
+
+function planningSummaryRow(job) {
+  const snapshot = planningSnapshot(job);
+  const text = joinDisplayParts([
+    `plan ${snapshot.state}`,
+    snapshot.verdict ? `verdict ${snapshot.verdict}` : '',
+    snapshot.degradationReason ? `reason ${snapshot.degradationReason}` : '',
+    snapshot.confirmationPending ? 'confirmation pending' : ''
+  ]);
+  const badge = snapshot.state === 'degraded'
+    ? { text: 'PLAN DEGRADED', style: palette.badgeWarn }
+    : snapshot.confirmationPending
+      ? { text: 'CONFIRMATION PENDING', style: palette.badgeWarn }
+      : null;
+  return { text, ...(badge ? { badge } : {}) };
+}
+
+function detailSummary(job, bodySummary, viewportHeight) {
+  if (!job.planning) return bodySummary;
+  const rows = [planningSummaryRow(job)];
+  if (sectionGapForHeight(viewportHeight) !== SPACE.none && bodySummary) rows.push(bodySummary);
+  return { rows };
+}
+
+function planLine(text, style = palette.body) {
+  return { text: formatDisplayValue(text, { maxLength: 16_384 }), style };
+}
+
+function planSection(entries, label, rows, empty = 'none') {
+  entries.push(planLine(label, palette.dim));
+  if (!rows.length) entries.push(planLine(`  ${empty}`, palette.dim));
+  else entries.push(...rows);
+}
+
+function planContent(job, ui) {
+  const snapshot = planningSnapshot(job);
+  const plan = structuralPlan(job);
+  const entries = [];
+  planSection(entries, 'STATE', [
+    planLine(`  planning state: ${snapshot.state}`),
+    planLine(`  confirmation pending: ${snapshot.confirmationPending ? 'yes' : 'no'}`),
+    ...(snapshot.verdict ? [planLine(`  comparison verdict: ${snapshot.verdict}`)] : []),
+    ...(snapshot.comparisonReason ? [planLine(`  comparison reason: ${snapshot.comparisonReason}`)] : []),
+    ...(snapshot.degradationReason ? [planLine(`  degradation reason: ${snapshot.degradationReason}`)] : [])
+  ]);
+  if (!plan) {
+    planSection(entries, 'PLAN', [], 'structural plan unavailable');
+  } else {
+    const files = Array.isArray(plan.targets?.files) ? plan.targets.files : [];
+    const components = Array.isArray(plan.targets?.components) ? plan.targets.components : [];
+    planSection(entries, 'TARGETS', [
+      ...files.map((file) => planLine(`  file: ${formatDisplayValue(file)}`)),
+      ...components.map((component) => planLine(`  component: ${formatDisplayValue(component)}`))
+    ]);
+    const approach = Array.isArray(plan.approach) ? plan.approach : [];
+    planSection(entries, 'APPROACH', approach.map((entry) => planLine(
+      `  ${formatDisplayValue(entry?.kind) || 'step'}: ${formatDisplayValue(entry?.component) || 'unspecified'}`
+    )));
+    const assumptions = Array.isArray(plan.assumptions) ? plan.assumptions : [];
+    planSection(entries, 'ASSUMPTIONS', assumptions.map((entry) => planLine(
+      `  ${formatDisplayValue(entry?.topic) || 'assumption'}: ${formatDisplayValue(entry?.choice) || 'unspecified'}`
+    )));
+    const risks = Array.isArray(plan.risks) ? plan.risks : [];
+    planSection(entries, 'RISKS', risks.map((risk) => planLine(`  ${formatDisplayValue(risk)}`)));
+  }
+  return {
+    title: `Plan${CHROME_SEPARATOR}live job state`,
+    summary: {
+      text: joinDisplayParts([
+        `${entries.length} plan rows`,
+        plan ? `${plan.targets?.files?.length || 0} files` : 'structural plan unavailable'
+      ])
+    },
+    content: {
+      kind: 'log',
+      virtual: true,
+      entries,
+      measureKey: `plan:${job.id}:${snapshot.state}:${snapshot.verdict || 'none'}:${snapshot.degradationReason || 'none'}`,
+      follow: false,
+      scroll: ui.detailScroll || 0
+    },
+    scrollItemCount: entries.length
+  };
 }
 
 function searchSuffix(ui, pane) {
@@ -1282,7 +1415,7 @@ function chainContent(store, job, ui, width) {
   };
 }
 
-function detailContent(job, store, ui, tab, activity) {
+function detailContent(job, store, ui, tab, activity, tabName) {
   const events = store.eventsByJob?.[job.id] || [];
   const hydration = store.hydrationByJob?.[job.id];
   const historyState = hydration?.error
@@ -1461,7 +1594,8 @@ function detailContent(job, store, ui, tab, activity) {
       scrollItemCount: fieldCount + usage.sections.length
     };
   }
-  if (tab === 5) return chainContent(store, job, ui, Math.max(1, Number(ui.viewportWidth || 80) - 2));
+  if (tabName === 'Plan') return planContent(job, ui);
+  if (tabName === 'Chain') return chainContent(store, job, ui, Math.max(1, Number(ui.viewportWidth || 80) - 2));
   const typeFilter = formatDisplayValue(ui.eventFilter).toLowerCase();
   const allBlocks = eventBlocks(events, typeFilter);
   const errors = allBlocks.filter((block) => eventCategory(block.event?.type) === 'error');
@@ -1521,7 +1655,7 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
   const activity = deriveJobActivity(job, activityEvents(store, job), { now });
   const tabs = detailTabs(store, job);
   const tab = Math.max(0, Math.min(tabs.length - 1, Number(ui.detailTab || 0)));
-  const body = detailContent(job, store, { ...ui, viewportWidth: width, viewportHeight: height }, tab, activity);
+  const body = detailContent(job, store, { ...ui, viewportWidth: width, viewportHeight: height }, tab, activity, tabs[tab]);
   const headerActivity = activityIndicator(activity, now);
   const visibility = activity.visibilityNote ? `${CHROME_SEPARATOR}${formatDisplayValue(activity.visibilityNote)}` : '';
   const originProject = job.origin?.projectDir
@@ -1542,7 +1676,7 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
     panes: [{
       rect: { x: 0, y: 3, width, height: Math.max(3, height - 4) },
       title: body.title,
-      summary: body.summary,
+      summary: detailSummary(job, body.summary, height),
       loading: body.loading,
       loadingGlyph: body.loadingGlyph,
       content: body.content

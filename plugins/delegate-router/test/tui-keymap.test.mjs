@@ -125,6 +125,21 @@ test('anomaly drill-down is one KEYMAP binding shared by footer, help, menu, and
   assert.match(controller, /key === 'A' && ui\.detailTab === 0\) \{ toggleTranscriptAnomalies\(\)/);
 });
 
+test('the appended Plan tab has one registry binding across footer, help, menu, docs, and dispatch', () => {
+  const ctx = { ...runningContext(), tabCount: 7, hasPlanning: true };
+  const binding = KEYMAP.find((item) => item.action === 'detail.plan');
+  assert.equal(formatKeyNotation(binding), 'P');
+  assert.ok(footerForContext(ctx, 220).groups.flat().some((item) => item.action === binding.action));
+  assert.ok(helpPagesForContext(ctx).flatMap((page) => page.rows).some((item) => item.action === binding.action));
+  assert.equal(actionMenuForContext(ctx).find((item) => item.action === binding.action).unavailable, null);
+  assert.equal(formatKeyNotation(KEYMAP.find((item) => item.action === 'detail.tab.open'), { ellipsis: '…' }), '1 … 6');
+  const docs = fs.readFileSync(docsPath, 'utf8');
+  assert.match(docs, /\| `P` \| open live Plan \| detail \|/);
+  const controller = fs.readFileSync(path.join(plugin, 'bin', 'delegate-tui'), 'utf8');
+  assert.match(controller, /action === 'detail\.plan'\) return openPlanTab\(\)/);
+  assert.match(controller, /binding\?\.action === 'detail\.plan'/);
+});
+
 test('tool, subagent, error, and warning drill-downs each flow through KEYMAP', () => {
   const cases = [
     { action: 'detail.tools', key: 'O', ctx: { ...runningContext(), toolCount: 2 }, dispatch: /action === 'detail\.tools'\) return toggleTranscriptKind\('tools'\)/, direct: /key === 'O' && ui\.detailTab === 0/ },

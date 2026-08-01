@@ -8,7 +8,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { paneContentRect, paintFrame, renderFrameToString } from '../bin/lib/tui/components.mjs';
 import { configureGlyphs } from '../bin/lib/tui/glyphs.mjs';
-import { createPalette, uiPalette } from '../bin/lib/tui/palette.mjs';
+import { createPalette, setUiTheme, uiPalette } from '../bin/lib/tui/palette.mjs';
 import { HEIGHT_PRESSURE_MAX_ROWS, sectionGapForHeight, SPACE, SPACING_SCALE } from '../bin/lib/tui/rhythm.mjs';
 import { formatTranscriptBlock } from '../bin/lib/tui/transcript.mjs';
 import { clearGraphemeWidthOverrides, setGraphemeWidthOverrides, truncateToWidth } from '../bin/lib/tui/width.mjs';
@@ -87,6 +87,40 @@ function syntheticStore() {
   };
 }
 
+function attachStructuralPlan(store, overrides = {}) {
+  const job = store.jobs.find((entry) => entry.id === 'codex-active-1234567');
+  job.pendingInput = {
+    kind: 'plan-confirmation',
+    requestId: 'plan-live-surface',
+    requiresHumanDecision: true
+  };
+  job.planning = {
+    state: 'awaiting-confirmation',
+    confirmationRequired: true,
+    confirmationRequestId: 'plan-live-surface',
+    primary: {
+      targets: {
+        files: ['bin/lib/tui/viewmodels.mjs', 'test/tui-viewmodels.test.mjs'],
+        components: ['detail-plan-summary', 'detail-plan-tab']
+      },
+      approach: [
+        { kind: 'edit', component: 'detail-plan-summary' },
+        { kind: 'test', component: 'detail-plan-tab' }
+      ],
+      assumptions: [
+        { topic: 'tab order', choice: 'Append Plan so every existing detail tab keeps its number.' }
+      ],
+      risks: ['A long sticky plan must not consume the transcript viewport.']
+    },
+    comparison: {
+      verdict: 'divergent',
+      reason: 'material-structural-divergence'
+    },
+    ...overrides
+  };
+  return job;
+}
+
 test('job detail surfaces plan-pass degradation while legacy records omit the additive section', () => {
   const degraded = recordSections({
     id: 'codex-plan-parent',
@@ -106,6 +140,132 @@ test('job detail surfaces plan-pass degradation while legacy records omit the ad
   assert.ok(planning.rows.some((row) => row.key === 'planPass jobId' && row.value === 'codex-plan-child'));
   assert.equal(recordSections({ id: 'legacy', status: 'completed', phase: 'completed' })
     .some((section) => section.label === 'Planning'), false);
+});
+
+test('job detail pins live planning state at the transcript tail and obeys height pressure', () => {
+  const store = syntheticStore();
+  const job = attachStructuralPlan(store);
+  store.eventsByJob[job.id] = Array.from({ length: 40 }, (_, index) => ({
+    v: 1,
+    seq: index + 1,
+    at: NOW - (40 - index) * 100,
+    jobId: job.id,
+    type: 'message.completed',
+    redacted: true,
+    data: { id: `message-${index}`, text: `transcript tail ${index}` }
+  }));
+  const ui = {
+    jobId: job.id,
+    detailTab: 0,
+    now: NOW,
+    follow: false,
+    detailScroll: { entry: 39, line: 0 },
+    transcriptSelection: 39
+  };
+  const compact = detailViewModel(store, ui, { width: 120, height: HEIGHT_PRESSURE_MAX_ROWS });
+  assert.equal(compact.panes[0].summary.rows.length, 1, 'height pressure keeps only the coordinator-critical sticky row');
+  assert.match(compact.panes[0].summary.rows[0].text, /plan awaiting-confirmation/);
+  assert.match(compact.panes[0].summary.rows[0].text, /verdict divergent/);
+  assert.match(compact.panes[0].summary.rows[0].text, /confirmation pending/);
+  assert.equal(compact.panes[0].summary.rows[0].badge.text, 'CONFIRMATION PENDING');
+  const compactText = renderFrameToString(compact, { trimEnd: true });
+  assert.match(compactText, /plan awaiting-confirmation/);
+  assert.match(compactText, /transcript tail 39/);
+
+  const relaxed = detailViewModel(store, ui, { width: 120, height: HEIGHT_PRESSURE_MAX_ROWS + 1 });
+  assert.equal(relaxed.panes[0].summary.rows.length, 2, 'relaxed height retains plan state and the tab quantity summary');
+  assert.match(relaxed.panes[0].summary.rows[1].text, /40 blocks/);
+});
+
+test('job detail rereads planning state without reselecting and exposes the complete appended Plan tab', () => {
+  const store = syntheticStore();
+  const job = attachStructuralPlan(store);
+  const ui = { jobId: job.id, detailTab: 0, now: NOW, follow: false };
+  const awaiting = detailViewModel(store, ui, { width: 120, height: 36 });
+  assert.deepEqual(awaiting.tabs.items.slice(0, -1), ['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
+  assert.equal(awaiting.tabs.items.at(-1), 'Plan');
+
+  job.planning = {
+    ...job.planning,
+    state: 'degraded',
+    degraded: true,
+    confirmationRequired: true,
+    presentation: {
+      structuralPlan: job.planning.primary,
+      degraded: true,
+      reason: 'plan-output-token-budget-exceeded'
+    },
+    comparison: { verdict: 'inconclusive', reason: 'probe-output-invalid' }
+  };
+  const degraded = detailViewModel(store, ui, { width: 120, height: 36 });
+  assert.equal(degraded.meta.jobId, awaiting.meta.jobId, 'the selected job did not change');
+  assert.match(degraded.panes[0].summary.rows[0].text, /plan degraded/);
+  assert.match(degraded.panes[0].summary.rows[0].text, /verdict inconclusive/);
+  assert.match(degraded.panes[0].summary.rows[0].text, /reason plan-output-token-budget-exceeded/);
+  assert.match(degraded.panes[0].summary.rows[0].text, /confirmation pending/);
+
+  const planIndex = degraded.tabs.items.indexOf('Plan');
+  const full = detailViewModel(store, { ...ui, detailTab: planIndex }, { width: 78, height: 24 });
+  assert.equal(full.tabs.active, planIndex);
+  assert.equal(full.panes[0].content.kind, 'log');
+  assert.equal(full.panes[0].content.virtual, true);
+  const planText = full.panes[0].content.entries.map((entry) => entry.text).join('\n');
+  assert.match(planText, /TARGETS/);
+  assert.match(planText, /bin\/lib\/tui\/viewmodels\.mjs/);
+  assert.match(planText, /APPROACH/);
+  assert.match(planText, /edit: detail-plan-summary/);
+  assert.match(planText, /ASSUMPTIONS/);
+  assert.match(planText, /Append Plan so every existing detail tab keeps its number/);
+  assert.match(planText, /RISKS/);
+  assert.match(planText, /long sticky plan must not consume the transcript viewport/);
+  const assumptionIndex = full.panes[0].content.entries.findIndex((entry) => entry.text.includes('Append Plan'));
+  const wrappedAssumption = detailViewModel(store, {
+    ...ui,
+    detailTab: planIndex,
+    detailScroll: { entry: assumptionIndex, line: 0 }
+  }, { width: 56, height: 12 });
+  const wrappedText = renderFrameToString(wrappedAssumption, { trimEnd: true });
+  assert.match(wrappedText, /Append Plan so every existing detail/);
+  assert.match(wrappedText, /b keeps its number/);
+
+  job.pendingInput = null;
+  job.planning = { ...job.planning, state: 'confirmed', confirmationRequired: false };
+  const confirmed = detailViewModel(store, ui, { width: 120, height: 36 });
+  assert.match(confirmed.panes[0].summary.rows[0].text, /plan confirmed/);
+  assert.doesNotMatch(confirmed.panes[0].summary.rows[0].text, /confirmation pending/);
+});
+
+test('planless detail frames retain the exact existing layout and plan information survives NO_COLOR ASCII', (t) => {
+  t.after(() => {
+    setUiTheme('dark');
+    configureGlyphs({ env: process.env, widths: {} });
+  });
+  const legacyStore = syntheticStore();
+  const legacyUi = { jobId: 'codex-active-1234567', detailTab: 0, now: NOW, follow: false };
+  const absent = detailViewModel(legacyStore, legacyUi, { width: 100, height: 30 });
+  legacyStore.jobs.find((job) => job.id === legacyUi.jobId).planning = null;
+  const explicitNull = detailViewModel(legacyStore, legacyUi, { width: 100, height: 30 });
+  assert.equal(
+    renderFrameToString(explicitNull, { trimEnd: true }),
+    renderFrameToString(absent, { trimEnd: true })
+  );
+  assert.deepEqual(absent.tabs.items, ['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
+  assert.equal(absent.panes[0].summary.rows, undefined);
+
+  const planStore = syntheticStore();
+  const job = attachStructuralPlan(planStore, {
+    state: 'degraded',
+    degraded: true,
+    presentation: { reason: 'unsafe-structural-output' }
+  });
+  setUiTheme('dark', { TERM: 'dumb', LANG: 'C', NO_COLOR: '1' });
+  configureGlyphs({ env: { TERM: 'dumb', LANG: 'C', DELEGATE_TUI_ASCII: '1', NO_COLOR: '1' }, widths: {} });
+  const frame = detailViewModel(planStore, { jobId: job.id, detailTab: 0, now: NOW }, { width: 120, height: 30 });
+  const rendered = renderFrameToString(frame, { trimEnd: true });
+  assert.match(rendered, /plan degraded/);
+  assert.match(rendered, /verdict divergent/);
+  assert.match(rendered, /reason unsafe-structural-output/);
+  assert.match(rendered, /confirmation pending/);
 });
 
 test('app bar receives the package version from startup and never invents a release literal', () => {
@@ -374,6 +534,7 @@ test('fleet and Record derive failed state for stale queued records before durab
 
 test('detail view models every tab and exposes diff-file selection metadata', () => {
   const store = syntheticStore();
+  attachStructuralPlan(store);
   for (let tab = 0; tab < DETAIL_TABS.length; tab += 1) {
     const frame = detailViewModel(store, { jobId: 'codex-active-1234567', detailTab: tab, now: NOW }, { width: 100, height: 30 });
     assert.equal(frame.tabs.active, tab);

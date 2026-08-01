@@ -2,6 +2,13 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.61.0 — 2026-08-01
+
+- Keep live plan-first state visible throughout job detail with a bounded sticky
+  summary, and append a wrapped full Plan tab for structural targets, approach,
+  assumptions, and risks. The registry-owned `P` binding reaches the tab
+  without moving any existing detail binding.
+
 ## 0.60.0 — 2026-07-31
 
 - Pause write-mode jobs at an explicit human plan-confirmation gate whenever

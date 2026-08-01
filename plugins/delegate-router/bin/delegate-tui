@@ -1370,14 +1370,14 @@ function move(direction, options = {}) {
     const count = viewModel().meta.visibleJobIds.length;
     ui.selectedIndex = Math.max(0, Math.min(Math.max(0, count - 1), ui.selectedIndex + direction));
   } else if (ui.screen === 'detail') {
+    const model = viewModel();
     if (ui.detailTab === 1 && !ui.diffFile) {
-      const count = viewModel().meta.diffFiles.length;
+      const count = model.meta.diffFiles.length;
       ui.diffSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.diffSelection + direction));
-    } else if (ui.detailTab === 5) {
-      const count = viewModel().meta.chainJobIds.length;
+    } else if (model.meta.tabs?.[ui.detailTab] === 'Chain') {
+      const count = model.meta.chainJobIds.length;
       ui.chainSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.chainSelection + direction));
     } else {
-      const model = viewModel();
       const { content, height, width } = detailViewport(model);
       if (content?.virtual) {
         if ([0, 4].includes(ui.detailTab) && options.select) {
@@ -1439,7 +1439,7 @@ function moveEdge(end) {
   } else if (ui.screen === 'detail') {
     if (ui.detailTab === 1 && !ui.diffFile) {
       ui.diffSelection = end ? Math.max(0, model.meta.diffFiles.length - 1) : 0;
-    } else if (ui.detailTab === 5) {
+    } else if (model.meta.tabs?.[ui.detailTab] === 'Chain') {
       ui.chainSelection = end ? Math.max(0, model.meta.chainJobIds.length - 1) : 0;
     } else {
       const { content, height, width } = detailViewport(model);
@@ -1522,6 +1522,17 @@ function switchDetailTab(tab) {
   draw();
 }
 
+function openPlanTab() {
+  const tabs = viewModel().meta.tabs || [];
+  const plan = tabs.indexOf('Plan');
+  if (plan < 0) {
+    setStatus('This job has no planning state', 'error');
+    draw();
+    return;
+  }
+  switchDetailTab(plan);
+}
+
 function switchWorkTab(tab) {
   const count = viewModel().meta.tabs?.length || 6;
   const next = Math.max(0, Math.min(count - 1, tab));
@@ -1571,7 +1582,7 @@ function handleClick(event) {
     }
     return;
   }
-  if (ui.screen === 'detail' && ui.detailTab === 5 && pane?.content?.kind === 'key-value') {
+  if (ui.screen === 'detail' && model.meta.tabs?.[ui.detailTab] === 'Chain' && pane?.content?.kind === 'key-value') {
     const section = keyValueSectionIndexAt(pane, event.x, event.y);
     if (section != null) {
       ui.chainSelection = section;
@@ -1591,7 +1602,7 @@ function handleClick(event) {
   else if (ui.screen === 'stats') ui.statsSelection = row;
   else if (ui.screen === 'launcher') ui.launcher.fieldIndex = row;
   else if (ui.screen === 'detail' && ui.detailTab === 1 && !ui.diffFile) ui.diffSelection = row;
-  else if (ui.screen === 'detail' && ui.detailTab === 5) ui.chainSelection = row;
+  else if (ui.screen === 'detail' && model.meta.tabs?.[ui.detailTab] === 'Chain') ui.chainSelection = row;
   draw();
 }
 
@@ -1821,6 +1832,7 @@ function dispatchMenuAction(action) {
   if (action === 'detail.events') return jumpTranscriptToEvents();
   if (action === 'detail.diff') return openFocusedToolDiff();
   if (action === 'detail.scope-evidence') return openScopeEvidence();
+  if (action === 'detail.plan') return openPlanTab();
   if (action === 'launcher.editor') return editLauncherBody();
   if (action === 'launcher.dry-run') return dryRunLaunch();
   if (action === 'view.yank') return copyFocused();
@@ -2004,6 +2016,10 @@ function handleKey(key) {
     dispatchRegisteredBinding(binding);
     return;
   }
+  if (binding?.action === 'detail.plan') {
+    dispatchRegisteredBinding(binding);
+    return;
+  }
   if (key === 'b') return toggleNotifications();
   if (key === 'T') return toggleTimestamps();
   if (key === 't') return toggleTimestamps(true);
@@ -2181,7 +2197,7 @@ function handleKey(key) {
   if (key === 'enter' && ui.detailTab === 4 && toggleFocusedEvent()) return;
   if (key === 'd' && ui.detailTab === 0 && openFocusedToolDiff()) return;
   if (key === 'enter' && ui.detailTab === 1 && !ui.diffFile) { openDiffFile(); return; }
-  if (key === 'enter' && ui.detailTab === 5) {
+  if (key === 'enter' && viewModel().meta.tabs?.[ui.detailTab] === 'Chain') {
     const id = viewModel().meta.chainJobIds?.[ui.chainSelection];
     const job = store.jobs.find((entry) => entry.id === id);
     if (job) openJobDetail(job, ui.detailReturn);
