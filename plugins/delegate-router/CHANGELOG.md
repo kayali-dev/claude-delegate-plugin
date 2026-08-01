@@ -2,6 +2,21 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.63.0 — 2026-08-01
+
+- Add a declared-and-observed `structuralPlanOutput` attempt capability. The
+  ambiguity planner now skips incapable provider/model candidates, preserves
+  same-provider model independence, records an explicit cold-start degradation
+  when none qualify, and can re-admit a lane from bounded valid probe evidence.
+- Preserve Cursor assistant-message boundaries across ACP and headless instead
+  of concatenating every burst into one terminal message. Correlated deltas and
+  completions render once in conversational order; the installed ACP build's
+  missing `messageId` has an explicit tool/turn-boundary fallback.
+- Map ACP tool `content`/`rawInput`, in-progress status, bounded result output,
+  optional usage cost, and newline-composite tool ids into clean normalized
+  events. Label nonstandard terminal usage supplied by installed Cursor builds
+  as provider-reported extensions; no token totals are inferred.
+
 ## 0.62.0 — 2026-08-01
 
 - Weight structural ambiguity evidence by reliability: agreed concrete file

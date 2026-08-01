@@ -44,6 +44,12 @@ and waits for revisioned `delegate_respond accept=true|false`. Acceptance
 continues the same provider thread/session into write mode; it never launches a
 fresh context. When budget permits, a second cheap plan from another provider
 or model is compared structurally by targets, approach shape, and assumptions.
+That planner must advertise `structuralPlanOutput`; provider independence is
+preferred only among capable candidates, otherwise the broker keeps model
+independence inside the parent provider. Recent comparable/unparseable probe
+outcomes and successful structural primary plans can override the declaration
+for that provider/model. With no observations, the declared lane capability is
+used rather than treating missing data as support.
 Concrete file overlap is strong agreement; disjoint file targets and explicit
 same-topic decision contradictions are blocking conflicts. Component names,
 approach ordering/granularity, and unmatched assumption wording are weak;
@@ -166,7 +172,7 @@ Managed Codex app-server, Cursor ACP, and Cursor headless implement one formal
 attempt-driver lifecycle: `start`, `resume`, `prompt`, `steer`, `cancel`, and
 `close`. Do not infer parity from that common surface. The negotiated
 capabilities separately cover same-turn steering, live shell stdout, mid-turn
-token totals, context occupancy, plan mode, MCP injection, broker-worktree
+token totals, context occupancy, plan mode, structural-plan output, MCP injection, broker-worktree
 support, and pre-prompt pause.
 
 Run `delegate-health --capabilities` when a workflow depends on one of those
@@ -185,12 +191,15 @@ Schedule against the named guarantee:
   measurement.
 - Cursor ACP is restart-only, shell-output-completion-only, and has no
   mid-turn token totals; it does expose context occupancy.
-- Cursor headless is restart-only, shell-output-completion-only, reports token
-  use only on the terminal result, exposes no context occupancy, and cannot
-  pause before its first prompt.
-- All three support plan-first, broker back-channel injection, and explicit
+- Cursor headless is restart-only and shell-output-completion-only. Its
+  documented stream has no token fields; installed builds may add
+  provider-reported usage only to the terminal result. It exposes no context
+  occupancy and cannot pause before its first prompt.
+- All three support primary plan-first, broker back-channel injection, and explicit
   broker-owned worktrees on the currently supported builds, though their
-  mechanisms differ.
+  mechanisms differ. Structural comparison planning is separate: the current
+  Codex lane is declared capable, while current Cursor lanes require positive
+  observed structural validity before selection.
 
 A workflow that requires an absent capability is refused with the lane and
 capability named. Do not convert that refusal into a weaker workflow. Ordinary

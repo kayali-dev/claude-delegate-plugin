@@ -26,6 +26,7 @@ import {
 import {
   cursorModelCatalog,
   cursorModelDetailed,
+  completeCursorAcpMessage,
   mapCursorAcpUpdate,
   mapCursorAcpNotification,
   mapCursorHeadlessEvent,
@@ -120,16 +121,20 @@ test('headless mapper dedupes assistant flushes, keeps thinking ephemeral, norma
   mapCursorHeadlessEvent(job, { type: 'assistant', timestamp_ms: 3, model_call_id: 'buffered', message: { content: [{ text: 'draft' }] } }, context);
   mapCursorHeadlessEvent(job, { type: 'assistant', message: { content: [{ text: 'draft' }] } }, context);
   mapCursorHeadlessEvent(job, {
-    type: 'tool_call', subtype: 'completed', call_id: 'shell-1',
+    type: 'tool_call', subtype: 'completed', call_id: 'shell-1\nfc-shell-1',
     tool_call: { shellToolCall: { args: { command: 'pwd', requestedSandboxPolicy: { type: 'TYPE_WORKSPACE_READWRITE', networkAccess: false } }, result: { rejected: { reason: 'policy denied' } } } }
   }, context);
+  mapCursorHeadlessEvent(job, { type: 'assistant', timestamp_ms: 4, message: { content: [{ text: 'final answer' }] } }, context);
   mapCursorHeadlessEvent(job, { type: 'usage_update', outputTokens: 999 }, context);
-  mapCursorHeadlessEvent(job, { type: 'result', result: 'final answer', session_id: 'chat-1', usage: { inputTokens: 5, outputTokens: 2 } }, context);
+  mapCursorHeadlessEvent(job, { type: 'result', result: 'draftfinal answer', session_id: 'chat-1', usage: { inputTokens: 5, outputTokens: 2 } }, context);
   const events = readJobEvents(job.id);
-  assert.equal(events.filter((event) => event.type === 'message.delta').length, 1);
-  assert.equal(events.find((event) => event.type === 'message.completed').data.text, 'final answer');
+  assert.equal(events.filter((event) => event.type === 'message.delta').length, 2);
+  assert.deepEqual(events.filter((event) => event.type === 'message.completed').map((event) => event.data.text), ['draft', 'final answer']);
   assert.equal(events.filter((event) => event.type === 'usage.updated').length, 1);
+  assert.equal(events.find((event) => event.type === 'usage.updated').data.source, 'cursor-headless-result-extension');
   const tool = events.find((event) => event.type === 'tool.completed').data;
+  assert.equal(tool.toolCallId, 'shell-1');
+  assert.ok(!tool.toolCallId.includes('\n'));
   assert.equal(tool.rejectedReason, 'policy denied');
   assert.deepEqual(tool.requestedSandboxPolicy, { type: 'TYPE_WORKSPACE_READWRITE', networkAccess: false });
   assert.ok(!JSON.stringify(events).includes('hidden-thought-secret'));
@@ -189,7 +194,7 @@ test('sandbox.json materializes by merge, restores exact prior bytes, and exit c
   assert.equal(fs.readFileSync(file, 'utf8'), prior);
 }));
 
-test('ACP mapper covers every update variant, raw output, nested diffs, replay, and context occupancy without budget coupling', async () => isolated(async (cwd) => {
+test('ACP mapper preserves assistant burst boundaries, tool results, safe ids, replay, and context occupancy', async () => isolated(async (cwd) => {
   const job = createManagedJob({ provider: 'cursor', mode: 'review', model: 'composer', cwd, prompt: 'review', maxOutputTokens: 1 });
   const context = { sessionId: 'acp-1', messageParts: [], deltas: new DeltaRedactor(), planHolder: {}, ephemeral: { thinking() {}, output() {} } };
   const updates = [
@@ -201,12 +206,14 @@ test('ACP mapper covers every update variant, raw output, nested diffs, replay, 
     { sessionUpdate: 'current_mode_update', mode: 'plan' },
     { sessionUpdate: 'session_info_update', title: 'A title', model: 'composer-2.5' },
     { sessionUpdate: 'config_option_update', configId: 'model', value: 'composer-2.5' },
-    { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Edit', status: 'in_progress' },
-    { sessionUpdate: 'tool_call_update', toolCallId: 't1', title: 'Edit', status: 'in_progress' },
-    { sessionUpdate: 'tool_call_update', toolCallId: 't1', title: 'Edit', status: 'completed', rawOutput: { stdout: 'ok', stderr: 'warn', exitCode: 0 }, content: { diff: { path: 'a.txt', oldText: 'old', newText: 'new' } } },
-    { sessionUpdate: 'usage_update', used: 12, size: 100 }
+    { sessionUpdate: 'tool_call', toolCallId: 't1\nfc_t1', title: 'Edit', status: 'in_progress', rawInput: { path: 'a.txt' } },
+    { sessionUpdate: 'tool_call_update', toolCallId: 'fc_t1', title: 'Edit', status: 'in_progress' },
+    { sessionUpdate: 'tool_call_update', toolCallId: 'fc_t1', title: 'Edit', status: 'completed', rawOutput: { summary: 'saved a.txt', exitCode: 0 }, content: [{ type: 'content', content: { type: 'text', text: 'saved a.txt' } }, { diff: { path: 'a.txt', oldText: 'old', newText: 'new' } }] },
+    { sessionUpdate: 'agent_message_chunk', messageId: 'a2', content: { text: 'after tool' } },
+    { sessionUpdate: 'usage_update', used: 12, size: 100, cost: { amount: 0.01, currency: 'USD' } }
   ];
   for (const update of updates) mapCursorAcpUpdate(job, update, context);
+  completeCursorAcpMessage(job, context);
   mapCursorAcpNotification(job, 'cursor/update_todos', { todos: [{ text: 'one' }], merge: true }, 'acp-1');
   mapCursorAcpNotification(job, 'cursor/task', { title: 'subtask', status: 'running' }, 'acp-1');
   mapCursorAcpNotification(job, 'cursor/generate_image', { path: 'image.png' }, 'acp-1');
@@ -215,7 +222,14 @@ test('ACP mapper covers every update variant, raw output, nested diffs, replay, 
   mapCursorAcpUpdate(job, replayUpdate, { ...context, replay: true });
   const events = readJobEvents(job.id);
   assert.ok(events.some((event) => event.type === 'tool.status'));
-  assert.equal(events.find((event) => event.type === 'tool.output').data.exitCode, 0);
+  const toolEvents = events.filter((event) => event.type.startsWith('tool.'));
+  assert.ok(toolEvents.every((event) => !String(event.data.toolCallId || '').includes('\n')));
+  assert.equal(new Set(toolEvents.map((event) => event.data.toolCallId).filter(Boolean)).size, 1);
+  assert.match(events.find((event) => event.type === 'tool.output').data.output, /saved a\.txt/);
+  assert.deepEqual(events.find((event) => event.type === 'tool.completed').data.result, [{ type: 'content', content: { type: 'text', text: 'saved a.txt' } }, { diff: { path: 'a.txt', oldText: 'old', newText: 'new' } }]);
+  assert.deepEqual(events.find((event) => event.type === 'tool.started').data.args, { path: 'a.txt' });
+  assert.equal(events.find((event) => event.type === 'tool.started').data.result, undefined);
+  assert.equal(events.find((event) => event.type === 'tool.status').data.status, 'in_progress');
   assert.ok(events.some((event) => event.type === 'file.changed'
     && event.data.changes?.some((change) => change.path === 'a.txt' && change.added === 1 && change.removed === 1)));
   assert.match(events.find((event) => event.type === 'diff.updated').data.diff, /-old[\s\S]*\+new/);
@@ -227,12 +241,37 @@ test('ACP mapper covers every update variant, raw output, nested diffs, replay, 
   assert.ok(events.some((event) => event.type === 'artifact.created'));
   assert.ok(!JSON.stringify(events).includes('hidden-acp-thought'));
   assert.equal(events.filter((event) => event.replay === true).length, 1);
-  assert.deepEqual(context.messageParts, ['answer']);
+  assert.deepEqual(context.messageParts, ['answer', 'after tool']);
+  assert.deepEqual(events.filter((event) => event.type === 'message.completed').map((event) => event.data.text), ['answer', 'after tool']);
   const usage = jobUsage(job.id);
-  assert.deepEqual(usage.contextOccupancy, { contextUsed: 12, contextSize: 100 });
+  assert.deepEqual(usage.contextOccupancy, { contextUsed: 12, contextSize: 100, cost: { amount: 0.01, currency: 'USD' } });
   assert.equal(usage.observedAvailable, false);
   const blocks = new TranscriptProjector().project(events);
+  const visible = blocks.filter((block) => block.kind === 'message' && block.role === 'assistant');
+  assert.deepEqual(visible.map((block) => block.text), ['answer', 'after tool']);
+  assert.equal(visible.filter((block) => block.text === 'answer').length, 1);
+  assert.ok(blocks.findIndex((block) => block.text === 'answer') < blocks.findIndex((block) => block.kind === 'tool'));
+  assert.ok(blocks.findIndex((block) => block.text === 'after tool') > blocks.findIndex((block) => block.kind === 'tool'));
   assert.equal(blocks.find((block) => block.kind === 'restored').count, 1);
+}));
+
+test('ACP installed-build fallback closes anonymous message bursts at tools without fusing them', async () => isolated(async (cwd) => {
+  const job = createManagedJob({ provider: 'cursor', mode: 'review', model: 'auto', cwd, prompt: 'review' });
+  const context = { sessionId: 'acp-no-message-id', messageParts: [], deltas: new DeltaRedactor(), planHolder: {}, ephemeral: { thinking() {}, output() {} } };
+  mapCursorAcpUpdate(job, { sessionUpdate: 'agent_message_chunk', content: { text: 'before tool' } }, context);
+  mapCursorAcpUpdate(job, { sessionUpdate: 'tool_call', toolCallId: 'call-1\nfc_1', title: 'Read', status: 'pending' }, context);
+  mapCursorAcpUpdate(job, { sessionUpdate: 'tool_call_update', toolCallId: 'call-1\nfc_1', title: 'Read', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'read result' } }] }, context);
+  mapCursorAcpUpdate(job, { sessionUpdate: 'agent_message_chunk', content: { text: 'after tool' } }, context);
+  completeCursorAcpMessage(job, context);
+  const events = readJobEvents(job.id);
+  assert.deepEqual(events.filter((event) => event.type === 'message.completed').map((event) => ({
+    id: event.data.id,
+    text: event.data.text
+  })), [
+    { id: 'acp-message-1', text: 'before tool' },
+    { id: 'acp-message-2', text: 'after tool' }
+  ]);
+  assert.equal(new TranscriptProjector().project(events).filter((block) => block.kind === 'message').length, 3);
 }));
 
 for (const scenario of ['ask-question', 'create-plan']) {

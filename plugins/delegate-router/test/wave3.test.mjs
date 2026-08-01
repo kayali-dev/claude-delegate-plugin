@@ -25,6 +25,7 @@ import {
   auditUsageBands,
   outputTokens,
   recommendOutcomeRouting,
+  structuralPlanCapabilityEvidence,
   usageBandKey
 } from '../bin/lib/stats.mjs';
 import { loadProfile } from '../bin/lib/profiles.mjs';
@@ -319,6 +320,47 @@ test('outcome stats expose exact plan-first completion and degradation effective
   assert.equal(recovered.planFirst.probeOutputHealth.status, 'degraded');
   assert.equal(recovered.planFirst.completionRate, 1 / 15);
   assert.equal(recovered.planFirst.degradationRate, 14 / 15);
+});
+
+test('structural-plan capability evidence is model-scoped, bounded, and excludes unusable attempts', () => {
+  const records = [
+    {
+      jobId: 'old-cursor', at: 1,
+      planFirstOutcome: { requested: true, attempts: [
+        { provider: 'cursor', model: 'composer', outputValidity: 'unparseable' },
+        { provider: 'cursor', model: 'composer', outputValidity: 'unusable' }
+      ] }
+    },
+    {
+      jobId: 'new-cursor', at: 2,
+      planFirstOutcome: { requested: true, attempts: [
+        { provider: 'cursor', model: 'composer-2.5', outputValidity: 'comparable' }
+      ] }
+    },
+    {
+      jobId: 'future-cursor', at: 3, provider: 'cursor', model: 'future-cursor',
+      planFirstOutcome: { requested: true, state: 'completed', completionReached: true, attempts: [] }
+    }
+  ];
+  assert.deepEqual(structuralPlanCapabilityEvidence(records, { provider: 'cursor', model: 'composer' }), {
+    supported: true,
+    sampleSize: 2,
+    comparable: 1,
+    unparseable: 1,
+    validityRate: 0.5,
+    latestValidity: 'comparable',
+    windowSize: 5
+  });
+  assert.deepEqual(structuralPlanCapabilityEvidence(records, { provider: 'cursor', model: 'grok' }), {
+    supported: null,
+    sampleSize: 0,
+    comparable: 0,
+    unparseable: 0,
+    validityRate: null,
+    latestValidity: null,
+    windowSize: 5
+  });
+  assert.equal(structuralPlanCapabilityEvidence(records, { provider: 'cursor', model: 'future-cursor' }).supported, true);
 });
 
 test('CLI plan-first stats shouts a zero-for-three parse rate and wasted output spend', () => isolated(({ root }) => {

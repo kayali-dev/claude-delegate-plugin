@@ -7,8 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { brokerError, normalizeBrokerError } from './errors.mjs';
 import {
   legacyProviderCapabilities,
+  resolveStructuralPlanCapability,
   scheduleAttemptWorkflow
 } from './attempt-driver.mjs';
+import { readAuditLog, structuralPlanCapabilityEvidence } from './stats.mjs';
 import { auditLogPath, avoidPercentFor, dataDir, effectiveUsage, jobsDir, listJobs, loadJob, loadState, providerConfigPath, providerEnabled, saveJob, statePath, validateProvider } from './state.mjs';
 import { isProcessAlive } from './process.mjs';
 import { withFileLock } from './lock.mjs';
@@ -3406,16 +3408,25 @@ function ambiguityModelCandidate(parent) {
   };
 }
 
-function ambiguityCandidate(parent) {
+function ambiguityCandidateCapability(candidate) {
+  const observation = structuralPlanCapabilityEvidence(readAuditLog(), candidate);
+  return resolveStructuralPlanCapability(candidate.provider, observation);
+}
+
+export function selectAmbiguityCandidate(parent) {
   const otherProvider = parent.provider === 'codex' ? 'cursor' : 'codex';
   if (providerEnabled(otherProvider)) {
-    return {
+    const candidate = {
       provider: otherProvider,
       model: otherProvider === 'codex' ? 'luna' : 'composer',
       independentBy: 'provider'
     };
+    const structuralPlanCapability = ambiguityCandidateCapability(candidate);
+    if (structuralPlanCapability.supported) return { ...candidate, structuralPlanCapability };
   }
-  return ambiguityModelCandidate(parent);
+  const candidate = ambiguityModelCandidate(parent);
+  const structuralPlanCapability = ambiguityCandidateCapability(candidate);
+  return structuralPlanCapability.supported ? { ...candidate, structuralPlanCapability } : null;
 }
 
 function planAttemptRole(planJob, parentId) {
@@ -3480,7 +3491,27 @@ export function startAmbiguityProbe(id) {
   if (!parent) throw brokerError('NOT_FOUND', `job not found: ${id}`);
   if (!parent.planFirst || parent.ambiguityCheck !== true) return null;
   if (parent.planning?.ambiguity?.jobId) return inspectJob(parent.planning.ambiguity.jobId);
-  const candidate = ambiguityCandidate(parent);
+  const candidate = selectAmbiguityCandidate(parent);
+  if (!candidate) {
+    updateManagedJob(id, (current) => {
+      current.planning.ambiguity = {
+        enabled: true,
+        state: 'skipped',
+        reason: 'no-structural-plan-capable-planner'
+      };
+      current.planPass = {
+        state: 'skipped',
+        reason: 'no-structural-plan-capable-planner',
+        jobId: null
+      };
+    }, { incrementRevision: false });
+    appendJobEvent(id, 'plan.degraded', {
+      stage: 'ambiguity-pass',
+      reason: 'no-structural-plan-capable-planner',
+      fallback: 'single-plan-confirmation'
+    });
+    return null;
+  }
   let originalPrompt;
   try { originalPrompt = fs.readFileSync(parent.promptPath, 'utf8'); }
   catch (error) {
@@ -3563,6 +3594,7 @@ export function startAmbiguityProbe(id) {
         provider: candidate.provider,
         model: candidate.model,
         independentBy: candidate.independentBy,
+        structuralPlanCapability: candidate.structuralPlanCapability,
         outputTokenLimit: budget,
         attempts,
         totalOutputTokens,
@@ -3597,6 +3629,7 @@ export function startAmbiguityProbe(id) {
       provider: candidate.provider,
       model: candidate.model,
       independentBy: candidate.independentBy,
+      structuralPlanCapability: candidate.structuralPlanCapability,
       outputTokenLimit: budget
     });
     return child;

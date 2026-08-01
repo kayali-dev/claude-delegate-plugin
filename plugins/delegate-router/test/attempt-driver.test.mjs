@@ -11,6 +11,7 @@ import {
   createAttemptDriver,
   legacyProviderCapabilities,
   resolveAttemptDriverMatrix,
+  resolveStructuralPlanCapability,
   scheduleAttemptWorkflow,
   schedulingProfile
 } from '../bin/lib/attempt-driver.mjs';
@@ -74,6 +75,9 @@ test('capability negotiation preserves honest lane non-parity and evidence prove
   assert.equal(matrix['codex-app-server'].capabilities.midTurnTokenUsage.supported, true);
   assert.equal(matrix['cursor-acp'].capabilities.midTurnTokenUsage.supported, false);
   assert.equal(matrix['cursor-acp'].capabilities.contextOccupancyUsage.supported, true);
+  assert.equal(matrix['codex-app-server'].capabilities.structuralPlanOutput.supported, true);
+  assert.equal(matrix['cursor-acp'].capabilities.structuralPlanOutput.supported, false);
+  assert.equal(matrix['cursor-headless'].capabilities.structuralPlanOutput.supported, false);
   assert.equal(matrix['cursor-headless'].capabilities.contextOccupancyUsage.supported, false);
   assert.equal(matrix['cursor-acp'].capabilities.planMode.evidence.source, 'probed');
   assert.equal(matrix['cursor-headless'].capabilities.mcpInjection.evidence.source, 'probed');
@@ -87,19 +91,19 @@ test('capability negotiation preserves honest lane non-parity and evidence prove
 
 test('scheduling profiles distinguish workflow, budget, checkpoint, and containment guarantees', () => {
   assert.deepEqual(schedulingProfile('codex-app-server'), {
-    workflows: { planFirst: true, sameTurnSteering: true, coordinatorBackchannel: true },
+    workflows: { planFirst: true, structuralPlan: true, sameTurnSteering: true, coordinatorBackchannel: true },
     budgets: { outputTokens: 'mid-turn', contextOccupancy: 'unavailable' },
     checkpoints: { liveShellStdout: true, contextOccupancy: false },
     containment: { brokerWorktree: true, mode: 'broker-worktree' }
   });
   assert.deepEqual(schedulingProfile('cursor-acp'), {
-    workflows: { planFirst: true, sameTurnSteering: false, coordinatorBackchannel: true },
+    workflows: { planFirst: true, structuralPlan: false, sameTurnSteering: false, coordinatorBackchannel: true },
     budgets: { outputTokens: 'unavailable', contextOccupancy: 'observable' },
     checkpoints: { liveShellStdout: false, contextOccupancy: true },
     containment: { brokerWorktree: true, mode: 'broker-worktree' }
   });
   assert.deepEqual(schedulingProfile('cursor-headless'), {
-    workflows: { planFirst: true, sameTurnSteering: false, coordinatorBackchannel: true },
+    workflows: { planFirst: true, structuralPlan: false, sameTurnSteering: false, coordinatorBackchannel: true },
     budgets: { outputTokens: 'completion-only', contextOccupancy: 'unavailable' },
     checkpoints: { liveShellStdout: false, contextOccupancy: false },
     containment: { brokerWorktree: true, mode: 'broker-worktree' }
@@ -118,6 +122,38 @@ test('a workflow is refused rather than degraded when its lane lacks the named c
     }
   );
   assert.equal(scheduleAttemptWorkflow('codex-app-server', 'mid-turn-output-budget').ok, true);
+});
+
+test('structural-plan output capability combines a cold declaration with observed validity', () => {
+  const coldCodex = resolveStructuralPlanCapability('codex-app-server');
+  const coldCursor = resolveStructuralPlanCapability('cursor-acp');
+  assert.equal(coldCodex.supported, true);
+  assert.equal(coldCodex.evidence.source, 'declared-from-documentation');
+  assert.equal(coldCursor.supported, false);
+  assert.equal(coldCursor.evidence.source, 'declared-from-documentation');
+
+  const observedCapable = resolveStructuralPlanCapability('cursor-acp', {
+    supported: true,
+    sampleSize: 2,
+    comparable: 2,
+    unparseable: 0,
+    validityRate: 1,
+    latestValidity: 'comparable'
+  });
+  assert.equal(observedCapable.supported, true);
+  assert.equal(observedCapable.evidence.source, 'probed');
+  assert.equal(observedCapable.evidence.probe, 'structural-plan-output');
+
+  const observedInvalid = resolveStructuralPlanCapability('codex-app-server', {
+    supported: false,
+    sampleSize: 1,
+    comparable: 0,
+    unparseable: 1,
+    validityRate: 0,
+    latestValidity: 'unparseable'
+  });
+  assert.equal(observedInvalid.supported, false);
+  assert.equal(observedInvalid.mode, 'observed-unparseable');
 });
 
 test('driver scheduling preserves legacy job capabilities and the existing Cursor same-turn error', () => isolated((directory) => {

@@ -116,6 +116,60 @@ export function normalizeStatsModel(model) {
   return value;
 }
 
+const STRUCTURAL_PLAN_CAPABILITY_WINDOW = 5;
+
+export function structuralPlanCapabilityEvidence(records = [], candidate = {}) {
+  const provider = String(candidate.provider || '');
+  const model = normalizeStatsModel(candidate.model);
+  const observations = coalesceAuditRecords(records).flatMap((record, recordIndex) => {
+    const primaryModels = new Set([record?.model, record?.requestedModel].filter(Boolean).map(normalizeStatsModel));
+    const primaryComparable = record?.provider === provider
+      && primaryModels.has(model)
+      && record?.planFirstOutcome?.completionReached === true
+      && ['completed', 'recovered'].includes(record?.planFirstOutcome?.state);
+    const attempts = Array.isArray(record?.planFirstOutcome?.attempts)
+      ? record.planFirstOutcome.attempts
+      : [];
+    return [
+      ...(primaryComparable ? [{
+        validity: 'comparable',
+        at: auditCohortAt(record),
+        recordIndex,
+        attemptIndex: -1
+      }] : []),
+      ...attempts.flatMap((attempt, attemptIndex) => {
+        const validity = attempt?.outputValidity;
+        if (attempt?.provider !== provider
+          || normalizeStatsModel(attempt?.model) !== model
+          || !['comparable', 'unparseable'].includes(validity)) return [];
+        return [{
+          validity,
+          at: auditCohortAt(record),
+          recordIndex,
+          attemptIndex
+        }];
+      })
+    ];
+  }).sort((left, right) => left.at - right.at
+    || left.recordIndex - right.recordIndex
+    || left.attemptIndex - right.attemptIndex)
+    .slice(-STRUCTURAL_PLAN_CAPABILITY_WINDOW);
+  const comparable = observations.filter((entry) => entry.validity === 'comparable').length;
+  const unparseable = observations.filter((entry) => entry.validity === 'unparseable').length;
+  const sampleSize = observations.length;
+  const validityRate = sampleSize ? comparable / sampleSize : null;
+  const latestValidity = observations.at(-1)?.validity || null;
+  return {
+    supported: sampleSize ? latestValidity === 'comparable' && validityRate >= 0.5 : null,
+    sampleSize,
+    comparable,
+    unparseable,
+    validityRate,
+    latestValidity,
+    windowSize: STRUCTURAL_PLAN_CAPABILITY_WINDOW
+  };
+}
+
 export function outputTokens(record) {
   const usage = record?.usage?.total && typeof record.usage.total === 'object' ? record.usage.total : record?.usage;
   for (const name of ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens']) {

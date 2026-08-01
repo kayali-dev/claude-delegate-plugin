@@ -197,9 +197,11 @@ deduplication key only; it is never written back to `planning.primary` or
 
 `activity` contains only `{ kind: 'thinking' | 'output', at }`. Codex reasoning items plus Cursor ACP and headless thinking chunks produce transition markers at most once per two seconds; a bounded thought tail exists only in the provider process and is never written to the job record or journal. `provider.event` contains only a redacted event name and safe metadata. The raw transport stream and hidden reasoning remain excluded. An otherwise-unmapped Codex thread item additionally emits `provider.item` with `{ itemType, itemId, phase, item }`; the item is recursively redacted and capped by the ordinary event/string bounds, so the next provider item type remains inspectable without persisting an unbounded raw stream.
 
-Cursor headless assistant chunks obey the provider's dedupe contract: only chunks with `timestamp_ms` and without `model_call_id` become `message.delta`; buffered pre-tool flushes and the timestamp-free final flush are skipped. `result.result` is the authoritative `message.completed`, with a content-free mismatch diagnostic when streamed text differs. Only the final result envelope supplies headless token usage.
+Cursor headless assistant chunks obey the installed provider's dedupe contract: `buildCursorArgs` always requests `--stream-partial-output`; only chunks with `timestamp_ms` and without `model_call_id` become `message.delta`, while buffered pre-tool flushes and the timestamp-free final flush are skipped. Chunks are grouped until the next tool call or turn end, then one correlated `message.completed` closes that segment. The terminal `result.result` remains the job result but is not rendered again when streamed segments exist; a content-free mismatch diagnostic preserves any disagreement. The published output schema does not promise token fields, but installed builds may add usage to the terminal result; such totals are journaled as provider-reported `cursor-headless-result-extension`, never inferred.
 
-Cursor ACP `tool_call_update` without output emits `tool.status`; completion `rawOutput` becomes bounded/redacted `tool.output` plus `tool.completed` with `exitCode`. Nested `{ path, oldText, newText }` diff content becomes `file.changed` and `diff.updated`. `session_info_update`, current mode, available commands, todo updates, nested task activity, and generated images map to the typed events above.
+ACP message chunks are grouped by the protocol `messageId`: a change closes the prior message, and turn end closes the last. The installed 2026.07.23 build has also been observed omitting `messageId`; only in that divergent shape, tool-call and turn boundaries close synthetic message ids so independent bursts cannot fuse. Delta and completion events share the normalized id, allowing transcript projection to render the text once at the first-delta position instead of moving a turn-wide concatenation above later tools.
+
+Cursor ACP `tool_call_update` without output emits `tool.status`, including `in_progress`. Standard `content` result blocks and command `rawOutput` are bounded/redacted into `tool.output` and the correlated `tool.completed`; standardized `rawInput` supplies args. Composite newline-separated provider ids are split at adapter ingestion, retained as one-line aliases, and correlated on one canonical `toolCallId`. Nested `{ path, oldText, newText }` diff content becomes `file.changed` and `diff.updated`. `usage_update {used,size,cost?}` remains context occupancy plus optional provider cost, never fabricated input/output tokens. A nonstandard ACP prompt-response usage extension is retained with source `cursor-acp-prompt-response-extension`. `session_info_update`, current mode, available commands, todo updates, nested task activity, and generated images map to the typed events above.
 
 Every `file.changed` change normalizes at the broker boundary to a cwd-relative path and, when derivable, exact `{ added, removed }` line counts. Unified hunks count leading `+`/`-` lines except file headers; Cursor old/new text uses a line edit diff. Unknown counts are omitted rather than represented as zero. `delegate_transcript` admits these events with one compact plain-text `✎ path (+A −R)` line per change (including rename/delete labels), strips full diff/text bodies from that transcript view, and applies the same normalization when reading legacy journals.
 
@@ -327,16 +329,19 @@ inspect and TUI expose the ordered chain.
 The adapter does not simulate capabilities Cursor lacks:
 
 - no same-turn steering; corrections are cancel-and-resume restarts;
-- no live shell stdout (ACP exposes completion `rawOutput` only);
-- no mid-turn token usage (headless reports tokens only in the final result; ACP `usage_update {used,size}` is context occupancy);
+- no live shell stdout (ACP exposes completed `content`/`rawOutput` only);
+- no documented input/output token stream (ACP `usage_update {used,size,cost?}`
+  is context occupancy plus optional cost; some installed ACP/headless builds
+  add explicitly labelled terminal usage extensions);
 - no rate-limit or allowance feed (Cursor allowance remains manual dashboard state).
 
 ACP initialize advertises fs read/write and terminal capabilities as false. A versioned no-turn health probe may advertise them experimentally and reports observed client requests, but production flags remain false until an installed release actually routes a request through the client.
 
 Cursor ACP does expose context occupancy through `usage_update`; that is useful
 for a context checkpoint but never satisfies an output-token budget. Cursor
-headless exposes output-token totals on the terminal result only and no context
-occupancy. Both lanes support plan mode, MCP injection, and broker-owned
+headless has no documented usage fields or context occupancy; a
+provider-reported terminal extension is retained when present. Both lanes
+support plan mode, MCP injection, and broker-owned
 worktrees on the supported installed builds, but headless still cannot satisfy
 pre-prompt pause.
 

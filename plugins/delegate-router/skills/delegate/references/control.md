@@ -246,7 +246,19 @@ retry proceeds to ordinary confirmation; an invalid or over-budget retry sets
 access.
 
 When enabled, ambiguity detection sends the same WorkSpec to an independent
-cheap plan pass using a different provider or model. It compares only parsed
+cheap plan pass using a different provider or model. Selection first requires
+the explicit `structuralPlanOutput` capability. Provider independence remains
+preferred among capable candidates; if the other provider lacks it, an
+alternate model in the parent provider preserves model independence. The
+capability combines the lane declaration with the five most recent comparable
+or unparseable probe outcomes for that provider/model; a successfully completed
+structural primary plan is also positive bootstrap evidence. The latest must be
+comparable and the bounded validity rate at least one half. Operationally
+unusable attempts do not vote. A cold store uses the declaration, and a store
+with no capable candidate records `no-structural-plan-capable-planner` before
+continuing to the single primary-plan confirmation. A future lane/model can
+therefore become eligible through valid probe evidence without a code change.
+It compares only parsed
 target files, components, approach shape, and declared assumptions, but weights
 those dimensions by evidentiary strength. Concrete file overlap is strong
 agreement. Disjoint file targets, explicit contradictory decisions on a shared
@@ -268,7 +280,7 @@ Material divergence becomes a revisioned coordinator question before write
 work. Convergence proceeds after the ordinary plan confirmation. Invalid or
 unavailable structural evidence is reported as inconclusive and never
 converted into a guessed ambiguity verdict. When a completed, within-budget
-provider-independent probe returns structurally invalid output, the broker
+initial probe returns structurally invalid output, the broker
 launches exactly one alternate-model probe on the parent provider. Timeout,
 quota, cancellation, budget, and provider failures never trigger that fallback,
 and an invalid fallback is not retried.

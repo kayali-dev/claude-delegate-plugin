@@ -15,6 +15,7 @@ export const ATTEMPT_CAPABILITIES = Object.freeze([
   'midTurnTokenUsage',
   'contextOccupancyUsage',
   'planMode',
+  'structuralPlanOutput',
   'mcpInjection',
   'worktreeSupport',
   'startBeforePrompt'
@@ -45,6 +46,7 @@ const LANE_DEFINITIONS = Object.freeze({
       midTurnTokenUsage: capability(true, 'usage-events', 'thread token-usage updates arrive before turn completion', 'Codex app-server protocol'),
       contextOccupancyUsage: capability(false, 'unavailable', 'token totals are not a context-window occupancy measurement', 'Codex app-server protocol'),
       planMode: capability(true, 'read-only-turn', 'the broker runs the plan pass as a read-only turn on the same thread', 'Delegate Router P4.6'),
+      structuralPlanOutput: capability(true, 'structural-final-answer', 'managed Codex plan probes produce the broker structural-plan artifact', 'Delegate Router plan-probe outcomes'),
       mcpInjection: capability(true, 'thread-config', 'the back-channel MCP server is injected through thread config', 'Delegate Router P4.5'),
       worktreeSupport: capability(true, 'broker-worktree', 'the provider cwd can be a broker-owned detached worktree', 'Delegate Router P6'),
       startBeforePrompt: capability(true, 'thread-before-turn', 'thread start or resume completes before the first turn', 'Codex app-server protocol')
@@ -60,6 +62,7 @@ const LANE_DEFINITIONS = Object.freeze({
       midTurnTokenUsage: capability(false, 'unavailable', 'ACP usage_update reports context occupancy, not billable token totals', 'Cursor ACP v1'),
       contextOccupancyUsage: capability(true, 'usage-update', 'ACP usage_update reports used and total context-window units', 'Cursor ACP v1'),
       planMode: capability(true, 'session-mode', 'the session mode catalog exposes plan mode and the broker selects it', 'Cursor ACP v1'),
+      structuralPlanOutput: capability(false, 'unproven-output-contract', 'plan mode does not establish that the lane emits the required structural-plan artifact', 'Delegate Router plan-probe outcomes'),
       mcpInjection: capability(true, 'session-mcp-servers', 'the back-channel server is supplied to session/new or session/load', 'Delegate Router P4.5'),
       worktreeSupport: capability(true, 'broker-worktree', 'the provider cwd can be a broker-owned detached worktree', 'Delegate Router P6'),
       startBeforePrompt: capability(true, 'session-before-prompt', 'session/new or session/load completes before session/prompt', 'Cursor ACP v1')
@@ -72,9 +75,10 @@ const LANE_DEFINITIONS = Object.freeze({
     capabilities: Object.freeze({
       sameTurnSteering: capability(false, 'restart-only', 'correction terminates the process and resumes the chat', 'Cursor headless CLI'),
       liveShellStdout: capability(false, 'completion-only', 'stream-json exposes tool completion records, not live shell stdout', 'Cursor headless CLI'),
-      midTurnTokenUsage: capability(false, 'completion-only', 'token usage is present only on the terminal result record', 'Cursor headless CLI'),
+      midTurnTokenUsage: capability(false, 'completion-only', 'when the installed CLI adds token usage, it is provider-reported only on the terminal result; the documented stream does not guarantee it', 'Cursor headless CLI observations and output-format contract'),
       contextOccupancyUsage: capability(false, 'unavailable', 'headless result usage does not expose context-window occupancy', 'Cursor headless CLI'),
       planMode: capability(true, 'cli-mode', 'headless print mode accepts --mode plan', 'Cursor headless CLI'),
+      structuralPlanOutput: capability(false, 'unproven-output-contract', 'CLI plan mode does not establish that the lane emits the required structural-plan artifact', 'Delegate Router plan-probe outcomes'),
       mcpInjection: capability(true, 'launch-plugin', 'the launch-scoped back-channel plugin is passed with MCP approval', 'Delegate Router P4.5'),
       worktreeSupport: capability(true, 'broker-worktree', 'the provider cwd can be a broker-owned detached worktree', 'Delegate Router P6'),
       startBeforePrompt: capability(false, 'unavailable', 'managed startPaused is intentionally unavailable on headless transport', 'Delegate Router control contract')
@@ -84,6 +88,7 @@ const LANE_DEFINITIONS = Object.freeze({
 
 const WORKFLOW_REQUIREMENTS = Object.freeze({
   'plan-first': Object.freeze(['planMode']),
+  'structural-plan': Object.freeze(['planMode', 'structuralPlanOutput']),
   'same-turn-steering': Object.freeze(['sameTurnSteering']),
   'live-shell-checkpoint': Object.freeze(['liveShellStdout']),
   'mid-turn-output-budget': Object.freeze(['midTurnTokenUsage']),
@@ -107,6 +112,18 @@ export function attemptLane(providerOrJob, transport = null) {
 export function attemptDriverDefinition(providerOrLane, transport = null) {
   const lane = LANE_DEFINITIONS[providerOrLane] ? providerOrLane : attemptLane(providerOrLane, transport);
   return LANE_DEFINITIONS[lane];
+}
+
+export function resolveStructuralPlanCapability(providerOrLane, observation = null, transport = null) {
+  const entry = attemptDriverDefinition(providerOrLane, transport).capabilities.structuralPlanOutput;
+  if (typeof observation?.supported !== 'boolean') return { ...entry, evidence: { ...entry.evidence } };
+  return probedCapability(
+    entry,
+    observation.supported,
+    observation.supported ? 'observed-structural' : 'observed-unparseable',
+    `recent structural probes: ${observation.comparable || 0} comparable, ${observation.unparseable || 0} unparseable, latest ${observation.latestValidity || 'unknown'}`,
+    'structural-plan-output'
+  );
 }
 
 function probedCapability(entry, supported, mode, detail, probe) {
@@ -212,6 +229,7 @@ export function schedulingProfile(providerOrDefinition, transport = null) {
   return {
     workflows: {
       planFirst: capabilities.planMode.supported,
+      structuralPlan: capabilities.planMode.supported && capabilities.structuralPlanOutput.supported,
       sameTurnSteering: capabilities.sameTurnSteering.supported,
       coordinatorBackchannel: capabilities.mcpInjection.supported
     },

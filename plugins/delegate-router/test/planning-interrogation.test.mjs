@@ -15,6 +15,7 @@ import {
   launchManagedJob,
   readJobEvents,
   recordInterrogationAnswer,
+  selectAmbiguityCandidate,
   submitControl,
   updateManagedJob,
   waitForPlanFirstLaunch
@@ -150,6 +151,18 @@ function waitFor(id, predicate, description, timeoutMs = 5_000) {
     observe: () => inspectJob(id),
     predicate
   });
+}
+
+function appendPlanProbeAudit(directory, { provider, model, outputValidity, at = Date.now() }) {
+  const audit = path.join(directory, 'audit.jsonl');
+  fs.appendFileSync(audit, `${JSON.stringify({
+    jobId: `probe-${provider}-${model}-${at}`,
+    at,
+    planFirstOutcome: {
+      requested: true,
+      attempts: [{ role: 'independent-probe', provider, model, outputValidity }]
+    }
+  })}\n`);
 }
 
 test('structural plan comparison distinguishes convergence, divergence, and inconclusive output without prose similarity', () => {
@@ -586,13 +599,31 @@ test('plan wall clock derives from the token budget instead of a fixed cap', () 
   assert.equal(planWallClockBudget('tiny', { DELEGATE_PLAN_TIMEOUT_SECONDS: '99999' }).seconds, 900);
 });
 
-test('the independent planner is budgeted for whoever actually plans, not the parent', () => {
-  // ambiguityCandidate prefers PROVIDER independence, so a Codex parent with
-  // Cursor enabled plans on Cursor. Cursor is materially slower to first token
-  // and was hitting the old ceiling on owner machines while Codex/luna finished
-  // in a median 46s. The budget-filling evidence behind the flat Codex default
-  // was measured only on Codex, so Cursor carries its own floor rather than a
-  // blanket raise that would regress Codex back into filling its allowance.
+test('planner selection requires structural output capability and preserves model independence', () => isolated((directory) => {
+  process.env.DELEGATE_ENABLED_PROVIDERS = 'codex,cursor';
+  const codexParent = { provider: 'codex', model: 'sol', requestedModel: 'sol' };
+  const cursorParent = { provider: 'cursor', model: 'composer', requestedModel: 'composer' };
+
+  const coldFallback = selectAmbiguityCandidate(codexParent);
+  assert.deepEqual({ provider: coldFallback.provider, model: coldFallback.model, independentBy: coldFallback.independentBy }, {
+    provider: 'codex', model: 'luna', independentBy: 'model'
+  });
+  const capableProvider = selectAmbiguityCandidate(cursorParent);
+  assert.deepEqual({ provider: capableProvider.provider, model: capableProvider.model, independentBy: capableProvider.independentBy }, {
+    provider: 'codex', model: 'luna', independentBy: 'provider'
+  });
+  process.env.DELEGATE_ENABLED_PROVIDERS = 'cursor';
+  assert.equal(selectAmbiguityCandidate(cursorParent), null);
+  process.env.DELEGATE_ENABLED_PROVIDERS = 'codex,cursor';
+
+  appendPlanProbeAudit(directory, { provider: 'cursor', model: 'composer', outputValidity: 'comparable' });
+  const observedCursor = selectAmbiguityCandidate(codexParent);
+  assert.deepEqual({ provider: observedCursor.provider, model: observedCursor.model, independentBy: observedCursor.independentBy }, {
+    provider: 'cursor', model: 'composer', independentBy: 'provider'
+  });
+}));
+
+test('the independent planner budget remains provider-specific', () => {
   const spec = 'x'.repeat(5_000);
   const codex = planOutputTokenBudget(spec, {}, { provider: 'codex' });
   const cursor = planOutputTokenBudget(spec, {}, { provider: 'cursor' });
@@ -958,6 +989,7 @@ test('two independent cheap plan passes open only structural divergence question
 
 test('an invalid Cursor probe falls back once to a parent-provider model and preserves both attempt costs', () => isolated(async (directory) => {
   process.env.DELEGATE_ENABLED_PROVIDERS = 'codex,cursor';
+  appendPlanProbeAudit(directory, { provider: 'cursor', model: 'composer', outputValidity: 'comparable' });
   process.env.FAKE_CURSOR_PLAN_RESPONSE = 'invalid';
   process.env.FAKE_CURSOR_PLAN_OUTPUT_TOKENS = '9024';
   const cursorLog = path.join(directory, 'cursor-invalid-plan.jsonl');
