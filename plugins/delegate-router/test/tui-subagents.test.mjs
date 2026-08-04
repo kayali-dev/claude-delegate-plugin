@@ -606,3 +606,40 @@ test('live projection drops reasoning and unknown items while admitting a recogn
   assert.match(JSON.stringify(publicMessage.events), /Public live answer/, 'the same live path is non-vacuously projecting recognized content');
   assert.doesNotMatch(JSON.stringify([reasoning, unknown, publicMessage]), new RegExp(REASONING_SECRET));
 });
+
+// thread/list reports a child's status as "notLoaded" even while that child is
+// actively working — the field describes thread-store residency, not execution.
+// Every fixture here uses "active", so nothing pinned what happens against the
+// shape production actually returns. That matters because the live path is gated
+// on selectedChildIsRunning: if a refactor dropped the lifecycle preference and
+// fell straight through to the thread status, every child would look idle, no
+// subscription would ever be attempted, and the Subagents tab would silently
+// serve stored snapshots forever with a green suite. Observed first-hand against
+// a real Codex job, where all children reported notLoaded for over 100 seconds.
+test('a child the thread store calls notLoaded is still live when the parent lifecycle says it started', async () => {
+  const source = new DelegateDataSource({ watch: false, pollMs: 10_000 });
+  try {
+    const notLoaded = { threads: [{ id: 'thread-child-running', status: 'notLoaded' }] };
+
+    // The production shape: thread/list says notLoaded, the parent's own
+    // subagent.started lifecycle says otherwise, and the lifecycle wins.
+    const started = { subagentLifecycle: { one: { id: 'thread-child-running', status: 'started' } } };
+    assert.equal(source.selectedChildIsRunning(started, 'thread-child-running', notLoaded), true,
+      'a running child must stay reachable by the live path despite notLoaded');
+
+    // The lifecycle is authoritative in both directions, not just the generous one.
+    const finished = { subagentLifecycle: { one: { id: 'thread-child-running', status: 'completed' } } };
+    assert.equal(source.selectedChildIsRunning(finished, 'thread-child-running', notLoaded), false,
+      'a completed child must not open a subscription just because a fallback is available');
+
+    // With nothing recorded on the parent, the thread status is all there is and
+    // notLoaded correctly means do not subscribe.
+    assert.equal(source.selectedChildIsRunning({}, 'thread-child-running', notLoaded), false,
+      'without lifecycle evidence, notLoaded means not running');
+
+    // ...and the fallback can still say yes when the store does report activity.
+    assert.equal(source.selectedChildIsRunning({}, 'thread-child-running', {
+      threads: [{ id: 'thread-child-running', status: 'active' }]
+    }), true, 'the fallback still recognises an active thread');
+  } finally { await source.close(); }
+});

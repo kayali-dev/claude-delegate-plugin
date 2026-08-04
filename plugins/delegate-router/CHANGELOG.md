@@ -13,6 +13,18 @@ All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the
   parent journal and removed on claim, timeout, process loss, view exit, parent
   completion, and TUI shutdown.
 
+## 0.69.1 — 2026-08-04
+
+- Pin the behaviour the live child path actually depends on. `thread/list`
+  reports a child's status as `notLoaded` even while that child is working —
+  the field describes thread-store residency, not execution — and every fixture
+  used `active`, so nothing covered the shape production returns. The live path
+  is gated on that decision: a refactor dropping the parent-lifecycle preference
+  would leave every child looking idle, no subscription would ever be attempted,
+  and the tab would serve stored snapshots forever with a green suite. The
+  regression asserts the lifecycle wins in both directions and that the thread
+  status still governs when no lifecycle evidence exists.
+
 ## 0.69.0 — 2026-08-04
 
 - Give a running Codex child a genuinely live transcript, brokered through the
