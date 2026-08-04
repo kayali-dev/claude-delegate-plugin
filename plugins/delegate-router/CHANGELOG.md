@@ -2,6 +2,20 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.68.0 — 2026-08-04
+
+- Stop subagent turns from rebinding the parent job's Codex thread. Codex
+  reports `turn/started` for SUBAGENT turns on the same connection, carrying the
+  child's `threadId` and turn id, and `recordSession` accepted them — so a parent
+  that spawned three subagents ended up recorded as the third child. Everything
+  keyed on that field then read a child: resume would continue the wrong thread,
+  owned-thread exclusion guarded the wrong id, `providerTurnId` aimed steering at
+  a turn the coordinator never started, and the Subagents tab asked `thread/list`
+  for the descendants of a descendant, which is why it found none. Thread
+  identity is now established only by the job's own thread start or resume;
+  anything else may confirm it, never replace it, and a foreign thread no longer
+  announces a `session.updated` that did not happen.
+
 ## 0.67.0 — 2026-08-04
 
 - Stop redacting subagent cache-token counters. Every usage field name contains

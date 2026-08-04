@@ -10,6 +10,7 @@ import {
   mapCodexItem,
   mapCodexMcpEvent,
   mapCursorAcpNotification,
+  recordSession,
   runManagedProvider
 } from '../bin/lib/providers.mjs';
 import { CODEX_FIRST_CLASS_ITEM_TYPES } from '../bin/lib/codex-item-types.mjs';
@@ -684,4 +685,50 @@ test('ACP tier gaps fall back to headless with the CLI-resolved model, explicitl
   assert.equal(completed.providerSessionId, 'headless-tier-session');
   const events = readJobEvents(job.id, { limit: 1000 });
   assert.ok(events.some((event) => event.data.providerEvent === 'cursor:acp-tier-fallback' && event.data.cliModel === 'grok-4.5-xhigh'));
+}));
+
+// Reproduces the sequence observed on codex-mseigqwb-f9fde5, where sol spawned
+// three subagents: turn/started fires for each CHILD turn on the same
+// connection, carrying the child's threadId and turn id. Before the guard, each
+// one rebound the parent job, and the recorded thread ended up being the third
+// child. Everything keyed on that field then reads a child — resume continues
+// the wrong thread, and the Subagents tab asks thread/list for the descendants
+// of a descendant, which is why it found none.
+test('subagent turns never rebind the parent job thread or its steering turn', () => isolated(async (directory) => {
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'consult', cwd: directory, prompt: 'investigate' });
+  const parentThread = '019fcc4d-7746-7c90-89cb-b3b5eff493f2';
+  const parentTurn = '019fcc4d-8a37-7293-8708-377d977f7847';
+  recordSession(job.id, parentThread, parentTurn, { rebind: true });
+  assert.equal(inspectJob(job.id).providerSessionId, parentThread);
+
+  const children = [
+    ['019fcc4d-9ba5-7ad1-8078-0c3ba82202d6', '019fcc4d-9c1b-7d60-bd87-7c3eeb60e928'],
+    ['019fcc4d-b61f-79c2-9c8b-701a54bc9d4f', '019fcc4d-b68a-7142-a669-f9fb38cea32d'],
+    ['019fcc4d-c352-7432-b04d-5bc25e6f052f', '019fcc4d-c3ac-76e0-a080-69d3bb681131']
+  ];
+  for (const [childThread, childTurn] of children) {
+    assert.equal(recordSession(job.id, childThread, childTurn), false, 'a foreign thread must be refused');
+  }
+
+  const after = inspectJob(job.id);
+  assert.equal(after.providerSessionId, parentThread, 'the parent thread survives every child turn');
+  assert.equal(after.session, parentThread);
+  assert.equal(after.providerTurnId, parentTurn, 'steering still aims at the turn the coordinator started');
+
+  // Reporting session.updated for a thread that is not this job's session would
+  // assert a change that never happened.
+  const announced = readJobEvents(job.id, { limit: 1000 })
+    .filter((event) => event.type === 'session.updated')
+    .map((event) => event.data?.sessionId);
+  assert.deepEqual(announced, [parentThread], 'only the job\'s own session is announced');
+
+  // The parent's own turns must still advance normally.
+  const secondTurn = '019fcc4d-dddd-7000-9000-000000000001';
+  assert.equal(recordSession(job.id, parentThread, secondTurn), true);
+  assert.equal(inspectJob(job.id).providerTurnId, secondTurn);
+
+  // A genuine resume onto a different thread is still allowed when asked for.
+  const resumed = '019fcc4d-eeee-7000-9000-000000000002';
+  assert.equal(recordSession(job.id, resumed, null, { rebind: true }), true);
+  assert.equal(inspectJob(job.id).providerSessionId, resumed);
 }));

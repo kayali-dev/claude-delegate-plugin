@@ -1550,8 +1550,28 @@ function terminal(job, status, phase, extra = {}) {
   }
 }
 
-function recordSession(jobId, sessionId, turnId = undefined) {
+// A managed job's provider thread identity is established when its own thread
+// starts or resumes, and those callers pass rebind. Everything else may only
+// confirm the identity already recorded, never replace it: Codex reports
+// turn/started for SUBAGENT turns on the same connection, carrying the child's
+// threadId and the child's turn id. Accepting those rebound the parent job to
+// its own subagent — observed on codex-mseigqwb-f9fde5, where the recorded
+// thread ended up being the third of three children. Everything keyed on this
+// field then reads a child: resume continues the wrong thread, owned-thread
+// exclusion guards the wrong id, subagent discovery asks for the descendants of
+// a descendant, and providerTurnId aims steering at a turn the coordinator
+// never started.
+export function recordSession(jobId, sessionId, turnId = undefined, options = {}) {
+  let applied = true;
   updateManagedJob(jobId, (job) => {
+    const foreignThread = Boolean(sessionId)
+      && Boolean(job.providerSessionId)
+      && job.providerSessionId !== sessionId
+      && options.rebind !== true;
+    if (foreignThread) {
+      applied = false;
+      return;
+    }
     if (sessionId) {
       job.providerSessionId = sessionId;
       job.session = sessionId;
@@ -1559,7 +1579,11 @@ function recordSession(jobId, sessionId, turnId = undefined) {
     if (turnId !== undefined) job.providerTurnId = turnId;
     job.phase = turnId ? 'running' : job.phase;
   });
-  appendJobEvent(jobId, 'session.updated', { sessionId, turnId });
+  // Reporting session.updated for a thread that is not this job's session would
+  // assert a change that did not happen. The child thread is already recorded
+  // by the subagent.* lifecycle events.
+  if (applied) appendJobEvent(jobId, 'session.updated', { sessionId, turnId });
+  return applied;
 }
 
 export function mapCodexItem(jobId, phase, params, activity = null) {
@@ -2026,7 +2050,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.67.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.68.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2062,7 +2086,8 @@ async function runCodex(job, driver) {
       }
     }
     const threadId = thread.thread.id;
-    recordSession(job.id, threadId, null);
+    // Thread start or resume is where this job's own identity is established.
+    recordSession(job.id, threadId, null, { rebind: true });
     if (thread.model) {
       updateManagedJob(job.id, (current) => { current.resolvedModel = thread.model; }, { incrementRevision: false });
     }
@@ -3193,7 +3218,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.67.0' }
+      clientInfo: { name: 'delegate-router', version: '0.68.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -3227,7 +3252,7 @@ async function runCursorAcpTransport(job, driver) {
     }
     replaying = false;
     sessionId ||= session.sessionId;
-    recordSession(job.id, sessionId, null);
+    recordSession(job.id, sessionId, null, { rebind: true });
     const config = session.configOptions || [];
     updateManagedJob(job.id, (current) => {
       current.cursorConfigOptions = redact(config);
@@ -3783,7 +3808,7 @@ async function runCursorHeadlessTransport(job, driver) {
     const created = createCursorChat(binary, job);
     if (created.sessionId) {
       resume = created.sessionId;
-      recordSession(job.id, resume, null);
+      recordSession(job.id, resume, null, { rebind: true });
       appendJobEvent(job.id, 'session.created', { sessionId: resume, source: 'cursor-create-chat' }, { sessionId: resume });
     } else {
       appendJobEvent(job.id, 'provider.event', { providerEvent: 'cursor:create-chat-fallback', reason: created.fallback });
@@ -4031,7 +4056,7 @@ async function runCursorHeadlessTransport(job, driver) {
       throw brokerError('PROVIDER_ERROR', outcome.error || 'Cursor headless execution failed', { provider: job.provider });
     }
     const sessionId = findValue(outcome.payload, ['session_id', 'sessionId', 'chat_id', 'chatId']);
-    if (sessionId) recordSession(job.id, sessionId, null);
+    if (sessionId) recordSession(job.id, sessionId, null, { rebind: true });
     if (pendingInterrogations.length) {
       resultBeforeInterrogation = redact(outcome.payload);
       activeInterrogation = pendingInterrogations.shift();
