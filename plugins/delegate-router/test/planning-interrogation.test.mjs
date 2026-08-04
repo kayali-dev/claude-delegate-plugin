@@ -1532,3 +1532,89 @@ test('Cursor plan-first and interrogation reuse one ACP session while questions 
     && request.params.configId === 'mode'
     && request.params.value === 'plan'));
 }));
+
+// recordPrimaryPlanDegradation() writes planning.state='degraded' together with
+// confirmationRequired=true, and the confirmation gate is opened by a later,
+// separate write. waitForPlanFirstLaunch() used to return inside that window,
+// reporting blocking:false for a job that was about to pause for a human
+// decision — a caller trusting it would proceed as though no gate were coming.
+// This reproduced as a ~33% flake at test/planning-interrogation.test.mjs:1310,
+// where every assertion passed except blocking. Pin the window directly rather
+// than racing for it.
+test('a degraded launch notice waits for the confirmation gate instead of reporting blocking:false', () => isolated(async (directory) => {
+  process.env.DELEGATE_PLAN_LAUNCH_WAIT_SECONDS = '5';
+  const job = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    planFirst: true,
+    ambiguityCheck: false
+  });
+  // The exact state recordPrimaryPlanDegradation leaves behind: degraded, a
+  // confirmation already known to be required, and no gate written yet.
+  updateManagedJob(job.id, (current) => {
+    current.planning = {
+      ...current.planning,
+      state: 'degraded',
+      degraded: true,
+      confirmationRequired: true,
+      reason: 'runaway-plan-output-token-budget-exceeded',
+      outputTokens: 66_428,
+      outputTokenLimit: 16_384
+    };
+    current.pendingInput = null;
+  }, { incrementRevision: false });
+
+  let settled = false;
+  const waiting = waitForPlanFirstLaunch(job.id).then((value) => { settled = true; return value; });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(settled, false, 'the wait must not resolve while the gate it implies is still unwritten');
+
+  updateManagedJob(job.id, (current) => {
+    current.pendingInput = {
+      requestId: 'plan-deterministic-gate',
+      kind: 'plan-confirmation',
+      requiresHumanDecision: true,
+      question: 'Confirm the degraded plan.',
+      options: ['accept-plan', 'decline-plan']
+    };
+  }, { incrementRevision: false });
+
+  const result = await waiting;
+  assert.equal(result.launchNotice.state, 'degraded');
+  assert.equal(result.launchNotice.blocking, true, 'once the gate exists the notice must say it blocks');
+}));
+
+test('a degraded notice whose gate never opens still reports itself rather than the pending notice', () => isolated(async (directory) => {
+  process.env.DELEGATE_PLAN_LAUNCH_WAIT_SECONDS = '1';
+  const job = createManagedJob({
+    provider: 'codex',
+    model: 'sol',
+    mode: 'implement',
+    cwd: directory,
+    prompt: 'Implement the bounded change',
+    planFirst: true,
+    ambiguityCheck: false
+  });
+  updateManagedJob(job.id, (current) => {
+    current.planning = {
+      ...current.planning,
+      state: 'degraded',
+      degraded: true,
+      confirmationRequired: true,
+      reason: 'runaway-plan-output-token-budget-exceeded',
+      outputTokens: 66_428,
+      outputTokenLimit: 16_384
+    };
+    current.pendingInput = null;
+  }, { incrementRevision: false });
+
+  const result = await waitForPlanFirstLaunch(job.id);
+  // Waiting must not cost the caller the degraded evidence. On expiry
+  // blocking:false is a measurement of a gate that never opened, not a race.
+  assert.equal(result.launchNotice.state, 'degraded');
+  assert.equal(result.launchNotice.reason, 'runaway-plan-output-token-budget-exceeded');
+  assert.equal(result.launchNotice.blocking, false);
+}));

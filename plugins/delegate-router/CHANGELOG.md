@@ -2,6 +2,20 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.66.0 — 2026-08-04
+
+- Wait for the plan confirmation gate to exist before reporting a degraded
+  launch notice. `recordPrimaryPlanDegradation` records
+  `confirmationRequired` together with `planning.state='degraded'`, and the gate
+  itself is opened by a later write, so `waitForPlanFirstLaunch` could return
+  inside that window and tell a caller `blocking: false` about a job that was
+  about to pause for a human decision. The wait now ends when the gate exists,
+  when the decision resolves, or at the deadline — where a degraded notice is
+  still returned in preference to the generic pending one, so waiting never
+  costs the caller its evidence. This surfaced as a ~33% flake in
+  `planning-interrogation.test.mjs` that was present in 0.64.0 and 0.65.0; two
+  deterministic regressions now pin the window instead of racing for it.
+
 ## 0.65.0 — 2026-08-04
 
 - Tail correlated Claude Agent/Task subagent transcripts from the resident

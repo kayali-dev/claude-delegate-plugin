@@ -5132,8 +5132,23 @@ export async function waitForPlanFirstLaunch(id) {
   for (;;) {
     const job = inspectJob(id);
     const notice = planLaunchNotice(job);
-    if (notice) return { ...job, launchNotice: notice };
-    if (Date.now() >= deadline) {
+    const expired = Date.now() >= deadline;
+    // A degrading plan records confirmationRequired before its confirmation gate
+    // is opened, so there is a window where the notice is fully populated while
+    // pendingInput is still one write away. Returning inside it reports
+    // blocking:false for a job that is about to pause for a human decision, and
+    // a caller who believes that proceeds as though no gate were coming. Wait
+    // for the gate to exist rather than describing a state we cannot yet back
+    // up. The wait ends on its own: answering the gate clears
+    // confirmationRequired and moves planning out of 'degraded'.
+    const awaitingGate = notice?.state === 'degraded'
+      && notice.blocking !== true
+      && job.planning?.confirmationRequired === true
+      && !TERMINAL_STATUSES.has(job.status);
+    // On expiry the degraded notice is still the truest thing we have; its
+    // blocking:false is then a measurement rather than a race.
+    if (notice && (!awaitingGate || expired)) return { ...job, launchNotice: notice };
+    if (expired) {
       return {
         ...job,
         launchNotice: {
