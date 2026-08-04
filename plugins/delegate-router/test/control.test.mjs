@@ -201,6 +201,55 @@ test('redaction preserves numeric usage while hiding numeric and boolean secrets
   assert.doesNotMatch(text, /hunter2|abcdef|value123|user:pass/);
 });
 
+// Every usage field name contains "token", so each one is presumed sensitive and
+// must be rescued by name. A field the allow-list has never heard of is written
+// to the journal as [REDACTED] — which is how the Claude transcript ingestor's
+// cache counters were lost in a live run while every unit test stayed green,
+// because the tests asserted on the normalizer's output and redaction happens
+// one seam later.
+test('usage counters from every ingestion path survive redaction, credential-shaped tokens do not', () => {
+  const usage = redact({
+    inputTokens: 4,
+    outputTokens: 532,
+    totalTokens: 536,
+    cachedInputTokens: 11,
+    cacheReadInputTokens: 1_625_967,
+    cacheCreationInputTokens: 103_453,
+    reasoningOutputTokens: 20_460,
+    maxOutputTokens: 8_192,
+    tokenCount: 7
+  });
+  assert.deepEqual(usage, {
+    inputTokens: 4,
+    outputTokens: 532,
+    totalTokens: 536,
+    cachedInputTokens: 11,
+    cacheReadInputTokens: 1_625_967,
+    cacheCreationInputTokens: 103_453,
+    reasoningOutputTokens: 20_460,
+    maxOutputTokens: 8_192,
+    tokenCount: 7
+  });
+  // Rescuing usage names must not open a door: credential-shaped keys stay
+  // redacted, and a string under an allow-listed usage key is still redacted,
+  // so the rescue cannot be used to smuggle one through.
+  assert.deepEqual(redact({
+    authToken: 1234,
+    apiToken: 'abc',
+    refreshToken: 'r',
+    accessToken: 'a',
+    sessionToken: 's',
+    cacheReadInputTokens: 'sk-live-not-a-number'
+  }), {
+    authToken: '[REDACTED]',
+    apiToken: '[REDACTED]',
+    refreshToken: '[REDACTED]',
+    accessToken: '[REDACTED]',
+    sessionToken: '[REDACTED]',
+    cacheReadInputTokens: '[REDACTED]'
+  });
+});
+
 test('compound provider usage counters survive journaling and Events rendering while credential tokens stay redacted', () => isolated((directory) => {
   const codexUsage = {
     total: {

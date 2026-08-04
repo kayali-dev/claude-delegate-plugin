@@ -2,6 +2,18 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.67.0 — 2026-08-04
+
+- Stop redacting subagent cache-token counters. Every usage field name contains
+  `token`, so each is presumed sensitive and rescued by an allow-list; the
+  transcript ingestor introduced `cacheReadInputTokens` and
+  `cacheCreationInputTokens`, which the list had never heard of, so a live
+  subagent wrote both to its journal as `[REDACTED]`. Unit tests could not see
+  it — they assert on the normalizer's output and redaction happens one seam
+  later. The allow-list now covers those names, credential-shaped keys are still
+  rejected, and a string under a usage-shaped key is still redacted so the
+  rescue cannot smuggle one through.
+
 ## 0.66.0 — 2026-08-04
 
 - Wait for the plan confirmation gate to exist before reporting a degraded

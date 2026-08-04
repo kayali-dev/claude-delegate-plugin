@@ -93,7 +93,14 @@ const SENSITIVE_VALUE = /(?:sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+\/-]{12
 // Usage counters often compose several semantic atoms (for example
 // cachedInputTokens or reasoningOutputTokens). Keep those numeric counters
 // inspectable without weakening the blanket treatment of auth/access tokens.
-const USAGE_TOKEN_KEY = /^(?:(?:(?:max|observed|cached|reasoning|billable|prompt|completion|input|output|total|context)+tokens?(?:count|usage)?)|tokens?(?:count|usage))$/i;
+// SENSITIVE_KEY matches the substring "token", so every usage field is presumed
+// sensitive and has to be rescued here by name. The vocabulary must therefore
+// cover the field names every ingestion path actually emits: the Claude
+// transcript ingestor introduced cacheReadInputTokens and
+// cacheCreationInputTokens, which this list did not know, and their counts were
+// written to the journal as [REDACTED]. Rescuing a key is not a way in for a
+// secret — an allow-listed key whose value is a string is still redacted below.
+const USAGE_TOKEN_KEY = /^(?:(?:(?:max|observed|cache|cached|creation|read|reasoning|billable|prompt|completion|input|output|total|context)+tokens?(?:count|usage)?)|tokens?(?:count|usage))$/i;
 const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WRITE_MODES = new Set(['implement', 'verify']);
