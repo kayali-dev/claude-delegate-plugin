@@ -91,11 +91,49 @@ function complete() {
 lines.on('line', async (line) => {
   const request = JSON.parse(line);
   if (process.env.FAKE_CODEX_REQUEST_LOG && request.id != null) {
-    fs.appendFileSync(process.env.FAKE_CODEX_REQUEST_LOG, `${JSON.stringify({ method: request.method, params: request.params })}\n`);
+    fs.appendFileSync(process.env.FAKE_CODEX_REQUEST_LOG, `${JSON.stringify({ pid: process.pid, method: request.method, params: request.params })}\n`);
   }
   if (request.id == null) return;
   if (request.method === 'initialize') send({ jsonrpc: '2.0', id: request.id, result: { userAgent: 'fake' } });
-  else if (request.method === 'thread/start' || request.method === 'thread/resume') {
+  else if (request.method === 'thread/resume' && String(request.params?.threadId || '').startsWith('thread-child-')) {
+    const childThreadId = request.params.threadId;
+    if (process.env.FAKE_CODEX_REJECT_CHILD_SUBSCRIBE === '1') {
+      send({ jsonrpc: '2.0', id: request.id, error: { code: -32600, message: 'fake child subscription rejected' } });
+      return;
+    }
+    send({ jsonrpc: '2.0', id: request.id, result: { thread: {
+      id: childThreadId,
+      parentThreadId: 'thread-fake',
+      status: { type: 'active' },
+      turns: [{
+        id: 'child-turn-live', status: 'inProgress', startedAt: Date.now() / 1000,
+        items: [{ id: 'child-stored-message', type: 'agentMessage', text: 'Stored child prefix.' }]
+      }]
+    } } });
+    const reasoningSecret = 'live-child-private-reasoning';
+    const unknownSecret = 'live-child-unknown-private-content';
+    setTimeout(() => send({ jsonrpc: '2.0', method: 'item/completed', params: {
+      threadId: childThreadId, turnId: 'child-turn-live', completedAtMs: Date.now(),
+      item: { id: 'child-reasoning', type: 'reasoning', summary: [{ text: reasoningSecret }], content: [{ text: reasoningSecret }] }
+    } }), 15);
+    setTimeout(() => send({ jsonrpc: '2.0', method: 'item/completed', params: {
+      threadId: childThreadId, turnId: 'child-turn-live', completedAtMs: Date.now(),
+      item: { id: 'child-unknown', type: 'internalMonologue', text: unknownSecret }
+    } }), 30);
+    setTimeout(() => send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: {
+      threadId: childThreadId, turnId: 'child-turn-live', itemId: 'child-live-message', delta: 'Live child '
+    } }), 45);
+    setTimeout(() => send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: {
+      threadId: childThreadId, turnId: 'child-turn-live', itemId: 'child-live-message', delta: 'answer.'
+    } }), 60);
+    setTimeout(() => send({ jsonrpc: '2.0', method: 'item/completed', params: {
+      threadId: childThreadId, turnId: 'child-turn-live', completedAtMs: Date.now(),
+      item: { id: 'child-live-message', type: 'agentMessage', text: 'Live child answer.' }
+    } }), 75);
+    setTimeout(() => send({ jsonrpc: '2.0', method: 'thread/status/changed', params: {
+      threadId: childThreadId, status: { type: 'idle' }
+    } }), 90);
+  } else if (request.method === 'thread/start' || request.method === 'thread/resume') {
     threadModel = request.params?.model || threadModel;
     backchannel = request.params?.config?.mcp_servers?.delegate_backchannel || null;
     if (process.env.FAKE_CODEX_REJECT_BACKCHANNEL === '1' && backchannel) {
@@ -103,6 +141,8 @@ lines.on('line', async (line) => {
       return;
     }
     send({ jsonrpc: '2.0', id: request.id, result: { thread: { id: 'thread-fake' }, model: 'fake', cwd: process.cwd() } });
+  } else if (request.method === 'thread/unsubscribe') {
+    send({ jsonrpc: '2.0', id: request.id, result: { status: 'unsubscribed' } });
   } else if (request.method === 'turn/start') {
     turnCount += 1;
     activePrompt = request.params?.input?.map((item) => item.text || '').join('\n') || '';

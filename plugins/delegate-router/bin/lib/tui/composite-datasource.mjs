@@ -266,7 +266,7 @@ export class CompositeDatasource extends EventEmitter {
     });
   }
 
-  close() {
+  async close() {
     if (this.closed) return;
     this.closed = true;
     for (const { entry, change, warning } of this.listeners) {
@@ -274,7 +274,7 @@ export class CompositeDatasource extends EventEmitter {
       entry.source.off?.('warning', warning);
     }
     this.listeners = [];
-    for (const entry of this.entries) entry.source.close?.();
+    await Promise.allSettled(this.entries.map((entry) => Promise.resolve(entry.source.close?.())));
   }
 }
 

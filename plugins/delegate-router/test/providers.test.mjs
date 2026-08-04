@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createManagedJob, inspectJob, readJobEvents, resumeManagedJob, submitControl, updateManagedJob } from '../bin/lib/control.mjs';
+import { createManagedJob, eventPath, inspectJob, readJobEvents, resumeManagedJob, submitControl, submitTransientControl, updateManagedJob } from '../bin/lib/control.mjs';
 import {
   mapCodexItem,
   mapCodexMcpEvent,
@@ -17,6 +17,7 @@ import { CODEX_FIRST_CLASS_ITEM_TYPES } from '../bin/lib/codex-item-types.mjs';
 import { effectiveUsage, loadState } from '../bin/lib/state.mjs';
 import { formatTranscriptBlock, TranscriptProjector } from '../bin/lib/tui/transcript.mjs';
 import { waitForCondition } from './helpers/wait.mjs';
+import { ChildTranscriptConsumer } from '../bin/lib/child-transcript-broker.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const fakeCodex = path.join(testDir, 'fake-codex-app-server.mjs');
@@ -25,12 +26,12 @@ const fakeCursorFallback = path.join(testDir, 'fake-cursor-fallback.mjs');
 const subagentFixture = JSON.parse(fs.readFileSync(path.join(testDir, 'fixtures', 'subagent-lifecycle.json'), 'utf8'));
 
 async function isolated(fn) {
-  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, crashOnce: process.env.FAKE_CODEX_CRASH_ONCE, collab: process.env.FAKE_CODEX_COLLAB, compaction: process.env.FAKE_CODEX_COMPACTION, fileChanges: process.env.FAKE_CODEX_FILE_CHANGES, writePath: process.env.FAKE_CODEX_WRITE_PATH, writeContent: process.env.FAKE_CODEX_WRITE_CONTENT, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE, retryBase: process.env.DELEGATE_RETRY_BASE_MS, minCodex: process.env.DELEGATE_MIN_CODEX_VERSION, minCursor: process.env.DELEGATE_MIN_CURSOR_VERSION };
+  const old = { state: process.env.DELEGATE_STATE_FILE, codex: process.env.DELEGATE_CODEX_BIN, cursor: process.env.DELEGATE_CURSOR_BIN, login: process.env.DELEGATE_CURSOR_LOGIN_SHELL, write: process.env.FAKE_CURSOR_WRITE, overlap: process.env.FAKE_CURSOR_OVERLAP, crash: process.env.FAKE_CODEX_CRASH, crashOnce: process.env.FAKE_CODEX_CRASH_ONCE, collab: process.env.FAKE_CODEX_COLLAB, compaction: process.env.FAKE_CODEX_COMPACTION, fileChanges: process.env.FAKE_CODEX_FILE_CHANGES, writePath: process.env.FAKE_CODEX_WRITE_PATH, writeContent: process.env.FAKE_CODEX_WRITE_CONTENT, growingUsage: process.env.FAKE_CODEX_GROWING_USAGE, childReject: process.env.FAKE_CODEX_REJECT_CHILD_SUBSCRIBE, requestLog: process.env.FAKE_CODEX_REQUEST_LOG, retryBase: process.env.DELEGATE_RETRY_BASE_MS, minCodex: process.env.DELEGATE_MIN_CODEX_VERSION, minCursor: process.env.DELEGATE_MIN_CURSOR_VERSION };
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-provider-test-'));
   process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
   try { await fn(directory); }
   finally {
-    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_CRASH_ONCE: old.crashOnce, FAKE_CODEX_COLLAB: old.collab, FAKE_CODEX_COMPACTION: old.compaction, FAKE_CODEX_FILE_CHANGES: old.fileChanges, FAKE_CODEX_WRITE_PATH: old.writePath, FAKE_CODEX_WRITE_CONTENT: old.writeContent, FAKE_CODEX_GROWING_USAGE: old.growingUsage, DELEGATE_RETRY_BASE_MS: old.retryBase, DELEGATE_MIN_CODEX_VERSION: old.minCodex, DELEGATE_MIN_CURSOR_VERSION: old.minCursor })) {
+    for (const [key, value] of Object.entries({ DELEGATE_STATE_FILE: old.state, DELEGATE_CODEX_BIN: old.codex, DELEGATE_CURSOR_BIN: old.cursor, DELEGATE_CURSOR_LOGIN_SHELL: old.login, FAKE_CURSOR_WRITE: old.write, FAKE_CURSOR_OVERLAP: old.overlap, FAKE_CODEX_CRASH: old.crash, FAKE_CODEX_CRASH_ONCE: old.crashOnce, FAKE_CODEX_COLLAB: old.collab, FAKE_CODEX_COMPACTION: old.compaction, FAKE_CODEX_FILE_CHANGES: old.fileChanges, FAKE_CODEX_WRITE_PATH: old.writePath, FAKE_CODEX_WRITE_CONTENT: old.writeContent, FAKE_CODEX_GROWING_USAGE: old.growingUsage, FAKE_CODEX_REJECT_CHILD_SUBSCRIBE: old.childReject, FAKE_CODEX_REQUEST_LOG: old.requestLog, DELEGATE_RETRY_BASE_MS: old.retryBase, DELEGATE_MIN_CODEX_VERSION: old.minCodex, DELEGATE_MIN_CURSOR_VERSION: old.minCursor })) {
       if (value == null) delete process.env[key]; else process.env[key] = value;
     }
   }
@@ -67,6 +68,76 @@ test('Codex app-server maps events and applies true same-turn steering', () => i
   assert.deepEqual(record.changedFiles.files, ['a.js']);
   assert.equal(record.resolvedModel, 'fake');
   assert.equal(typeof record.result, 'string', 'subagent support does not reshape ordinary Codex results');
+}));
+
+test('running Codex child streams incrementally on the parent worker connection without touching its journal', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const requestLog = path.join(directory, 'child-live-requests.jsonl');
+  process.env.FAKE_CODEX_REQUEST_LOG = requestLog;
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'inspect child stream' });
+  const running = runManagedProvider(job);
+  await waitFor(job.id, (current) => Boolean(current.providerTurnId), 'parent Codex turn to become active');
+
+  const consumer = new ChildTranscriptConsumer({ subscriptionId: 'provider-live-child' });
+  const descriptor = await consumer.start();
+  const messages = [];
+  let disconnected = false;
+  consumer.on('message', (message) => messages.push(message));
+  consumer.on('disconnect', () => { disconnected = true; });
+  const journalBefore = fs.readFileSync(eventPath(job.id));
+  try {
+    submitTransientControl(job.id, {
+      type: 'child-transcript.subscribe', commandId: 'provider-live-child-subscribe',
+      subscriptionId: descriptor.subscriptionId, threadId: 'thread-child-live',
+      endpoint: descriptor.endpoint, token: descriptor.token
+    });
+    await waitForCondition({
+      description: 'live child subscription to establish and close after terminal status',
+      timeoutMs: 2_000,
+      intervalMs: 10,
+      observe: () => ({ messages: [...messages], disconnected }),
+      predicate: (value) => value.messages.some((message) => message.type === 'established')
+        && value.messages.some((message) => message.type === 'closed')
+        && value.disconnected
+    });
+    const establishedIndex = messages.findIndex((message) => message.type === 'established');
+    const publicFrames = messages
+      .map((message, index) => ({ index, message }))
+      .filter(({ message }) => message.type === 'events' && message.events?.some((event) => /Live child|answer\./.test(JSON.stringify(event))));
+    assert.ok(establishedIndex >= 0);
+    assert.ok(publicFrames.length >= 3, 'two deltas and completion arrive as separate incremental frames');
+    assert.ok(publicFrames.every(({ index }) => index > establishedIndex));
+    assert.match(JSON.stringify(messages), /Stored child prefix/);
+    assert.match(JSON.stringify(messages), /Live child answer/);
+    assert.doesNotMatch(JSON.stringify(messages), /live-child-private-reasoning/);
+    assert.doesNotMatch(JSON.stringify(messages), /live-child-unknown-private-content/);
+    // Byte-identity was the original requirement here and it was the wrong one:
+    // the parent worker is still running, so its journal legitimately grows with
+    // the parent's OWN events whenever the host is busy enough for them to land
+    // inside this window. That made the assertion pass on a quiet machine and
+    // fail under load while the implementation was correct either way. The
+    // property that actually matters is that nothing CHILD-derived reaches the
+    // parent's record, which does not depend on timing.
+    const parentJournal = fs.readFileSync(eventPath(job.id), 'utf8');
+    assert.ok(parentJournal.startsWith(journalBefore.toString('utf8')), 'the parent journal is only ever appended to');
+    assert.doesNotMatch(parentJournal, /thread-child-live/, 'no child thread id reaches the parent journal');
+    assert.doesNotMatch(parentJournal, /Live child answer|Stored child prefix/, 'no child transcript text reaches the parent journal');
+    assert.doesNotMatch(parentJournal, /live-child-private-reasoning|live-child-unknown-private-content/, 'no child reasoning reaches the parent journal');
+    const childAttributed = parentJournal.split('\n').filter(Boolean)
+      .flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })
+      .filter((event) => event.sessionId === 'thread-child-live');
+    assert.deepEqual(childAttributed, [], 'no parent journal event is attributed to the child thread');
+
+    const requests = fs.readFileSync(requestLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    const parentStart = requests.find((request) => request.method === 'thread/start');
+    const childResume = requests.find((request) => request.method === 'thread/resume' && request.params?.threadId === 'thread-child-live');
+    const childUnsubscribe = requests.find((request) => request.method === 'thread/unsubscribe' && request.params?.threadId === 'thread-child-live');
+    assert.ok(parentStart && childResume && childUnsubscribe);
+    assert.equal(new Set([parentStart.pid, childResume.pid, childUnsubscribe.pid]).size, 1, 'start, child resume, and unsubscribe use one app-server process');
+  } finally {
+    consumer.close();
+    await running;
+  }
 }));
 
 test('Codex context-compaction items retain provider passthroughs and add ordered first-class lifecycles', () => isolated(async (directory) => {

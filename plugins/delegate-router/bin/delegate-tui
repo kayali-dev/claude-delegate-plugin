@@ -417,14 +417,14 @@ function refresh() {
   draw('refresh');
 }
 
-function quit(code = 0) {
+async function quit(code = 0) {
   if (quitting) return;
   quitting = true;
   clearInterval(clock);
   spinnerAnimator.stop();
   if (routeAdviceTimer) clearTimeout(routeAdviceTimer);
   if (gPrefixTimer) clearTimeout(gPrefixTimer);
-  source.close();
+  await source.close();
   bufferedInput.close();
   detachTuiInput();
   widthProbeInputStage?.teardown();
@@ -1733,7 +1733,7 @@ function openSelectedSubagent() {
   clearSearch();
   setStatus(row.transcript === 'Unavailable'
     ? 'Opening the explicit unavailable transcript explanation'
-    : `Reading a bounded ${row.transcript.toLowerCase()} snapshot for ${row.agentName || row.id}`);
+    : `Opening the child transcript for ${row.agentName || row.id}`);
   draw();
   void source.selectSubagent?.(ui.jobId, row.id);
   return true;

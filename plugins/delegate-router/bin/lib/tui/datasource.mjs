@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,8 @@ import {
   readJobEventPage,
   readLastCompleteEvent,
   reconcileJob,
+  cancelTransientControl,
+  submitTransientControl,
   updateManagedJob
 } from '../control.mjs';
 import {
@@ -42,7 +45,14 @@ import {
   readCodexThreadTail,
   scanExternalCodexThreads
 } from '../codex-sessions.mjs';
-import { CodexSubagentClient, isCodexSubagentDiscoveryUnsupported, supportsCodexSubagentDiscovery } from '../codex-subagents.mjs';
+import {
+  CHILD_TRANSCRIPT_MAX_CHARS,
+  CHILD_TRANSCRIPT_MAX_EVENTS,
+  CodexSubagentClient,
+  isCodexSubagentDiscoveryUnsupported,
+  supportsCodexSubagentDiscovery
+} from '../codex-subagents.mjs';
+import { ChildTranscriptConsumer } from '../child-transcript-broker.mjs';
 import { claudeProjectsDirectory, readClaudeTranscriptTail, scanClaudeSessions } from './sessions.mjs';
 import { readJournalTail } from '../store-maintenance.mjs';
 
@@ -54,6 +64,21 @@ const DEFAULT_MAX_EVENTS = 5000;
 // full, output-heavy journal on the fleet path.
 const ACTIVITY_TAIL_BYTES = 512 * 1024;
 const ACTIVITY_TAIL_EVENTS = 5000;
+
+function appendBoundedChildEvents(existing = [], incoming = []) {
+  const events = [...existing, ...incoming].map((event) => ({ ...event, data: { ...(event.data || {}) } }));
+  let chars = events.reduce((total, event) => total + JSON.stringify(event).length, 0);
+  let truncated = false;
+  while (events.length > CHILD_TRANSCRIPT_MAX_EVENTS || chars > CHILD_TRANSCRIPT_MAX_CHARS) {
+    const removed = events.shift();
+    chars -= JSON.stringify(removed).length;
+    truncated = true;
+  }
+  return {
+    events: events.map((event, index) => ({ ...event, seq: index + 1 })),
+    truncated
+  };
+}
 
 function hasIngestedClaudeJournal(job) {
   return job?.transport === 'claude-agent'
@@ -218,6 +243,11 @@ export class DelegateDataSource extends EventEmitter {
     };
     this.codexSubagentClientFactory = options.codexSubagentClientFactory
       || ((job) => new CodexSubagentClient(job, this.codexSubagentOptions));
+    this.childTranscriptConsumerFactory = options.childTranscriptConsumerFactory
+      || ((consumerOptions) => new ChildTranscriptConsumer(consumerOptions));
+    this.submitTransientControl = options.submitTransientControl || submitTransientControl;
+    this.cancelTransientControl = options.cancelTransientControl || cancelTransientControl;
+    this.childTranscriptSubscribeTimeoutMs = Math.max(100, Number(options.childTranscriptSubscribeTimeoutMs || 3000));
     this.externalJobs = new Map();
     this.externalSources = new Map();
     this.journalCursors = new Map();
@@ -233,6 +263,7 @@ export class DelegateDataSource extends EventEmitter {
     this.followSubagentThreadId = null;
     this.subagentEpoch = 0;
     this.subagentReadTask = null;
+    this.liveSubagent = null;
     this.lastSubagentReadAt = 0;
     this.diffs = new Map();
     this.followJobId = null;
@@ -453,6 +484,10 @@ export class DelegateDataSource extends EventEmitter {
       };
       if (changed) this.emit('change', this.getState());
       const followed = this.followJobId ? jobsById.get(this.followJobId) : null;
+      const liveParent = this.liveSubagent ? jobsById.get(this.liveSubagent.jobId) : null;
+      if (this.liveSubagent && (!liveParent || TERMINAL.has(liveParent.status))) {
+        void this.stopLiveSubagent('parent-terminal');
+      }
       if (followed?.external) {
         void this.hydrateReadOnlyTranscript(this.followJobId, 'external');
       } else if (followed?.transport === 'claude-agent') {
@@ -654,9 +689,182 @@ export class DelegateDataSource extends EventEmitter {
     await Promise.allSettled(closing);
   }
 
+  publishLiveSubagent(live, patch = {}) {
+    if (!live || this.liveSubagent !== live) return this.getState();
+    const current = this.state.subagentsByJob[live.jobId] || { status: 'ready', provider: 'codex', threads: [] };
+    const snapshot = current.snapshot?.threadId === live.threadId
+      ? current.snapshot
+      : { threadId: live.threadId, mode: 'stored', status: 'loading', events: [], capturedAtMs: null };
+    return this.publishSubagents(live.jobId, {
+      ...current,
+      snapshot: { ...snapshot, ...patch, threadId: live.threadId }
+    });
+  }
+
+  handleLiveSubagentMessage(live, message) {
+    if (!live || this.liveSubagent !== live || message?.subscriptionId !== live.subscriptionId) return;
+    if (message.type === 'established') {
+      live.established = true;
+      live.resolve?.('established');
+      this.publishLiveSubagent(live, {
+        mode: 'live', status: 'ready', subscriptionState: 'established', pointInTime: true,
+        capturedAtMs: Date.now()
+      });
+      return;
+    }
+    if (message.type === 'rejected') {
+      live.rejection = String(message.error || 'subscription rejected').slice(0, 1024);
+      live.resolve?.('rejected');
+      return;
+    }
+    if (message.type === 'snapshot') {
+      live.snapshotReceived = true;
+      const projected = message.snapshot || {};
+      const bounded = appendBoundedChildEvents(projected.events || [], live.pendingEvents);
+      live.pendingEvents = [];
+      this.publishLiveSubagent(live, {
+        ...projected,
+        events: bounded.events,
+        truncated: projected.truncated === true || bounded.truncated,
+        mode: live.established ? 'live' : 'stored',
+        status: 'ready',
+        subscriptionState: live.established ? 'established' : 'pending',
+        pointInTime: true,
+        capturedAtMs: projected.capturedAtMs || Date.now()
+      });
+      return;
+    }
+    if (message.type === 'events') {
+      if (!live.snapshotReceived) {
+        live.pendingEvents.push(...(message.events || []));
+        return;
+      }
+      const current = this.state.subagentsByJob[live.jobId]?.snapshot || {};
+      const bounded = appendBoundedChildEvents(current.events || [], message.events || []);
+      this.publishLiveSubagent(live, {
+        events: bounded.events,
+        truncated: current.truncated === true || bounded.truncated,
+        droppedReasoningCount: Number(current.droppedReasoningCount || 0) + Number(message.droppedReasoningCount || 0),
+        capturedAtMs: message.capturedAtMs || Date.now()
+      });
+      return;
+    }
+    if (message.type === 'status' && message.pointInTime === false) {
+      this.publishLiveSubagent(live, {
+        mode: 'stored', subscriptionState: 'closed', pointInTime: false,
+        status: 'ready', capturedAtMs: Date.now()
+      });
+      return;
+    }
+    if (message.type === 'closed') {
+      live.closedResolve?.(message.reason || 'closed');
+      if (live.established) {
+        live.established = false;
+        this.publishLiveSubagent(live, {
+          mode: 'stored', subscriptionState: 'closed', status: 'ready', capturedAtMs: Date.now()
+        });
+      }
+    }
+  }
+
+  async startLiveSubagent(job, threadId, epoch) {
+    const live = {
+      jobId: job.id,
+      threadId,
+      subscriptionId: crypto.randomUUID(),
+      consumer: null,
+      intake: null,
+      established: false,
+      snapshotReceived: false,
+      pendingEvents: [],
+      resolve: null,
+      closedResolve: null
+    };
+    const outcome = new Promise((resolve) => { live.resolve = resolve; });
+    live.closed = new Promise((resolve) => { live.closedResolve = resolve; });
+    this.liveSubagent = live;
+    try {
+      const consumer = this.childTranscriptConsumerFactory({ subscriptionId: live.subscriptionId });
+      live.consumer = consumer;
+      consumer.on('message', (message) => this.handleLiveSubagentMessage(live, message));
+      consumer.on('disconnect', () => {
+        live.closedResolve?.('disconnect');
+        if (live.established && this.liveSubagent === live) {
+          live.established = false;
+          this.publishLiveSubagent(live, {
+            mode: 'stored', subscriptionState: 'disconnected', status: 'ready', capturedAtMs: Date.now()
+          });
+        } else live.resolve?.('disconnected');
+        if (this.liveSubagent === live) this.liveSubagent = null;
+      });
+      consumer.on('rejected', () => live.resolve?.('rejected'));
+      consumer.on('warning', () => {});
+      const descriptor = await consumer.start();
+      if (this.closed || epoch !== this.subagentEpoch || this.liveSubagent !== live) throw new Error('selection changed before child subscription request');
+      live.intake = this.submitTransientControl(job.id, {
+        type: 'child-transcript.subscribe', commandId: crypto.randomUUID(), threadId,
+        subscriptionId: live.subscriptionId, endpoint: descriptor.endpoint, token: descriptor.token
+      });
+      const result = await Promise.race([
+        outcome,
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve('timeout'), this.childTranscriptSubscribeTimeoutMs);
+          timer.unref?.();
+        })
+      ]);
+      if (result === 'established' && !this.closed && epoch === this.subagentEpoch && this.liveSubagent === live) return true;
+    } catch (error) {
+      live.rejection = String(error?.message || error).slice(0, 1024);
+    }
+    if (live.intake) this.cancelTransientControl(job.id, live.intake.commandId);
+    live.consumer?.close();
+    if (this.liveSubagent === live) this.liveSubagent = null;
+    return false;
+  }
+
+  async stopLiveSubagent(reason = 'unsubscribe', options = {}) {
+    const live = this.liveSubagent;
+    if (!live) return false;
+    this.liveSubagent = null;
+    let intake = null;
+    if (live.established) {
+      try {
+        intake = this.submitTransientControl(live.jobId, {
+          type: 'child-transcript.unsubscribe', commandId: crypto.randomUUID(), threadId: live.threadId,
+          subscriptionId: live.subscriptionId
+        });
+      } catch {}
+      await Promise.race([
+        live.closed,
+        new Promise((resolve) => {
+          const timer = setTimeout(resolve, 500);
+          timer.unref?.();
+        })
+      ]);
+    }
+    if (intake) this.cancelTransientControl(live.jobId, intake.commandId);
+    if (live.intake) this.cancelTransientControl(live.jobId, live.intake.commandId);
+    live.consumer?.close();
+    if (options.publish !== false) {
+      const current = this.state.subagentsByJob[live.jobId];
+      if (current?.snapshot?.threadId === live.threadId && current.snapshot.mode === 'live') {
+        this.publishSubagents(live.jobId, {
+          ...current,
+          snapshot: {
+            ...current.snapshot, mode: 'stored', subscriptionState: 'closed', status: 'ready', capturedAtMs: Date.now()
+          }
+        });
+      }
+    }
+    return true;
+  }
+
   async selectSubagent(jobId, threadId = null, options = {}) {
     const selectedJobId = jobId || null;
     const selectedThreadId = threadId || null;
+    if (this.liveSubagent && (this.liveSubagent.jobId !== selectedJobId || this.liveSubagent.threadId !== selectedThreadId || !selectedThreadId)) {
+      await this.stopLiveSubagent(selectedThreadId ? 'selection-change' : 'transcript-close');
+    }
     const epoch = ++this.subagentEpoch;
     this.followSubagentJobId = selectedJobId;
     this.followSubagentThreadId = selectedThreadId;
@@ -741,6 +949,10 @@ export class DelegateDataSource extends EventEmitter {
         snapshot: { threadId: selectedThreadId, mode: 'stored', status: 'loading', events: [], capturedAtMs: null }
       });
     }
+    const runningChild = !TERMINAL.has(job.status)
+      && this.selectedChildIsRunning(job, selectedThreadId, previous)
+      && job.workerAlive !== false;
+    if (runningChild && await this.startLiveSubagent(job, selectedThreadId, epoch)) return this.getState();
     try {
       const snapshot = await client.read(selectedThreadId, { now: Date.now() });
       if (this.closed || epoch !== this.subagentEpoch || this.followSubagentThreadId !== selectedThreadId) return this.getState();
@@ -791,6 +1003,7 @@ export class DelegateDataSource extends EventEmitter {
   refreshSelectedSubagentSnapshot() {
     if (this.closed || !this.followSubagentJobId || !this.followSubagentThreadId || this.subagentReadTask) return Promise.resolve(this.getState());
     const state = this.state.subagentsByJob[this.followSubagentJobId];
+    if (state?.snapshot?.mode === 'live' && state.snapshot.subscriptionState === 'established') return Promise.resolve(this.getState());
     if (state?.snapshot?.status !== 'ready' || state.snapshot.pointInTime !== true) return Promise.resolve(this.getState());
     if (Date.now() - this.lastSubagentReadAt < this.pollMs) return Promise.resolve(this.getState());
     const task = this.selectSubagent(this.followSubagentJobId, this.followSubagentThreadId, { refresh: true })
@@ -988,9 +1201,10 @@ export class DelegateDataSource extends EventEmitter {
     return this.getState();
   }
 
-  close() {
+  async close() {
     if (this.closed) return;
     this.closed = true;
+    const liveStop = this.stopLiveSubagent('datasource-close', { publish: false });
     for (const watcher of this.watchers) {
       try { watcher.close(); } catch {}
     }
@@ -1019,6 +1233,7 @@ export class DelegateDataSource extends EventEmitter {
     this.subagentClients.clear();
     this.hydrations.clear();
     this.journalStamps.clear();
+    await liveStop;
   }
 }
 

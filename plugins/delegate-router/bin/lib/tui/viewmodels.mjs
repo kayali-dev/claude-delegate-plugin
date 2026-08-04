@@ -1488,17 +1488,18 @@ function subagentTranscriptContent(job, ui, state) {
     jobTerminal: snapshot.pointInTime !== true,
     timestampMode: ui.timestampMode
   });
-  const label = snapshot.mode === 'disk' ? 'Disk fallback' : 'Stored';
+  const live = snapshot.mode === 'live' && snapshot.subscriptionState === 'established';
+  const label = live ? 'Live' : snapshot.mode === 'disk' ? 'Disk fallback' : 'Stored';
   const captured = formatTimestamp(snapshot.capturedAtMs, { mode: ui.timestampMode, now: nowOf(ui) }) || 'just now';
   const pointInTime = snapshot.pointInTime === true;
   return {
-    title: `Subagent transcript | ${label} snapshot`,
+    title: `Subagent transcript | ${label}${live ? '' : ' snapshot'}`,
     summary: {
       text: joinDisplayParts([
         `${entries.length} blocks`,
-        `captured ${captured}`,
+        live ? 'streaming now' : `captured ${captured}`,
         snapshot.truncated ? 'bounded tail truncated' : '',
-        pointInTime ? 'point-in-time; may be incomplete and may grow' : ''
+        !live && pointInTime ? 'point-in-time; may be incomplete and may grow' : ''
       ])
     },
     content: entries.length ? {
@@ -1515,11 +1516,15 @@ function subagentTranscriptContent(job, ui, state) {
     } : {
       kind: 'empty',
       message: 'No displayable child transcript items were present in this bounded snapshot.',
-      action: pointInTime
+      action: live
+        ? 'Waiting for the next displayable child event on the worker-owned subscription.'
+        : pointInTime
         ? 'Point-in-time read: this child is still running, so the snapshot may be incomplete and may grow.'
         : 'The stored snapshot contained no displayable user, assistant, tool, or file-change items.'
     },
-    notice: pointInTime
+    notice: live
+      ? 'Live via the parent provider worker; child reasoning remains excluded.'
+      : pointInTime
       ? 'Point-in-time read: this child is still running, so the snapshot may be incomplete and may grow.'
       : 'Bounded stored snapshot; no live subscription is attached.',
     scrollItemCount: entries.length,

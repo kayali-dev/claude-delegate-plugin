@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,7 @@ import { eventBlocks, wrapEventBlock } from '../bin/lib/tui/events.mjs';
 import {
   appendJobEvent,
   createManagedJob,
+  eventPath,
   hashWorkingFile,
   inspectJob,
   inspectJobSummary,
@@ -28,9 +30,13 @@ import {
   revertManagedJob,
   reviewRoundManagedJob,
   resumeManagedJob,
+  cancelTransientControl,
+  claimTransientCommands,
   submitControl,
+  submitTransientControl,
   updateManagedJob
 } from '../bin/lib/control.mjs';
+import { ChildTranscriptConsumer } from '../bin/lib/child-transcript-broker.mjs';
 import { filterDiffPaths, pathMatchesScope, validatedAllowedPaths } from '../bin/lib/control.mjs';
 import { auditLogPath, loadJob, loadState, saveJob, saveState, setWindow } from '../bin/lib/state.mjs';
 
@@ -146,6 +152,78 @@ test('control commands use revisions and stable ids for exactly-once acceptance'
     /REVISION_CONFLICT/
   );
   assert.equal(inspectJob(created.id).revision, current.revision + 1);
+}));
+
+test('transient child controls use a private endpoint and leave no job or journal record', () => isolated(async (directory) => {
+  const job = createManagedJob({ provider: 'codex', mode: 'review', cwd: directory, prompt: 'observe child' });
+  updateManagedJob(job.id, (record) => {
+    record.status = 'running';
+    record.phase = 'working';
+    record.providerSessionId = 'thread-parent';
+  });
+  const before = loadJob(job.id);
+  const journalFile = eventPath(job.id);
+  const journal = fs.readFileSync(journalFile);
+  const consumer = new ChildTranscriptConsumer({ subscriptionId: 'private-endpoint-proof' });
+  const descriptor = await consumer.start();
+  try {
+    assert.equal(fs.statSync(path.dirname(descriptor.endpoint)).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(descriptor.endpoint).mode & 0o777, 0o600);
+    const attacker = net.createConnection(descriptor.endpoint);
+    await new Promise((resolve, reject) => {
+      attacker.once('connect', resolve);
+      attacker.once('error', reject);
+    });
+    const rejected = new Promise((resolve) => consumer.once('rejected', resolve));
+    const closed = new Promise((resolve) => attacker.once('close', resolve));
+    attacker.write(`${JSON.stringify({ type: 'hello', subscriptionId: descriptor.subscriptionId, token: '0'.repeat(64) })}\n`);
+    await Promise.all([rejected, closed]);
+    assert.equal(consumer.authenticated, false, 'a local process without the per-subscription token cannot attach');
+    const intake = submitTransientControl(job.id, {
+      type: 'child-transcript.subscribe', commandId: 'transient-private',
+      subscriptionId: descriptor.subscriptionId, threadId: 'thread-child-live',
+      endpoint: descriptor.endpoint, token: descriptor.token
+    });
+    assert.equal(fs.statSync(intake.path).mode & 0o777, 0o600);
+    const claimed = claimTransientCommands(job.id);
+    assert.equal(claimed.length, 1);
+    assert.equal(claimed[0].command.threadId, 'thread-child-live');
+    assert.equal(fs.existsSync(intake.path), false, 'claim deletes the transient command before the handshake');
+    assert.deepEqual(fs.readFileSync(journalFile), journal);
+    assert.equal(loadJob(job.id).revision, before.revision);
+
+    const abandonedOwner = submitTransientControl(job.id, {
+      type: 'child-transcript.subscribe', commandId: 'transient-abandoned-owner',
+      subscriptionId: descriptor.subscriptionId, threadId: 'thread-child-live',
+      endpoint: descriptor.endpoint, token: descriptor.token
+    });
+    const abandonedRecord = JSON.parse(fs.readFileSync(abandonedOwner.path, 'utf8'));
+    fs.writeFileSync(abandonedOwner.path, `${JSON.stringify({ ...abandonedRecord, ownerPid: 2_147_483_647 })}\n`);
+    assert.deepEqual(claimTransientCommands(job.id), []);
+    assert.equal(fs.existsSync(abandonedOwner.path), false, 'a killed TUI leaves no queued transient command');
+
+    const abandonedWorker = submitTransientControl(job.id, {
+      type: 'child-transcript.subscribe', commandId: 'transient-abandoned-worker',
+      subscriptionId: descriptor.subscriptionId, threadId: 'thread-child-live',
+      endpoint: descriptor.endpoint, token: descriptor.token
+    });
+    const processingPath = path.join(path.dirname(abandonedWorker.path), `.processing-2147483647-${path.basename(abandonedWorker.path)}`);
+    fs.renameSync(abandonedWorker.path, processingPath);
+    assert.deepEqual(claimTransientCommands(job.id), []);
+    assert.equal(fs.existsSync(processingPath), false, 'a dead worker leaves no claimed transient command');
+
+    const cancelled = submitTransientControl(job.id, {
+      type: 'child-transcript.subscribe', commandId: 'transient-cancelled',
+      subscriptionId: descriptor.subscriptionId, threadId: 'thread-child-live',
+      endpoint: descriptor.endpoint, token: descriptor.token
+    });
+    assert.equal(cancelTransientControl(job.id, cancelled.commandId), true);
+    assert.equal(fs.existsSync(cancelled.path), false, 'a failed handshake cancels its queued command');
+  } finally {
+    consumer.close();
+  }
+  assert.equal(fs.existsSync(descriptor.endpoint), false, 'the private endpoint is removed on the unhappy path');
+  assert.deepEqual(fs.readFileSync(journalFile), journal);
 }));
 
 test('event pagination resumes without duplicates and ignores a truncated tail', () => isolated((directory) => {

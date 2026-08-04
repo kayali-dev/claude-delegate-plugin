@@ -9,6 +9,7 @@ import {
   awaitAmbiguityProbe,
   captureManagedWorkspace,
   claimCommands,
+  claimTransientCommands,
   changedFilesRecord,
   completeCommand,
   completeIngestedFiles,
@@ -86,6 +87,8 @@ import {
 } from './attempt-driver.mjs';
 import { executeVerification } from './verification-runner.mjs';
 import { pendingRequestIds, pendingRequestMatches } from './response-contract.mjs';
+import { connectChildTranscriptPublisher, removeChildTranscriptEndpoint } from './child-transcript-broker.mjs';
+import { projectCodexChildNotification, projectCodexChildSnapshot } from './codex-subagents.mjs';
 
 export { securityPreamble } from './packet.mjs';
 
@@ -99,9 +102,10 @@ const CONVERSATIONAL_DELEGATION_PREAMBLE = [
 
 function claimProviderCommands(jobId) {
   const pending = loadJob(jobId)?.pendingInput;
-  return claimCommands(jobId, {
+  return [...claimCommands(jobId, {
     excludeTypes: pending?.origin === 'backchannel' ? ['respond'] : []
-  });
+  }), ...claimTransientCommands(jobId)]
+    .sort((left, right) => Number(left.command?.requestedAt || 0) - Number(right.command?.requestedAt || 0));
 }
 
 function backchannelTimedOut(jobId) {
@@ -1898,6 +1902,113 @@ export function codexSpawnArgs(job) {
   ];
 }
 
+const CHILD_SUBSCRIPTION_TERMINAL = new Set(['idle', 'not_loaded', 'notloaded', 'system_error', 'completed', 'failed', 'cancelled']);
+
+export function createCodexChildSubscriptionController(rpc, options = {}) {
+  const active = new Map();
+  const parentThreadId = options.parentThreadId || (() => null);
+
+  const stop = async (subscriptionId, reason = 'unsubscribe', notify = true) => {
+    const subscription = active.get(subscriptionId);
+    if (!subscription || subscription.stopping) return false;
+    subscription.stopping = true;
+    active.delete(subscriptionId);
+    if (notify) subscription.publisher.send({ type: 'closed', subscriptionId, threadId: subscription.threadId, reason });
+    try { await rpc.request('thread/unsubscribe', { threadId: subscription.threadId }); } catch {}
+    subscription.publisher.close();
+    removeChildTranscriptEndpoint(subscription.endpoint);
+    return true;
+  };
+
+  const reject = async (command, message, publisher = null, resumed = false) => {
+    publisher?.send({
+      type: 'rejected', subscriptionId: command.subscriptionId, threadId: command.threadId,
+      error: String(message || 'subscription rejected').slice(0, 1024)
+    });
+    if (resumed) {
+      try { await rpc.request('thread/unsubscribe', { threadId: command.threadId }); } catch {}
+    }
+    publisher?.close();
+    removeChildTranscriptEndpoint(command.endpoint);
+  };
+
+  return {
+    active,
+    async handleCommand(command) {
+      if (command?.type === 'child-transcript.unsubscribe') {
+        return stop(command.subscriptionId, 'requested');
+      }
+      if (command?.type !== 'child-transcript.subscribe') return false;
+      let publisher = null;
+      let resumed = false;
+      try {
+        if (!command.threadId || command.threadId === parentThreadId()) {
+          throw new Error('child transcript subscription must target a child thread');
+        }
+        await stop(command.subscriptionId, 'replaced', false);
+        for (const [id, subscription] of active) {
+          if (subscription.threadId === command.threadId) await stop(id, 'replaced', false);
+        }
+        publisher = await connectChildTranscriptPublisher(command);
+        const subscription = {
+          subscriptionId: command.subscriptionId,
+          threadId: command.threadId,
+          endpoint: command.endpoint,
+          publisher,
+          established: false,
+          stopping: false
+        };
+        active.set(command.subscriptionId, subscription);
+        publisher.once('disconnect', () => { void stop(command.subscriptionId, 'consumer-disconnected', false); });
+        const result = await rpc.request('thread/resume', { threadId: command.threadId });
+        resumed = true;
+        if (String(result?.thread?.id || '') !== String(command.threadId)) {
+          throw new Error(`app-server resumed unexpected thread ${result?.thread?.id || 'missing'}`);
+        }
+        subscription.established = true;
+        publisher.send({ type: 'established', subscriptionId: command.subscriptionId, threadId: command.threadId });
+        publisher.send({
+          type: 'snapshot', subscriptionId: command.subscriptionId, threadId: command.threadId,
+          snapshot: projectCodexChildSnapshot(result.thread, { now: Date.now() })
+        });
+        return true;
+      } catch (error) {
+        active.delete(command.subscriptionId);
+        await reject(command, error?.message || error, publisher, resumed);
+        return false;
+      }
+    },
+    handleNotification(method, params = {}) {
+      const threadId = String(params.threadId || params.thread?.id || '');
+      if (!threadId) return false;
+      const subscription = [...active.values()].find((entry) => entry.threadId === threadId);
+      if (!subscription) return false;
+      const projected = projectCodexChildNotification(method, params, { now: Date.now() });
+      if (projected.events.length || projected.droppedReasoningCount) {
+        subscription.publisher.send({
+          type: 'events', subscriptionId: subscription.subscriptionId, threadId,
+          events: projected.events, droppedReasoningCount: projected.droppedReasoningCount,
+          capturedAtMs: projected.capturedAtMs
+        });
+      }
+      if (projected.status) {
+        subscription.publisher.send({
+          type: 'status', subscriptionId: subscription.subscriptionId, threadId,
+          status: projected.status, pointInTime: projected.pointInTime
+        });
+        if (CHILD_SUBSCRIPTION_TERMINAL.has(normalizedToken(projected.status))) {
+          void stop(subscription.subscriptionId, 'child-terminal');
+        }
+      }
+      return true;
+    },
+    stop,
+    async close(reason = 'parent-terminal') {
+      await Promise.allSettled([...active.keys()].map((subscriptionId) => stop(subscriptionId, reason)));
+    }
+  };
+}
+
 async function runCodex(job, driver) {
   let turnDone = null;
   let turnResolve;
@@ -1919,6 +2030,7 @@ async function runCodex(job, driver) {
   const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
   const binary = process.env.DELEGATE_CODEX_BIN || 'codex';
   persistProviderCliVersion(job.id, assertProviderVersion('codex', binary));
+  let childSubscriptions = null;
   const rpc = new JsonRpcProcess(binary, codexSpawnArgs(job), {
     cwd: job.cwd,
     onStderr: (text) => appendJobEvent(job.id, 'provider.event', { providerEvent: 'stderr', text: deltas.redactDelta('stderr', text) }),
@@ -1938,6 +2050,7 @@ async function runCodex(job, driver) {
       return result;
     },
     onNotification: async (method, params) => {
+      if (childSubscriptions?.handleNotification(method, params)) return;
       const options = { sessionId: params.threadId, turnId: params.turnId || params.turn?.id };
       if (method === 'turn/started') {
         activity.mark('output');
@@ -2047,10 +2160,13 @@ async function runCodex(job, driver) {
       else appendJobEvent(job.id, 'provider.event', { providerEvent: method }, options);
     }
   });
+  childSubscriptions = createCodexChildSubscriptionController(rpc, {
+    parentThreadId: () => loadJob(job.id)?.providerSessionId || null
+  });
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.68.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.69.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2157,6 +2273,10 @@ async function runCodex(job, driver) {
       for (const claimed of claimProviderCommands(job.id)) {
         const command = claimed.command;
         try {
+          if (command.type === 'child-transcript.subscribe' || command.type === 'child-transcript.unsubscribe') {
+            await childSubscriptions.handleCommand(command);
+            continue;
+          }
           const current = inspectJob(job.id);
           const planAnswer = answerPlanCommand(job.id, claimed);
           if (planAnswer?.decision === 'confirmed') {
@@ -2313,6 +2433,7 @@ async function runCodex(job, driver) {
     }
   } finally {
     activity.close();
+    await childSubscriptions.close('parent-terminal');
     await driver.close(() => rpc.stop());
   }
 }
@@ -3218,7 +3339,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.68.0' }
+      clientInfo: { name: 'delegate-router', version: '0.69.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

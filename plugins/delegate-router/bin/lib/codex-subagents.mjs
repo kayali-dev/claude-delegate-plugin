@@ -103,18 +103,33 @@ function userText(content) {
     .join('\n');
 }
 
-function itemEvents(item, at) {
+function itemEvents(item, at, phase = 'snapshot') {
   const kind = token(item?.type);
   const id = safeText(item?.id, 256) || `child-item-${at}`;
+  if (kind === 'agent_message_delta') {
+    const delta = safeText(item.delta);
+    return delta ? [{ type: 'message.delta', at, data: { id, role: 'assistant', delta } }] : [];
+  }
+  if (kind === 'command_execution_output_delta') {
+    const delta = safeText(item.delta);
+    return delta ? [{ type: 'tool.output', at, data: { id, toolCallId: id, delta } }] : [];
+  }
   if (kind === 'user_message') {
+    if (phase === 'started') return [];
     const text = userText(item.content);
     return text ? [{ type: 'message.user', at, data: { id, role: 'user', text } }] : [];
   }
   if (kind === 'agent_message') {
+    if (phase === 'started') return [];
     const text = safeText(item.text);
     return text ? [{ type: 'message.completed', at, data: { id, role: 'assistant', text } }] : [];
   }
   if (kind === 'plan') {
+    if (phase === 'started') return [];
+    const text = safeText(item.text);
+    return text ? [{ type: 'plan.updated', at, data: { id, text } }] : [];
+  }
+  if (kind === 'plan_live_update') {
     const text = safeText(item.text);
     return text ? [{ type: 'plan.updated', at, data: { id, text } }] : [];
   }
@@ -122,26 +137,41 @@ function itemEvents(item, at) {
     const command = safeText(item.command, 4096);
     const output = safeText(item.aggregatedOutput);
     return [
-      { type: 'tool.started', at, data: { id, toolCallId: id, name: 'command', command, cwd: safeText(item.cwd, 2048), status: safeText(item.status, 64) || 'completed' } },
-      ...(output ? [{ type: 'tool.output', at, data: { id, toolCallId: id, output } }] : []),
-      { type: 'tool.completed', at, data: { id, toolCallId: id, name: 'command', command, status: safeText(item.status, 64) || 'completed', exitCode: Number.isFinite(Number(item.exitCode)) ? Number(item.exitCode) : null } }
+      ...(phase !== 'completed' ? [{ type: 'tool.started', at, data: { id, toolCallId: id, name: 'command', command, cwd: safeText(item.cwd, 2048), status: safeText(item.status, 64) || 'completed' } }] : []),
+      ...(phase !== 'started' && output ? [{ type: 'tool.output', at, data: { id, toolCallId: id, output } }] : []),
+      ...(phase !== 'started' ? [{ type: 'tool.completed', at, data: { id, toolCallId: id, name: 'command', command, status: safeText(item.status, 64) || 'completed', exitCode: Number.isFinite(Number(item.exitCode)) ? Number(item.exitCode) : null } }] : [])
     ];
   }
   if (['mcp_tool_call', 'dynamic_tool_call', 'collab_tool_call'].includes(kind)) {
     const name = safeText(item.tool || item.name || item.server || kind, 256);
     const status = safeText(item.status, 64) || 'completed';
     return [
-      { type: 'tool.started', at, data: { id, toolCallId: id, name, status } },
-      { type: 'tool.completed', at, data: { id, toolCallId: id, name, status } }
+      ...(phase !== 'completed' ? [{ type: 'tool.started', at, data: { id, toolCallId: id, name, status } }] : []),
+      ...(phase !== 'started' ? [{ type: 'tool.completed', at, data: { id, toolCallId: id, name, status } }] : [])
     ];
   }
   if (kind === 'file_change') {
+    if (phase === 'started') return [];
     return (Array.isArray(item.changes) ? item.changes : []).flatMap((change) => {
       const changedPath = safeText(change?.path, 2048);
       return changedPath ? [{ type: 'file.changed', at, data: { path: changedPath, action: safeText(change?.kind, 64) || 'update' } }] : [];
     });
   }
   return [];
+}
+
+function projectedEvents(items, at, phase = 'snapshot') {
+  const events = [];
+  let droppedReasoningCount = 0;
+  for (const item of items) {
+    const kind = token(item?.type);
+    if (kind.includes('reasoning') || kind.includes('thought')) {
+      droppedReasoningCount += 1;
+      continue;
+    }
+    events.push(...itemEvents(item, at, phase));
+  }
+  return { events, droppedReasoningCount };
 }
 
 export function projectCodexChildSnapshot(thread = {}, options = {}) {
@@ -153,12 +183,9 @@ export function projectCodexChildSnapshot(thread = {}, options = {}) {
   outer: for (const turn of turns) {
     const at = timestampMs(turn?.completedAt || turn?.startedAt) || Number(options.now || Date.now());
     for (const item of Array.isArray(turn?.items) ? turn.items : []) {
-      const kind = token(item?.type);
-      if (kind.includes('reasoning') || kind.includes('thought')) {
-        droppedReasoningCount += 1;
-        continue;
-      }
-      for (const projected of itemEvents(item, at)) {
+      const batch = projectedEvents([item], at);
+      droppedReasoningCount += batch.droppedReasoningCount;
+      for (const projected of batch.events) {
         const size = JSON.stringify(projected).length;
         if (events.length >= CHILD_TRANSCRIPT_MAX_EVENTS || chars + size > CHILD_TRANSCRIPT_MAX_CHARS) {
           truncated = true;
@@ -178,6 +205,35 @@ export function projectCodexChildSnapshot(thread = {}, options = {}) {
     truncated,
     droppedReasoningCount,
     capturedAtMs: Number(options.now || Date.now())
+  };
+}
+
+export function projectCodexChildNotification(method, params = {}, options = {}) {
+  const at = timestampMs(params.completedAtMs || params.startedAtMs || params.at) || Number(options.now || Date.now());
+  let items = [];
+  let phase = 'completed';
+  if (method === 'item/started' || method === 'item/completed') {
+    items = params.item ? [params.item] : [];
+    phase = method === 'item/started' ? 'started' : 'completed';
+  } else if (method === 'item/agentMessage/delta') {
+    items = [{ type: 'agentMessageDelta', id: params.itemId, delta: params.delta }];
+  } else if (method === 'item/commandExecution/outputDelta') {
+    items = [{ type: 'commandExecutionOutputDelta', id: params.itemId, delta: params.delta }];
+  } else if (method === 'turn/plan/updated') {
+    items = [{
+      type: 'planLiveUpdate', id: params.turnId || `child-plan-${at}`,
+      text: params.explanation || (Array.isArray(params.plan) ? params.plan.map((entry) => entry?.step).filter(Boolean).join('\n') : '')
+    }];
+  }
+  const projected = projectedEvents(items, at, phase);
+  if (/reasoning|thought/i.test(String(method))) projected.droppedReasoningCount += 1;
+  const status = method === 'thread/status/changed' ? statusType(params.status) : null;
+  return {
+    events: projected.events.map((event, index) => ({ schemaVersion: 1, seq: index + 1, redacted: true, ...event })),
+    droppedReasoningCount: projected.droppedReasoningCount,
+    status,
+    pointInTime: status == null ? null : status === 'active',
+    capturedAtMs: at
   };
 }
 

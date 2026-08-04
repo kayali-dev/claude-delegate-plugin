@@ -2,6 +2,30 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## Unreleased
+
+- Stream a selected running Codex child's transcript through the parent job's
+  existing app-server connection. The TUI reports `Live` only after the worker
+  confirms `thread/resume`, returns to the bounded stored snapshot on rejection
+  or disconnect, and never resumes terminal children.
+- Keep child transcript frames memory-only over an authenticated 0600 socket in
+  the private state root. Transient subscribe commands are excluded from the
+  parent journal and removed on claim, timeout, process loss, view exit, parent
+  completion, and TUI shutdown.
+
+## 0.69.0 — 2026-08-04
+
+- Give a running Codex child a genuinely live transcript, brokered through the
+  parent worker's existing app-server connection. Codex tracks thread membership
+  per connection, so resuming a child on the connection that already owns it
+  introduces no second client and violates no documented assumption — verified
+  against `thread_state.rs` rather than assumed. Child events are ephemeral:
+  they cross a private `0600` socket under the state root, never enter the
+  parent journal, never become a job, and never touch disk. `Live` appears only
+  on a confirmed subscription; a rejected, unsupported, worker-gone, or
+  acknowledged-then-dropped subscription renders `Stored`, and terminal children
+  keep their stored snapshot because it is already complete.
+
 ## 0.68.0 — 2026-08-04
 
 - Stop subagent turns from rebinding the parent job's Codex thread. Codex

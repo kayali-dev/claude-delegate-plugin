@@ -2,11 +2,13 @@ import { useTuiTestHarness } from './helpers/tui-test-harness.mjs';
 const harness = await useTuiTestHarness(import.meta.url);
 
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import {
   CodexSubagentClient,
+  projectCodexChildNotification,
   projectCodexChildSnapshot,
   supportsCodexSubagentDiscovery
 } from '../bin/lib/codex-subagents.mjs';
@@ -15,6 +17,7 @@ import { normalizeSubagentLifecycle } from '../bin/lib/providers.mjs';
 import { DelegateDataSource } from '../bin/lib/tui/datasource.mjs';
 import { projectSubagentRows, subagentRowsForDisplay } from '../bin/lib/tui/subagents.mjs';
 import { detailViewModel } from '../bin/lib/tui/viewmodels.mjs';
+import { waitForCondition } from './helpers/wait.mjs';
 
 const NOW = 1_786_000_000_000;
 const REASONING_SECRET = 'private-chain-of-thought-must-never-enter-the-view';
@@ -80,8 +83,108 @@ function subagentsFrame(store, ui = {}) {
   }, { width: 132, height: 34 });
 }
 
+function subagentsFrameFor(store, jobId, ui = {}) {
+  const base = detailViewModel(store, { jobId, now: NOW, follow: false }, { width: 132, height: 34 });
+  const detailTab = base.meta.tabs.indexOf('Subagents');
+  assert.ok(detailTab >= 0, 'the provider exposes the Subagents tab');
+  return detailViewModel(store, {
+    jobId, now: NOW, follow: false, detailTab, viewportWidth: 132, viewportHeight: 34,
+    ...ui
+  }, { width: 132, height: 34 });
+}
+
 function emptyMessage(frame) {
   return [frame.panes[0].content.message, frame.panes[0].content.action].filter(Boolean).join(' ');
+}
+
+class FakeChildTranscriptConsumer extends EventEmitter {
+  constructor(subscriptionId) {
+    super();
+    this.subscriptionId = subscriptionId;
+    this.closed = false;
+  }
+
+  async start() {
+    return { subscriptionId: this.subscriptionId, endpoint: `/private/fake/${this.subscriptionId}.sock`, token: 'a'.repeat(64) };
+  }
+
+  close() { this.closed = true; }
+}
+
+function liveDatasource(job, options = {}) {
+  const childIds = options.childIds || ['thread-child-running'];
+  const statuses = options.statuses || Object.fromEntries(childIds.map((id) => [id, 'active']));
+  const calls = [];
+  const consumers = new Map();
+  const snapshotFor = (threadId) => projectCodexChildSnapshot({ ...childFixture(statuses[threadId] || 'active'), id: threadId }, { now: NOW });
+  const client = {
+    version: '0.144.0',
+    async discover() {
+      return {
+        threads: childIds.map((id) => ({
+          id, parentThreadId: 'thread-parent', agentName: id, role: 'worker',
+          task: `Task ${id}`, status: statuses[id] || 'active', createdAtMs: NOW - 30_000
+        })),
+        capped: false,
+        version: this.version
+      };
+    },
+    async read(threadId) { return snapshotFor(threadId); },
+    async close() {}
+  };
+  const source = new DelegateDataSource({
+    watch: false,
+    pollMs: 10_000,
+    childTranscriptSubscribeTimeoutMs: 100,
+    codexSubagentClientFactory: () => client,
+    childTranscriptConsumerFactory: ({ subscriptionId }) => {
+      const consumer = new FakeChildTranscriptConsumer(subscriptionId);
+      consumers.set(subscriptionId, consumer);
+      return consumer;
+    },
+    submitTransientControl(_jobId, command) {
+      calls.push(command);
+      const consumer = consumers.get(command.subscriptionId);
+      queueMicrotask(() => {
+        if (command.type === 'child-transcript.unsubscribe') {
+          consumer?.emit('message', { type: 'closed', subscriptionId: command.subscriptionId, threadId: command.threadId, reason: 'requested' });
+          consumer?.emit('disconnect', { authenticated: true });
+          return;
+        }
+        if (options.outcome === 'gone') return;
+        if (options.outcome === 'rejected') {
+          consumer?.emit('message', { type: 'rejected', subscriptionId: command.subscriptionId, threadId: command.threadId, error: 'worker rejected it' });
+          consumer?.emit('disconnect', { authenticated: true });
+          return;
+        }
+        consumer?.emit('message', { type: 'established', subscriptionId: command.subscriptionId, threadId: command.threadId });
+        consumer?.emit('message', {
+          type: 'snapshot', subscriptionId: command.subscriptionId, threadId: command.threadId,
+          snapshot: snapshotFor(command.threadId)
+        });
+      });
+      return { accepted: true, transient: true, commandId: command.commandId, path: `/private/fake/${command.commandId}` };
+    },
+    cancelTransientControl() { return false; }
+  });
+  source.refreshRecords({ force: true });
+  return { source, calls, consumers };
+}
+
+function createLiveParent(label, childIds = ['thread-child-running'], statuses = {}) {
+  const job = createManagedJob({ provider: 'codex', mode: 'review', cwd: harness.root, prompt: packet(`Live child ${label}`) });
+  updateManagedJob(job.id, (record) => {
+    record.providerSessionId = 'thread-parent';
+    record.providerCliVersion = '0.144.0';
+    record.status = 'running';
+    record.phase = 'working';
+    record.pid = process.pid;
+    record.workerPid = process.pid;
+    record.subagentLifecycle = Object.fromEntries(childIds.map((id) => [id, {
+      id, status: statuses[id] || 'running', task: `Task ${id}`
+    }]));
+  });
+  return job;
 }
 
 test('Codex v2 discovery is version/capability gated and thread/read yields a bounded reasoning-free snapshot', async () => {
@@ -198,6 +301,7 @@ test('Subagents renders a flat nested tree, collapses guardians, and preserves s
   assert.match(controller, /row\.category === 'guardians'[\s\S]*guardiansExpanded = !ui\.guardiansExpanded/, 'Enter expands the guardian category');
   const backBranch = controller.match(/else if \(ui\.screen === 'detail' && ui\.subagentTranscriptId\) \{([\s\S]*?)\n  \}/)?.[1] || '';
   assert.match(backBranch, /ui\.subagentTranscriptId = null/, 'Esc closes only the child transcript');
+  assert.match(backBranch, /source\.selectSubagent\?\.\(ui\.jobId\)/, 'Esc routes through the datasource release path');
   assert.doesNotMatch(backBranch, /subagentSelection\s*=/, 'Esc preserves the parent row selection');
 });
 
@@ -330,6 +434,130 @@ test('datasource keeps child snapshots memory-only, polls only the selected runn
   } finally { fallbackSource.close(); }
 });
 
+test('Transcript is Live only after confirmation, and rejected or disconnected subscriptions render Stored', async () => {
+  const confirmedJob = createLiveParent('confirmed');
+  const confirmed = liveDatasource(confirmedJob);
+  try {
+    await confirmed.source.selectSubagent(confirmedJob.id);
+    await confirmed.source.selectSubagent(confirmedJob.id, 'thread-child-running');
+    let state = confirmed.source.getState();
+    assert.equal(state.subagentsByJob[confirmedJob.id].snapshot.mode, 'live');
+    assert.equal(state.subagentsByJob[confirmedJob.id].snapshot.subscriptionState, 'established');
+    const liveFrame = subagentsFrameFor(state, confirmedJob.id, { subagentTranscriptId: 'thread-child-running' });
+    assert.match(liveFrame.panes[0].title, /\| Live$/);
+    assert.equal(projectSubagentRows(state.jobs[0], [], state.subagentsByJob[confirmedJob.id])[0].transcript, 'Live');
+  } finally { await confirmed.source.close(); }
+
+  const rejectedJob = createLiveParent('rejected');
+  const rejected = liveDatasource(rejectedJob, { outcome: 'rejected' });
+  try {
+    await rejected.source.selectSubagent(rejectedJob.id);
+    await rejected.source.selectSubagent(rejectedJob.id, 'thread-child-running');
+    const state = rejected.source.getState();
+    assert.equal(state.subagentsByJob[rejectedJob.id].snapshot.mode, 'stored');
+    assert.equal(projectSubagentRows(state.jobs[0], [], state.subagentsByJob[rejectedJob.id])[0].transcript, 'Stored', 'a rejected subscribe never earns Live');
+  } finally { await rejected.source.close(); }
+
+  const droppedJob = createLiveParent('post-ack-disconnect');
+  const dropped = liveDatasource(droppedJob);
+  try {
+    await dropped.source.selectSubagent(droppedJob.id);
+    await dropped.source.selectSubagent(droppedJob.id, 'thread-child-running');
+    const live = dropped.source.liveSubagent;
+    assert.equal(dropped.source.getState().subagentsByJob[droppedJob.id].snapshot.mode, 'live');
+    live.consumer.emit('disconnect', { authenticated: true });
+    const state = dropped.source.getState();
+    assert.equal(state.subagentsByJob[droppedJob.id].snapshot.mode, 'stored');
+    assert.equal(state.subagentsByJob[droppedJob.id].snapshot.subscriptionState, 'disconnected');
+    assert.equal(projectSubagentRows(state.jobs[0], [], state.subagentsByJob[droppedJob.id])[0].transcript, 'Stored', 'an acknowledged stream that dies cannot remain Live');
+  } finally { await dropped.source.close(); }
+
+  const goneJob = createLiveParent('worker-gone');
+  const gone = liveDatasource(goneJob, { outcome: 'gone' });
+  try {
+    await gone.source.selectSubagent(goneJob.id);
+    await gone.source.selectSubagent(goneJob.id, 'thread-child-running');
+    const state = gone.source.getState();
+    assert.equal(state.subagentsByJob[goneJob.id].snapshot.mode, 'stored');
+    assert.equal(projectSubagentRows(state.jobs.find((entry) => entry.id === goneJob.id), [], state.subagentsByJob[goneJob.id])[0].transcript, 'Stored', 'a vanished worker times out to Stored');
+  } finally { await gone.source.close(); }
+});
+
+test('Esc releases the selected live child subscription', async () => {
+  const job = createLiveParent('escape');
+  const fixture = liveDatasource(job);
+  try {
+    await fixture.source.selectSubagent(job.id);
+    await fixture.source.selectSubagent(job.id, 'thread-child-running');
+    const consumer = fixture.source.liveSubagent.consumer;
+    await fixture.source.selectSubagent(job.id);
+    assert.ok(fixture.calls.some((command) => command.type === 'child-transcript.unsubscribe' && command.threadId === 'thread-child-running'));
+    assert.equal(consumer.closed, true);
+  } finally { await fixture.source.close(); }
+});
+
+test('selecting a different child releases the previous subscription', async () => {
+  const childIds = ['thread-child-running', 'thread-child-second'];
+  const job = createLiveParent('switch', childIds);
+  const fixture = liveDatasource(job, { childIds });
+  try {
+    await fixture.source.selectSubagent(job.id);
+    await fixture.source.selectSubagent(job.id, childIds[0]);
+    const firstConsumer = fixture.source.liveSubagent.consumer;
+    await fixture.source.selectSubagent(job.id, childIds[1]);
+    assert.ok(fixture.calls.some((command) => command.type === 'child-transcript.unsubscribe' && command.threadId === childIds[0]));
+    assert.equal(firstConsumer.closed, true);
+    assert.equal(fixture.source.liveSubagent.threadId, childIds[1]);
+  } finally { await fixture.source.close(); }
+});
+
+test('parent terminal transition releases the live child subscription', async () => {
+  const job = createLiveParent('parent-terminal');
+  const fixture = liveDatasource(job);
+  try {
+    await fixture.source.selectSubagent(job.id);
+    await fixture.source.selectSubagent(job.id, 'thread-child-running');
+    const consumer = fixture.source.liveSubagent.consumer;
+    updateManagedJob(job.id, (record) => {
+      record.status = 'completed';
+      record.phase = 'completed';
+      record.completedAt = Math.floor(Date.now() / 1000);
+    });
+    fixture.source.refreshRecords({ force: true });
+    await waitForCondition({
+      description: 'parent terminal child unsubscribe', timeoutMs: 500, intervalMs: 5,
+      observe: () => ({ live: fixture.source.liveSubagent, consumerClosed: consumer.closed }),
+      predicate: (value) => value.live == null && value.consumerClosed
+    });
+    assert.ok(fixture.calls.some((command) => command.type === 'child-transcript.unsubscribe'));
+    assert.equal(consumer.closed, true);
+  } finally { await fixture.source.close(); }
+});
+
+test('TUI datasource close releases the live child subscription', async () => {
+  const job = createLiveParent('tui-close');
+  const fixture = liveDatasource(job);
+  await fixture.source.selectSubagent(job.id);
+  await fixture.source.selectSubagent(job.id, 'thread-child-running');
+  const consumer = fixture.source.liveSubagent.consumer;
+  await fixture.source.close();
+  assert.ok(fixture.calls.some((command) => command.type === 'child-transcript.unsubscribe'));
+  assert.equal(consumer.closed, true);
+});
+
+test('a terminal child stays on the stored snapshot path and never subscribes', async () => {
+  const statuses = { 'thread-child-running': 'idle' };
+  const job = createLiveParent('terminal-child', ['thread-child-running'], statuses);
+  const fixture = liveDatasource(job, { statuses });
+  try {
+    await fixture.source.selectSubagent(job.id);
+    await fixture.source.selectSubagent(job.id, 'thread-child-running');
+    const state = fixture.source.getState().subagentsByJob[job.id];
+    assert.equal(state.snapshot.mode, 'stored');
+    assert.equal(fixture.calls.some((command) => command.type === 'child-transcript.subscribe'), false);
+  } finally { await fixture.source.close(); }
+});
+
 // The reasoning/thought early exit is only one of two layers. The layer that
 // actually decides what a child may show is the itemEvents allow-list, which
 // returns nothing for a kind it does not recognize. Nothing pinned that layer:
@@ -356,4 +584,25 @@ test('an unrecognized child item kind projects no events at all', () => {
   assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(REASONING_SECRET), 'unrecognized kinds must contribute nothing');
   assert.equal(snapshot.events.length, 1, 'only the one recognized item became an event');
   assert.equal(snapshot.droppedReasoningCount, 0, 'these were dropped by the allow-list, not the reasoning early exit');
+});
+
+test('live projection drops reasoning and unknown items while admitting a recognized child message', () => {
+  const reasoning = projectCodexChildNotification('item/completed', {
+    threadId: 'thread-child-live', turnId: 'turn-live',
+    item: { id: 'reasoning-live', type: 'reasoning', summary: [{ text: REASONING_SECRET }] }
+  }, { now: NOW });
+  const unknown = projectCodexChildNotification('item/completed', {
+    threadId: 'thread-child-live', turnId: 'turn-live',
+    item: { id: 'unknown-live', type: 'internalMonologue', text: REASONING_SECRET }
+  }, { now: NOW });
+  const publicMessage = projectCodexChildNotification('item/completed', {
+    threadId: 'thread-child-live', turnId: 'turn-live',
+    item: { id: 'public-live', type: 'agentMessage', text: 'Public live answer.' }
+  }, { now: NOW });
+  assert.equal(reasoning.droppedReasoningCount, 1, 'the live reasoning fixture actually reaches the reasoning guard');
+  assert.deepEqual(reasoning.events, []);
+  assert.equal(unknown.droppedReasoningCount, 0, 'the unknown fixture reaches the allow-list rather than the reasoning guard');
+  assert.deepEqual(unknown.events, []);
+  assert.match(JSON.stringify(publicMessage.events), /Public live answer/, 'the same live path is non-vacuously projecting recognized content');
+  assert.doesNotMatch(JSON.stringify([reasoning, unknown, publicMessage]), new RegExp(REASONING_SECRET));
 });

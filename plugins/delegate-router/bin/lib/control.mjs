@@ -4642,6 +4642,119 @@ export function submitControl(id, command, expectedRevision) {
   });
 }
 
+const TRANSIENT_CONTROL_TYPES = new Set(['child-transcript.subscribe', 'child-transcript.unsubscribe']);
+
+function transientControlPath(id, commandId) {
+  return path.join(paths(id).commands, `${commandId}.transient.json`);
+}
+
+function pruneTransientControls(id, now = Date.now()) {
+  const directory = paths(id).commands;
+  let names = [];
+  try { names = fs.readdirSync(directory).filter((name) => name.endsWith('.transient.json')); }
+  catch { return; }
+  for (const name of names) {
+    const file = path.join(directory, name);
+    const processingOwner = name.match(/^\.processing-(\d+)-/)?.[1];
+    try {
+      const command = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (command?.transient === true
+        && TRANSIENT_CONTROL_TYPES.has(command.type)
+        && Number(command.expiresAt || 0) > now
+        && (processingOwner
+          ? isProcessAlive(Number(processingOwner))
+          : isProcessAlive(Number(command.ownerPid)))) continue;
+    } catch {}
+    try { fs.unlinkSync(file); } catch {}
+  }
+}
+
+export function submitTransientControl(id, command) {
+  assertJobId(id);
+  if (!TRANSIENT_CONTROL_TYPES.has(command?.type)) throw brokerError('INVALID_REQUEST', `unsupported transient control command: ${command?.type || 'missing'}`);
+  const job = loadJob(id);
+  if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+  if (job.managedBy !== 'delegate-control' || isReadOnlyTransport(job)) throw brokerError('UNMANAGED_JOB', 'transient worker control requires a managed job', { provider: job.provider });
+  if (TERMINAL_STATUSES.has(job.status)) throw brokerError('JOB_TERMINAL', `job is already ${job.status}`, { provider: job.provider });
+  if (job.provider !== 'codex') throw brokerError('INVALID_REQUEST', 'live child transcripts require the managed Codex worker', { provider: job.provider });
+  const commandId = /^[a-zA-Z0-9_-]{1,128}$/.test(command.commandId || '') ? command.commandId : crypto.randomUUID();
+  const subscriptionId = String(command.subscriptionId || '');
+  const threadId = String(command.threadId || '');
+  if (!/^[a-zA-Z0-9._:-]{1,256}$/.test(subscriptionId) || !threadId || threadId.length > 256) {
+    throw brokerError('INVALID_REQUEST', 'transient child transcript control requires bounded subscriptionId and threadId');
+  }
+  if (command.type === 'child-transcript.subscribe') {
+    if (typeof command.endpoint !== 'string' || !path.isAbsolute(command.endpoint) || command.endpoint.length > 2048) {
+      throw brokerError('INVALID_REQUEST', 'child transcript subscribe requires an absolute private endpoint');
+    }
+    const endpoint = path.resolve(command.endpoint);
+    const privateRoot = path.resolve(dataDir());
+    let endpointStat;
+    let rootStat;
+    try {
+      endpointStat = fs.statSync(endpoint);
+      rootStat = fs.statSync(privateRoot);
+    } catch {
+      throw brokerError('INVALID_REQUEST', 'child transcript subscribe endpoint must already exist under the private state root');
+    }
+    if (path.dirname(endpoint) !== privateRoot || !endpointStat.isSocket()
+      || (endpointStat.mode & 0o777) !== 0o600 || (rootStat.mode & 0o777) !== 0o700) {
+      throw brokerError('INVALID_REQUEST', 'child transcript subscribe endpoint must be a private 0600 socket under a 0700 state directory');
+    }
+    if (!/^[a-f0-9]{64}$/.test(String(command.token || ''))) {
+      throw brokerError('INVALID_REQUEST', 'child transcript subscribe requires a private authentication token');
+    }
+  }
+  const record = {
+    type: command.type,
+    commandId,
+    subscriptionId,
+    threadId,
+    ...(command.type === 'child-transcript.subscribe' ? { endpoint: command.endpoint, token: command.token } : {}),
+    transient: true,
+    ownerPid: process.pid,
+    requestedAt: Date.now(),
+    expiresAt: Date.now() + 10_000
+  };
+  fs.mkdirSync(paths(id).commands, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(paths(id).commands, 0o700); } catch {}
+  pruneTransientControls(id);
+  const file = transientControlPath(id, commandId);
+  writePrivate(file, `${JSON.stringify(record)}\n`);
+  return { accepted: true, transient: true, commandId, path: file };
+}
+
+export function cancelTransientControl(id, commandId) {
+  assertJobId(id);
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(commandId || '')) return false;
+  try { fs.unlinkSync(transientControlPath(id, commandId)); return true; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  return false;
+}
+
+export function claimTransientCommands(id) {
+  const directory = paths(id).commands;
+  pruneTransientControls(id);
+  let names = [];
+  try { names = fs.readdirSync(directory).filter((name) => name.endsWith('.transient.json') && !name.startsWith('.processing-')).sort(); }
+  catch { return []; }
+  const claimed = [];
+  for (const name of names) {
+    const source = path.join(directory, name);
+    const target = path.join(directory, `.processing-${process.pid}-${name}`);
+    try {
+      fs.renameSync(source, target);
+      const command = JSON.parse(fs.readFileSync(target, 'utf8'));
+      fs.unlinkSync(target);
+      if (command.transient !== true || !TRANSIENT_CONTROL_TYPES.has(command.type) || Number(command.expiresAt || 0) <= Date.now()) continue;
+      claimed.push({ path: null, command, transient: true });
+    } catch {
+      try { fs.unlinkSync(target); } catch {}
+    }
+  }
+  return claimed.sort((left, right) => Number(left.command.requestedAt || 0) - Number(right.command.requestedAt || 0));
+}
+
 function resolvedResponseResult(job, intake, events = []) {
   const commandId = intake.command.id;
   const control = job.controls?.[commandId];
@@ -4741,7 +4854,7 @@ export function claimCommands(id, options = {}) {
   fs.mkdirSync(p.done, { recursive: true, mode: 0o700 });
   let names = [];
   try {
-    names = fs.readdirSync(p.commands).filter((name) => name.endsWith('.json')).map((name) => {
+    names = fs.readdirSync(p.commands).filter((name) => name.endsWith('.json') && !name.endsWith('.transient.json')).map((name) => {
       try {
         const command = JSON.parse(fs.readFileSync(path.join(p.commands, name), 'utf8'));
         return { name, requestedAt: command.requestedAt || 0, type: command.type };

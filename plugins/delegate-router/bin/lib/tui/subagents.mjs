@@ -123,6 +123,9 @@ export function projectSubagentRows(job = {}, events = [], state = {}) {
   for (const row of rows) {
     row.depth = job.provider === 'cursor' ? null : depthFor(row, byId, job.providerSessionId);
     row.transcript = job.provider === 'codex' && !job.remote ? 'Stored' : 'Unavailable';
+    if (state.snapshot?.threadId === row.id
+      && state.snapshot.mode === 'live'
+      && state.snapshot.subscriptionState === 'established') row.transcript = 'Live';
     if (state.snapshot?.threadId === row.id && state.snapshot.mode === 'disk') row.transcript = 'Disk fallback';
     if (state.snapshot?.threadId === row.id && state.snapshot.mode === 'unavailable') row.transcript = 'Unavailable';
   }
