@@ -49,6 +49,7 @@ function emptyState(host) {
     diffsByJob: {},
     diffStatsByJob: {},
     hydrationByJob: {},
+    subagentsByJob: {},
     usage: null,
     providers: [],
     writerLocks: [],
@@ -327,6 +328,38 @@ export class RemoteDatasource extends EventEmitter {
       this.connectionStatus();
       this.publish();
     }
+    return this.getState();
+  }
+
+  async selectSubagent(jobId, threadId = null) {
+    if (!jobId) {
+      this.state = { ...this.state, subagentsByJob: {}, updatedAt: Date.now() };
+      this.publish();
+      return this.getState();
+    }
+    const previous = this.state.subagentsByJob[jobId] || {};
+    this.state = {
+      ...this.state,
+      subagentsByJob: {
+        ...this.state.subagentsByJob,
+        [jobId]: {
+          ...previous,
+          provider: this.state.jobs.find((job) => job.id === jobId)?.provider || null,
+          status: 'remote-unavailable',
+          threads: [],
+          error: 'provider RPC discovery is unreachable from this remote TUI connection',
+          snapshot: threadId ? {
+            threadId,
+            mode: 'unavailable',
+            status: 'unavailable',
+            events: [],
+            message: 'Child transcripts are unavailable through the read-only remote detail transport.'
+          } : previous.snapshot || null
+        }
+      },
+      updatedAt: Date.now()
+    };
+    this.publish();
     return this.getState();
   }
 

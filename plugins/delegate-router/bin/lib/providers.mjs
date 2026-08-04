@@ -22,6 +22,7 @@ import {
   recordInterrogationAnswer,
   recordPlanPassOutcome,
   redact,
+  readJobEvents,
   resumeManagedJob,
   settleQueuedControl,
   startAmbiguityProbe,
@@ -765,6 +766,25 @@ export function normalizeSubagentLifecycle(input = {}) {
         status: kind || 'running',
         occurredAtMs: payload.occurredAtMs || payload.occurred_at_ms
       }));
+    } else if (itemType === 'collab_tool_call') {
+      const id = payload.newThreadId || payload.new_thread_id
+        || payload.receiverThreadId || payload.receiver_thread_id || payload.id;
+      const state = statusDetailsFromProvider(payload.agentStatus || payload.agent_status || payload.status);
+      const fallback = /spawn/.test(normalizedToken(payload.tool)) ? 'started' : 'progress';
+      candidates.push(subagentCandidate({
+        lifecycle: state.status ? lifecycleForStatus(state.status, fallback) : fallback,
+        id,
+        correlationId: payload.id || id,
+        sourceItemId: payload.id,
+        type: payload.agentRole || payload.agent_role || 'subagent',
+        agentName: payload.agentNickname || payload.agent_nickname,
+        task: payload.prompt,
+        status: state.status || payload.status || (fallback === 'started' ? 'running' : 'in_progress'),
+        output: state.output,
+        error: state.error,
+        usage: state.usage,
+        durationMs: state.durationMs ?? payload.durationMs ?? payload.duration_ms
+      }));
     } else if (itemType === 'collab_agent_tool_call') {
       const refs = receiverAgentRefs(payload);
       const states = payload.agentsStates && typeof payload.agentsStates === 'object' ? payload.agentsStates
@@ -879,6 +899,22 @@ function resultWithSubagents(result, subagents) {
     ? { ...result }
     : result == null ? {} : { text: String(result) };
   return subagents.length ? { ...base, subagents } : base;
+}
+
+function hasRecordedSubagentFailure(job) {
+  const lifecycle = job?.subagentLifecycle && typeof job.subagentLifecycle === 'object'
+    ? Object.values(job.subagentLifecycle) : [];
+  const results = Array.isArray(job?.result?.subagents) ? job.result.subagents : [];
+  const failedState = [...lifecycle, ...results].some((subagent) => {
+    const status = normalizedToken(subagent?.status);
+    return subagent?.failed === true || ['errored', 'error', 'failed', 'failure'].includes(status);
+  });
+  if (failedState) return true;
+  try {
+    return readJobEvents(job.id, { types: ['subagent.errored'], limit: 1 }).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function recordSubagentLifecycle(jobId, candidate, options = {}) {
@@ -1329,6 +1365,8 @@ function terminal(job, status, phase, extra = {}) {
     && job.verify?.disabled !== true
     && job.verifyCommandPath
     && storedBeforeTerminal?.verification?.state === 'pending';
+  const swallowedSubagentFailure = !deferVerification && status === 'completed'
+    && hasRecordedSubagentFailure(storedBeforeTerminal || job);
   let ingestOutcome = null;
   if (status === 'completed' && !deferVerification && job.stagingDir) {
     try { ingestOutcome = completeIngestedFiles(job); }
@@ -1426,7 +1464,7 @@ function terminal(job, status, phase, extra = {}) {
     // A read-mode turn that ends with a sentence of narration instead of the
     // findings is a recurring provider pattern; flag it so the coordinator
     // resumes with "paste the full findings now" instead of trusting it.
-    if (!deferVerification && status === 'completed' && ['consult', 'plan', 'review'].includes(job.mode)
+    if (!current.resultSuspect && !deferVerification && status === 'completed' && ['consult', 'plan', 'review'].includes(job.mode)
       && !current.result?.plan && (!text || text.trim().length < 200)) {
       current.resultSuspect = 'short-final-message';
     }
@@ -1434,16 +1472,19 @@ function terminal(job, status, phase, extra = {}) {
     // audit returned analysis instead of code): completed with zero observed
     // changes means the objective was not met, on the record itself and not
     // only via the wait exit code.
-    if (!deferVerification && status === 'completed' && ['implement', 'verify'].includes(job.mode)
+    if (!current.resultSuspect && !deferVerification && status === 'completed' && ['implement', 'verify'].includes(job.mode)
       && changedFiles && changedFiles.count === 0) {
       current.resultSuspect = 'no-changes-write-mode';
     }
     const subagentOutputChars = (current.result?.subagents || [])
       .reduce((total, subagent) => total + String(subagent?.output || '').trim().length, 0);
     const finalMessageChars = String(text || '').trim().length;
-    if (!deferVerification && status === 'completed' && subagentOutputChars >= 1000
+    if (!current.resultSuspect && !deferVerification && status === 'completed' && subagentOutputChars >= 1000
       && subagentOutputChars > Math.max(finalMessageChars * 2, finalMessageChars + 500)) {
       current.resultSuspect = 'subagent-output-dominates-final';
+    }
+    if (!deferVerification && status === 'completed' && swallowedSubagentFailure && !current.resultSuspect) {
+      current.resultSuspect = 'subagent-error-swallowed';
     }
     if (!deferVerification && status === 'completed' && ['implement', 'verify'].includes(current.mode)) {
       current.completedRevision = verificationRepositoryRevision(current.cwd);
@@ -1535,11 +1576,11 @@ export function mapCodexItem(jobId, phase, params, activity = null) {
     }
   } else if (item.type === 'plan') {
     appendJobEvent(jobId, 'plan.updated', { id: item.id, text: item.text, phase }, options);
-  } else if (item.type === 'commandExecution' || item.type === 'mcpToolCall' || item.type === 'dynamicToolCall' || item.type === 'collabAgentToolCall') {
+  } else if (item.type === 'commandExecution' || item.type === 'mcpToolCall' || item.type === 'dynamicToolCall' || item.type === 'collabToolCall' || item.type === 'collabAgentToolCall') {
     // Collab-agent items mean the thread engaged Codex's multi-agent review
     // flow; such threads refuse direct resume. Mark the job so delegate_resume
     // can fail fast with the recovery instead of a provider round-trip.
-    if (item.type === 'collabAgentToolCall') {
+    if (item.type === 'collabToolCall' || item.type === 'collabAgentToolCall') {
       updateManagedJob(jobId, (job) => { job.reviewFlowEngaged = true; }, { incrementRevision: false });
       recordSubagentCandidates(jobId, normalizeSubagentLifecycle({
         source: 'codex-item',
@@ -1985,7 +2026,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.64.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.65.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -3152,7 +3193,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.64.0' }
+      clientInfo: { name: 'delegate-router', version: '0.65.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

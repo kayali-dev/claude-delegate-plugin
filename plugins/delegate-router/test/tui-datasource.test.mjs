@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { activeWriterLocks, appendJobEvent, createManagedJob, updateManagedJob } from '../bin/lib/control.mjs';
+import { createClaudeAgentStub } from '../bin/lib/agent-stubs.mjs';
 import { paintFrame } from '../bin/lib/tui/components.mjs';
 import { DelegateDataSource, tailAllJobs } from '../bin/lib/tui/datasource.mjs';
 import { dashboardViewModel, fleetViewModel } from '../bin/lib/tui/viewmodels.mjs';
@@ -60,6 +61,47 @@ test('tailAllJobs discovers new job files and tails only new journal events', ()
 
     source.refresh();
     assert.equal(source.metrics.journalEvents, initialMetric + 1, 'quiet refresh must not re-append old journal events');
+  } finally { source.close(); }
+}));
+
+test('claude-agent detail uses ingested journal events or transcript fallback, never both', () => isolated(async (root) => {
+  const transcriptAgentId = 'f5f9ee00417f2e40';
+  const sidecar = path.join(root, 'coordinator');
+  const subagents = path.join(sidecar, 'subagents');
+  fs.mkdirSync(subagents, { recursive: true });
+  const transcript = path.join(subagents, `agent-${transcriptAgentId}.jsonl`);
+  fs.writeFileSync(transcript, `${JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-08-04T00:00:00.000Z',
+    message: { id: 'fallback-message', role: 'assistant', content: [{ type: 'text', text: 'fallback text' }] }
+  })}\n`);
+  const job = createClaudeAgentStub({
+    sessionId: 'tui-agent-session',
+    toolUseId: 'toolu_tui_agent',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    transcriptAgentId,
+    transcriptPath: transcript,
+    prompt: 'show one source'
+  });
+  const source = new DelegateDataSource({ watch: false, pollMs: 100_000 });
+  try {
+    source.refreshRecords({ force: true });
+    let selected = await source.selectJob(job.id);
+    assert.equal(selected.eventsByJob[job.id].length, 1);
+    assert.equal(selected.eventsByJob[job.id][0].source, 'claude-agent-transcript');
+    assert.equal(source.metrics.readOnlyTranscriptReads, 1);
+
+    appendJobEvent(job.id, 'message.delta', { id: 'journal-message', delta: 'journal text' });
+    updateManagedJob(job.id, (current) => {
+      current.agentTranscriptIngestion = { journalEvents: 1, closed: false };
+    }, { incrementRevision: false });
+    await source.selectJob(null);
+    source.refreshRecords({ force: true });
+    selected = await source.selectJob(job.id);
+    assert.ok(selected.eventsByJob[job.id].some((event) => event.type === 'message.delta' && event.data.id === 'journal-message'));
+    assert.ok(selected.eventsByJob[job.id].every((event) => event.source !== 'claude-agent-transcript'));
+    assert.equal(source.metrics.readOnlyTranscriptReads, 1, 'journal hydration must not also reread the transcript');
   } finally { source.close(); }
 }));
 

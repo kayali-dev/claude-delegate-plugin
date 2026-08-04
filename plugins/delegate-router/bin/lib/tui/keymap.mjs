@@ -218,10 +218,10 @@ export const KEYMAP = Object.freeze([
   entry({
     keys: ['U'], label: 'toggle transcript subagent list', action: 'detail.subagents', scope: ['detail'], class: 'view',
     footer: true, footerLabel: 'subagents',
-    when: (ctx) => Number(ctx.detailTab) === 0 && Number(ctx.subagentCount || 0) > 0,
-    unavailableReason: (ctx) => Number(ctx.detailTab) !== 0
-      ? 'open Transcript'
-      : Number(ctx.subagentCount || 0) > 0 ? null : 'no transcript subagents'
+    when: (ctx) => ['codex', 'cursor'].includes(String(ctx.job?.provider || '')) && ctx.job?.external !== true,
+    unavailableReason: (ctx) => ctx.job?.external === true
+      ? 'external threads have no managed parent detail surface'
+      : ['codex', 'cursor'].includes(String(ctx.job?.provider || '')) ? null : 'selected provider has no subagent detail surface'
   }),
   entry({
     keys: ['A'], label: 'toggle error event list', action: 'detail.event-errors', scope: ['detail'], class: 'view',

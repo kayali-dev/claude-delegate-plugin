@@ -161,6 +161,24 @@ function collectCandidates(root) {
   return candidates.sort((left, right) => right.mtimeMs - left.mtimeMs || left.file.localeCompare(right.file));
 }
 
+// This is deliberately a selected-thread lookup, not a fleet scanner. The
+// caller must already have a provider thread id and explicitly request the
+// child transcript before this undocumented local-layout fallback is touched.
+export function findCodexThreadRollout(threadId, options = {}) {
+  const expected = typeof threadId === 'string' ? threadId.trim() : '';
+  if (!expected) return null;
+  const sessionsDir = path.resolve(String(options.sessionsDir || codexSessionsDirectory(options.env || process.env)));
+  let candidates;
+  try { candidates = collectCandidates(sessionsDir); }
+  catch { return null; }
+  const limit = Math.max(1, Math.min(MAX_CANDIDATES, Number(options.maxFiles || MAX_CANDIDATES)));
+  for (const candidate of candidates.slice(0, limit)) {
+    const meta = readSessionMeta(candidate.file, options.metaBytes || DEFAULT_META_BYTES);
+    if (codexThreadIdentity(meta) === expected) return candidate.file;
+  }
+  return null;
+}
+
 function messageText(value) {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) {

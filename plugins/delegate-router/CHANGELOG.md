@@ -2,6 +2,38 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.65.0 — 2026-08-04
+
+- Tail correlated Claude Agent/Task subagent transcripts from the resident
+  supervisor into the managed journal, including content-free reasoning
+  activity, message boundaries, tools, bounded/redacted output, observed usage,
+  model identity, and file-change signals. Durable byte and usage checkpoints
+  keep growth live and supervisor restarts idempotent; terminal jobs receive a
+  final post-stop drain. `DELEGATE_AGENT_TAIL=0` disables ingestion without
+  disabling the existing shadow-job hooks.
+- Keep lifecycle-hook transcript ids separate from Agent result display names,
+  use readable `meta.json` sidecars only for exact `toolUseId` correlation, and
+  reject display-shaped legacy ids during transcript lookup. The agent-type
+  heuristic remains only for runs without a readable sidecar. Nested subagents
+  at spawn depth 2 or greater still receive no invented shadow job when no
+  hook-correlated stub exists.
+- Render Claude subagents from ingested journal events when available and retain
+  the existing bounded transcript reader only as an all-or-nothing fallback.
+- Add a parent-owned Subagents tab to managed Codex and Cursor job detail.
+  Codex discovers descendants through version/capability-gated `thread/list`
+  and reads only the selected child through bounded `thread/read` snapshots,
+  with a version-detected exact-thread local rollout fallback. Running-child
+  snapshots are explicitly point-in-time and may be incomplete; they are not
+  live subscriptions because cross-process live attachment to a child owned by
+  another app-server remains unverified. Cursor renders observed lifecycle rows
+  with child transcripts explicitly unavailable instead of inventing sessions.
+- Make existing dashboard attention surfaces subagent-aware without adding a
+  new attention kind: child errors appear in the notable feed, stale correlated
+  children can stall an otherwise chatty parent with the child named in Needs
+  you, and successful parents that swallowed a child failure are marked
+  `resultSuspect: 'subagent-error-swallowed'` unless an earlier suspect reason
+  already explains the required review.
+
 ## 0.64.0 — 2026-08-01
 
 - Canonicalize newline-composite Cursor input request IDs at ACP ingestion,

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createManagedJob, inspectJob, readJobEvents, resumeManagedJob, submitControl } from '../bin/lib/control.mjs';
+import { createManagedJob, inspectJob, readJobEvents, resumeManagedJob, submitControl, updateManagedJob } from '../bin/lib/control.mjs';
 import {
   mapCodexItem,
   mapCodexMcpEvent,
@@ -345,6 +345,35 @@ test('review-flow threads are flagged and refuse resume fast; terminal jobs writ
   assert.ok(completed.finishedPath);
   assert.equal(fs.readFileSync(completed.finishedPath, 'utf8').trim(), 'completed');
   assert.throws(() => resumeManagedJob(job.id, { prompt: 'continue' }), /RESUME_UNSUPPORTED/);
+}));
+
+test('a successful parent with an errored child is suspect and preserves an existing reason', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const recordErroredChild = (jobId, id) => mapCodexItem(jobId, 'completed', {
+    threadId: 'thread-fake', turnId: 'turn-before-parent-completion',
+    item: {
+      type: 'collabAgentToolCall', id: `collab-${id}`, tool: 'wait', status: 'completed',
+      receiverThreadIds: [id],
+      receiverAgents: [{ threadId: id, agentNickname: id, agentRole: 'reviewer' }],
+      prompt: 'Review the implementation',
+      agentsStates: { [id]: { failed: 'child review failed' } }
+    }
+  });
+
+  const swallowed = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'implement' });
+  recordErroredChild(swallowed.id, 'failed-reviewer');
+  await runManagedProvider(swallowed);
+  const completed = inspectJob(swallowed.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.result.subagents[0].status, 'errored');
+  assert.ok(readJobEvents(swallowed.id, { types: ['subagent.errored'], limit: 1 }).length);
+  assert.equal(completed.resultSuspect, 'subagent-error-swallowed');
+
+  const prior = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review again' });
+  updateManagedJob(prior.id, (job) => { job.resultSuspect = 'pre-existing-review-signal'; }, { incrementRevision: false });
+  recordErroredChild(prior.id, 'failed-reviewer-with-prior');
+  await runManagedProvider(prior);
+  assert.equal(inspectJob(prior.id).resultSuspect, 'pre-existing-review-signal');
 }));
 
 test('out-of-scope writes are recorded as scopeViolations with a scope.violation event', () => isolated(async (directory) => {

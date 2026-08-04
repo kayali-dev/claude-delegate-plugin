@@ -4,12 +4,28 @@ import path from 'node:path';
 import { appendJobEvent, inspectJob, launchOrigin, redact, updateManagedJob } from './control.mjs';
 import { listJobs, loadJob, saveJob } from './state.mjs';
 import { initializeOutcomeAttempt } from './outcome-ledger.mjs';
+import {
+  agentMetadataPath,
+  encodeClaudeProjectDirectory,
+  normalizeTranscriptAgentId,
+  resolveStoredAgentTranscriptPath,
+  transcriptAgentIdForJob,
+  transcriptAgentIdFromPath,
+  transcriptPathMatchesAgentId
+} from './agent-transcript-paths.mjs';
+
+export {
+  encodeClaudeProjectDirectory,
+  normalizeTranscriptAgentId,
+  resolveStoredAgentTranscriptPath,
+  transcriptAgentIdForJob,
+  transcriptAgentIdFromPath,
+  transcriptPathMatchesAgentId
+} from './agent-transcript-paths.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const MAX_PROMPT_SUMMARY = 512;
-const DEFAULT_AGENT_TRANSCRIPT_ENTRY_LIMIT = 200;
-const DEFAULT_AGENT_SESSION_LIMIT = 8;
-const DEFAULT_AGENT_PROJECT_ENTRY_LIMIT = 200;
+const MAX_AGENT_METADATA_BYTES = 64 * 1024;
 
 function boundedText(value, maximum = MAX_PROMPT_SUMMARY) {
   return String(redact(String(value ?? '').slice(0, maximum)))
@@ -22,10 +38,6 @@ function boundedText(value, maximum = MAX_PROMPT_SUMMARY) {
 export function agentStubId(sessionId, toolUseId) {
   const digest = crypto.createHash('sha256').update(`${String(sessionId || '')}\0${String(toolUseId || '')}`).digest('hex').slice(0, 24);
   return `claude-agent-${digest}`;
-}
-
-export function encodeClaudeProjectDirectory(cwd) {
-  return path.resolve(String(cwd || path.parse(process.cwd()).root)).split(path.sep).join('-');
 }
 
 export function coordinatorSidecarDirectory(coordinatorTranscriptPath) {
@@ -85,12 +97,13 @@ export function createClaudeAgentStub(options = {}) {
     agentType: boundedText(options.agentType, 128) || null,
     agentName: boundedText(options.agentName, 128) || null,
     agentId: boundedText(options.agentId, 256) || null,
+    transcriptAgentId: normalizeTranscriptAgentId(options.transcriptAgentId),
     agentLifecycle: 'started',
     promptSummary: boundedText(options.prompt),
     coordinatorSidecarDir: typeof options.coordinatorSidecarDir === 'string' && path.isAbsolute(options.coordinatorSidecarDir)
       ? path.normalize(options.coordinatorSidecarDir)
       : null,
-    transcriptPath: typeof options.transcriptPath === 'string' && path.isAbsolute(options.transcriptPath)
+    transcriptPath: transcriptPathMatchesAgentId(options.transcriptPath, normalizeTranscriptAgentId(options.transcriptAgentId))
       ? path.normalize(options.transcriptPath)
       : null,
     createdAt,
@@ -126,12 +139,20 @@ export function completeClaudeAgentStub(options = {}) {
   const alreadyRecorded = background && existing.agentLifecycle === 'spawn-returned';
   const wasTerminal = TERMINAL.has(existing.status);
   const status = options.status === 'failed' ? 'failed' : options.status === 'cancelled' ? 'cancelled' : 'completed';
+  const transcriptAgentId = normalizeTranscriptAgentId(options.transcriptAgentId)
+    || transcriptAgentIdFromPath(options.transcriptPath);
   updateManagedJob(id, (job) => {
+    // Agent tool results expose a fleet/display name. Subagent lifecycle hooks
+    // expose the unrelated id used in agent-<id>.jsonl. Never let the former
+    // overwrite the latter, regardless of hook ordering.
     if (options.agentId) job.agentId = boundedText(options.agentId, 256) || job.agentId || null;
+    if (transcriptAgentId) job.transcriptAgentId = transcriptAgentId;
     if (options.coordinatorSidecarDir && path.isAbsolute(options.coordinatorSidecarDir)) {
       job.coordinatorSidecarDir = path.normalize(options.coordinatorSidecarDir);
     }
-    if (options.transcriptPath && path.isAbsolute(options.transcriptPath)) job.transcriptPath = path.normalize(options.transcriptPath);
+    if (transcriptPathMatchesAgentId(options.transcriptPath, transcriptAgentId || transcriptAgentIdForJob(job))) {
+      job.transcriptPath = path.normalize(options.transcriptPath);
+    }
     if (wasTerminal || alreadyRecorded) return;
     if (background) {
       job.status = 'running';
@@ -172,44 +193,87 @@ export function completeClaudeAgentStub(options = {}) {
 
 function matchingAgentStubs(options = {}) {
   const sessionId = boundedText(options.sessionId, 256);
-  const agentId = boundedText(options.agentId, 256);
+  const transcriptAgentId = normalizeTranscriptAgentId(options.transcriptAgentId);
   const agentType = boundedText(options.agentType, 128);
   return listJobs().filter((job) => job.managedBy === 'delegate-agent-hook'
     && job.transport === 'claude-agent'
     && (!sessionId || job.coordinatorSessionId === sessionId)
-    && (!agentId || job.agentId === agentId)
+    && (!transcriptAgentId || transcriptAgentIdForJob(job) === transcriptAgentId)
     && (!agentType || !job.agentType || job.agentType === agentType))
     .sort((left, right) => Number(right.createdAtMs || right.createdAt * 1000 || 0)
       - Number(left.createdAtMs || left.createdAt * 1000 || 0));
 }
 
-export function correlateClaudeSubagentStart(options = {}) {
-  if (!options.agentId) throw new Error('SubagentStart payload is missing agent_id');
-  const already = matchingAgentStubs(options).find((job) => job.agentId === boundedText(options.agentId, 256));
-  if (already) return inspectJob(already.id);
-  const candidate = matchingAgentStubs({ sessionId: options.sessionId, agentType: options.agentType })
-    .find((job) => !job.agentId && !TERMINAL.has(job.status));
-  if (!candidate) return null;
+function readAgentMetadata(coordinatorSidecarDir, transcriptAgentId) {
+  const file = agentMetadataPath(coordinatorSidecarDir, transcriptAgentId);
+  if (!file) return null;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_AGENT_METADATA_BYTES) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
+function correlateCandidate(candidate, options, metadata = null) {
+  const transcriptAgentId = normalizeTranscriptAgentId(options.transcriptAgentId);
+  const transcriptPath = resolveStoredAgentTranscriptPath({
+    transcriptAgentId,
+    coordinatorSidecarDir: options.coordinatorSidecarDir
+  });
   updateManagedJob(candidate.id, (job) => {
-    job.agentId = boundedText(options.agentId, 256);
+    job.transcriptAgentId = transcriptAgentId;
     if (options.agentType) job.agentType = boundedText(options.agentType, 128) || job.agentType;
     if (options.coordinatorSidecarDir && path.isAbsolute(options.coordinatorSidecarDir)) {
       job.coordinatorSidecarDir = path.normalize(options.coordinatorSidecarDir);
     }
+    if (transcriptPath) job.transcriptPath = transcriptPath;
+    const spawnDepth = Number(metadata?.spawnDepth);
+    if (Number.isSafeInteger(spawnDepth) && spawnDepth >= 0) job.spawnDepth = spawnDepth;
+    if (!job.agentName && metadata?.description) job.agentName = boundedText(metadata.description, 128) || null;
+    if (!job.agentType && metadata?.agentType) job.agentType = boundedText(metadata.agentType, 128) || null;
   }, { incrementRevision: false });
   return inspectJob(candidate.id);
 }
 
+export function correlateClaudeSubagentStart(options = {}) {
+  const transcriptAgentId = normalizeTranscriptAgentId(options.transcriptAgentId);
+  if (!transcriptAgentId) throw new Error('SubagentStart payload has an invalid transcript agent_id');
+  const normalized = { ...options, transcriptAgentId };
+  const metadata = readAgentMetadata(options.coordinatorSidecarDir, transcriptAgentId);
+  if (metadata) {
+    const exactId = metadata.toolUseId ? agentStubId(options.sessionId, metadata.toolUseId) : null;
+    const exact = exactId ? loadJob(exactId) : null;
+    if (exact?.managedBy === 'delegate-agent-hook'
+      && exact.transport === 'claude-agent'
+      && (!options.sessionId || exact.coordinatorSessionId === boundedText(options.sessionId, 256))) {
+      return correlateCandidate(exact, normalized, metadata);
+    }
+    // A readable sidecar supplies the only exact correlation key. In
+    // particular, nested agents have no coordinator-owned stub of their own;
+    // guessing by type here could bind their transcript to an unrelated job.
+    return null;
+  }
+  const already = matchingAgentStubs(normalized).find((job) => transcriptAgentIdForJob(job) === transcriptAgentId);
+  if (already) return inspectJob(already.id);
+  const candidate = matchingAgentStubs({ sessionId: options.sessionId, agentType: options.agentType })
+    .find((job) => !transcriptAgentIdForJob(job) && !TERMINAL.has(job.status));
+  if (!candidate) return null;
+  return correlateCandidate(candidate, normalized, metadata);
+}
+
 export function completeClaudeSubagentByAgentId(options = {}) {
-  if (!options.agentId) throw new Error('SubagentStop payload is missing agent_id');
-  const candidate = matchingAgentStubs(options).find((job) => !TERMINAL.has(job.status))
-    || matchingAgentStubs(options)[0];
+  const transcriptAgentId = normalizeTranscriptAgentId(options.transcriptAgentId);
+  if (!transcriptAgentId) throw new Error('SubagentStop payload has an invalid transcript agent_id');
+  const normalized = { ...options, transcriptAgentId };
+  const candidate = matchingAgentStubs(normalized).find((job) => !TERMINAL.has(job.status))
+    || matchingAgentStubs(normalized)[0];
   if (!candidate) return null;
   return completeClaudeAgentStub({
     sessionId: candidate.coordinatorSessionId,
     toolUseId: candidate.toolUseId,
     status: options.status || 'completed',
-    agentId: options.agentId,
+    transcriptAgentId,
     coordinatorSidecarDir: options.coordinatorSidecarDir || candidate.coordinatorSidecarDir,
     transcriptPath: options.transcriptPath,
     resultText: options.resultText,
@@ -257,63 +321,12 @@ export function agentResultStatus(result) {
 }
 
 export function deriveAgentId(result) {
+  // This is the Agent tool result's fleet/display identity. The transcript
+  // identity comes only from lifecycle hooks or an explicit transcript path.
   const explicit = recursiveValue(result, ['agent_id', 'agentId']);
   if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
   const match = resultText(result).match(/\bagent(?:_id|Id)\s*[:=]\s*["']?([a-zA-Z0-9_-]{1,128})/);
   return match?.[1] || null;
-}
-
-function boundedPositiveInteger(value, fallback, maximum = 10_000) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return fallback;
-  return Math.min(maximum, Math.max(1, Math.floor(number)));
-}
-
-function transcriptCandidates(directory, agentId, options = {}) {
-  const safeId = String(agentId || '').replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!safeId) return [];
-  const maxEntries = boundedPositiveInteger(options.maxEntries, DEFAULT_AGENT_TRANSCRIPT_ENTRY_LIMIT);
-  let entries;
-  try { entries = fs.readdirSync(directory, { withFileTypes: true }).slice(0, maxEntries); }
-  catch { return []; }
-  return entries.filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl')
-    && (entry.name === `agent-${safeId}.jsonl` || entry.name.startsWith(`agent-${safeId}-`)))
-    .flatMap((entry) => {
-      const file = path.join(directory, entry.name);
-      try { return [{ file, mtimeMs: fs.statSync(file).mtimeMs }]; } catch { return []; }
-    })
-    .sort((left, right) => right.mtimeMs - left.mtimeMs || left.file.localeCompare(right.file));
-}
-
-function transcriptInSidecar(sidecar, agentId, options = {}) {
-  if (typeof sidecar !== 'string' || !path.isAbsolute(sidecar)) return null;
-  return transcriptCandidates(path.join(path.normalize(sidecar), 'subagents'), agentId, options)[0]?.file || null;
-}
-
-export function resolveStoredAgentTranscriptPath(options = {}) {
-  const agentId = String(options.agentId || '').trim();
-  if (!agentId) return null;
-  const eagerSidecar = transcriptInSidecar(options.coordinatorSidecarDir, agentId, options);
-  if (eagerSidecar) return eagerSidecar;
-  if (options.coordinatorSidecarDir) return null;
-  if (typeof options.cwd !== 'string' || !path.isAbsolute(options.cwd)) return null;
-  if (typeof options.projectsDir !== 'string' || !path.isAbsolute(options.projectsDir)) return null;
-
-  const projectDirectory = path.join(path.normalize(options.projectsDir), encodeClaudeProjectDirectory(options.cwd));
-  const maxProjectEntries = boundedPositiveInteger(options.maxProjectEntries, DEFAULT_AGENT_PROJECT_ENTRY_LIMIT);
-  const maxSessionDirs = boundedPositiveInteger(options.maxSessionDirs, DEFAULT_AGENT_SESSION_LIMIT, 64);
-  let entries;
-  try { entries = fs.readdirSync(projectDirectory, { withFileTypes: true }); }
-  catch { return null; }
-  const sessions = entries.filter((entry) => entry.isDirectory()).flatMap((entry) => {
-    const directory = path.join(projectDirectory, entry.name);
-    try { return [{ directory, mtimeMs: fs.statSync(directory).mtimeMs }]; } catch { return []; }
-  }).sort((left, right) => right.mtimeMs - left.mtimeMs || left.directory.localeCompare(right.directory)).slice(0, maxProjectEntries);
-  for (const session of sessions.slice(0, maxSessionDirs)) {
-    const transcript = transcriptInSidecar(session.directory, agentId, options);
-    if (transcript) return transcript;
-  }
-  return null;
 }
 
 export function deriveAgentTranscriptPath(coordinatorTranscriptPath, result, options = {}) {
@@ -322,9 +335,14 @@ export function deriveAgentTranscriptPath(coordinatorTranscriptPath, result, opt
   const direct = recursiveValue(result, ['transcript_path', 'transcriptPath', 'agent_transcript_path', 'agentTranscriptPath']);
   if (typeof direct === 'string' && path.isAbsolute(direct)) {
     const normalized = path.normalize(direct);
-    if (normalized.startsWith(`${path.dirname(coordinator)}${path.sep}`)) return normalized;
+    const transcriptAgentId = transcriptAgentIdFromPath(normalized);
+    if (transcriptAgentId && normalized.startsWith(`${path.dirname(coordinator)}${path.sep}`)) return normalized;
   }
-  const agentId = deriveAgentId(result);
-  if (!agentId) return null;
-  return transcriptInSidecar(coordinatorSidecarDirectory(coordinator), agentId, options);
+  const transcriptAgentId = normalizeTranscriptAgentId(options.transcriptAgentId);
+  if (!transcriptAgentId) return null;
+  return resolveStoredAgentTranscriptPath({
+    ...options,
+    transcriptAgentId,
+    coordinatorSidecarDir: coordinatorSidecarDirectory(coordinator)
+  });
 }

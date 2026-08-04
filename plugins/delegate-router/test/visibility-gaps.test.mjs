@@ -143,9 +143,18 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
   const subagents = path.join(root, 'projects', 'coordinator', 'subagents');
   fs.mkdirSync(subagents, { recursive: true });
   fs.writeFileSync(coordinator, '');
-  const transcript = path.join(subagents, 'agent-reviewer-abc123.jsonl');
+  const transcriptAgentId = 'a0a9ee00417f2e4b4';
+  const transcript = path.join(subagents, `agent-${transcriptAgentId}.jsonl`);
   fs.writeFileSync(transcript, `${JSON.stringify({ type: 'assistant', timestamp: '2026-07-20T00:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'bounded finding' }] } })}\n`);
-  const environment = { ...process.env, DELEGATE_STATE_FILE: stateFile, DELEGATE_AGENT_STUBS: '1' };
+  fs.writeFileSync(path.join(subagents, `agent-${transcriptAgentId}.meta.json`), JSON.stringify({
+    agentType: 'general-purpose', description: 'reviewer', toolUseId: 'toolu_agent_1', spawnDepth: 1
+  }));
+  const environment = {
+    ...process.env,
+    DELEGATE_STATE_FILE: stateFile,
+    DELEGATE_AGENT_STUBS: '1',
+    DELEGATE_AGENT_TAIL: '0'
+  };
   const pre = {
     session_id: 'coordinator-session', tool_use_id: 'toolu_agent_1', transcript_path: coordinator,
     cwd: root, hook_event_name: 'PreToolUse', tool_name: 'Agent',
@@ -167,6 +176,17 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
   assert.equal(stub.groupId, 'claude-session-coordinator-session');
   assert.doesNotMatch(stub.promptSummary, /sk-1234567890abcdefghijkl/);
 
+  const startRun = spawnSync(process.execPath, [hook], {
+    input: JSON.stringify({
+      ...pre,
+      hook_event_name: 'SubagentStart',
+      agent_id: transcriptAgentId,
+      agent_type: 'general-purpose'
+    }),
+    encoding: 'utf8', env: environment
+  });
+  assert.equal(startRun.status, 0, startRun.stderr);
+
   const postRun = spawnSync(process.execPath, [hook], {
     input: JSON.stringify({ ...pre, hook_event_name: 'PostToolUse', tool_response: 'agent_id: reviewer\ncompleted' }),
     encoding: 'utf8', env: environment
@@ -176,6 +196,7 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
   assert.equal(completed.status, 'completed');
   assert.equal(completed.agentLifecycle, 'completed');
   assert.equal(completed.agentId, 'reviewer');
+  assert.equal(completed.transcriptAgentId, transcriptAgentId);
   assert.equal(completed.coordinatorSidecarDir, coordinator.replace(/\.jsonl$/, ''));
   assert.equal(completed.transcriptPath, transcript);
   assert.deepEqual(readJobEvents(stub.id, { limit: 20 }).map((event) => event.type), ['job.created', 'job.completed']);
@@ -221,6 +242,24 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
   assert.equal(background.transcriptPath, null, 'PostToolUse precedes the background transcript file');
   assert.deepEqual(readJobEvents(background.id, { limit: 20 }).map((event) => event.type), ['job.created', 'job.spawn-returned']);
 
+  const backgroundTranscriptAgentId = 'b1b9ee00417f2e4c';
+  const backgroundSubagents = path.join(backgroundCoordinator.replace(/\.jsonl$/, ''), 'subagents');
+  fs.mkdirSync(backgroundSubagents, { recursive: true });
+  fs.writeFileSync(path.join(backgroundSubagents, `agent-${backgroundTranscriptAgentId}.meta.json`), JSON.stringify({
+    agentType: 'general-purpose', description: 'background review', toolUseId: 'toolu_background', spawnDepth: 1
+  }));
+  const backgroundStart = spawnSync(process.execPath, [hook], {
+    input: JSON.stringify({
+      ...backgroundPayload,
+      hook_event_name: 'SubagentStart',
+      agent_id: backgroundTranscriptAgentId,
+      agent_type: 'general-purpose'
+    }),
+    encoding: 'utf8', env: environment
+  });
+  assert.equal(backgroundStart.status, 0, backgroundStart.stderr);
+  assert.equal(inspectJob(background.id).transcriptAgentId, backgroundTranscriptAgentId);
+
   const projectsDir = path.join(root, 'claude-projects');
   const source = new DelegateDataSource({ watch: false, pollMs: 100_000, projectsDir });
   source.refreshRecords({ force: true });
@@ -234,9 +273,7 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
       assert.equal(missingFrame.panes[0].content.message, 'subagent transcript not found (yet) — background agents link once the file appears; reopen to retry');
       assert.match(renderFrameToString(missingFrame), /subagent transcript not found \(yet\).*reopen to retry/);
 
-      const backgroundSubagents = path.join(backgroundCoordinator.replace(/\.jsonl$/, ''), 'subagents');
-      fs.mkdirSync(backgroundSubagents, { recursive: true });
-      const backgroundTranscript = path.join(backgroundSubagents, 'agent-background123.jsonl');
+      const backgroundTranscript = path.join(backgroundSubagents, `agent-${backgroundTranscriptAgentId}.jsonl`);
       const activeAt = Date.now() - 30_000;
       fs.writeFileSync(backgroundTranscript, `${JSON.stringify({ type: 'assistant', timestamp: new Date(activeAt).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'first live line' }] } })}\n`);
       fs.utimesSync(backgroundTranscript, new Date(activeAt), new Date(activeAt));
@@ -296,12 +333,14 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
         model: fallbackPayload.tool_input.model
       });
       const fallbackResult = { status: 'async_launched', agentId: 'fallback456', description: 'fallback' };
+      const fallbackTranscriptAgentId = 'c2c9ee00417f2e4d';
       completeClaudeAgentStub({
         sessionId: fallbackPayload.session_id,
         toolUseId: fallbackPayload.tool_use_id,
         cwd: fallbackPayload.cwd,
         ...agentResultStatus(fallbackResult),
         agentId: deriveAgentId(fallbackResult),
+        transcriptAgentId: fallbackTranscriptAgentId,
         transcriptPath: null
       });
       const fallback = listJobs().find((job) => job.toolUseId === 'toolu_fallback');
@@ -309,12 +348,12 @@ test('Agent hook creates and completes one read-only stub, derives transcript, h
       const olderSession = path.join(projectsDir, encodeProjectDirectory(fallbackCwd), 'older-session');
       const olderSubagents = path.join(olderSession, 'subagents');
       fs.mkdirSync(olderSubagents, { recursive: true });
-      fs.writeFileSync(path.join(olderSubagents, 'agent-fallback456.jsonl'), `${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'stale fallback' } })}\n`);
+      fs.writeFileSync(path.join(olderSubagents, `agent-${fallbackTranscriptAgentId}.jsonl`), `${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'stale fallback' } })}\n`);
       fs.utimesSync(olderSession, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
       const fallbackSession = path.join(projectsDir, encodeProjectDirectory(fallbackCwd), 'newest-session');
       const fallbackSubagents = path.join(fallbackSession, 'subagents');
       fs.mkdirSync(fallbackSubagents, { recursive: true });
-      const fallbackTranscript = path.join(fallbackSubagents, 'agent-fallback456.jsonl');
+      const fallbackTranscript = path.join(fallbackSubagents, `agent-${fallbackTranscriptAgentId}.jsonl`);
       fs.writeFileSync(fallbackTranscript, `${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'cwd-scoped fallback' } })}\n`);
       fs.utimesSync(fallbackSession, new Date(), new Date());
       source.refreshRecords({ force: true });

@@ -1,6 +1,6 @@
  delegate | fleet | tive-1234567          | thinking | 12s                  codex 42%   cursor off
 
- 1 Transcript   2 Diff   3 Record   4 Usage   5 Events   6 Chain
+ 1 Transcript   2 Diff   3 Record   4 Usage   5 Events   6 Chain   7 Subagents
 
 | Transcript | follow on | time:absolute                                                    1-6/6
 | 3 blocks | 0 tools | 0 subagents                                                                 #
@@ -27,4 +27,4 @@
 |                                                                                                  #
 |                                                                                                  #
 |
- s  steer | x  actions  f  follow | ! c  cancel                                  ?  keys  Esc  back
+ s  steer | x  actions  f  follow  U  subagents | ! c  cancel                    ?  keys  Esc  back

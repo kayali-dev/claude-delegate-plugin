@@ -289,6 +289,7 @@ const ui = {
   activeOnly: false, showExternals: true, filter: '', help: false, helpPage: 0, actionMenu: null, input: null, confirm: null,
   status: '', statusKind: 'info', detailTab: 0, detailScroll: 0, transcriptSelection: null,
   transcriptAnomaliesOnly: false, transcriptKindFilter: null,
+  subagentSelection: 0, subagentTranscriptId: null, subagentTranscriptSelection: 0, guardiansExpanded: false,
   diffSelection: 0, diffFile: null, diffPaths: [], diffWindow: null, eventFilter: '', eventCategoryFilter: null, follow: true,
   expandedTools: new Set(), expandedEvents: new Set(), eventSelection: null,
   chainSelection: 0, search: null, detailReturn: initialJobId ? 'dashboard' : 'fleet',
@@ -976,6 +977,10 @@ function openJobDetail(job, returnScreen = ui.screen) {
   ui.transcriptSelection = null;
   ui.transcriptAnomaliesOnly = false;
   ui.transcriptKindFilter = null;
+  ui.subagentSelection = 0;
+  ui.subagentTranscriptId = null;
+  ui.subagentTranscriptSelection = 0;
+  ui.guardiansExpanded = false;
   ui.chainSelection = 0;
   ui.diffSelection = 0;
   ui.diffFile = null;
@@ -1374,6 +1379,9 @@ function move(direction, options = {}) {
     if (ui.detailTab === 1 && !ui.diffFile) {
       const count = model.meta.diffFiles.length;
       ui.diffSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.diffSelection + direction));
+    } else if (model.meta.tabs?.[ui.detailTab] === 'Subagents' && !ui.subagentTranscriptId) {
+      const count = model.meta.subagentRowIds.length;
+      ui.subagentSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.subagentSelection + direction));
     } else if (model.meta.tabs?.[ui.detailTab] === 'Chain') {
       const count = model.meta.chainJobIds.length;
       ui.chainSelection = Math.max(0, Math.min(Math.max(0, count - 1), ui.chainSelection + direction));
@@ -1439,6 +1447,8 @@ function moveEdge(end) {
   } else if (ui.screen === 'detail') {
     if (ui.detailTab === 1 && !ui.diffFile) {
       ui.diffSelection = end ? Math.max(0, model.meta.diffFiles.length - 1) : 0;
+    } else if (model.meta.tabs?.[ui.detailTab] === 'Subagents' && !ui.subagentTranscriptId) {
+      ui.subagentSelection = end ? Math.max(0, model.meta.subagentRowIds.length - 1) : 0;
     } else if (model.meta.tabs?.[ui.detailTab] === 'Chain') {
       ui.chainSelection = end ? Math.max(0, model.meta.chainJobIds.length - 1) : 0;
     } else {
@@ -1492,10 +1502,16 @@ function goBack() {
     ui.diffPaths = [];
     ui.diffWindow = null;
     ui.detailScroll = 0;
+  } else if (ui.screen === 'detail' && ui.subagentTranscriptId) {
+    ui.subagentTranscriptId = null;
+    ui.subagentTranscriptSelection = 0;
+    ui.detailScroll = 0;
+    void source.selectSubagent?.(ui.jobId);
   } else if (ui.screen === 'fleet') {
     ui.screen = 'dashboard';
   } else if (ui.screen !== 'dashboard') {
     if (ui.screen === 'detail') {
+      void source.selectSubagent?.(null);
       void source.selectJob(null);
       ui.screen = ui.detailReturn || 'dashboard';
     } else if (ui.screen === 'group-members') ui.screen = 'groups';
@@ -1510,6 +1526,8 @@ function switchDetailTab(tab) {
   const count = model.meta.tabs?.length || 5;
   const next = Math.max(0, Math.min(count - 1, tab));
   if (next === ui.detailTab) return;
+  const previousName = model.meta.tabs?.[ui.detailTab];
+  const nextName = model.meta.tabs?.[next];
   ui.detailTab = next;
   ui.detailScroll = 0;
   if (next === 0) ui.transcriptSelection = null;
@@ -1518,8 +1536,14 @@ function switchDetailTab(tab) {
   ui.diffPaths = [];
   ui.diffWindow = null;
   ui.chainSelection = 0;
+  if (nextName !== 'Subagents') {
+    ui.subagentTranscriptId = null;
+    ui.subagentTranscriptSelection = 0;
+  }
   clearSearch();
   draw();
+  if (nextName === 'Subagents') void source.selectSubagent?.(ui.jobId);
+  else if (previousName === 'Subagents') void source.selectSubagent?.(null);
 }
 
 function openPlanTab() {
@@ -1531,6 +1555,25 @@ function openPlanTab() {
     return;
   }
   switchDetailTab(plan);
+}
+
+function openSubagentsTab() {
+  const tabs = viewModel().meta.tabs || [];
+  const subagents = tabs.indexOf('Subagents');
+  if (subagents < 0) {
+    setStatus('This provider has no Subagents detail surface', 'error');
+    draw();
+    return;
+  }
+  if (ui.detailTab === subagents) {
+    ui.subagentTranscriptId = null;
+    ui.subagentTranscriptSelection = 0;
+    ui.detailScroll = 0;
+    draw();
+    void source.selectSubagent?.(ui.jobId);
+    return;
+  }
+  switchDetailTab(subagents);
 }
 
 function switchWorkTab(tab) {
@@ -1602,6 +1645,7 @@ function handleClick(event) {
   else if (ui.screen === 'stats') ui.statsSelection = row;
   else if (ui.screen === 'launcher') ui.launcher.fieldIndex = row;
   else if (ui.screen === 'detail' && ui.detailTab === 1 && !ui.diffFile) ui.diffSelection = row;
+  else if (ui.screen === 'detail' && model.meta.tabs?.[ui.detailTab] === 'Subagents' && !ui.subagentTranscriptId) ui.subagentSelection = row;
   else if (ui.screen === 'detail' && model.meta.tabs?.[ui.detailTab] === 'Chain') ui.chainSelection = row;
   draw();
 }
@@ -1664,6 +1708,34 @@ function toggleTranscriptKind(kind) {
     ? `Showing ${count} transcript ${kind}`
     : 'Showing the complete transcript');
   draw();
+  return true;
+}
+
+function openSelectedSubagent() {
+  if (ui.screen !== 'detail' || viewModel().meta.tabs?.[ui.detailTab] !== 'Subagents' || ui.subagentTranscriptId) return false;
+  const model = viewModel();
+  const row = model.meta.subagentRows?.[ui.subagentSelection];
+  if (!row) {
+    setStatus('No subagent row is selected', 'error');
+    draw();
+    return false;
+  }
+  if (row.category === 'guardians') {
+    ui.guardiansExpanded = !ui.guardiansExpanded;
+    ui.detailScroll = 0;
+    setStatus(`Guardians ${ui.guardiansExpanded ? 'expanded' : 'collapsed'}`);
+    draw();
+    return true;
+  }
+  ui.subagentTranscriptId = row.id;
+  ui.subagentTranscriptSelection = 0;
+  ui.detailScroll = 0;
+  clearSearch();
+  setStatus(row.transcript === 'Unavailable'
+    ? 'Opening the explicit unavailable transcript explanation'
+    : `Reading a bounded ${row.transcript.toLowerCase()} snapshot for ${row.agentName || row.id}`);
+  draw();
+  void source.selectSubagent?.(ui.jobId, row.id);
   return true;
 }
 
@@ -1826,7 +1898,7 @@ function dispatchMenuAction(action) {
   if (action === 'detail.follow') return toggleFollow();
   if (action === 'detail.anomalies') return toggleTranscriptAnomalies();
   if (action === 'detail.tools') return toggleTranscriptKind('tools');
-  if (action === 'detail.subagents') return toggleTranscriptKind('subagents');
+  if (action === 'detail.subagents') return openSubagentsTab();
   if (action === 'detail.event-errors') return toggleEventCategory('error');
   if (action === 'detail.event-warnings') return toggleEventCategory('warning');
   if (action === 'detail.events') return jumpTranscriptToEvents();
@@ -2188,7 +2260,7 @@ function handleKey(key) {
   }
   if (key === 'A' && ui.detailTab === 0) { toggleTranscriptAnomalies(); return; }
   if (key === 'O' && ui.detailTab === 0) { toggleTranscriptKind('tools'); return; }
-  if (key === 'U' && ui.detailTab === 0) { toggleTranscriptKind('subagents'); return; }
+  if (key === 'U') { openSubagentsTab(); return; }
   if (key === 'A' && ui.detailTab === 4) { toggleEventCategory('error'); return; }
   if (key === 'W' && ui.detailTab === 4) { toggleEventCategory('warning'); return; }
   if (key === '/' && [0, 1, 4].includes(ui.detailTab)) { beginPaneSearch(); return; }
@@ -2197,6 +2269,10 @@ function handleKey(key) {
   if (key === 'enter' && ui.detailTab === 4 && toggleFocusedEvent()) return;
   if (key === 'd' && ui.detailTab === 0 && openFocusedToolDiff()) return;
   if (key === 'enter' && ui.detailTab === 1 && !ui.diffFile) { openDiffFile(); return; }
+  if (key === 'enter' && viewModel().meta.tabs?.[ui.detailTab] === 'Subagents' && !ui.subagentTranscriptId) {
+    openSelectedSubagent();
+    return;
+  }
   if (key === 'enter' && viewModel().meta.tabs?.[ui.detailTab] === 'Chain') {
     const id = viewModel().meta.chainJobIds?.[ui.chainSelection];
     const job = store.jobs.find((entry) => entry.id === id);

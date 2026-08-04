@@ -13,6 +13,10 @@ import {
   updateManagedJob
 } from '../bin/lib/control.mjs';
 import {
+  completeClaudeAgentStub,
+  createClaudeAgentStub
+} from '../bin/lib/agent-stubs.mjs';
+import {
   supervisorBrokerVersion,
   classifySupervisorLock,
   heartbeatSupervisorLease,
@@ -23,7 +27,7 @@ import {
   supervisorPaths,
   versionSkewDecision
 } from '../bin/lib/supervisor-common.mjs';
-import { reconcileSupervisorLeases } from '../bin/lib/supervisor-runtime.mjs';
+import { reconcileSupervisorLeases, ResidentSupervisor } from '../bin/lib/supervisor-runtime.mjs';
 import { auditLogPath, loadJob } from '../bin/lib/state.mjs';
 import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 
@@ -83,7 +87,7 @@ async function isolated(t, fn, overrides = {}) {
     'DELEGATE_SUPERVISOR_HEARTBEAT_MS', 'DELEGATE_SUPERVISOR_LEASE_TTL_MS',
     'DELEGATE_SUPERVISOR_WORKER_BIN', 'DELEGATE_SUPERVISOR_TEST_WORKER_MODE',
     'DELEGATE_SUPERVISOR_TEST_WORKER_DELAY_MS', 'DELEGATE_SUPERVISOR_LAUNCHER_HOLD_MS',
-    'DELEGATE_CODEX_BIN'
+    'DELEGATE_CODEX_BIN', 'DELEGATE_AGENT_TAIL'
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const env = {
@@ -303,6 +307,53 @@ test('SIGTERM drains and persists stopped state, and an idle resident exits on p
     } catch { return null; }
   }, 'the idle supervisor to publish its stopped state');
   assert.equal(idleStopped.drainReason, 'idle');
+}));
+
+test('resident tail remains live through terminal status and drains final transcript lines afterward', (t) => isolated(t, ({ root }) => {
+  const transcriptAgentId = 'd3d9ee00417f2e4e';
+  const sidecar = path.join(root, 'coordinator');
+  const subagents = path.join(sidecar, 'subagents');
+  fs.mkdirSync(subagents, { recursive: true });
+  const transcript = path.join(subagents, `agent-${transcriptAgentId}.jsonl`);
+  const line = (id, text, outputTokens) => JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-08-04T00:00:00.000Z',
+    message: {
+      id,
+      model: 'claude-opus-4-8',
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      usage: { input_tokens: 2, output_tokens: outputTokens }
+    }
+  });
+  fs.writeFileSync(transcript, `${line('message-one', 'initial live output', 3)}\n`);
+  const job = createClaudeAgentStub({
+    sessionId: 'supervisor-agent-session',
+    toolUseId: 'toolu_supervisor_agent',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    transcriptAgentId,
+    prompt: 'tail me'
+  });
+  const runtime = new ResidentSupervisor({ idleMs: 100 });
+  const live = runtime.tailAgentTranscripts();
+  assert.ok(live[0].events.some((event) => event.type === 'message.delta'));
+  assert.equal(runtime.snapshot().openAgentTails, 1, 'an open tail counts as resident work');
+
+  fs.appendFileSync(transcript, `${line('message-two', 'last line before stop', 5)}\n`);
+  completeClaudeAgentStub({
+    sessionId: 'supervisor-agent-session',
+    toolUseId: 'toolu_supervisor_agent',
+    status: 'completed',
+    agentId: 'display-agent@session-final'
+  });
+  const terminalSeq = readJobEvents(job.id).find((event) => event.type === 'job.completed').seq;
+  const final = runtime.tailAgentTranscripts();
+  assert.ok(final[0].events.some((event) => event.type === 'message.delta' && event.data.delta === 'last line before stop'));
+  assert.ok(final[0].events.some((event) => event.type === 'message.completed' && event.data.id === 'message-two'));
+  assert.ok(final[0].events.every((event) => event.seq > terminalSeq), 'final drain must append after terminal publication');
+  assert.equal(loadJob(job.id).agentTranscriptIngestion.closed, true);
+  assert.equal(runtime.snapshot().openAgentTails, 0);
 }));
 
 test('SIGKILL on an owned worker records precise signal, process, lease, and audit attribution', (t) => isolated(t, async ({ root }) => {

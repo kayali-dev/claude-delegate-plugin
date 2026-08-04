@@ -78,6 +78,11 @@ import {
   pendingRequestMatches,
   validatePendingResponse
 } from './response-contract.mjs';
+import {
+  resolveStoredAgentTranscriptPath,
+  transcriptAgentIdForJob,
+  transcriptPathMatchesAgentId
+} from './agent-transcript-paths.mjs';
 
 const EVENT_VERSION = 1;
 const MAX_STRING = Number(process.env.DELEGATE_EVENT_MAX_STRING || 65536);
@@ -935,6 +940,33 @@ export function appendJobEvent(id, type, data = {}, options = {}) {
   return event;
 }
 
+// Transcript ingestion advances a durable byte checkpoint alongside the
+// normalized events derived from those bytes. Keep both mutations under the
+// same per-job writer lock so ordinary supervisor restarts cannot replay a
+// completed chunk or expose an offset ahead of its journal entries.
+export function appendJobEventsAndUpdate(id, entries = [], mutate = null) {
+  const normalizedEntries = Array.isArray(entries) ? entries : [];
+  const result = withLock(id, () => {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    const events = normalizedEntries.map((entry) => appendUnlocked(
+      job,
+      entry.type,
+      entry.data || {},
+      entry.options || {}
+    ));
+    if (typeof mutate === 'function') mutate(job, events);
+    ensureCheckpoint(job);
+    job.updatedAt = Math.floor(Date.now() / 1000);
+    saveJob(job);
+    return { events, job };
+  });
+  if (normalizedEntries.some((entry) => entry?.type === 'file.changed') && !signalCollisionWatchRefresh()) {
+    recordCollisionWatchDegradation([id], { reason: 'watch-refresh-signal-unavailable' });
+  }
+  return result;
+}
+
 export function updateManagedJob(id, mutate, options = {}) {
   return withLock(id, () => {
     const job = loadJob(id);
@@ -1201,28 +1233,18 @@ export function readJobEventPage(id, options = {}) {
 export const QUEUED_STALE_SECONDS = 600;
 
 function discoverAgentTranscript(job) {
-  const direct = typeof job?.transcriptPath === 'string' && path.isAbsolute(job.transcriptPath)
+  const transcriptAgentId = transcriptAgentIdForJob(job);
+  if (!transcriptAgentId) return null;
+  const direct = transcriptPathMatchesAgentId(job?.transcriptPath, transcriptAgentId)
     ? path.normalize(job.transcriptPath) : null;
   try {
     if (direct && fs.statSync(direct).isFile()) return direct;
   } catch {}
-  if (!job?.agentId || typeof job.coordinatorSidecarDir !== 'string' || !path.isAbsolute(job.coordinatorSidecarDir)) return direct;
-  const safeId = String(job.agentId).replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!safeId) return direct;
-  const directory = path.join(path.normalize(job.coordinatorSidecarDir), 'subagents');
-  try {
-    const candidates = fs.readdirSync(directory, { withFileTypes: true }).slice(0, 200)
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl')
-        && (entry.name === `agent-${safeId}.jsonl` || entry.name.startsWith(`agent-${safeId}-`)))
-      .map((entry) => {
-        const file = path.join(directory, entry.name);
-        return { file, mtimeMs: fs.statSync(file).mtimeMs };
-      })
-      .sort((left, right) => right.mtimeMs - left.mtimeMs || left.file.localeCompare(right.file));
-    return candidates[0]?.file || direct;
-  } catch {
-    return direct;
-  }
+  return resolveStoredAgentTranscriptPath({
+    transcriptAgentId,
+    coordinatorSidecarDir: job.coordinatorSidecarDir,
+    allowMissing: true
+  }) || direct;
 }
 
 export function agentStubActivity(job, options = {}) {
@@ -1985,7 +2007,7 @@ export function groupSummary(groupId) {
 }
 
 const TRANSCRIPT_TYPES = new Set([
-  'message.user', 'message.delta', 'message.completed', 'plan.updated',
+  'message.user', 'message.delta', 'message.completed', 'activity', 'plan.updated',
   'tool.started', 'tool.status', 'tool.output', 'tool.completed',
   'file.changed',
   'session.updated', 'mode.updated', 'model.updated', 'commands.updated',

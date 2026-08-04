@@ -10,7 +10,11 @@ import {
   maybePruneJobs,
   updateManagedJob
 } from './control.mjs';
-import { jobsDir, loadJob } from './state.mjs';
+import { jobsDir, listJobs, loadJob } from './state.mjs';
+import {
+  ingestClaudeAgentTranscriptJob,
+  isClaudeAgentTailCandidate
+} from './agent-transcript-ingestor.mjs';
 import { isProcessAlive } from './process.mjs';
 import {
   SUPERVISOR_PROTOCOL_VERSION,
@@ -176,6 +180,7 @@ export class ResidentSupervisor {
     this.draining = false;
     this.drainReason = null;
     this.entries = new Map();
+    this.agentTailIds = new Set();
     this.server = null;
     this.heartbeatTimer = null;
     this.idleTimer = null;
@@ -206,6 +211,7 @@ export class ResidentSupervisor {
       draining: this.draining,
       drainReason: this.drainReason,
       liveLeases: this.entries.size,
+      openAgentTails: this.agentTailIds.size,
       lastWorkAt: this.lastWorkAt,
       updatedAt: Date.now()
     };
@@ -284,6 +290,7 @@ export class ResidentSupervisor {
         this.entries.set(item.lease.attemptId, { lease: item.lease, child: null, adopted: true });
       }
     }
+    this.tailAgentTranscripts();
     this.persist();
     try { fs.unlinkSync(this.locations.socket); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     this.server = net.createServer((socket) => this.handleConnection(socket));
@@ -494,10 +501,49 @@ export class ResidentSupervisor {
     if (finalized.finalized) this.entries.delete(attemptId);
     this.persist();
     this.log('attempt process exited', { jobId: entry.lease.jobId, pid: entry.lease.pid, code, signal, finalized: finalized.finalized });
-    if (this.draining && this.entries.size === 0) setImmediate(() => this.shutdown(this.drainReason || 'drained'));
+    if (this.draining && this.entries.size === 0 && this.agentTailIds.size === 0) {
+      setImmediate(() => this.shutdown(this.drainReason || 'drained'));
+    }
+  }
+
+  tailAgentTranscripts() {
+    if (String(process.env.DELEGATE_AGENT_TAIL ?? '1') === '0') {
+      this.agentTailIds.clear();
+      return [];
+    }
+    const open = new Set();
+    const results = [];
+    let jobs;
+    try { jobs = listJobs(); }
+    catch (error) {
+      this.log('agent transcript discovery failed', {
+        code: error.code,
+        error: String(error.message || error).slice(0, 500)
+      });
+      return results;
+    }
+    for (const job of jobs) {
+      if (!isClaudeAgentTailCandidate(job)) continue;
+      try {
+        const result = ingestClaudeAgentTranscriptJob(job.id);
+        results.push({ jobId: job.id, ...result });
+        if (result.open) open.add(job.id);
+        if (result.events?.length) this.lastWorkAt = Date.now();
+      } catch (error) {
+        open.add(job.id);
+        this.log('agent transcript tail failed', {
+          jobId: job.id,
+          code: error.code,
+          error: String(error.message || error).slice(0, 500)
+        });
+      }
+    }
+    this.agentTailIds = open;
+    return results;
   }
 
   heartbeat() {
+    this.tailAgentTranscripts();
     for (const [attemptId, entry] of this.entries) {
       if (entry.adopted) {
         const classification = classifyLeaseProcess(entry.lease, { ...(this.probe ? { probe: this.probe } : {}) });
@@ -525,7 +571,9 @@ export class ResidentSupervisor {
       entry.lease = heartbeatSupervisorLease(entry.lease, { now: Date.now(), ttlMs: this.leaseTtlMs });
     }
     try { this.persist(); } catch {}
-    if (this.draining && this.entries.size === 0) setImmediate(() => this.shutdown(this.drainReason || 'drained'));
+    if (this.draining && this.entries.size === 0 && this.agentTailIds.size === 0) {
+      setImmediate(() => this.shutdown(this.drainReason || 'drained'));
+    }
   }
 
   requestDrain(reason = 'control-request') {
@@ -533,12 +581,13 @@ export class ResidentSupervisor {
     this.draining = true;
     this.drainReason = reason;
     try { this.persist('draining'); } catch {}
-    this.log('drain requested', { reason, liveLeases: this.entries.size });
-    if (this.entries.size === 0) setImmediate(() => this.shutdown(reason));
+    this.log('drain requested', { reason, liveLeases: this.entries.size, openAgentTails: this.agentTailIds.size });
+    if (this.entries.size === 0 && this.agentTailIds.size === 0) setImmediate(() => this.shutdown(reason));
   }
 
   checkIdle() {
-    if (this.draining || this.entries.size > 0) return;
+    this.tailAgentTranscripts();
+    if (this.draining || this.entries.size > 0 || this.agentTailIds.size > 0) return;
     try { maybePruneJobs(); } catch {}
     if (Date.now() - this.lastWorkAt >= this.idleMs) this.requestDrain('idle');
   }

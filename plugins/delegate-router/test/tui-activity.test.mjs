@@ -90,8 +90,68 @@ test('active subagents drive fleet activity until their terminal lifecycle event
   assert.notEqual(completed.kind, 'quiet');
 });
 
+test('a stale named child stalls despite fresh sibling chatter while the ordinary boundary stays exact', () => {
+  const boundaryEvent = event(1, 'message.completed', { text: 'still governed by the parent clock' }, 300_000);
+  const boundary = deriveJobActivity(baseJob, [boundaryEvent], { now: NOW, stallSeconds: 300 });
+  assert.deepEqual(
+    { kind: boundary.kind, since: boundary.since, age: boundary.age, idleMs: boundary.idleMs },
+    { kind: 'quiet', since: NOW - 300_000, age: '5m', idleMs: 300_000 }
+  );
+  const pastBoundary = deriveJobActivity(baseJob, [
+    event(1, 'message.completed', { text: 'one millisecond beyond the existing boundary' }, 300_001)
+  ], { now: NOW, stallSeconds: 300 });
+  assert.deepEqual(
+    { kind: pastBoundary.kind, since: pastBoundary.since, age: pastBoundary.age, idleMs: pastBoundary.idleMs },
+    { kind: 'stalled', since: NOW - 300_001, age: '5m', idleMs: 300_001 }
+  );
+
+  const activity = deriveJobActivity(baseJob, [
+    event(1, 'subagent.started', {
+      id: 'schrodinger', correlationId: 'schrodinger', agentName: 'Schrodinger',
+      type: 'worker', task: 'Inspect the parser', status: 'running'
+    }, 360_001),
+    event(2, 'subagent.started', {
+      id: 'chatty', correlationId: 'chatty', agentName: 'Chatty',
+      type: 'worker', task: 'Inspect the renderer', status: 'running'
+    }, 20_000),
+    event(3, 'subagent.progress', {
+      id: 'chatty', correlationId: 'chatty', agentName: 'Chatty',
+      type: 'worker', task: 'Inspect the renderer', status: 'interacted'
+    }, 1_000)
+  ], { now: NOW, stallSeconds: 300 });
+  assert.equal(activity.kind, 'stalled');
+  assert.equal(activity.stalledSubagentId, 'schrodinger');
+  assert.equal(activity.stalledSubagentLabel, 'Schrodinger');
+  assert.equal(activity.stalledSubagentSilentAge, '6m');
+});
+
+test('recent parent progress protects a slow child and completed guardians cannot poison liveness', () => {
+  const slowTool = deriveJobActivity(baseJob, [
+    event(1, 'subagent.started', {
+      id: 'slow-child', correlationId: 'slow-child', agentName: 'Slow child', status: 'running'
+    }, 360_001),
+    event(2, 'tool.started', { item: { id: 'parent-tool', type: 'commandExecution', command: 'long-running-check' } }, 1_000)
+  ], { now: NOW, stallSeconds: 300 });
+  assert.notEqual(slowTool.kind, 'stalled');
+
+  const completedGuardian = deriveJobActivity(baseJob, [
+    event(1, 'subagent.started', {
+      id: 'guardian', correlationId: 'guardian', agentName: 'Guardian', type: 'guardian', status: 'running'
+    }, 400_000),
+    event(2, 'subagent.completed', {
+      id: 'guardian', correlationId: 'guardian', agentName: 'Guardian', type: 'guardian', status: 'completed'
+    }, 200_000),
+    event(3, 'subagent.started', {
+      id: 'worker', correlationId: 'worker', agentName: 'Worker', type: 'worker', status: 'running'
+    }, 2_000)
+  ], { now: NOW, stallSeconds: 300 });
+  assert.equal(completedGuardian.kind, 'subagent');
+  assert.equal(completedGuardian.subagentId, 'worker');
+});
+
 test('transport capability truth table reflects streamed headless thinking and tools without inventing approvals', () => {
   assert.equal(ACTIVITY_CAPABILITIES['codex:app-server'].visibility, 'full');
+  assert.equal(ACTIVITY_CAPABILITIES['claude:agent-hook'].visibility, 'observed-transcript');
   assert.equal(ACTIVITY_CAPABILITIES['cursor:acp'].visibility, 'near-full');
   assert.equal(ACTIVITY_CAPABILITIES['cursor:headless'].visibility, 'near-full');
   const thought = [event(1, 'activity', { kind: 'thinking' })];
@@ -102,6 +162,9 @@ test('transport capability truth table reflects streamed headless thinking and t
   assert.equal(headless.visibilityNote, undefined);
   const headlessTool = deriveJobActivity({ ...baseJob, provider: 'cursor', transport: 'headless' }, [event(1, 'tool.started', { toolCallId: 'x', title: 'Edit' })], { now: NOW });
   assert.equal(headlessTool.kind, 'tool');
+  const claude = { ...baseJob, provider: 'claude', transport: 'claude-agent', agentLifecycle: 'started' };
+  assert.equal(deriveJobActivity(claude, [event(1, 'activity', { kind: 'reasoning' })], { now: NOW }).kind, 'thinking');
+  assert.equal(deriveJobActivity(claude, [event(1, 'tool.started', { toolCallId: 'claude-edit', title: 'Edit' })], { now: NOW }).kind, 'tool');
   const sequence = [
     event(1, 'message.delta', { delta: 'x' }, 2000),
     event(2, 'activity', { kind: 'thinking' }, 1000)

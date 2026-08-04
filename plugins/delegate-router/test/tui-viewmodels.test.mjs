@@ -184,13 +184,12 @@ test('job detail pins live planning state at the transcript tail and obeys heigh
   assert.equal(timedOut.panes[0].summary.rows[0].badge, undefined);
 });
 
-test('job detail rereads planning state without reselecting and exposes the complete appended Plan tab', () => {
+test('job detail rereads planning state without reselecting and exposes Plan before the appended Subagents tab', () => {
   const store = syntheticStore();
   const job = attachStructuralPlan(store);
   const ui = { jobId: job.id, detailTab: 0, now: NOW, follow: false };
   const awaiting = detailViewModel(store, ui, { width: 120, height: 36 });
-  assert.deepEqual(awaiting.tabs.items.slice(0, -1), ['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
-  assert.equal(awaiting.tabs.items.at(-1), 'Plan');
+  assert.deepEqual(awaiting.tabs.items, ['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain', 'Plan', 'Subagents']);
 
   job.planning = {
     ...job.planning,
@@ -256,7 +255,7 @@ test('planless detail frames retain the exact existing layout and plan informati
     renderFrameToString(explicitNull, { trimEnd: true }),
     renderFrameToString(absent, { trimEnd: true })
   );
-  assert.deepEqual(absent.tabs.items, ['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain']);
+  assert.deepEqual(absent.tabs.items, ['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain', 'Subagents']);
   assert.equal(absent.panes[0].summary.rows, undefined);
 
   const planStore = syntheticStore();
@@ -686,6 +685,79 @@ test('dashboard is attention-first and derives today tiles, providers, feed, and
   assert.deepEqual(grid.get(focused.rect.x, focused.rect.y).style, { ...expectedPalette.surfaceRaised, ...expectedPalette.focusBorder });
   assert.equal(grid.get(0, 1).char, ' ', 'row one remains the app-bar-owned spacer');
   assert.deepEqual(grid.get(0, 1).style, expectedPalette.body);
+});
+
+test('dashboard names the stale child whose silence survives fresh sibling chatter', () => {
+  const store = syntheticStore();
+  const stale = {
+    ...store.jobs.find((job) => job.status === 'running'),
+    id: 'codex-stale-schrodinger', scopeViolations: [], resultSuspect: null,
+    createdAt: NOW / 1000 - 700, updatedAt: NOW / 1000 - 1, lastActivityAt: NOW - 1_000
+  };
+  store.jobs = [stale];
+  store.audit = [];
+  store.eventsByJob = {};
+  store.activityEventsByJob = {
+    [stale.id]: [
+      { v: 1, seq: 1, at: NOW - 360_001, jobId: stale.id, type: 'subagent.started', redacted: true, data: {
+        id: 'schrodinger', correlationId: 'schrodinger', agentName: 'Schrodinger', type: 'worker', status: 'running'
+      } },
+      { v: 1, seq: 2, at: NOW - 20_000, jobId: stale.id, type: 'subagent.started', redacted: true, data: {
+        id: 'chatty', correlationId: 'chatty', agentName: 'Chatty', type: 'worker', status: 'running'
+      } },
+      { v: 1, seq: 3, at: NOW - 1_000, jobId: stale.id, type: 'subagent.progress', redacted: true, data: {
+        id: 'chatty', correlationId: 'chatty', agentName: 'Chatty', type: 'worker', status: 'interacted'
+      } }
+    ]
+  };
+
+  const frame = dashboardViewModel(store, { now: NOW, timestampMode: 'relative' }, { width: 120, height: 30 });
+  const attention = frame.panes.find((pane) => pane.title === 'Needs you');
+  assert.deepEqual(frame.meta.attentionJobIds, [stale.id]);
+  assert.match(attention.content.rows[0].need.text, /^stalled 6m .*subagent Schrodinger silent 6m$/);
+});
+
+test('subagent errors enter the feed without creating a Needs you row', () => {
+  const store = syntheticStore();
+  const recovered = {
+    ...store.jobs.find((job) => job.status === 'running'),
+    id: 'codex-recovered-child', scopeViolations: [], resultSuspect: null,
+    createdAt: NOW / 1000 - 60, updatedAt: NOW / 1000 - 1, lastActivityAt: NOW - 1_000
+  };
+  store.jobs = [recovered];
+  store.audit = [];
+  store.eventsByJob = {};
+  store.activityEventsByJob = {
+    [recovered.id]: [
+      { v: 1, seq: 1, at: NOW - 3_000, jobId: recovered.id, type: 'subagent.started', redacted: true, data: {
+        id: 'failed-child', correlationId: 'failed-child', agentName: 'Failed child', type: 'worker', status: 'running'
+      } },
+      { v: 1, seq: 2, at: NOW - 1_000, jobId: recovered.id, type: 'subagent.errored', redacted: true, data: {
+        id: 'failed-child', correlationId: 'failed-child', agentName: 'Failed child', type: 'worker', status: 'errored', error: 'preserved failure'
+      } }
+    ]
+  };
+  const frame = dashboardViewModel(store, { now: NOW, timestampMode: 'relative' }, { width: 120, height: 30 });
+  const feed = frame.panes.find((pane) => pane.title === 'Recent notable activity');
+  assert.ok(!frame.meta.attentionJobIds.includes(recovered.id));
+  assert.ok(frame.meta.feedJobIds.includes(recovered.id));
+  assert.ok(feed.content.rows.some((row) => row.job === recovered.id.slice(-10) && row.event.text === 'subagent errored'));
+});
+
+test('a successful job with a swallowed child error uses the existing suspect attention row', () => {
+  const store = syntheticStore();
+  const job = {
+    ...store.jobs.find((entry) => entry.status === 'completed'),
+    id: 'codex-swallowed-error', resultSuspect: 'subagent-error-swallowed'
+  };
+  store.jobs = [job];
+  store.audit = [];
+  store.eventsByJob = { [job.id]: [] };
+  store.activityEventsByJob = {};
+  const frame = dashboardViewModel(store, { now: NOW }, { width: 100, height: 30 });
+  const attention = frame.panes.find((pane) => pane.title === 'Needs you');
+  assert.deepEqual(frame.meta.attentionJobIds, [job.id]);
+  assert.equal(attention.content.rows[0].need.text, 'result needs review');
 });
 
 test('dashboard frame snapshots are deterministic in ASCII and probe-proven Unicode modes', (t) => {

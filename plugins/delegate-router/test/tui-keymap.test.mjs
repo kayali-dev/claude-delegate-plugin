@@ -18,6 +18,7 @@ import {
   KEY_CLASSES,
   KEY_RELATIONS,
   renderKeysMarkdown,
+  resolveKeymapAction,
   validateKeymap
 } from '../bin/lib/tui/keymap.mjs';
 import { createPalette, setUiTheme, uiPalette } from '../bin/lib/tui/palette.mjs';
@@ -143,7 +144,7 @@ test('the appended Plan tab has one registry binding across footer, help, menu, 
 test('tool, subagent, error, and warning drill-downs each flow through KEYMAP', () => {
   const cases = [
     { action: 'detail.tools', key: 'O', ctx: { ...runningContext(), toolCount: 2 }, dispatch: /action === 'detail\.tools'\) return toggleTranscriptKind\('tools'\)/, direct: /key === 'O' && ui\.detailTab === 0/ },
-    { action: 'detail.subagents', key: 'U', ctx: { ...runningContext(), subagentCount: 1 }, dispatch: /action === 'detail\.subagents'\) return toggleTranscriptKind\('subagents'\)/, direct: /key === 'U' && ui\.detailTab === 0/ },
+    { action: 'detail.subagents', key: 'U', ctx: { ...runningContext(), job: { ...runningContext().job, provider: 'codex' }, subagentCount: 0 }, dispatch: /action === 'detail\.subagents'\) return openSubagentsTab\(\)/, direct: /key === 'U'/ },
     { action: 'detail.event-errors', key: 'A', ctx: { ...runningContext(), detailTab: 4, errorCount: 2 }, dispatch: /action === 'detail\.event-errors'\) return toggleEventCategory\('error'\)/, direct: /key === 'A' && ui\.detailTab === 4/ },
     { action: 'detail.event-warnings', key: 'W', ctx: { ...runningContext(), detailTab: 4, warningCount: 1 }, dispatch: /action === 'detail\.event-warnings'\) return toggleEventCategory\('warning'\)/, direct: /key === 'W' && ui\.detailTab === 4/ }
   ];
@@ -157,6 +158,10 @@ test('tool, subagent, error, and warning drill-downs each flow through KEYMAP', 
     assert.match(controller, item.dispatch);
     assert.match(controller, item.direct);
   }
+  assert.equal(resolveKeymapAction('U', cases[1].ctx)?.action, 'detail.subagents', 'U reaches honest empty and unavailable states without a row-count gate');
+  assert.equal(resolveKeymapAction('U', { ...cases[1].ctx, job: { ...cases[1].ctx.job, provider: 'cursor' } })?.action, 'detail.subagents');
+  assert.equal(KEYMAP.find((entry) => entry.action === 'detail.subagents').when({ ...cases[1].ctx, job: { ...cases[1].ctx.job, external: true } }), false);
+  assert.match(controller, /key === 'ctrl-u'\) return page\(-1\)/, 'Ctrl-U retains half-page-up behavior');
 });
 
 test('footer, contextual help, action menu, and generated docs all derive from KEYMAP', () => {

@@ -60,7 +60,8 @@ test('chain tab orders resume rounds and exposes exact jump targets', () => {
   const third = { id: 'codex-child-0000003', provider: 'codex', mode: 'implement', status: 'running', createdAt: 30, parentJobId: second.id, rootJobId: root.id, resultText: 'third outcome', changedFiles: { count: 3 } };
   const store = { jobs: [third, root, second], eventsByJob: {}, hydrationByJob: {}, diffStatsByJob: {} };
   const frame = detailViewModel(store, { jobId: second.id, detailTab: 5, chainSelection: 1 }, { width: 110, height: 28 });
-  assert.equal(frame.tabs.items.at(-1), 'Chain');
+  assert.equal(frame.tabs.items[frame.tabs.active], 'Chain');
+  assert.equal(frame.tabs.items.at(-1), 'Subagents');
   assert.deepEqual(frame.meta.chainJobIds, [root.id, second.id, third.id]);
   const selected = frame.panes[0].content.sections[1];
   assert.match(selected.rows.find((row) => row.key === 'resultMarker').value, /suspect:short/);

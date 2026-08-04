@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   agentResultStatus,
   completeClaudeSubagentByAgentId,
@@ -12,6 +15,7 @@ import {
 } from './lib/agent-stubs.mjs';
 
 const MAX_INPUT_BYTES = 256 * 1024;
+const supervisorExecutable = path.join(path.dirname(fileURLToPath(import.meta.url)), 'delegate-supervisor');
 let warned = false;
 
 function warnOnce(error) {
@@ -35,22 +39,38 @@ function readInput() {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+function ensureAgentTailSupervisor() {
+  if (String(process.env.DELEGATE_AGENT_TAIL ?? '1') === '0') return;
+  if (String(process.env.DELEGATE_SUPERVISOR ?? '1') === '0') return;
+  const executable = process.env.DELEGATE_AGENT_SUPERVISOR_BIN || supervisorExecutable;
+  const child = spawn(process.execPath, [executable, 'start', '--json'], {
+    cwd: '/',
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: process.env
+  });
+  child.once('error', () => {});
+  child.unref();
+}
+
 function handle(payload) {
   if (String(process.env.DELEGATE_AGENT_STUBS ?? '1') === '0') return;
   if (payload?.hook_event_name === 'SubagentStart') {
-    correlateClaudeSubagentStart({
+    const correlated = correlateClaudeSubagentStart({
       sessionId: payload.session_id,
-      agentId: payload.agent_id,
+      transcriptAgentId: payload.agent_id,
       agentType: payload.agent_type,
       cwd: payload.cwd,
       coordinatorSidecarDir: coordinatorSidecarDirectory(payload.transcript_path)
     });
+    if (correlated) ensureAgentTailSupervisor();
     return;
   }
   if (payload?.hook_event_name === 'SubagentStop') {
     completeClaudeSubagentByAgentId({
       sessionId: payload.session_id,
-      agentId: payload.agent_id,
+      transcriptAgentId: payload.agent_id,
       agentType: payload.agent_type,
       coordinatorSidecarDir: coordinatorSidecarDirectory(payload.transcript_path),
       transcriptPath: payload.agent_transcript_path,

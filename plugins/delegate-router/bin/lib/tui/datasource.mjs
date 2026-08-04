@@ -13,7 +13,11 @@ import {
   reconcileJob,
   updateManagedJob
 } from '../control.mjs';
-import { resolveStoredAgentTranscriptPath } from '../agent-stubs.mjs';
+import {
+  resolveStoredAgentTranscriptPath,
+  transcriptAgentIdForJob,
+  transcriptPathMatchesAgentId
+} from '../agent-stubs.mjs';
 import { isProcessAlive } from '../process.mjs';
 import { profilesDir } from '../profiles.mjs';
 import {
@@ -34,19 +38,27 @@ import { aggregateVisibilityStats, readAuditLog } from '../stats.mjs';
 import {
   brokerOwnedCodexThreadIds,
   externalThreadStats,
+  findCodexThreadRollout,
   readCodexThreadTail,
   scanExternalCodexThreads
 } from '../codex-sessions.mjs';
+import { CodexSubagentClient, isCodexSubagentDiscoveryUnsupported, supportsCodexSubagentDiscovery } from '../codex-subagents.mjs';
 import { claudeProjectsDirectory, readClaudeTranscriptTail, scanClaudeSessions } from './sessions.mjs';
 import { readJournalTail } from '../store-maintenance.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+const ACTIVE_CHILD_STATUSES = new Set(['active', 'running', 'in_progress', 'started', 'pending', 'waiting', 'interacted', 'resumed']);
 const DEFAULT_MAX_EVENTS = 5000;
 // Activity hydration is deferred until after first paint. A moderately deep
 // tail retains the start of long-running tool calls without ever scanning a
 // full, output-heavy journal on the fleet path.
 const ACTIVITY_TAIL_BYTES = 512 * 1024;
 const ACTIVITY_TAIL_EVENTS = 5000;
+
+function hasIngestedClaudeJournal(job) {
+  return job?.transport === 'claude-agent'
+    && Number(job?.agentTranscriptIngestion?.journalEvents || 0) > 0;
+}
 
 export function readRecentJobEvents(id, options = {}) {
   const file = eventPath(id);
@@ -149,6 +161,11 @@ function cloneState(state) {
     diffsByJob: { ...state.diffsByJob },
     diffStatsByJob: Object.fromEntries(Object.entries(state.diffStatsByJob).map(([id, stat]) => [id, { ...stat, files: [...stat.files] }])),
     hydrationByJob: Object.fromEntries(Object.entries(state.hydrationByJob).map(([id, hydration]) => [id, { ...hydration }])),
+    subagentsByJob: Object.fromEntries(Object.entries(state.subagentsByJob || {}).map(([id, value]) => [id, {
+      ...value,
+      threads: (value.threads || []).map((thread) => ({ ...thread })),
+      ...(value.snapshot ? { snapshot: { ...value.snapshot, events: (value.snapshot.events || []).map((event) => ({ ...event, data: { ...(event.data || {}) } })) } } : {})
+    }])),
     providers: state.providers.map((provider) => ({
       ...provider,
       allowance: { ...provider.allowance, windows: [...provider.allowance.windows] },
@@ -195,6 +212,12 @@ export class DelegateDataSource extends EventEmitter {
       ...(options.agentTranscriptMaxProjectEntries == null ? {} : { maxProjectEntries: options.agentTranscriptMaxProjectEntries }),
       ...(options.agentTranscriptMaxEntries == null ? {} : { maxEntries: options.agentTranscriptMaxEntries })
     };
+    this.codexSubagentOptions = {
+      ...(options.codexSubagentRpcFactory ? { rpcFactory: options.codexSubagentRpcFactory } : {}),
+      ...(options.codexSubagentRequestTimeoutMs == null ? {} : { requestTimeoutMs: options.codexSubagentRequestTimeoutMs })
+    };
+    this.codexSubagentClientFactory = options.codexSubagentClientFactory
+      || ((job) => new CodexSubagentClient(job, this.codexSubagentOptions));
     this.externalJobs = new Map();
     this.externalSources = new Map();
     this.journalCursors = new Map();
@@ -205,6 +228,12 @@ export class DelegateDataSource extends EventEmitter {
     this.activityEvents = new Map();
     this.activityTailStamps = new Map();
     this.readOnlyTranscriptStamps = new Map();
+    this.subagentClients = new Map();
+    this.followSubagentJobId = null;
+    this.followSubagentThreadId = null;
+    this.subagentEpoch = 0;
+    this.subagentReadTask = null;
+    this.lastSubagentReadAt = 0;
     this.diffs = new Map();
     this.followJobId = null;
     this.watchers = [];
@@ -220,9 +249,9 @@ export class DelegateDataSource extends EventEmitter {
     this.closed = false;
     this.recordsDigest = null;
     this.metadataStamp = null;
-    this.metrics = { refreshes: 0, sessionScans: 0, activityTailReads: 0, readOnlyTranscriptReads: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
+    this.metrics = { refreshes: 0, sessionScans: 0, activityTailReads: 0, readOnlyTranscriptReads: 0, subagentDiscoveries: 0, subagentSnapshotReads: 0, subagentDiskFallbackReads: 0, journalPages: 0, journalEvents: 0, reconciliations: 0, startupMs: null };
     this.state = {
-      jobs: [], eventsByJob: {}, activityEventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
+      jobs: [], eventsByJob: {}, activityEventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {}, subagentsByJob: {},
       usage: null, providers: [], writerLocks: [], profiles: [], groups: [], audit: [], metadataReady: false,
       sessions: [], sessionScan: { status: 'loading', available: null, projectsDir: this.sessionProjectsDir, scanned: 0, totalFiles: 0, capped: false, error: null },
       externalScan: { status: 'loading', available: null, scanned: 0, totalFiles: 0, capped: false, ownedExcluded: 0, personalExcluded: 0, duplicatesExcluded: 0, error: null },
@@ -395,19 +424,28 @@ export class DelegateDataSource extends EventEmitter {
         this.reconcileAttempts.delete(id);
         this.reconciledByTui.delete(id);
       }
+      const subagentsByJob = Object.fromEntries(Object.entries(this.state.subagentsByJob || {}).filter(([id]) => ids.has(id)));
+      for (const [id, client] of this.subagentClients) {
+        if (ids.has(id)) continue;
+        this.subagentClients.delete(id);
+        void client.close();
+      }
       const digest = JSON.stringify(jobs.map((job) => [
         job.id, job.revision, job.status, job.phase, job.updatedAt, job.lastActivityAt, job.stalled, job.workerAlive,
         job.groupId || null, Array.isArray(job.scopeViolations) ? job.scopeViolations.length : Number(job.scopeViolations || 0),
         job.errorCode || null, job.stoppedReason || null,
         job.external === true, job.approximateSize || null, job.activityLabel || null,
-        job.agentId || null, job.agentLifecycle || null, job.coordinatorSidecarDir || null, job.transcriptPath || null,
-        job.transcriptMtimeMs || null, job.transcriptSize || null
+        job.agentId || null, job.transcriptAgentId || null, job.agentLifecycle || null,
+        job.coordinatorSidecarDir || null, job.transcriptPath || null,
+        job.transcriptMtimeMs || null, job.transcriptSize || null,
+        Number(job.agentTranscriptIngestion?.journalEvents || 0)
       ]));
       changed = options.force || digest !== this.recordsDigest;
       this.recordsDigest = digest;
       this.state = {
         ...this.state,
         jobs,
+        subagentsByJob,
         groups: aggregateJobGroups(jobs),
         writerLocks: activeWriterLocks(rawJobs),
         updatedAt: Date.now(),
@@ -418,10 +456,12 @@ export class DelegateDataSource extends EventEmitter {
       if (followed?.external) {
         void this.hydrateReadOnlyTranscript(this.followJobId, 'external');
       } else if (followed?.transport === 'claude-agent') {
-        void this.hydrateReadOnlyTranscript(this.followJobId, 'claude-agent');
+        if (hasIngestedClaudeJournal(followed)) void this.hydrateJob(this.followJobId);
+        else void this.hydrateReadOnlyTranscript(this.followJobId, 'claude-agent');
       } else if (followed && this.journalStamps.get(this.followJobId) !== fileStamp(eventPath(this.followJobId))) {
         void this.hydrateJob(this.followJobId);
       }
+      void this.refreshSelectedSubagentSnapshot();
     } catch (error) {
       this.state = { ...this.state, error: error.message, updatedAt: Date.now() };
       this.emit('warning', error);
@@ -577,12 +617,199 @@ export class DelegateDataSource extends EventEmitter {
     this.emit('change', this.getState());
   }
 
+  publishSubagents(id, value) {
+    if (this.closed || !id) return this.getState();
+    this.state = {
+      ...this.state,
+      subagentsByJob: { ...this.state.subagentsByJob, [id]: value },
+      updatedAt: Date.now()
+    };
+    this.emit('change', this.getState());
+    return this.getState();
+  }
+
+  subagentClient(job) {
+    let client = this.subagentClients.get(job.id);
+    if (!client) {
+      client = this.codexSubagentClientFactory(job);
+      this.subagentClients.set(job.id, client);
+    }
+    return client;
+  }
+
+  selectedChildIsRunning(job, threadId, state = {}) {
+    const lifecycle = Object.values(job?.subagentLifecycle || {}).find((entry) => String(entry?.id || '') === String(threadId));
+    if (lifecycle?.status) return ACTIVE_CHILD_STATUSES.has(String(lifecycle.status).replace(/[-\s]+/g, '_').toLowerCase());
+    const thread = (state.threads || []).find((entry) => entry.id === threadId);
+    return ACTIVE_CHILD_STATUSES.has(String(thread?.status || '').replace(/[-\s]+/g, '_').toLowerCase());
+  }
+
+  async closeSubagentClients(exceptId = null) {
+    const closing = [];
+    for (const [id, client] of this.subagentClients) {
+      if (id === exceptId) continue;
+      this.subagentClients.delete(id);
+      closing.push(client.close());
+    }
+    await Promise.allSettled(closing);
+  }
+
+  async selectSubagent(jobId, threadId = null, options = {}) {
+    const selectedJobId = jobId || null;
+    const selectedThreadId = threadId || null;
+    const epoch = ++this.subagentEpoch;
+    this.followSubagentJobId = selectedJobId;
+    this.followSubagentThreadId = selectedThreadId;
+    if (!selectedJobId) {
+      await this.closeSubagentClients();
+      if (!this.closed && epoch === this.subagentEpoch) {
+        this.state = { ...this.state, subagentsByJob: {}, updatedAt: Date.now() };
+        this.emit('change', this.getState());
+      }
+      return this.getState();
+    }
+    await this.closeSubagentClients(selectedJobId);
+    const job = this.state.jobs.find((entry) => entry.id === selectedJobId);
+    if (!job) return this.getState();
+    const previous = this.state.subagentsByJob[selectedJobId] || { status: 'idle', threads: [], error: null };
+    if (job.provider === 'cursor') {
+      return this.publishSubagents(selectedJobId, {
+        ...previous,
+        status: 'ready',
+        provider: 'cursor',
+        threads: [],
+        error: null,
+        snapshot: selectedThreadId ? {
+          threadId: selectedThreadId,
+          mode: 'unavailable',
+          status: 'unavailable',
+          events: [],
+          message: 'Cursor does not expose child transcript identifiers or transcript retrieval on this transport.'
+        } : previous.snapshot || null
+      });
+    }
+    if (job.provider !== 'codex' || job.external || job.remote) {
+      return this.publishSubagents(selectedJobId, {
+        ...previous,
+        status: 'remote-unavailable',
+        provider: job.provider,
+        threads: [],
+        error: 'provider RPC discovery is unreachable from this detail source',
+        snapshot: selectedThreadId ? { threadId: selectedThreadId, mode: 'unavailable', status: 'unavailable', events: [] } : null
+      });
+    }
+    const client = this.subagentClient(job);
+    if (!selectedThreadId) {
+      if (['ready', 'unavailable'].includes(previous.status) && options.force !== true) {
+        return this.publishSubagents(selectedJobId, { ...previous, snapshot: previous.snapshot || null });
+      }
+      if (!job.providerSessionId) {
+        return this.publishSubagents(selectedJobId, {
+          ...previous,
+          status: 'unavailable',
+          provider: 'codex',
+          version: client.version,
+          error: 'parent provider thread id was not recorded',
+          unsupported: true
+        });
+      }
+      this.publishSubagents(selectedJobId, { ...previous, status: 'loading', provider: 'codex', error: null });
+      try {
+        const discovery = await client.discover(job.providerSessionId);
+        if (this.closed || epoch !== this.subagentEpoch || this.followSubagentJobId !== selectedJobId) return this.getState();
+        this.metrics.subagentDiscoveries += 1;
+        return this.publishSubagents(selectedJobId, {
+          status: 'ready', provider: 'codex', threads: discovery.threads, capped: discovery.capped,
+          version: discovery.version, error: null, snapshot: previous.snapshot || null
+        });
+      } catch (error) {
+        if (this.closed || epoch !== this.subagentEpoch || this.followSubagentJobId !== selectedJobId) return this.getState();
+        return this.publishSubagents(selectedJobId, {
+          ...previous,
+          status: 'unavailable',
+          provider: 'codex',
+          version: client.version,
+          error: String(error?.message || error).slice(0, 1024),
+          unsupported: isCodexSubagentDiscoveryUnsupported(error),
+          snapshot: previous.snapshot || null
+        });
+      }
+    }
+    if (!options.refresh) {
+      this.publishSubagents(selectedJobId, {
+        ...previous,
+        snapshot: { threadId: selectedThreadId, mode: 'stored', status: 'loading', events: [], capturedAtMs: null }
+      });
+    }
+    try {
+      const snapshot = await client.read(selectedThreadId, { now: Date.now() });
+      if (this.closed || epoch !== this.subagentEpoch || this.followSubagentThreadId !== selectedThreadId) return this.getState();
+      this.metrics.subagentSnapshotReads += 1;
+      this.lastSubagentReadAt = Date.now();
+      const current = this.state.subagentsByJob[selectedJobId] || previous;
+      return this.publishSubagents(selectedJobId, {
+        ...current,
+        snapshot: {
+          ...snapshot,
+          threadId: selectedThreadId,
+          mode: 'stored',
+          status: 'ready',
+          pointInTime: snapshot.pointInTime === true || this.selectedChildIsRunning(job, selectedThreadId, current)
+        }
+      });
+    } catch (error) {
+      if (this.closed || epoch !== this.subagentEpoch || this.followSubagentThreadId !== selectedThreadId) return this.getState();
+      let fallback = null;
+      if (supportsCodexSubagentDiscovery(client.version)) {
+        const file = findCodexThreadRollout(selectedThreadId, this.externalScanOptions);
+        if (file) fallback = readCodexThreadTail(file, { limit: 500 });
+      }
+      if (fallback) {
+        this.metrics.subagentDiskFallbackReads += 1;
+        this.lastSubagentReadAt = Date.now();
+        const row = (this.state.subagentsByJob[selectedJobId]?.threads || []).find((entry) => entry.id === selectedThreadId);
+        return this.publishSubagents(selectedJobId, {
+          ...this.state.subagentsByJob[selectedJobId],
+          snapshot: {
+            threadId: selectedThreadId, mode: 'disk', status: 'ready', events: fallback.events || [],
+            pointInTime: this.selectedChildIsRunning(job, selectedThreadId, this.state.subagentsByJob[selectedJobId]) || row?.status === 'active', truncated: fallback.truncated === true,
+            capturedAtMs: Date.now(), error: String(error?.message || error).slice(0, 1024)
+          }
+        });
+      }
+      return this.publishSubagents(selectedJobId, {
+        ...this.state.subagentsByJob[selectedJobId],
+        snapshot: {
+          threadId: selectedThreadId, mode: 'unavailable', status: 'unavailable', events: [],
+          message: 'The stored child transcript could not be read from this thread store.',
+          error: String(error?.message || error).slice(0, 1024)
+        }
+      });
+    }
+  }
+
+  refreshSelectedSubagentSnapshot() {
+    if (this.closed || !this.followSubagentJobId || !this.followSubagentThreadId || this.subagentReadTask) return Promise.resolve(this.getState());
+    const state = this.state.subagentsByJob[this.followSubagentJobId];
+    if (state?.snapshot?.status !== 'ready' || state.snapshot.pointInTime !== true) return Promise.resolve(this.getState());
+    if (Date.now() - this.lastSubagentReadAt < this.pollMs) return Promise.resolve(this.getState());
+    const task = this.selectSubagent(this.followSubagentJobId, this.followSubagentThreadId, { refresh: true })
+      .finally(() => { if (this.subagentReadTask === task) this.subagentReadTask = null; });
+    this.subagentReadTask = task;
+    return task;
+  }
+
   selectJob(id) {
+    if (this.followJobId && this.followJobId !== id) void this.selectSubagent(null);
     this.followJobId = id || null;
     if (!id) return Promise.resolve(this.getState());
     const selected = this.state.jobs.find((job) => job.id === id);
     if (selected?.external) return this.hydrateReadOnlyTranscript(id, 'external');
-    if (selected?.transport === 'claude-agent') return this.hydrateReadOnlyTranscript(id, 'claude-agent');
+    if (selected?.transport === 'claude-agent') {
+      return hasIngestedClaudeJournal(selected)
+        ? this.hydrateJob(id)
+        : this.hydrateReadOnlyTranscript(id, 'claude-agent');
+    }
     const loaded = this.state.hydrationByJob[id]?.loaded === true;
     if (loaded && this.journalStamps.get(id) === fileStamp(eventPath(id))) return Promise.resolve(this.getState());
     return this.hydrateJob(id);
@@ -590,21 +817,26 @@ export class DelegateDataSource extends EventEmitter {
 
   resolveClaudeAgentTranscript(job) {
     if (!job || job.transport !== 'claude-agent') return null;
-    if (typeof job.transcriptPath === 'string' && path.isAbsolute(job.transcriptPath)) return path.normalize(job.transcriptPath);
+    const transcriptAgentId = transcriptAgentIdForJob(job);
+    if (!transcriptAgentId) return null;
+    const direct = transcriptPathMatchesAgentId(job.transcriptPath, transcriptAgentId)
+      ? path.normalize(job.transcriptPath) : null;
+    try { if (direct && fs.statSync(direct).isFile()) return direct; } catch {}
     const resolved = resolveStoredAgentTranscriptPath({
-      agentId: job.agentId,
+      transcriptAgentId,
       coordinatorSidecarDir: job.coordinatorSidecarDir,
       cwd: job.cwd,
       ...this.agentTranscriptOptions
     });
-    if (!resolved) return null;
+    if (!resolved && !direct) return null;
+    const selected = resolved || direct;
     let persisted = null;
     try {
       persisted = updateManagedJob(job.id, (record) => {
-        if (!record.transcriptPath) record.transcriptPath = resolved;
+        if (!transcriptPathMatchesAgentId(record.transcriptPath, transcriptAgentId)) record.transcriptPath = selected;
       }, { incrementRevision: false });
     } catch {}
-    const transcriptPath = persisted?.transcriptPath || resolved;
+    const transcriptPath = persisted?.transcriptPath || selected;
     this.state = {
       ...this.state,
       jobs: this.state.jobs.map((entry) => entry.id === job.id ? { ...entry, transcriptPath } : entry)
@@ -615,6 +847,7 @@ export class DelegateDataSource extends EventEmitter {
   hydrateReadOnlyTranscript(id, kind) {
     if (this.closed || this.followJobId !== id) return Promise.resolve(this.getState());
     let job = this.state.jobs.find((entry) => entry.id === id);
+    if (kind === 'claude-agent' && hasIngestedClaudeJournal(job)) return this.hydrateJob(id);
     const file = kind === 'external' ? this.externalSources.get(id) : this.resolveClaudeAgentTranscript(job);
     job = this.state.jobs.find((entry) => entry.id === id) || job;
     const snapshot = fileSnapshot(file);
@@ -778,6 +1011,12 @@ export class DelegateDataSource extends EventEmitter {
     }
     this.immediates.clear();
     this.reconcileTask = null;
+    this.subagentReadTask = null;
+    this.followSubagentJobId = null;
+    this.followSubagentThreadId = null;
+    this.subagentEpoch += 1;
+    for (const client of this.subagentClients.values()) void client.close();
+    this.subagentClients.clear();
     this.hydrations.clear();
     this.journalStamps.clear();
   }

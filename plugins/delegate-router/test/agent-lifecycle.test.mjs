@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,8 +9,11 @@ import { fileURLToPath } from 'node:url';
 import {
   agentResultStatus,
   completeClaudeAgentStub,
-  createClaudeAgentStub
+  correlateClaudeSubagentStart,
+  createClaudeAgentStub,
+  resolveStoredAgentTranscriptPath
 } from '../bin/lib/agent-stubs.mjs';
+import { ingestClaudeAgentTranscriptJob } from '../bin/lib/agent-transcript-ingestor.mjs';
 import {
   inspectJob,
   pruneJobs,
@@ -58,14 +62,19 @@ function backgroundStub(root, suffix = 'one', now = Date.now()) {
     toolUseId: `tool-${suffix}`,
     ...agentResultStatus({ status: 'async_launched' }),
     agentId: `agent-${suffix}`,
+    transcriptAgentId: transcriptId(suffix),
     now
   });
+}
+
+function transcriptId(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 16);
 }
 
 function writeAgentTranscript(root, suffix, mtimeMs) {
   const directory = path.join(root, suffix, 'subagents');
   fs.mkdirSync(directory, { recursive: true });
-  const file = path.join(directory, `agent-agent-${suffix}.jsonl`);
+  const file = path.join(directory, `agent-${transcriptId(suffix)}.jsonl`);
   fs.writeFileSync(file, `${JSON.stringify({ type: 'assistant', message: { content: 'work' } })}\n`);
   fs.utimesSync(file, new Date(mtimeMs), new Date(mtimeMs));
   return file;
@@ -78,7 +87,7 @@ test('SubagentStop correlates a background stub by agent_id and records the real
   const payload = {
     hook_event_name: 'SubagentStop',
     session_id: 'session-agent-lifecycle',
-    agent_id: 'agent-target',
+    agent_id: transcriptId('target'),
     agent_type: 'general-purpose',
     transcript_path: path.join(root, 'target.jsonl'),
     agent_transcript_path: transcript,
@@ -94,10 +103,164 @@ test('SubagentStop correlates a background stub by agent_id and records the real
   const completed = inspectJob(target.id);
   assert.equal(completed.status, 'completed');
   assert.equal(completed.agentLifecycle, 'completed');
+  assert.equal(completed.transcriptAgentId, transcriptId('target'));
   assert.equal(completed.transcriptPath, transcript);
   assert.equal(completed.resultText, 'actual background result');
   assert.equal(inspectJob(other.id).status, 'running');
   assert.equal(readJobEvents(target.id).filter((event) => event.type === 'job.completed').length, 1);
+}));
+
+test('SubagentStart exact sidecar correlation survives a later display-name PostToolUse overwrite', (t) => isolated(t, (root) => {
+  const sessionId = 'namespace-session';
+  const transcriptAgentId = 'a0a9ee00417f2e4b4';
+  const sidecar = path.join(root, 'coordinator');
+  const coordinatorTranscript = `${sidecar}.jsonl`;
+  const subagents = path.join(sidecar, 'subagents');
+  fs.mkdirSync(subagents, { recursive: true });
+  fs.writeFileSync(coordinatorTranscript, '');
+  const target = createClaudeAgentStub({
+    sessionId,
+    toolUseId: 'toolu_exact_target',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    prompt: 'target',
+    agentType: 'Explore'
+  });
+  createClaudeAgentStub({
+    sessionId,
+    toolUseId: 'toolu_newer_wrong',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    prompt: 'newer candidate',
+    agentType: 'Explore',
+    now: Date.now() + 1000
+  });
+  const transcript = path.join(subagents, `agent-${transcriptAgentId}.jsonl`);
+  fs.writeFileSync(transcript, `${JSON.stringify({ type: 'assistant', message: { id: 'msg-1', role: 'assistant', content: [{ type: 'text', text: 'resolved' }] } })}\n`);
+  fs.writeFileSync(path.join(subagents, `agent-${transcriptAgentId}.meta.json`), JSON.stringify({
+    agentType: 'Explore',
+    description: 'Map contract-redlining patterns',
+    toolUseId: 'toolu_exact_target',
+    spawnDepth: 1
+  }));
+
+  const correlated = correlateClaudeSubagentStart({
+    sessionId,
+    transcriptAgentId,
+    agentType: 'Explore',
+    coordinatorSidecarDir: sidecar
+  });
+  assert.equal(correlated.id, target.id, 'sidecar toolUseId must beat the newer heuristic candidate');
+  assert.equal(correlated.transcriptAgentId, transcriptAgentId);
+  assert.equal(correlated.spawnDepth, 1);
+  assert.equal(correlated.agentName, 'Map contract-redlining patterns');
+
+  const postRun = spawnSync(process.execPath, [hook], {
+    input: JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      session_id: sessionId,
+      tool_use_id: 'toolu_exact_target',
+      transcript_path: coordinatorTranscript,
+      cwd: root,
+      tool_name: 'Agent',
+      tool_response: { status: 'completed', agentId: 'plan-auditor@session-ba7e9b10' }
+    }),
+    encoding: 'utf8',
+    env: { ...process.env, DELEGATE_AGENT_STUBS: '1', DELEGATE_AGENT_TAIL: '0' }
+  });
+  assert.equal(postRun.status, 0, postRun.stderr);
+  const post = inspectJob(target.id);
+  assert.equal(post.agentId, 'plan-auditor@session-ba7e9b10');
+  assert.equal(post.transcriptAgentId, transcriptAgentId, 'display identity must not clobber transcript identity');
+  assert.equal(resolveStoredAgentTranscriptPath({
+    transcriptAgentId: post.transcriptAgentId,
+    coordinatorSidecarDir: post.coordinatorSidecarDir
+  }), transcript);
+  assert.equal(resolveStoredAgentTranscriptPath({
+    transcriptAgentId: post.agentId,
+    coordinatorSidecarDir: post.coordinatorSidecarDir
+  }), null, 'display-shaped legacy ids must never be searched as transcript ids');
+  const ingested = ingestClaudeAgentTranscriptJob(post.id);
+  assert.ok(ingested.events.some((event) => event.type === 'message.delta' && event.data.delta === 'resolved'));
+}));
+
+test('async PostToolUse before SubagentStart preserves both display and transcript identities', (t) => isolated(t, (root) => {
+  const sessionId = 'async-namespace-session';
+  const transcriptAgentId = 'b1b9ee00417f2e4c';
+  const sidecar = path.join(root, 'async-coordinator');
+  const subagents = path.join(sidecar, 'subagents');
+  fs.mkdirSync(subagents, { recursive: true });
+  const created = createClaudeAgentStub({
+    sessionId,
+    toolUseId: 'toolu_async_target',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    prompt: 'async target',
+    agentType: 'Explore'
+  });
+  completeClaudeAgentStub({
+    sessionId,
+    toolUseId: 'toolu_async_target',
+    ...agentResultStatus({ status: 'async_launched' }),
+    agentId: 'landscape-researcher@session-1e3f2225'
+  });
+  fs.writeFileSync(path.join(subagents, `agent-${transcriptAgentId}.meta.json`), JSON.stringify({
+    agentType: 'Explore', description: 'Landscape', toolUseId: 'toolu_async_target', spawnDepth: 1
+  }));
+  const correlated = correlateClaudeSubagentStart({
+    sessionId,
+    transcriptAgentId,
+    agentType: 'Explore',
+    coordinatorSidecarDir: sidecar
+  });
+  assert.equal(correlated.id, created.id);
+  assert.equal(correlated.agentId, 'landscape-researcher@session-1e3f2225');
+  assert.equal(correlated.transcriptAgentId, transcriptAgentId);
+}));
+
+test('a nested transcript with a readable sidecar never binds to an unrelated pending stub', (t) => isolated(t, (root) => {
+  const sessionId = 'nested-correlation-session';
+  const transcriptAgentId = 'c2c9ee00417f2e4d';
+  const sidecar = path.join(root, 'nested-coordinator');
+  const subagents = path.join(sidecar, 'subagents');
+  fs.mkdirSync(subagents, { recursive: true });
+  const first = createClaudeAgentStub({
+    sessionId,
+    toolUseId: 'toolu_pending_one',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    prompt: 'first depth-one task',
+    agentType: 'Explore'
+  });
+  const second = createClaudeAgentStub({
+    sessionId,
+    toolUseId: 'toolu_pending_two',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    prompt: 'second depth-one task',
+    agentType: 'Explore',
+    now: Date.now() + 1000
+  });
+  fs.writeFileSync(path.join(subagents, `agent-${transcriptAgentId}.jsonl`), `${JSON.stringify({
+    type: 'assistant',
+    message: { id: 'nested-message', role: 'assistant', content: [{ type: 'text', text: 'nested work' }] }
+  })}\n`);
+  fs.writeFileSync(path.join(subagents, `agent-${transcriptAgentId}.meta.json`), JSON.stringify({
+    agentType: 'Explore',
+    description: 'Nested task without a coordinator stub',
+    toolUseId: 'toolu_nested_without_stub',
+    spawnDepth: 2
+  }));
+
+  const correlated = correlateClaudeSubagentStart({
+    sessionId,
+    transcriptAgentId,
+    agentType: 'Explore',
+    coordinatorSidecarDir: sidecar
+  });
+  assert.equal(correlated, null, 'readable sidecars must never fall through to agentType guessing');
+  assert.equal(inspectJob(first.id).transcriptAgentId, null);
+  assert.equal(inspectJob(second.id).transcriptAgentId, null);
 }));
 
 test('a quiet background stub reconciles at read time to ended-unknown idempotently without fabricated success', (t) => isolated(t, (root) => {
@@ -187,6 +350,54 @@ test('foreground Agent completion remains completed and the lifecycle hooks are 
   assert.ok(hooks.PostToolUse);
   assert.equal(hooks.SubagentStart[0].matcher, '*');
   assert.equal(hooks.SubagentStop[0].matcher, '*');
+}));
+
+test('SubagentStart launches the tail supervisor fire-and-forget without changing hook exit behavior', (t) => isolated(t, async (root) => {
+  const transcriptAgentId = 'e4e9ee00417f2e4f';
+  const coordinator = path.join(root, 'hook-coordinator.jsonl');
+  const sidecar = coordinator.replace(/\.jsonl$/, '');
+  const subagents = path.join(sidecar, 'subagents');
+  const marker = path.join(root, 'supervisor-invocation.json');
+  const fakeSupervisor = path.join(root, 'fake-supervisor.mjs');
+  fs.mkdirSync(subagents, { recursive: true });
+  fs.writeFileSync(coordinator, '');
+  fs.writeFileSync(fakeSupervisor, `import fs from 'node:fs'; fs.writeFileSync(process.env.DELEGATE_AGENT_SUPERVISOR_MARKER, JSON.stringify(process.argv.slice(2)));\n`);
+  createClaudeAgentStub({
+    sessionId: 'hook-supervisor-session',
+    toolUseId: 'toolu_hook_supervisor',
+    cwd: root,
+    coordinatorSidecarDir: sidecar,
+    prompt: 'launch supervisor',
+    agentType: 'Explore'
+  });
+  fs.writeFileSync(path.join(subagents, `agent-${transcriptAgentId}.meta.json`), JSON.stringify({
+    agentType: 'Explore', description: 'Launch test', toolUseId: 'toolu_hook_supervisor', spawnDepth: 1
+  }));
+  const startedAt = Date.now();
+  const run = spawnSync(process.execPath, [hook], {
+    input: JSON.stringify({
+      hook_event_name: 'SubagentStart',
+      session_id: 'hook-supervisor-session',
+      agent_id: transcriptAgentId,
+      agent_type: 'Explore',
+      transcript_path: coordinator,
+      cwd: root
+    }),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      DELEGATE_AGENT_STUBS: '1',
+      DELEGATE_AGENT_TAIL: '1',
+      DELEGATE_SUPERVISOR: '1',
+      DELEGATE_AGENT_SUPERVISOR_BIN: fakeSupervisor,
+      DELEGATE_AGENT_SUPERVISOR_MARKER: marker
+    }
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(Date.now() - startedAt < 1000, 'hook must not await supervisor startup');
+  const deadline = Date.now() + 2000;
+  while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), ['start', '--json']);
 }));
 
 test('retention reconciliation prunes old non-terminal agent stubs instead of accumulating them', (t) => isolated(t, (root) => {

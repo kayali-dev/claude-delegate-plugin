@@ -18,7 +18,7 @@ function localHostLabel() {
 
 function emptyState(includeLocal) {
   return {
-    jobs: [], eventsByJob: {}, activityEventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {},
+    jobs: [], eventsByJob: {}, activityEventsByJob: {}, diffsByJob: {}, diffStatsByJob: {}, hydrationByJob: {}, subagentsByJob: {},
     usage: null, providers: [], writerLocks: [], profiles: [], groups: [], audit: [], metadataReady: false,
     sessions: [], sessionScan: { status: 'loading', available: null, scanned: 0, totalFiles: 0, capped: false, error: null },
     externalScan: { status: 'loading', available: null, scanned: 0, totalFiles: 0, capped: false, error: null },
@@ -81,6 +81,7 @@ export class CompositeDatasource extends EventEmitter {
     const diffsByJob = {};
     const diffStatsByJob = {};
     const hydrationByJob = {};
+    const subagentsByJob = {};
     const providers = [];
     const writerLocks = [];
     const sessions = [];
@@ -128,6 +129,7 @@ export class CompositeDatasource extends EventEmitter {
         if (Object.hasOwn(child.diffsByJob || {}, job.id)) diffsByJob[id] = child.diffsByJob[job.id];
         if (child.diffStatsByJob?.[job.id]) diffStatsByJob[id] = child.diffStatsByJob[job.id];
         if (child.hydrationByJob?.[job.id]) hydrationByJob[id] = child.hydrationByJob[job.id];
+        if (child.subagentsByJob?.[job.id]) subagentsByJob[id] = child.subagentsByJob[job.id];
       }
       for (const provider of child.providers || []) providers.push(entry.local
         ? { ...provider, host: entry.label }
@@ -167,6 +169,7 @@ export class CompositeDatasource extends EventEmitter {
       diffsByJob,
       diffStatsByJob,
       hydrationByJob,
+      subagentsByJob,
       providers,
       writerLocks,
       profiles: [...profiles].sort(),
@@ -230,6 +233,20 @@ export class CompositeDatasource extends EventEmitter {
       const selected = route?.entry === entry ? route.id : null;
       try { tasks.push(Promise.resolve(entry.source.selectJob?.(selected))); }
       catch (error) { this.emit('warning', error); }
+    }
+    await Promise.allSettled(tasks);
+    this.publish();
+    return this.getState();
+  }
+
+  async selectSubagent(jobId, threadId = null) {
+    const route = jobId ? this.routes.get(jobId) : null;
+    const tasks = [];
+    for (const entry of this.entries) {
+      const selectedJob = route?.entry === entry ? route.id : null;
+      try {
+        if (typeof entry.source.selectSubagent === 'function') tasks.push(Promise.resolve(entry.source.selectSubagent(selectedJob, selectedJob ? threadId : null)));
+      } catch (error) { this.emit('warning', error); }
     }
     await Promise.allSettled(tasks);
     this.publish();

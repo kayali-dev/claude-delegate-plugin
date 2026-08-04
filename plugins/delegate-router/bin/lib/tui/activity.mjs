@@ -9,7 +9,7 @@ const PHASES = new Set(['verifying', 'retrying', 'paused', 'starting']);
 export const ACTIVITY_CAPABILITIES = Object.freeze({
   'codex:app-server': Object.freeze({ thinking: true, streaming: true, tools: true, subagents: true, approvals: true, needsInput: true, visibility: 'full' }),
   'codex:external': Object.freeze({ thinking: false, streaming: false, tools: false, approvals: false, needsInput: false, visibility: 'bounded-tail' }),
-  'claude:agent-hook': Object.freeze({ thinking: false, streaming: false, tools: false, approvals: false, needsInput: false, visibility: 'hook-only' }),
+  'claude:agent-hook': Object.freeze({ thinking: true, streaming: true, tools: true, subagents: false, approvals: false, needsInput: false, visibility: 'observed-transcript' }),
   'cursor:acp': Object.freeze({ thinking: true, streaming: true, tools: true, subagents: true, approvals: true, needsInput: true, visibility: 'near-full' }),
   'cursor:headless': Object.freeze({ thinking: true, streaming: true, tools: true, subagents: true, approvals: false, needsInput: false, visibility: 'near-full' })
 });
@@ -53,6 +53,7 @@ function activitySignals(events) {
   let needsInput = null;
   let delta = null;
   let signal = null;
+  let parentSignal = null;
   for (const event of events) {
     if (event.replay === true) continue;
     if (event.type === 'turn.started') needsInput = null;
@@ -97,14 +98,20 @@ function activitySignals(events) {
       || event.type === 'tool.started' || event.type === 'tool.output' || event.type === 'tool.completed'
       || event.type === 'file.changed' || event.type === 'plan.updated' || event.type === 'approval.requested' || event.type === 'approval.resolved'
       || event.type === 'input.requested' || event.type === 'input.resolved'
-      || event.type === 'compaction.started' || event.type === 'compaction.completed' || event.type === 'error') signal = event;
+      || event.type === 'compaction.started' || event.type === 'compaction.completed' || event.type === 'error') {
+      signal = event;
+      parentSignal = event;
+    }
     if (event.type?.startsWith('subagent.')) signal = event;
   }
+  const openSubagentEntries = [...openSubagents.values()]
+    .sort((left, right) => eventAt(right.latest) - eventAt(left.latest) || left.key.localeCompare(right.key));
   const value = {
-    approval, needsInput, delta, signal, lastEvent: events.at(-1) || null,
+    approval, needsInput, delta, signal, parentSignal, lastEvent: events.at(-1) || null,
     openTool: [...open.entries()].sort((left, right) => eventAt(right[1]) - eventAt(left[1]))[0] || null,
     openCompaction: [...openCompactions.values()].sort((left, right) => eventAt(right) - eventAt(left))[0] || null,
-    openSubagent: [...openSubagents.values()].sort((left, right) => eventAt(right.latest) - eventAt(left.latest))[0] || null
+    openSubagents: openSubagentEntries,
+    openSubagent: openSubagentEntries[0] || null
   };
   signalCache.set(events, value);
   return value;
@@ -159,6 +166,34 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
     });
   }
 
+  const configuredStall = Number(options.stallSeconds ?? process.env.DELEGATE_STALL_SECONDS ?? 300);
+  const stallMs = (Number.isFinite(configuredStall) && configuredStall >= 0 ? configuredStall : 300) * 1000;
+  if (capabilities.subagents && signals.openSubagents.length) {
+    const parentAt = eventAt(signals.parentSignal);
+    const parentProgressing = parentAt > 0 && now - parentAt <= stallMs;
+    const staleSubagent = parentProgressing ? null : signals.openSubagents
+      .map((subagent) => ({ subagent, silentSince: eventAt(subagent.latest) || eventAt(subagent.start) }))
+      .filter((entry) => entry.silentSince > 0 && now - entry.silentSince > stallMs)
+      .sort((left, right) => left.silentSince - right.silentSince
+        || left.subagent.key.localeCompare(right.subagent.key))[0] || null;
+    if (staleSubagent) {
+      const data = { ...(staleSubagent.subagent.start?.data || {}), ...(staleSubagent.subagent.latest?.data || {}) };
+      const { silentSince } = staleSubagent;
+      const silentMs = Math.max(0, now - silentSince);
+      const subagentLabel = formatDisplayValue(data.agentName || data.task || data.type || data.id || staleSubagent.subagent.key || 'subagent');
+      return result('stalled', 'stalled', '!', silentSince, now, 'failed', {
+        capabilities,
+        transportKey: key,
+        sourceSeq: staleSubagent.subagent.latest?.seq,
+        idleMs: silentMs,
+        stalledSubagentId: data.id || staleSubagent.subagent.key,
+        stalledSubagentLabel: subagentLabel,
+        stalledSubagentSilentMs: silentMs,
+        stalledSubagentSilentAge: elapsedText(silentMs)
+      });
+    }
+  }
+
   if (capabilities.subagents && signals.openSubagent) {
     const subagent = signals.openSubagent;
     const data = subagent.latest?.data || {};
@@ -181,7 +216,7 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
 
   if (capabilities.thinking) {
     const signal = signals.signal;
-    if (signal?.type === 'activity' && signal.data?.kind === 'thinking') {
+    if (signal?.type === 'activity' && ['thinking', 'reasoning'].includes(signal.data?.kind)) {
       return result('thinking', 'thinking', '~', eventAt(signal), now, 'accent', { capabilities, transportKey: key, sourceSeq: signal.seq });
     }
   }
@@ -200,8 +235,6 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   }
 
   const idleMs = Math.max(0, now - lastAt);
-  const configuredStall = Number(options.stallSeconds ?? process.env.DELEGATE_STALL_SECONDS ?? 300);
-  const stallMs = (Number.isFinite(configuredStall) && configuredStall >= 0 ? configuredStall : 300) * 1000;
   if (job.stalled || idleMs > stallMs) return result('stalled', 'stalled', '!', lastAt, now, 'failed', { capabilities, transportKey: key, idleMs });
   if (idleMs > Number(options.quietMs ?? 30_000)) return result('quiet', 'quiet', '.', lastAt, now, 'dim', { capabilities, transportKey: key, idleMs });
 

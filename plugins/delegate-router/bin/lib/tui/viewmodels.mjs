@@ -11,12 +11,13 @@ import { actionMenuForContext, footerForContext, formatKeyNotation, helpPagesFor
 import { uiPalette as palette } from './palette.mjs';
 import { sectionGapForHeight, SPACE } from './rhythm.mjs';
 import { classifySession, correlateSessions } from './sessions.mjs';
+import { projectSubagentRows, subagentElapsedMs, subagentRowsForDisplay } from './subagents.mjs';
 import { formatTranscriptBlock, transcriptAnomalyEntries, TranscriptProjector, wrapTranscriptBlock } from './transcript.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
 
-export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain', 'Plan']);
+export const DETAIL_TABS = Object.freeze(['Transcript', 'Diff', 'Record', 'Usage', 'Events', 'Chain', 'Plan', 'Subagents']);
 export const WORK_TABS = Object.freeze(['Compose', 'Review', 'Approve', 'Compare', 'Replay', 'Converge']);
 
 export const HELP_ITEMS = Object.freeze(KEYMAP.map((item) => Object.freeze({
@@ -572,7 +573,12 @@ function dashboardAttention(store, ui, now) {
     let need = '';
     if (activity.kind === 'approval') { kind = 'approval'; need = 'approval required'; }
     else if (activity.kind === 'needs-input') { kind = 'needs-input'; need = 'needs input'; }
-    else if (activity.kind === 'stalled') { kind = 'stalled'; need = `stalled ${activity.age}`; }
+    else if (activity.kind === 'stalled') {
+      kind = 'stalled';
+      need = activity.stalledSubagentLabel
+        ? `stalled ${activity.age}${CHROME_SEPARATOR}subagent ${activity.stalledSubagentLabel} silent ${activity.stalledSubagentSilentAge}`
+        : `stalled ${activity.age}`;
+    }
     else if (violations) { kind = 'violation'; need = `${violations} scope violation${violations === 1 ? '' : 's'}`; }
     else if (job.resultSuspect) { kind = 'suspect'; need = 'result needs review'; }
     else if (job.errorCode === 'BUDGET_EXCEEDED' || job.stoppedReason === 'budget') { kind = 'budget'; need = 'budget stopped'; }
@@ -582,7 +588,7 @@ function dashboardAttention(store, ui, now) {
   }).sort((left, right) => right.rank - left.rank || Number(right.job.lastActivityAt || right.job.updatedAt * 1000 || 0) - Number(left.job.lastActivityAt || left.job.updatedAt * 1000 || 0));
 }
 
-const NOTABLE_EVENTS = new Set(['scope.violation', 'budget.exceeded', 'job.nudged', 'correction.restarted', 'retry.started']);
+const NOTABLE_EVENTS = new Set(['scope.violation', 'budget.exceeded', 'job.nudged', 'correction.restarted', 'retry.started', 'subagent.errored']);
 
 function dashboardFeed(store, now) {
   const rows = [];
@@ -1221,10 +1227,11 @@ function detailChain(store, job) {
 }
 
 function detailTabs(store, job) {
-  const base = job.rootJobId || detailChain(store, job).jobs.length > 1
-    ? DETAIL_TABS.slice(0, 6)
-    : DETAIL_TABS.slice(0, 5);
-  return job.planning ? [...base, DETAIL_TABS.at(-1)] : base;
+  const tabs = DETAIL_TABS.slice(0, 5);
+  if (job.rootJobId || detailChain(store, job).jobs.length > 1) tabs.push('Chain');
+  if (job.planning) tabs.push('Plan');
+  if (job.external !== true && ['codex', 'cursor'].includes(String(job.provider || ''))) tabs.push('Subagents');
+  return tabs;
 }
 
 function structuralPlan(job) {
@@ -1416,6 +1423,188 @@ function chainContent(store, job, ui, width) {
   };
 }
 
+function subagentEmpty(job, state) {
+  if (job.provider === 'cursor') {
+    return {
+      message: 'Cursor can run subagents, but this transport exposed no child records. Child transcripts are unavailable.'
+    };
+  }
+  if (state.status === 'remote-unavailable' || job.remote) {
+    return {
+      message: 'Subagent discovery is unavailable from this remote TUI connection.',
+      action: 'Remote detail cannot reach the provider app-server; this is not an authoritative zero.'
+    };
+  }
+  if (state.status === 'unavailable') {
+    return {
+      message: 'Subagent discovery is unavailable for this Codex version or thread store.',
+      action: 'This lookup failed; no zero-child claim is being made.'
+    };
+  }
+  if (state.status === 'ready') {
+    return { message: 'No worker subagents or guardians were recorded for this job.' };
+  }
+  return { message: 'Loading bounded subagent discovery from the parent thread.' };
+}
+
+function subagentTranscriptContent(job, ui, state) {
+  const threadId = ui.subagentTranscriptId;
+  const snapshot = state.snapshot?.threadId === threadId ? state.snapshot : null;
+  if (!snapshot || snapshot.status === 'loading') {
+    return {
+      title: 'Subagent transcript | Stored snapshot',
+      loading: true,
+      loadingGlyph: spinnerGlyph(nowOf(ui)),
+      summary: { text: 'bounded point-in-time read' },
+      content: { kind: 'empty', message: 'Loading a bounded stored snapshot for the selected child.' },
+      scrollItemCount: 0,
+      subagentTranscriptOpen: true
+    };
+  }
+  if (snapshot.status === 'unavailable' || snapshot.mode === 'unavailable') {
+    const cursor = job.provider === 'cursor';
+    return {
+      title: 'Subagent transcript | Unavailable',
+      summary: { text: 'no transcript was fabricated' },
+      content: {
+        kind: 'empty',
+        message: cursor
+          ? 'Cursor child transcript unavailable.'
+          : 'Stored child transcript unavailable.',
+        action: snapshot.message || (cursor
+          ? 'Cursor exposes lifecycle signals here but no child session id or transcript locator.'
+          : 'The selected child could not be read from this Codex thread store or local fallback.')
+      },
+      scrollItemCount: 0,
+      subagentTranscriptOpen: true
+    };
+  }
+  const events = snapshot.events || [];
+  const projector = transcriptProjector(`child:${job.id}:${threadId}`);
+  const entries = projector.project(events, {
+    expandedTools: ui.expandedTools,
+    jobCwd: job.cwd,
+    now: nowOf(ui),
+    jobTerminal: snapshot.pointInTime !== true,
+    timestampMode: ui.timestampMode
+  });
+  const label = snapshot.mode === 'disk' ? 'Disk fallback' : 'Stored';
+  const captured = formatTimestamp(snapshot.capturedAtMs, { mode: ui.timestampMode, now: nowOf(ui) }) || 'just now';
+  const pointInTime = snapshot.pointInTime === true;
+  return {
+    title: `Subagent transcript | ${label} snapshot`,
+    summary: {
+      text: joinDisplayParts([
+        `${entries.length} blocks`,
+        `captured ${captured}`,
+        snapshot.truncated ? 'bounded tail truncated' : '',
+        pointInTime ? 'point-in-time; may be incomplete and may grow' : ''
+      ])
+    },
+    content: entries.length ? {
+      kind: 'rail',
+      virtual: true,
+      entries,
+      formatEntry: formatTranscriptBlock,
+      wrapEntry: wrapTranscriptBlock,
+      styleLine: transcriptLineStyle,
+      measureKey: `child-transcript:${job.id}:${threadId}:${snapshot.capturedAtMs || 0}`,
+      follow: false,
+      scroll: ui.detailScroll || 0,
+      selectedEntry: Math.max(0, Math.min(entries.length - 1, Number(ui.subagentTranscriptSelection || 0)))
+    } : {
+      kind: 'empty',
+      message: 'No displayable child transcript items were present in this bounded snapshot.',
+      action: pointInTime
+        ? 'Point-in-time read: this child is still running, so the snapshot may be incomplete and may grow.'
+        : 'The stored snapshot contained no displayable user, assistant, tool, or file-change items.'
+    },
+    notice: pointInTime
+      ? 'Point-in-time read: this child is still running, so the snapshot may be incomplete and may grow.'
+      : 'Bounded stored snapshot; no live subscription is attached.',
+    scrollItemCount: entries.length,
+    subagentTranscriptOpen: true
+  };
+}
+
+function subagentContent(job, store, ui, width) {
+  const state = store.subagentsByJob?.[job.id] || { status: job.remote ? 'remote-unavailable' : 'idle', threads: [] };
+  if (ui.subagentTranscriptId) return subagentTranscriptContent(job, ui, state);
+  const rows = projectSubagentRows(job, store.eventsByJob?.[job.id] || [], state);
+  const displayed = subagentRowsForDisplay(rows, ui.guardiansExpanded === true);
+  const selection = Math.max(0, Math.min(Math.max(0, displayed.length - 1), Number(ui.subagentSelection || 0)));
+  const selected = displayed[selection] || null;
+  const taskWidth = Math.max(12, width - 77);
+  const tableRows = displayed.map((row) => ({
+    agent: `${row.depth == null ? '' : '  '.repeat(Math.max(0, row.depth - 1))}${row.agentName || row.id.slice(-12)}`,
+    depth: row.depth == null ? '\u2014' : String(row.depth),
+    role: row.role || '\u2014',
+    task: row.task || '\u2014',
+    status: row.status || '\u2014',
+    elapsed: subagentElapsedMs(row, nowOf(ui, store)) == null ? '\u2014' : duration(subagentElapsedMs(row, nowOf(ui, store))),
+    transcript: row.category ? '\u2014' : row.transcript
+  }));
+  if (!displayed.length) {
+    const empty = subagentEmpty(job, state);
+    return {
+      title: 'Subagents',
+      summary: { text: state.status === 'loading' ? 'discovery pending' : '0 child rows' },
+      loading: state.status === 'loading',
+      loadingGlyph: spinnerGlyph(nowOf(ui, store)),
+      content: { kind: 'empty', ...empty },
+      scrollItemCount: 0,
+      subagentRows: [],
+      subagentRowIds: []
+    };
+  }
+  const discoveryNote = state.status === 'unavailable'
+    ? 'discovery unavailable; lifecycle rows only'
+    : state.status === 'remote-unavailable' ? 'remote discovery unavailable; lifecycle rows only' : '';
+  const detailRows = selected?.category ? [
+    { key: 'category', value: selected.agentName },
+    { key: 'state', value: ui.guardiansExpanded ? 'expanded' : 'collapsed' },
+    { key: 'meaning', value: 'Guardians do not participate in the worker spawn-edge thread list.' }
+  ] : selected ? [
+    { key: 'id', value: selected.id },
+    { key: 'parent thread', value: selected.parentThreadId || '\u2014' },
+    { key: 'model', value: selected.model || '\u2014' },
+    { key: 'agent path', value: selected.agentPath || '\u2014' },
+    { key: 'usage', value: selected.usage ? formatDisplayValue(selected.usage) : '\u2014' },
+    { key: 'output', value: selected.output || '\u2014' }
+  ] : [];
+  return {
+    title: 'Subagents',
+    summary: { text: joinDisplayParts([`${rows.filter((row) => !row.guardian).length} workers`, `${rows.filter((row) => row.guardian).length} guardians`, discoveryNote]) },
+    panes: [
+      {
+        title: 'Subagents | flat spawn tree',
+        content: {
+          kind: 'table',
+          selected: selection,
+          scroll: ui.detailScroll || 0,
+          columns: [
+            { key: 'agent', title: 'Agent', width: 17 },
+            { key: 'depth', title: 'Depth', width: 7 },
+            { key: 'role', title: 'Role', width: 11 },
+            { key: 'task', title: 'Task', width: taskWidth },
+            { key: 'status', title: 'Status', width: 11 },
+            { key: 'elapsed', title: 'Elapsed', width: 9 },
+            { key: 'transcript', title: 'Transcript', width: 15 }
+          ],
+          rows: tableRows
+        }
+      },
+      {
+        title: selected?.category ? 'Guardian category' : 'Selected child detail',
+        content: { kind: 'key-value', rows: detailRows, sectionGap: 0, follow: false, scroll: 0 }
+      }
+    ],
+    scrollItemCount: displayed.length,
+    subagentRows: displayed,
+    subagentRowIds: displayed.map((row) => row.id)
+  };
+}
+
 function detailContent(job, store, ui, tab, activity, tabName) {
   const events = store.eventsByJob?.[job.id] || [];
   const hydration = store.hydrationByJob?.[job.id];
@@ -1595,6 +1784,7 @@ function detailContent(job, store, ui, tab, activity, tabName) {
       scrollItemCount: fieldCount + usage.sections.length
     };
   }
+  if (tabName === 'Subagents') return subagentContent(job, store, ui, Math.max(20, Number(ui.viewportWidth || 80) - 2));
   if (tabName === 'Plan') return planContent(job, ui);
   if (tabName === 'Chain') return chainContent(store, job, ui, Math.max(1, Number(ui.viewportWidth || 80) - 2));
   const typeFilter = formatDisplayValue(ui.eventFilter).toLowerCase();
@@ -1669,19 +1859,30 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
     headerActivity.text += visibility;
     headerActivity.segments.push({ text: visibility, style: palette.dim });
   }
+  const detailHeight = Math.max(3, height - 4);
+  const panes = body.panes?.length ? body.panes.map((pane, index) => {
+    const firstHeight = Math.max(5, Math.floor(detailHeight * 0.64));
+    const paneHeight = index === 0 ? firstHeight : Math.max(3, detailHeight - firstHeight);
+    const y = index === 0 ? 3 : 3 + firstHeight;
+    return {
+      ...pane,
+      rect: { x: 0, y, width, height: paneHeight },
+      ...(index === 0 ? { summary: detailSummary(job, body.summary, height) } : {})
+    };
+  }) : [{
+    rect: { x: 0, y: 3, width, height: detailHeight },
+    title: body.title,
+    summary: detailSummary(job, body.summary, height),
+    loading: body.loading,
+    loadingGlyph: body.loadingGlyph,
+    content: body.content
+  }];
   const frame = {
     width, height, screen: 'detail',
     title: { text: joinDisplayParts([`origin ${originName}`, job.id, job.provider, job.resolvedModel || job.model || 'auto']), right: headerActivity.text, rightStyle: activityStyle(activity) },
     headerActivity,
     tabs: { rect: { x: 0, y: 1, width, height: 1 }, items: tabs, active: tab },
-    panes: [{
-      rect: { x: 0, y: 3, width, height: Math.max(3, height - 4) },
-      title: body.title,
-      summary: detailSummary(job, body.summary, height),
-      loading: body.loading,
-      loadingGlyph: body.loadingGlyph,
-      content: body.content
-    }],
+    panes,
     status: errorStatus(ui) || { text: '' },
     meta: {
       jobId: job.id,
@@ -1698,6 +1899,9 @@ export function detailViewModel(store, ui = {}, viewport = {}) {
       toolEntryKeys: body.toolEntryKeys || [],
       subagentCount: Number(body.subagentCount || 0),
       subagentEntryKeys: body.subagentEntryKeys || [],
+      subagentRows: body.subagentRows || [],
+      subagentRowIds: body.subagentRowIds || [],
+      subagentTranscriptOpen: body.subagentTranscriptOpen === true,
       eventCount: Number(body.eventCount || 0),
       eventEntryKeys: body.eventEntryKeys || [],
       errorCount: Number(body.errorCount || 0),

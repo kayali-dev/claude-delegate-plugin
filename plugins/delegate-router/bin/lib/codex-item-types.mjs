@@ -13,6 +13,7 @@ export const CODEX_FIRST_CLASS_ITEM_TYPES = Object.freeze([
   'commandExecution',
   'mcpToolCall',
   'dynamicToolCall',
+  'collabToolCall',
   'collabAgentToolCall',
   'fileChange',
   'contextCompaction',
