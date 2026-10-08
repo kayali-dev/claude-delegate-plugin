@@ -15,6 +15,7 @@ import { resolveAttemptDriverMatrix } from './lib/attempt-driver.mjs';
 import { auditLogPath, effectiveUsage, enabledProviders, loadState, mutateState, providerEnabled, providerNames, providerConfigPath, statePath } from './lib/state.mjs';
 import { maintenanceLogPath, measureStateStore } from './lib/store-maintenance.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
+import { probeLegacyCodexMcp } from './lib/codex-cli.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout, windowsHide: true });
@@ -68,7 +69,10 @@ if (report.usage.cursor && !report.usage.cursor.known) {
   report.usage.cursor.note = 'expected: Cursor exposes no allowance API; record the dashboard percentage manually with delegate-usage set cursor <percent> --window first-party';
 }
 
-if (report.codex.enabled && codexBinary) report.codex.version = run(codexBinary, ['--version'], 5000);
+if (report.codex.enabled && codexBinary) {
+  report.codex.version = run(codexBinary, ['--version'], 5000);
+  report.codex.legacyMcp = probeLegacyCodexMcp(codexBinary);
+}
 if (report.cursor.enabled && cursorBinary) {
   report.cursor.version = runCursor(cursorBinary, ['--version'], 5000);
   const projectConfig = inspectCursorProjectConfig(process.cwd());
@@ -199,6 +203,7 @@ else {
   console.log(`Claude: ${report.claude.installed ? 'installed' : 'missing'}`);
   console.log(`Enabled providers: ${configuredProviders.join(', ')}`);
   console.log(`Codex: ${report.codex.enabled ? report.codex.installed ? 'installed' : 'missing' : 'disabled'}`);
+  if (report.codex.legacyMcp) console.log(`Legacy Codex MCP: ${report.codex.legacyMcp.available ? 'available' : 'unavailable (use managed app-server tools)'}`);
   console.log(`Cursor: ${report.cursor.enabled ? report.cursor.installed ? 'installed' : 'missing' : 'disabled'}${report.cursor.enabled && cursorBinary ? ` (${path.basename(cursorBinary)})` : ''}`);
   console.log(`Control MCP: ${report.control.installed ? 'installed' : 'missing'}`);
   console.log(`Audit log: ${report.auditLogFile}`);

@@ -428,7 +428,7 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.71.0' },
+        serverInfo: { name: 'delegate-control', version: '0.71.1' },
         instructions: MCP_INSTRUCTIONS
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS.map((tool) => ({ ...tool, annotations: toolAnnotations(tool.name) })) } });

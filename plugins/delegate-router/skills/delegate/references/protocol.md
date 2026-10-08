@@ -3,6 +3,11 @@
 ## Layers
 
 - Codex uses app-server v2 for coding-specific events, interruption, and true `turn/steer`.
+- Current Codex removed `mcp-server`; use managed app-server tools. The optional
+  `delegate_codex` wrapper exposes the legacy foreground tools only when bounded
+  top-level CLI help advertises the exact command. Otherwise it initializes
+  normally with no tools and an actionable managed-tool instruction. Disabled
+  providers are never probed; unsupported commands are never used as TUI prompts.
 - Cursor uses ACP v1 for sessions, structured updates, model/mode configuration, and cancellation.
 - The broker uses an A2A-inspired durable job lifecycle and an AG-UI-inspired normalized event stream.
 - Claude Code consumes the broker through ordinary MCP tools. MCP Tasks may be negotiated later; the plugin does not require the evolving extension.

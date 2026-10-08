@@ -10,7 +10,7 @@ Treat this checkout as the source of truth. Never edit generated copies under `~
 
 Delegate Router keeps Claude as coordinator and final reviewer while routing bounded work to enabled providers:
 
-- Codex through app-server v2 for managed jobs and `codex mcp-server` as a foreground fallback.
+- Codex through app-server v2 for managed jobs. The legacy `codex mcp-server` foreground fallback is exposed only when bounded local CLI help advertises that command; current Codex removed it. Otherwise its optional MCP registration stays healthy with an empty tool catalog and instructions to use managed tools.
 - Cursor through ACP v1, with a headless compatibility fallback.
 - Claude in the current session or a built-in subagent when handoff is not worthwhile.
 

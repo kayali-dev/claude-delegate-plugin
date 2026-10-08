@@ -2,6 +2,17 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.71.1 — 2026-10-08
+
+- Detect the removal of `codex mcp-server` through bounded top-level CLI help,
+  never by trying an unknown command that can become an interactive prompt.
+  Keep the optional legacy registration healthy with no tools and instructions
+  to use managed app-server tools on current/unverified CLIs. Preserve direct
+  shadow-journaled tools on older CLIs that still advertise the command.
+- Skip all executable probing for disabled providers. Report optional legacy
+  MCP availability in quick health without degrading managed Codex readiness.
+  Add fake-only compatibility and fail-closed deadline/output tests; align docs.
+
 ## 0.71.0 — 2026-10-08
 
 - Add native Claude Code Mods: seven immediate local commands, an explicitly

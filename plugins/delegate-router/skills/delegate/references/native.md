@@ -1,6 +1,6 @@
 # Native Claude Code integration
 
-Source release 0.71.0 targets Claude Code 2.1.294 or later. Mods add host-native
+Source release 0.71.1 targets Claude Code 2.1.294 or later. Mods add host-native
 commands, a panel and lifecycle handling; the dependency-free Node broker remains
 the source of job truth. They do not replace provider transports, sandbox policy,
 revisioned controls, the external TUI or the coordinator's final review.

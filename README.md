@@ -2,7 +2,7 @@
 
 A portable Claude Code marketplace containing `delegate-router`. The plugin keeps Claude in charge while it deterministically routes bounded work to:
 
-- Codex through app-server v2 for managed jobs, with `codex mcp-server` as a foreground fallback. Current aliases select GPT-6.1 Sol, GPT-6 Astra, GPT-6 Luna, and the cost-balanced GPT-5.6 Terra. OpenAI's official Claude Code plugin is optional and has its own job lifecycle.
+- Codex through app-server v2 for managed jobs. Older CLIs that still advertise `codex mcp-server` retain a legacy foreground fallback; current Codex removed it. Current aliases select GPT-6.1 Sol, GPT-6 Astra, GPT-6 Luna, and the cost-balanced GPT-5.6 Terra. OpenAI's official Claude Code plugin is optional and has its own job lifecycle.
 - Cursor through ACP v1 with a headless fallback, using the installed catalog's newest eligible Composer and Grok models (currently Composer 2.5 and Grok 4.7).
 - Claude subagents or the current Claude session when handoff cost or task fit makes Claude the better route.
 
@@ -46,11 +46,19 @@ Invoke explicitly with:
 
 Claude may also select the skill automatically when a task matches its description.
 
-Codex users can optionally add OpenAI's official Claude Code plugin for its background review/rescue commands; managed Codex app-server supervision and the native Codex MCP work without it:
+Codex users can optionally add OpenAI's official Claude Code plugin for its background review/rescue commands; managed Codex app-server supervision works without it:
 
 ```bash
 claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex
 ```
+
+[Current Codex no longer hosts an MCP server](https://learn.chatgpt.com/docs/mcp-server).
+The optional `delegate_codex` registration checks bounded local CLI help before
+launching anything: older supported CLIs expose `codex`/`codex-reply`; current or
+unverified CLIs return an empty tool catalog and direct callers to the managed
+`delegate_control` tools. `delegate-health --quick --json` reports this separately
+as `codex.legacyMcp`; absence of the optional fallback does not disable managed
+Codex. No unsupported command is ever forwarded as an interactive model prompt.
 
 ### Update
 

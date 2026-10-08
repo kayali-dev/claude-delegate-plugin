@@ -28,7 +28,8 @@ worker completion as owner acceptance.
    in one short update.
 5. Use managed `delegate_control` MCP tools for external work. Search the host's
    actual namespaced tools; do not assume an unprefixed name. Direct Codex MCP
-   and Cursor CLI are compatibility fallbacks, not durable managed controls.
+   exists only on older CLIs advertising `mcp-server`; current Codex removed it.
+   That legacy path and Cursor CLI are fallbacks, not durable managed controls.
 
 Read [models](references/models.md) for model fit or pins and
 [routing](references/routing.md) when the route is surprising. Full IDs remain

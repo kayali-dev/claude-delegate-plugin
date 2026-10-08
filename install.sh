@@ -99,7 +99,7 @@ claude plugin marketplace add kayali-dev/claude-delegate-plugin || claude plugin
 if [[ "$PROVIDER_MODE" != cursor && "$LEAN" == false ]]; then
   claude plugin marketplace add openai/codex-plugin-cc || true
   if ! claude plugin install codex@openai-codex; then
-    printf 'Warning: optional OpenAI Codex plugin installation failed; managed app-server and native Codex MCP remain available.\n' >&2
+    printf 'Warning: optional OpenAI Codex plugin installation failed; managed app-server remains available. Legacy native Codex MCP requires a CLI that advertises mcp-server.\n' >&2
   fi
 fi
 

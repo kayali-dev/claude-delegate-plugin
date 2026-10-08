@@ -9,6 +9,11 @@ if (process.argv.includes('--version')) {
   process.exit(0);
 }
 
+if (process.argv.includes('--help')) {
+  console.log('Codex CLI\n\nCommands:\n  app-server  Run app server\n\nOptions:\n  --help  Print help');
+  process.exit(0);
+}
+
 if (process.env.FAKE_CODEX_SPAWN_COUNT_FILE) {
   let count = 0;
   try { count = Number(fs.readFileSync(process.env.FAKE_CODEX_SPAWN_COUNT_FILE, 'utf8')) || 0; } catch {}

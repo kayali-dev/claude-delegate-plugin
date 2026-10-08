@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
 
+if (process.argv.includes('--help')) {
+  console.log('Codex CLI\n\nCommands:\n  mcp-server  Run legacy MCP server\n  app-server  Run app server\n\nOptions:\n  --help  Print help');
+  process.exit(0);
+}
+
 const threadId = '019f-shadow-codex-thread';
 let turn = 0;
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);

@@ -7,9 +7,14 @@ import { DeltaRedactor, latestShadowJobForSession } from './lib/control.mjs';
 import { beginDirectShadow } from './lib/direct-shadow.mjs';
 import { ActivityTransitionEmitter, mapCodexMcpEvent } from './lib/providers.mjs';
 import { providerEnabled } from './lib/state.mjs';
+import { probeLegacyCodexMcp } from './lib/codex-cli.mjs';
 
-if (providerEnabled('codex')) {
-  const child = spawn(process.env.DELEGATE_CODEX_BIN || 'codex', [
+const enabled = providerEnabled('codex');
+const binary = process.env.DELEGATE_CODEX_BIN || 'codex';
+const legacyMcp = enabled ? probeLegacyCodexMcp(binary) : null;
+
+if (enabled && legacyMcp.available) {
+  const child = spawn(binary, [
     'mcp-server',
     '-c', 'approval_policy="on-request"',
     '-c', 'approvals_reviewer="auto_review"',
@@ -191,12 +196,14 @@ if (providerEnabled('codex')) {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: negotiateMcpVersion(request.params?.protocolVersion),
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-codex-disabled', version: '0.71.0' }
+        serverInfo: { name: enabled ? 'delegate-codex-unavailable' : 'delegate-codex-disabled', version: '0.71.1' },
+        ...(enabled ? { instructions: legacyMcp.note } : {})
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: [] } });
     else if (request.method === 'resources/list') send({ jsonrpc: '2.0', id: request.id, result: { resources: [] } });
+    else if (request.method === 'resources/templates/list') send({ jsonrpc: '2.0', id: request.id, result: { resourceTemplates: [] } });
     else if (request.method === 'prompts/list') send({ jsonrpc: '2.0', id: request.id, result: { prompts: [] } });
     else if (request.method === 'ping') send({ jsonrpc: '2.0', id: request.id, result: {} });
-    else send({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Codex provider is disabled for this installation' } });
+    else send({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: enabled ? legacyMcp.note : 'Codex provider is disabled for this installation' } });
   });
 }
