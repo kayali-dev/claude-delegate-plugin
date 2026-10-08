@@ -45,6 +45,10 @@ import {
 import { compareVersions } from './cursor.mjs';
 import { delay, JsonRpcProcess } from './jsonrpc.mjs';
 import { brokerError, normalizeBrokerError } from './errors.mjs';
+import { resolveCodexModel } from './models.mjs';
+import { discoverCodexModels, validateCodexSelection } from './model-catalog.mjs';
+import { nativeOutputSchema, parseLastStructuredResult } from './structured-output.mjs';
+import { recordWorkBudgetUsage, workBudgetSnapshot } from './work-budget.mjs';
 import { assembleProviderPrompt, securityPreamble } from './packet.mjs';
 import { terminateProcessTree } from './process.mjs';
 import { loadJob, mutateState, setWindow } from './state.mjs';
@@ -78,7 +82,8 @@ import {
   planPrompt,
   planRetryPrompt,
   planRequestId,
-  planReviewPresentation
+  planReviewPresentation,
+  STRUCTURAL_PLAN_SCHEMA
 } from './planning.mjs';
 import { recordProviderCliVersion } from './outcome-ledger.mjs';
 import {
@@ -504,10 +509,6 @@ function recordInterrogationUnavailable(jobId, command, error, transport, claime
   });
   if (claimed) completeCommand(jobId, claimed, { ok: false, error: reason, degraded: true });
   else settleQueuedControl(jobId, command.commandId, { ok: false, error: reason, degraded: true });
-}
-
-function codexModel(model) {
-  return ({ sol: 'gpt-5.6-sol', terra: 'gpt-5.6-terra', luna: 'gpt-5.6-luna' })[model] || (model === 'auto' ? null : model);
 }
 
 function readOnly(job) {
@@ -1002,48 +1003,6 @@ function codexChangedPaths(item) {
   return (item.changes || []).map((change) => change?.path || change?.file || change?.filename).filter(Boolean);
 }
 
-function jsonTypeMatches(value, type) {
-  if (type === 'null') return value === null;
-  if (type === 'array') return Array.isArray(value);
-  if (type === 'object') return value != null && typeof value === 'object' && !Array.isArray(value);
-  if (type === 'integer') return Number.isInteger(value);
-  return typeof value === type;
-}
-
-function structuredResultMatchesSchema(value, schema) {
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return true;
-  const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
-  if (types.length && !types.some((type) => jsonTypeMatches(value, type))) return false;
-  if (Array.isArray(schema.enum) && !schema.enum.some((item) => JSON.stringify(item) === JSON.stringify(value))) return false;
-  if (Object.hasOwn(schema, 'const') && JSON.stringify(schema.const) !== JSON.stringify(value)) return false;
-  if (Array.isArray(value)) {
-    if (Number.isInteger(schema.minItems) && value.length < schema.minItems) return false;
-    if (Number.isInteger(schema.maxItems) && value.length > schema.maxItems) return false;
-    if (schema.items && !value.every((item) => structuredResultMatchesSchema(item, schema.items))) return false;
-  }
-  if (value != null && typeof value === 'object' && !Array.isArray(value)) {
-    if (Array.isArray(schema.required) && schema.required.some((key) => !Object.hasOwn(value, key))) return false;
-    const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
-    if (schema.additionalProperties === false && Object.keys(value).some((key) => !Object.hasOwn(properties, key))) return false;
-    for (const [key, propertySchema] of Object.entries(properties)) {
-      if (Object.hasOwn(value, key) && !structuredResultMatchesSchema(value[key], propertySchema)) return false;
-    }
-  }
-  return true;
-}
-
-function parseLastStructuredResult(text, schema) {
-  const blocks = [...String(text || '').matchAll(/```json\s*([\s\S]*?)```/gi)];
-  if (!blocks.length) return null;
-  try {
-    const parsed = JSON.parse(blocks.at(-1)[1].trim());
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) && structuredResultMatchesSchema(parsed, schema)
-      ? parsed
-      : null;
-  } catch {
-    return null;
-  }
-}
 
 async function holdBeforeFirstTurn(job, deadline) {
   if (!job.startPaused) return true;
@@ -1149,6 +1108,10 @@ function persistProviderCliVersion(jobId, info, source = 'cli-version-check') {
 }
 
 export function recordUsage(job, usage, options = {}) {
+  const before = loadJob(job.id) || job;
+  // A native child's counter is not the parent's aggregate, and adding both
+  // would invent cost attribution. Keep the owner job's usage identity intact.
+  if (job.provider === 'codex' && options.sessionId && before.providerSessionId && options.sessionId !== before.providerSessionId) return null;
   appendJobEvent(job.id, 'usage.updated', usage, options);
   const reportedPlanTokens = primaryPlanOutputTokens({ planning: {} }, usage);
   updateManagedJob(job.id, (current) => {
@@ -1161,6 +1124,16 @@ export function recordUsage(job, usage, options = {}) {
   attributeInterrogationUsage(job.id, usage);
   const totals = usageTotals(usage);
   const current = loadJob(job.id) || job;
+  const source = usage?.total && typeof usage.total === 'object' ? usage.total : usage;
+  const reportedOutput = ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens']
+    .map(key => source?.[key]).find(value => typeof value === 'number' && Number.isFinite(value));
+  let workBudget;
+  try { workBudget = recordWorkBudgetUsage(current, reportedOutput ?? null); }
+  catch (error) { return normalizeBrokerError(error, { defaultCode: 'STATE_ERROR', provider: job.provider }); }
+  if (workBudget?.exceeded) return brokerError('BUDGET_EXCEEDED', `work-level reported output ${workBudget.observedOutputTokens} exceeded its ${workBudget.maxOutputTokens} token budget`, {
+    provider: job.provider, rootJobId: workBudget.rootJobId,
+    maxOutputTokens: workBudget.maxOutputTokens, observedOutputTokens: workBudget.observedOutputTokens
+  });
   const external = Number(current.planning?.externalOutputTokensReserved || 0);
   const attributedOutputTokens = totals ? totals.outputTokens + external : null;
   const planLimit = Number(current.planningFor
@@ -2166,12 +2139,21 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.69.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.71.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
-    const model = codexModel(job.model);
+    const model = resolveCodexModel(job.model);
+    const catalog = await discoverCodexModels(rpc, { timeoutMs: Math.max(100, Math.min(2000, deadline - Date.now())) });
+    const preflight = validateCodexSelection(catalog, job.model, job.effort);
+    updateManagedJob(job.id, current => { current.modelPreflight = preflight; }, { incrementRevision: false });
+    appendJobEvent(job.id, 'model.preflight', preflight);
     const baseConfig = job.effort ? { model_reasoning_effort: job.effort } : {};
+    if (job.maxSubagents === 0) baseConfig['agents.enabled'] = false;
+    else if (job.maxSubagents != null) {
+      baseConfig['agents.enabled'] = true;
+      baseConfig['agents.max_concurrent_threads_per_session'] = job.maxSubagents;
+    }
     const common = {
       model,
       cwd: job.cwd,
@@ -2211,19 +2193,34 @@ async function runCodex(job, driver) {
     const startTurn = async (text, sandbox = codexSandboxMode(loadJob(job.id))) => {
       turnDone = new Promise((resolve) => { turnResolve = resolve; });
       let result;
+      const current = loadJob(job.id);
+      const planning = Boolean(current.planningFor) || current.planning?.state === 'running';
+      const outputSchema = nativeOutputSchema(planning ? STRUCTURAL_PLAN_SCHEMA : current.reportSchema);
+      const params = {
+        threadId,
+        input: [{ type: 'text', text: outputSchema ? `${text}\n\nNative JSON output contract: return the final answer as the schema-matching JSON object, without Markdown fences or surrounding prose. This changes formatting only, not task authority.` : text, text_elements: [] }],
+        cwd: job.cwd,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review',
+        model,
+        sandbox,
+        ...(outputSchema ? { outputSchema } : {})
+      };
       try {
-        result = await driver.prompt(() => rpc.request('turn/start', {
-          threadId,
-          input: [{ type: 'text', text, text_elements: [] }],
-          cwd: job.cwd,
-          approvalPolicy: 'on-request',
-          approvalsReviewer: 'auto_review',
-          model,
-          sandbox
-        }));
+        result = await driver.prompt(() => rpc.request('turn/start', params));
       } catch (error) {
-        throw mapCodexResumeError(error, Boolean(job.providerSessionId));
+        // Only a pre-turn unknown-field refusal can remove native formatting.
+        // Task/model/schema validation errors never trigger paid retries.
+        if (!outputSchema || error.rpcCode !== -32602 || !/outputSchema|output_schema/i.test(error.message)
+          || !/unknown|unrecognized|unsupported|unexpected/i.test(error.message)) {
+          throw mapCodexResumeError(error, Boolean(job.providerSessionId));
+        }
+        delete params.outputSchema;
+        params.input[0].text = text;
+        appendJobEvent(job.id, 'provider.event', { providerEvent: 'codex:output-schema-unavailable', fallback: 'broker-validated-report', turnStarted: false });
+        result = await driver.prompt(() => rpc.request('turn/start', params));
       }
+      if (outputSchema && params.outputSchema) appendJobEvent(job.id, 'provider.event', { providerEvent: 'codex:output-schema', contract: planning ? 'structural-plan' : 'report' });
       recordSession(job.id, threadId, result.turn.id);
       return result.turn.id;
     };
@@ -2492,7 +2489,7 @@ export function cursorModelDetailed(options, requested) {
     }
     pool = [...pool].sort((a, b) =>
       ((EFFORT_RANK[b.effort] || 0) - (EFFORT_RANK[a.effort] || 0))
-      || b.base.localeCompare(a.base, undefined, { numeric: true }));
+      || b.base.replace(/^cursor-/, '').localeCompare(a.base.replace(/^cursor-/, ''), undefined, { numeric: true }));
     return pool[0] || null;
   };
   if (!requested || requested === 'auto') {
@@ -3339,7 +3336,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.69.1' }
+      clientInfo: { name: 'delegate-router', version: '0.71.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -4416,7 +4413,11 @@ export function managedAttemptDriver(job) {
   driver = createAttemptDriver(lane, {
     start: execute,
     resume: execute,
-    prompt: invokeLifecycleOperation,
+    prompt: async (operation, ...args) => {
+      const budget = workBudgetSnapshot(loadJob(job.id) || job);
+      if (budget?.exhausted) throw brokerError('BUDGET_EXCEEDED', 'work-level reported-output budget is exhausted before a new provider turn', { provider: job.provider });
+      return invokeLifecycleOperation(operation, ...args);
+    },
     steer: invokeLifecycleOperation,
     cancel: invokeLifecycleOperation,
     close: invokeLifecycleOperation
@@ -4466,6 +4467,8 @@ export async function runManagedProvider(job) {
   const policy = job.retryPolicy || { maxAttempts: 1, retryOn: [] };
   for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
     try {
+      const budget = workBudgetSnapshot(loadJob(job.id));
+      if (budget?.exhausted) throw brokerError('BUDGET_EXCEEDED', 'work-level reported-output budget is exhausted before provider start', { provider: job.provider });
       await runProviderAttempt(loadJob(job.id));
       const current = inspectJob(job.id);
       if (current.status === 'running' && current.phase === 'verifying') await finishVerification(loadJob(job.id));

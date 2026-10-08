@@ -1,7 +1,7 @@
 {
   "name": "delegate-router",
   "displayName": "Delegate Router",
-  "version": "0.69.1",
+  "version": "0.71.0",
   "description": "Quota-aware delegation and live supervision for Codex and Cursor agents.",
   "author": {
     "name": "Mahmoud Kayyali",
@@ -16,5 +16,27 @@
     "usage"
   ],
   "homepage": "https://github.com/kayali-dev/claude-delegate-plugin",
-  "repository": "https://github.com/kayali-dev/claude-delegate-plugin"
+  "repository": "https://github.com/kayali-dev/claude-delegate-plugin",
+  "userConfig": {
+    "native_enabled": {
+      "type": "boolean", "title": "Native Claude Code integration", "default": true,
+      "description": "Enable native commands and the job panel. Disabling it leaves the existing hooks, CLI and MCP broker unchanged."
+    },
+    "usage_capture": {
+      "type": "boolean", "title": "Capture official Claude allowance", "default": true,
+      "description": "Read Claude Code's native subscription-window data locally. Never reads credentials or queries a usage endpoint."
+    },
+    "compact_status": {
+      "type": "boolean", "title": "Show active-work status", "default": true,
+      "description": "Show one compact native status line only while jobs are running, blocked or awaiting review."
+    },
+    "reviewer_guard": {
+      "type": "boolean", "title": "Protect Claude reviewer headroom", "default": true,
+      "description": "Refuse this plugin's reviewer above the Claude avoid threshold; never changes an explicitly requested model."
+    },
+    "refresh_seconds": {
+      "type": "number", "title": "Local dashboard refresh interval", "default": 5, "min": 3, "max": 30,
+      "description": "Refresh broker metadata every 3–30 seconds (values outside the range are clamped). No model or provider calls."
+    }
+  }
 }

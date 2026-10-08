@@ -13,8 +13,8 @@ or ~/.local/state/delegate-router/usage.json
 ## Provider Truth
 
 - Codex: `delegate-usage refresh codex` queries the official app-server `account/rateLimits/read` method and stores primary (five-hour) and secondary (weekly) windows. Managed Codex jobs also capture pushed `account/rateLimits/updated` notifications, so the snapshot stays fresh during every job. Both paths append bounded allowance snapshots to history for capture-window comparison.
-- Claude: `delegate-config statusline enable` wraps (or installs) the Claude Code status line so the official `rate_limits.five_hour` and `rate_limits.seven_day` payload flows into usage state on every render. The wrapper prefixes the session-scoped Delegate work chip, then runs the user's original command unchanged; a five-second `refreshInterval` keeps background state current while Claude Code's 300 ms debounce handles bursts. `delegate-config statusline disable` restores the exact previous configuration. Manual values are also accepted. Anthropic's Consumer Terms prohibit using Claude OAuth tokens in any third-party tool, so this plugin deliberately does not query any usage endpoint directly — the status line is the sanctioned channel.
-- Cursor: no stable public quota CLI/API is assumed. Cursor meters two monthly pools; the one Delegate Router consumes is the first-party pool (Auto, Composer, Grok). Enter its dashboard percentage with `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>`; the `--reset` epoch makes the entry expire at the monthly cycle boundary instead of going stale. Invocation history is an estimate and never converted into a fake quota percentage. Local token-counting tools (ccusage, tokscale, TokenTracker) estimate from transcripts and must not be treated as quota truth.
+- Claude: native Mods consume official `$.session.usage()` / `session.measure` subscription windows and copy only five-hour/weekly percentage/reset fields into usage state. No breakdown/model call, credential read or usage endpoint is used. Empty readings remain unknown, not zero. Optional `delegate-config statusline enable` wraps (or installs) the status line to capture its official `rate_limits.five_hour` and `rate_limits.seven_day` payload too. The wrapper prefixes the session-scoped work chip, then runs the user's original command unchanged; `delegate-config statusline disable` restores the exact previous configuration. Manual values remain valid. See [native integration](native.md).
+- Cursor: no stable public quota CLI/API is assumed. Cursor meters two monthly pools: Cursor Models for Composer/Grok and Other Models for third-party selections. Auto may consume either; pin a first-party model when pool selection matters. Record each relevant dashboard percentage with `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>` (use `--window other-models` for the other pool). The guard uses the maximum reliable active window. `--reset` expires an entry at the billing boundary. Invocation history and local transcript estimates are never converted into quota percentages.
 
 ## Commands
 
@@ -27,12 +27,12 @@ delegate-usage guard <provider> [threshold]
 delegate-usage record <provider> <model> <started|ok|failed> [--mode mode] [--thread id]
 delegate-usage history [count]
 delegate-route --json --mode <mode> --effort <level> --task <summary>
-delegate-health [--quick] [--deep] [--json]
+delegate-health [--quick] [--deep] [--capabilities] [--json]
 delegate-config show
 delegate-config providers <codex|cursor|both>
 delegate-config statusline <enable|disable|show>
 delegate-config footer-links <enable|disable|show>
-delegate-jobs start|status|stats|group|inspect|events|transcript|wait|diff|files|steer|cancel|release|respond|accept|reject|resume|usage|result|logs|prune <job-id>
+delegate-jobs --help   # complete command/flag surface, including spec/work/verify/integrate/workspace
 ```
 
 The default avoid threshold is 90% for Claude and Codex and 80% for Cursor (stricter because Cursor overage bills on-demand instead of throttling), configurable globally with `DELEGATE_AVOID_PERCENT` or per provider with `DELEGATE_<PROVIDER>_AVOID_PERCENT`. Thresholds act only on reliable data: manual entries without a `--reset` boundary expire after `DELEGATE_MANUAL_USAGE_TTL_DAYS` (default 7) and revert to unknown. `guard` exits 75 when the provider is at or above the threshold so the router can choose a fallback.
@@ -41,7 +41,20 @@ The plugin's `PreToolUse` hook hard-blocks new native or official-plugin Codex w
 
 Per-job observed tokens and context occupancy are separate dimensions, neither of which is a subscription allowance percentage. `delegate_usage.tokenUsage` / `observed` contains input/output/total tokens and feeds the `maxOutputTokens` check; `chainCumulative` sums those token counters from the root job through the inspected continuation. Cursor ACP `usage_update {used,size}` is stored only as `contextOccupancy: { contextUsed, contextSize }`, never interpreted as output tokens and never compared with `maxOutputTokens`. Headless Cursor records tokens only from its final `result.usage` envelope. Routing continues to use the provider windows in `usage.json`.
 
-Plan-first uses a separate 4,096-token structured output default that does not
+`maxTotalOutputTokens` adds an opt-in shared work budget across continuations,
+auto-fix, and independent planners. `delegate_usage.workBudget` reads its private
+ledger, with Codex thread-cumulative reports counted once and Cursor attempts
+counted separately; use that value for the shared cap, not the legacy
+`chainCumulative` sum. The immutable limit blocks descendants after known
+exhaustion and triggers normal provider cancellation on excess. It is only
+provider-reported output: completion-only reports, concurrent overshoot, missing
+usage, and unreported native-child costs prevent a dollar/allowance guarantee.
+It uses thread/attempt high-watermarks; lower reports never refund budget and
+set `counterDecreasesObserved`. Counter resets and stale reports cannot be
+distinguished, so any post-reset cost coverage remains unverified.
+
+Plan-first uses a separate 8,192-token primary/Codex structured output default
+(12,288 for a Cursor independent planner) that does not
 scale with packet bytes or directive markers; the prompt itself requires one
 compact structural answer. The configurable ceiling remains 16,384 tokens;
 `DELEGATE_PLAN_OUTPUT_TOKENS` overrides it without changing provider allowance.
@@ -74,6 +87,13 @@ minimum-sample suppression: a 14/14 degradation era must display as
 `--since` / MCP `since` accepts a duration (`24h`, `7d`), ISO date (`2026-07-17`), or broker version (`0.42.0`); `--until` / MCP `until` supplies an exclusive ISO-date upper bound. Responses include broker-version and UTC-day cohorts with explicit ORPHANED counts, so a historical failure era remains visible without contaminating a selected current view. `--recommend-for <mode>` (optional `--recommend-access read|write`) or MCP `recommendFor` requests advisory outcome evidence. It uses only explicit owner-acceptance labels, requires at least 20 labels per provider, attaches a fixed 95% Wilson interval, and recommends only when the leading lower bound exceeds the runner-up upper bound. Otherwise it returns `insufficient-data`; it never changes the static router.
 
 The response also retains `totals`, transport/model groups, `external`, and `unattributed`. `external` counts only proven tool-originated, non-broker Codex threads and sums token fields only when the bounded thread tail actually carries provider counters; absence remains `null`, never an estimate. `unattributed` remains explicitly approximate allowance movement and is unavailable for broker-version selections because allowance markers have no broker-version attribution. `delegate-health --deep` intentionally spends real allowance on one bounded managed probe per enabled provider and writes its `{ provider, ok, durationMs, cliVersion, at }` result under `lastVerified`. Ordinary Cursor health uses `agent status --format json` with a text fallback and a no-turn ACP initialize/session-new capability probe; neither spends model allowance.
+
+`--model <exact-id>` / MCP `model` selects recorded model IDs exactly.
+`modelCohorts` groups by provider, full model ID, effort, transport, provider CLI,
+and policy version, with sample counts and latency/output percentiles. Historical
+aliases are marked `generation-unknown`; they are never relabeled as today's
+alias targets. Missing usage remains missing. These are observed outcome cohorts,
+not randomized model-quality evaluations, and they do not change routing.
 
 `DELEGATE_MONITOR_SCOPE=session|workspace|all` filters ambient push only; `off`
 disables push. It never filters usage, stats, `delegate_list`,

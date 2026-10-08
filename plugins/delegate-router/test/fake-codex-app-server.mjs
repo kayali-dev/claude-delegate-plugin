@@ -95,6 +95,13 @@ lines.on('line', async (line) => {
   }
   if (request.id == null) return;
   if (request.method === 'initialize') send({ jsonrpc: '2.0', id: request.id, result: { userAgent: 'fake' } });
+  else if (request.method === 'model/list') {
+    const catalog = ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.4-mini', 'gpt-5.4'];
+    send({ jsonrpc: '2.0', id: request.id, result: { data: catalog.map(model => ({
+      id: model, model, inputModalities: ['text', 'image'],
+      supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', ...(/luna/.test(model) ? [] : ['ultra'])].map(reasoningEffort => ({ reasoningEffort }))
+    })), nextCursor: null } });
+  }
   else if (request.method === 'thread/resume' && String(request.params?.threadId || '').startsWith('thread-child-')) {
     const childThreadId = request.params.threadId;
     if (process.env.FAKE_CODEX_REJECT_CHILD_SUBSCRIBE === '1') {
@@ -144,6 +151,10 @@ lines.on('line', async (line) => {
   } else if (request.method === 'thread/unsubscribe') {
     send({ jsonrpc: '2.0', id: request.id, result: { status: 'unsubscribed' } });
   } else if (request.method === 'turn/start') {
+    if (request.params?.outputSchema && process.env.FAKE_CODEX_REJECT_OUTPUT_SCHEMA === '1') {
+      send({ jsonrpc: '2.0', id: request.id, error: { code: -32602, message: 'unknown field outputSchema' } });
+      return;
+    }
     turnCount += 1;
     activePrompt = request.params?.input?.map((item) => item.text || '').join('\n') || '';
     activeTurn = `turn-${Date.now()}`;
@@ -164,7 +175,8 @@ lines.on('line', async (line) => {
         throw new Error('FAKE_CODEX_WRITE_PATH must stay inside the fake provider cwd');
       }
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, process.env.FAKE_CODEX_WRITE_CONTENT || 'fake provider write\n');
+      const repair = activePrompt.includes('deterministic broker evidence from automatic fix round');
+      fs.writeFileSync(target, (repair && process.env.FAKE_CODEX_REPAIR_CONTENT) || process.env.FAKE_CODEX_WRITE_CONTENT || 'fake provider write\n');
     }
     for (let index = 0; index < fileChanges; index += 1) {
       const changedPath = index === 0 ? 'a.js' : `file-${index}.js`;

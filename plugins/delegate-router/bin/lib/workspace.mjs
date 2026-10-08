@@ -92,7 +92,7 @@ function assertNoSubmodules(root, revision) {
   }
 }
 
-export function inspectWorkspaceRepository(ownerCwd, jobId = 'preview') {
+export function inspectWorkspaceRepository(ownerCwd, jobId = 'preview', immutableBase = null) {
   const requested = canonicalDirectory(ownerCwd);
   const rootOutput = requireGit(requested, ['rev-parse', '--show-toplevel'], 'workspace isolation requires a Git working tree').trim();
   const ownerRoot = canonicalDirectory(rootOutput);
@@ -101,7 +101,8 @@ export function inspectWorkspaceRepository(ownerCwd, jobId = 'preview') {
   }
   const bare = requireGit(ownerRoot, ['rev-parse', '--is-bare-repository'], 'cannot determine whether the repository is bare').trim();
   if (bare !== 'false') throw brokerError('UNSUPPORTED_GIT_SHAPE', 'workspace isolation refuses bare repositories');
-  const baseRevision = requireGit(ownerRoot, ['rev-parse', '--verify', 'HEAD^{commit}'], 'workspace isolation requires an immutable HEAD commit').trim();
+  if (immutableBase != null && !/^[a-f0-9]{40,64}$/.test(immutableBase)) throw brokerError('INVALID_REQUEST', 'workspace continuation requires a full immutable commit ID');
+  const baseRevision = requireGit(ownerRoot, ['rev-parse', '--verify', `${immutableBase || 'HEAD'}^{commit}`], 'workspace isolation requires an immutable HEAD commit').trim();
   const baseTree = requireGit(ownerRoot, ['rev-parse', '--verify', `${baseRevision}^{tree}`], 'cannot resolve the immutable base tree').trim();
   const filters = runGit(ownerRoot, ['config', '--local', '--get-regexp', '^filter\\.']);
   if (filters.status === 0 && filters.stdout.trim()) {
@@ -168,8 +169,8 @@ function removeOwnedWorktree(ownerRoot, workspacePath, expectedStorageRoot) {
   return { removed: true, gitRemoved: removed.status === 0, ...(warning ? { warning } : {}) };
 }
 
-export function allocateWorkspace(ownerCwd, jobId) {
-  const planned = inspectWorkspaceRepository(ownerCwd, jobId);
+export function allocateWorkspace(ownerCwd, jobId, immutableBase = null) {
+  const planned = inspectWorkspaceRepository(ownerCwd, jobId, immutableBase);
   const storageRoot = path.join(dataDir(), 'workspaces');
   fs.mkdirSync(storageRoot, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(storageRoot, 0o700); } catch {}
@@ -299,6 +300,7 @@ export function createWorkspaceChangeSet(job, artifactDirectory) {
       verification: job.verification || null,
       producedBy: job.id,
       containment: 'broker-workspace',
+      resultTree: requireGit(workspace.path, ['write-tree'], 'cannot fingerprint candidate tree').trim(),
       patch: {
         format: 'git-binary-patch',
         path: patchPath,
@@ -309,6 +311,49 @@ export function createWorkspaceChangeSet(job, artifactDirectory) {
     },
     patch
   };
+}
+
+export function continueWorkspace(parent, jobId) {
+  const ownerRoot = parent.workspace?.ownerRoot;
+  const base = parent.changeSet?.base;
+  const artifact = parent.changeSet?.patch;
+  if (parent.isolation !== 'worktree' || parent.workspace?.ownedBy !== 'delegate-router'
+    || parent.changeSet?.producedBy !== parent.id || !base || !artifact || typeof ownerRoot !== 'string'
+    || typeof artifact.path !== 'string' || !Array.isArray(parent.changeSet.files)) {
+    throw brokerError('RESUME_UNSUPPORTED', 'workspace continuation requires a captured broker-owned change set');
+  }
+  if (!isInside(dataDir(), artifact.path) || isInside(ownerRoot, artifact.path)
+    || !Number.isSafeInteger(artifact.bytes) || artifact.bytes < 0 || artifact.bytes > PATCH_MAX_BYTES) {
+    throw brokerError('CHANGESET_CONFLICT', 'workspace continuation patch is outside private storage or exceeds its bounded manifest');
+  }
+  let patch;
+  try {
+    if (fs.statSync(artifact.path).size !== artifact.bytes) throw new Error('patch byte count mismatch');
+    patch = fs.readFileSync(artifact.path);
+  } catch (error) { throw brokerError('CHANGESET_CONFLICT', `workspace continuation patch is unreadable: ${error.message}`); }
+  if (crypto.createHash('sha256').update(patch).digest('hex') !== artifact.sha256) {
+    throw brokerError('CHANGESET_CONFLICT', 'workspace continuation patch digest differs from the captured manifest');
+  }
+  const workspace = allocateWorkspace(ownerRoot, jobId, base.revision);
+  try {
+    if (workspace.baseTree !== base.tree) throw brokerError('CHANGESET_CONFLICT', 'workspace continuation base tree differs from the captured manifest');
+    if (patch.length) {
+      const applied = runGit(workspace.path, ['apply', '--index', '--binary', '--whitespace=nowarn', '-'], { input: patch });
+      if (applied.status !== 0) throw brokerError('CHANGESET_CONFLICT', gitFailure(applied, 'cannot restore captured candidate'));
+    }
+    const files = changedPathRecords(workspace.path, base.revision).map(({ path: file, status }) => manifestEntry(workspace.path, base.revision, file, status));
+    const expected = new Map(parent.changeSet.files.map(file => [file.path, file]));
+    if (files.length !== expected.size || files.some(file => {
+      const previous = expected.get(file.path);
+      return !previous || ['baseOid', 'baseMode', 'resultOid', 'resultMode'].some(key => previous[key] !== file[key]);
+    })) throw brokerError('CHANGESET_CONFLICT', 'restored candidate content/modes differ from the captured manifest');
+    const resultTree = requireGit(workspace.path, ['write-tree'], 'cannot fingerprint restored candidate').trim();
+    if (parent.changeSet.resultTree && parent.changeSet.resultTree !== resultTree) throw brokerError('CHANGESET_CONFLICT', 'restored candidate tree differs from the captured result tree');
+    return { ...workspace, continuedFromJobId: parent.id, candidateTree: resultTree, continuation: 'captured-candidate-fresh-session' };
+  } catch (error) {
+    try { discardWorkspace(workspace); } catch {}
+    throw error;
+  }
 }
 
 function workingEntry(root, file) {

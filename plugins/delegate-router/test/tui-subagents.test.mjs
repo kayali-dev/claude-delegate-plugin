@@ -434,6 +434,14 @@ test('datasource keeps child snapshots memory-only, polls only the selected runn
   } finally { fallbackSource.close(); }
 });
 
+test('child-stream subscribe deadlines have finite bounds even for invalid configuration', async () => {
+  for (const [configured, expected] of [[0, 3000], [-1, 100], [Infinity, 10000], [NaN, 3000], [500, 500], [999999, 10000]]) {
+    const source = new DelegateDataSource({ watch: false, childTranscriptSubscribeTimeoutMs: configured });
+    try { assert.equal(source.childTranscriptSubscribeTimeoutMs, expected); }
+    finally { await source.close(); }
+  }
+});
+
 test('Transcript is Live only after confirmation, and rejected or disconnected subscriptions render Stored', async () => {
   const confirmedJob = createLiveParent('confirmed');
   const confirmed = liveDatasource(confirmedJob);

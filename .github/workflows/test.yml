@@ -8,11 +8,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', 'lts/*']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 'lts/*'
+          node-version: ${{ matrix.node }}
       - name: Run test suite
         working-directory: plugins/delegate-router
         run: node --test test/*.test.mjs
@@ -23,3 +27,17 @@ jobs:
           package_version=$(node -p "require('./plugins/delegate-router/package.json').version")
           test "$plugin_version" = "$package_version"
           grep -q "version: '$plugin_version'" plugins/delegate-router/bin/delegate-control-mcp
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+      - name: Install the tested Claude Code host (no sign-in)
+        run: curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.294
+      - name: Validate and test native Mods without model calls
+        run: |
+          "$HOME/.local/bin/claude" plugin validate .
+          "$HOME/.local/bin/claude" plugin validate plugins/delegate-router
+          "$HOME/.local/bin/claude" plugin test plugins/delegate-router

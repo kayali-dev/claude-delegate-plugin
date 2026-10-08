@@ -14,9 +14,11 @@ import {
   prepareManagedIntegration,
   preflightManagedIntegration,
   revertManagedJob,
+  resumeManagedJob,
   updateManagedJob
 } from '../bin/lib/control.mjs';
-import { allocateWorkspace, discardWorkspace, preflightWorkspaceChangeSets } from '../bin/lib/workspace.mjs';
+import { allocateWorkspace, continueWorkspace, discardWorkspace, preflightWorkspaceChangeSets } from '../bin/lib/workspace.mjs';
+import { waitForCondition } from './helpers/wait.mjs';
 
 const fakeCodex = fileURLToPath(new URL('./fake-codex-app-server.mjs', import.meta.url));
 
@@ -117,6 +119,84 @@ test('broker workspace contains dirty-owner writes and discard cannot touch the 
 
   terminalize(job.id);
   assert.throws(() => revertManagedJob(job.id), /roll back only by discarding/);
+});
+
+test('continuation restores the exact candidate from its original base even after owner HEAD moves', (t) => {
+  withState(t);
+  const root = repository(t, 'continue');
+  const job = workspaceJob(root);
+  fs.writeFileSync(path.join(job.cwd, 'target.txt'), 'candidate one\n');
+  captureManagedWorkspace(job.id, { discard: true });
+  terminalize(job.id);
+  fs.writeFileSync(path.join(root, 'other.txt'), 'new owner commit\n');
+  git(root, ['add', 'other.txt']); git(root, ['commit', '-qm', 'owner advanced']);
+  const parent = inspectJob(job.id);
+  assert.equal(parent.resumable.ok, true);
+  const workspace = continueWorkspace(parent, 'candidate-round-2');
+  assert.equal(workspace.baseRevision, job.workspace.baseRevision);
+  assert.equal(fs.readFileSync(path.join(workspace.path, 'target.txt'), 'utf8'), 'candidate one\n');
+  assert.equal(fs.readFileSync(path.join(workspace.path, 'other.txt'), 'utf8'), 'other\n');
+  assert.equal(fs.readFileSync(path.join(root, 'target.txt'), 'utf8'), 'base\n');
+  assert.equal(fs.readFileSync(path.join(root, 'other.txt'), 'utf8'), 'new owner commit\n');
+  assert.equal(workspace.continuation, 'captured-candidate-fresh-session');
+  discardWorkspace(workspace);
+});
+
+test('isolated continuation and auto-fix preserve the captured candidate and its original verification recipe', async t => {
+  withState(t);
+  const root = repository(t, 'repair');
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), "# Tests\n\n```sh\n(test \"$(cat target.txt)\" = fixed && test \"$(cat other.txt)\" = preserved-candidate) || { printf '1 failing\\n'; exit 1; }\n```\n");
+  git(root, ['add', 'AGENTS.md']); git(root, ['commit', '-qm', 'verification recipe']);
+  const parent = workspaceJob(root, { allowedPaths: ['target.txt', 'other.txt'], pathClaims: ['.'], autoFix: { maxRounds: 2 } });
+  assert.equal(parent.verify.origin, 'derived');
+  fs.writeFileSync(path.join(parent.cwd, 'target.txt'), 'initial-candidate\n');
+  fs.writeFileSync(path.join(parent.cwd, 'other.txt'), 'preserved-candidate\n');
+  captureManagedWorkspace(parent.id, { discard: true }); terminalize(parent.id);
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Tests\n\n```sh\nexit 9\n```\n');
+  git(root, ['add', 'AGENTS.md']); git(root, ['commit', '-qm', 'owner recipe changed']);
+  const previous = Object.fromEntries(['DELEGATE_CODEX_BIN', 'FAKE_CODEX_WRITE_PATH', 'FAKE_CODEX_WRITE_CONTENT', 'FAKE_CODEX_REPAIR_CONTENT', 'FAKE_CODEX_FILE_CHANGES'].map(key => [key, process.env[key]]));
+  t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value == null) delete process.env[key]; else process.env[key] = value; } });
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_WRITE_PATH = 'target.txt';
+  process.env.FAKE_CODEX_WRITE_CONTENT = 'broken\n';
+  process.env.FAKE_CODEX_REPAIR_CONTENT = 'fixed\n';
+  process.env.FAKE_CODEX_FILE_CHANGES = '1';
+  assert.throws(() => resumeManagedJob(parent.id, { prompt: 'fix', allowedPaths: ['.'] }), { code: 'INVALID_REQUEST' });
+  const continued = resumeManagedJob(parent.id, { prompt: 'Fix target while retaining the existing candidate.', planFirst: false });
+  const first = await waitForCondition({
+    description: 'isolated automatic repair to launch', timeoutMs: 6000, intervalMs: 25,
+    observe: () => inspectJob(continued.id), predicate: job => Boolean(job.autoFix?.childJobId) || job.autoFix?.state === 'stopped'
+  });
+  assert.equal(first.autoFix.state, 'launched', JSON.stringify(first.autoFix));
+  assert.equal(first.verification.state, 'failed');
+  const repaired = await waitForCondition({
+    description: 'isolated automatic repair to verify and capture', timeoutMs: 6000, intervalMs: 25,
+    observe: () => inspectJob(first.autoFix.childJobId), predicate: job => job.status === 'completed' && job.workspace.state === 'discarded'
+  });
+  assert.equal(repaired.verification.state, 'passed', JSON.stringify(repaired.verification));
+  assert.equal(repaired.workspace.baseRevision, parent.workspace.baseRevision);
+  assert.equal(repaired.workspace.continuedFromJobId, continued.id);
+  assert.deepEqual(repaired.changeSet.files.map(file => file.path).sort(), ['other.txt', 'target.txt']);
+  assert.equal(fs.readFileSync(path.join(root, 'target.txt'), 'utf8'), 'base\n');
+  assert.equal(fs.readFileSync(path.join(root, 'other.txt'), 'utf8'), 'other\n');
+  assert.match(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), /exit 9/);
+});
+
+test('continuation refuses tampered patch bytes and mismatched candidate manifests', (t) => {
+  const state = withState(t);
+  const root = repository(t, 'tamper');
+  const job = workspaceJob(root);
+  fs.writeFileSync(path.join(job.cwd, 'target.txt'), 'candidate\n');
+  captureManagedWorkspace(job.id, { discard: true }); terminalize(job.id);
+  const parent = inspectJob(job.id);
+  const bad = structuredClone(parent);
+  bad.changeSet.files[0].resultMode = '100755';
+  assert.throws(() => continueWorkspace(bad, 'bad-manifest'), { code: 'CHANGESET_CONFLICT' });
+  assert.equal(fs.existsSync(path.join(state, 'workspaces', 'bad-manifest')), false);
+  fs.appendFileSync(parent.changeSet.patch.path, 'tampered');
+  assert.throws(() => continueWorkspace(parent, 'bad-patch'), { code: 'CHANGESET_CONFLICT' });
+  assert.equal(fs.existsSync(path.join(state, 'workspaces', 'bad-patch')), false);
+  assert.equal(fs.readFileSync(path.join(root, 'target.txt'), 'utf8'), 'base\n');
 });
 
 test('a real managed provider process writes only in its isolated workspace and terminal capture discards it', async (t) => {

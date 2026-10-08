@@ -3,6 +3,7 @@ await useTuiTestHarness(import.meta.url);
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -218,6 +219,20 @@ test('runtime CPR probe measures the interposed terminal and cached/off modes do
   const off = await probeTerminalWidths({ screen, input, mode: 'off' });
   assert.equal(off.source, 'off');
   assert.equal(writes.length, 0);
+});
+
+test('interactive background probing does not pin process exit after its awaited foreground deadline', () => {
+  const module = new URL('../bin/lib/tui/width-probe.mjs', import.meta.url).href;
+  const script = [
+    'import { EventEmitter } from "node:events";',
+    `import { probeTerminalWidths } from ${JSON.stringify(module)};`,
+    'const input = new EventEmitter(); input.isTTY = true; input.isRaw = true;',
+    'const result = await probeTerminalWidths({screen:{rows:20,input,writeOutput(){}}, input, probes:["A"], foregroundMs:50, unrefBackground:true});',
+    'console.log(result.background?.active ? "background" : "unexpected");'
+  ].join('\n');
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 3000 });
+  assert.equal(child.status, 0, child.error?.message || child.stderr);
+  assert.equal(child.stdout.trim(), 'background');
 });
 
 test('runtime CPR probe owns raw stdin before writes and handles every reply latency', async (t) => {

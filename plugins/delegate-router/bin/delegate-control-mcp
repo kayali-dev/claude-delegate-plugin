@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
+import { MCP_INSTRUCTIONS, negotiateMcpVersion, toolAnnotations } from './lib/mcp-contract.mjs';
 import { brokerError, normalizeBrokerError } from './lib/errors.mjs';
 import { enabledProviders, listJobs, loadJob, loadState } from './lib/state.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
@@ -58,7 +59,7 @@ const TOOLS = [
       startPaused: { type: 'boolean', description: 'Establish the provider session, then hold before the first prompt until delegate_release.' },
       ingestFiles: { type: 'array', maxItems: 20, items: { type: 'string' }, description: 'Absolute out-of-cwd files copied into private workspace staging and copied back only after successful completion.' },
       autoNudge: { type: 'boolean', description: 'Read modes only. Retry one suspect short final answer in the same session.' },
-      reportSchema: { type: 'object', description: 'Best-effort structured final-result contract. Missing or invalid JSON never fails the job.' },
+      reportSchema: { type: 'object', description: 'Bounded JSON-schema subset for a final raw/fenced JSON object (unsupported constraints refused). Compatible Codex schemas use native outputSchema; broker validation remains authoritative. Missing or invalid report JSON never fails the job.' },
       maxOutputTokens: { type: 'integer', minimum: 1, description: 'Stop the provider through its normal cancellation path when observed output tokens exceed this per-job cap.' },
       retryPolicy: { type: 'object', required: ['maxAttempts', 'retryOn'], additionalProperties: false, properties: {
         maxAttempts: { type: 'integer', minimum: 1, maximum: 5 },
@@ -81,8 +82,9 @@ const TOOLS = [
   { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. full remains the default; summary returns a compact monitoring projection. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, view: { enum: ['summary', 'full'], default: 'full' }, resultWindow: { type: 'object', additionalProperties: false, properties: { find: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } } } },
   { name: 'delegate_list', description: 'List recent delegation jobs, optionally filtered by status, phase, or human-input gate, or summarized by fan-out group.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, activeOnly: { type: 'boolean' }, status: { type: 'array', items: { enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] } }, phase: { type: 'array', items: { type: 'string' } }, blockedOnInput: { type: 'boolean' }, groupId: { type: 'string' }, groupSummary: { type: 'boolean' } } } },
   { name: 'delegate_stats', description: 'Return the local outcome ledger: separately sampled provider-completion, real-tree verification-pass, and owner-acceptance rates; exact plan-first completion/degradation counts; broker/date cohorts; transport groups; and an optional confidence-bounded routing recommendation that never changes the static route.', inputSchema: { type: 'object', additionalProperties: false, properties: {
-    since: { type: 'string', description: "Optional duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.69.1')." },
+    since: { type: 'string', description: "Optional duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.70.0')." },
     until: { type: 'string', description: "Optional exclusive ISO-date upper bound such as '2026-07-17'." },
+    model: { type: 'string', minLength: 1, maxLength: 128, description: 'Filter by the exact recorded model ID, without alias-generation inference. Results include exact model/effort/transport/client/policy cohorts.' },
     recommendFor: {
       type: 'object',
       required: ['mode'],
@@ -105,7 +107,7 @@ const TOOLS = [
   { name: 'delegate_cancel', description: 'Request provider-aware cancellation using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
   { name: 'delegate_release', description: 'Release a startPaused job to send its first prompt, using optimistic revision control.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, commandId: { type: 'string' } } } },
   { name: 'delegate_respond', description: 'Resolve pending input using optimistic revision control: free-form questions take answer, while plan confirmations take accept=true or accept=false. requestId may be the canonical pending ID or any published requestAliases entry; unmatched IDs fail before command intake. Returns only after the command is applied or rejected and distinguishes command state from request outcome. Retry with the same commandId for idempotency.', inputSchema: { type: 'object', required: ['jobId', 'expectedRevision'], properties: { jobId: { type: 'string' }, expectedRevision: { type: 'integer' }, requestId: { type: 'string' }, answer: { type: 'string' }, accept: { type: 'boolean' }, response: { type: 'object' }, commandId: { type: 'string' } } } },
-  { name: 'delegate_resume', description: 'Start a new supervised job on the same provider session or thread.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, cwd: { type: 'string' }, effort: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, maxOutputTokens: { type: 'integer', minimum: 1 }, retryPolicy: { type: 'object', required: ['maxAttempts', 'retryOn'], additionalProperties: false, properties: { maxAttempts: { type: 'integer', minimum: 1, maximum: 5 }, retryOn: { type: 'array', uniqueItems: true, items: { enum: ['transport', 'rate-limit'] } } } }, verify: { type: 'object', required: ['command'], additionalProperties: false, properties: { command: { type: 'string', minLength: 1 }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400, default: 600 } } }, network: { type: 'boolean' }, networkAllow: { type: 'array', items: { type: 'string' } }, addDirs: { type: 'array', items: { type: 'string' } }, approveMcps: { type: 'boolean' }, cursorWorktree: { type: 'boolean' }, cursorWorktreeBase: { type: 'string' }, sandbox: { enum: ['auto', 'off'] }, allowedPaths: { type: 'array', items: { type: 'string' } }, allowUnscopedWrite: { type: 'boolean' }, allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' } } } },
+  { name: 'delegate_resume', description: 'Continue a terminal supervised job: shared jobs resume the provider session; isolated jobs restore the captured candidate on its original base in a fresh workspace and provider session.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, cwd: { type: 'string' }, effort: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 60, maximum: 86400 }, maxOutputTokens: { type: 'integer', minimum: 1 }, retryPolicy: { type: 'object', required: ['maxAttempts', 'retryOn'], additionalProperties: false, properties: { maxAttempts: { type: 'integer', minimum: 1, maximum: 5 }, retryOn: { type: 'array', uniqueItems: true, items: { enum: ['transport', 'rate-limit'] } } } }, verify: { type: 'object', required: ['command'], additionalProperties: false, properties: { command: { type: 'string', minLength: 1 }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400, default: 600 } } }, network: { type: 'boolean' }, networkAllow: { type: 'array', items: { type: 'string' } }, addDirs: { type: 'array', items: { type: 'string' } }, approveMcps: { type: 'boolean' }, cursorWorktree: { type: 'boolean' }, cursorWorktreeBase: { type: 'string' }, sandbox: { enum: ['auto', 'off'] }, allowedPaths: { type: 'array', items: { type: 'string' } }, allowUnscopedWrite: { type: 'boolean' }, allowSensitive: { type: 'boolean' }, overrideLimit: { type: 'boolean' }, overrideWriter: { type: 'boolean' } } } },
   { name: 'delegate_review_round', description: 'Resume a terminal job with findings plus its recorded diff stat, changed files, and allowed scope.', inputSchema: { type: 'object', required: ['jobId', 'prompt'], properties: { jobId: { type: 'string' }, prompt: { type: 'string', minLength: 1 } } } },
   { name: 'delegate_usage', description: 'Return per-job observed usage, chain-cumulative token totals, and provider allowance headroom.', inputSchema: jobOnly() },
   { name: 'delegate_work', description: 'Return read-only WorkItem compatibility projections derived from existing job records. Accepts either a job id or projected work id; unfiltered reads default to the 20 most recent WorkItems.', inputSchema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 } } } },
@@ -113,6 +115,26 @@ const TOOLS = [
   { name: 'delegate_workspace_discard', description: 'Discard a terminal broker-owned workspace without touching the owner tree. Legacy shared-tree jobs remain on delegate-jobs revert.', inputSchema: jobOnly() },
   { name: 'delegate_integrate', description: 'Strictly CAS-preflight one or more portable workspace change sets and compose them in a broker-owned integration worktree. Conflicts stop composition; this never writes the owner tree.', inputSchema: { type: 'object', required: ['jobIds'], additionalProperties: false, properties: { jobIds: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } }, preflight: { type: 'boolean' } } } }
 ];
+
+// Advertise the verification exception and bounded auto-fix controls already
+// accepted by the broker, so schema-driven clients can use the documented API.
+for (const tool of TOOLS.filter((entry) => ['delegate_start', 'delegate_resume'].includes(entry.name))) {
+  const properties = tool.inputSchema.properties;
+  properties.maxSubagents = { type: 'integer', minimum: 0, maximum: 16, description: 'Codex only: limit concurrent native subagents (excludes the primary agent); zero disables them. Omit to preserve provider configuration.' };
+  properties.maxTotalOutputTokens = { type: 'integer', minimum: 1, description: 'Optional work-level reported-output cap shared by continuations, auto-fix rounds, and independent planners. Inherited and immutable on continuation. Unknown usage and native child costs are not guaranteed covered.' };
+  const verify = properties.verify;
+  delete verify.required;
+  verify.properties.exception = { type: 'string', minLength: 1 };
+  verify.oneOf = [
+    { required: ['command'], not: { required: ['exception'] } },
+    { required: ['exception'], not: { anyOf: [{ required: ['command'] }, { required: ['timeoutSeconds'] }] } }
+  ];
+  properties.autoFix = {
+    type: 'object', required: ['maxRounds'], additionalProperties: false,
+    properties: { maxRounds: { type: 'integer', minimum: 1, maximum: 100 } },
+    description: 'Write modes only. Opt-in deterministic repair rounds; the broker hard-caps execution at three.'
+  };
+}
 
 TOOLS.push(
   {
@@ -323,12 +345,13 @@ async function dispatch(name, args) {
   }
   if (name === 'delegate_list') return args.groupSummary ? groupSummary(args.groupId) : listManagedJobs(args);
   if (name === 'delegate_stats') {
-    const unknown = Object.keys(args).filter((key) => !['since', 'until', 'recommendFor'].includes(key));
+    const unknown = Object.keys(args).filter((key) => !['since', 'until', 'model', 'recommendFor'].includes(key));
     if (unknown.length) throw brokerError('INVALID_REQUEST', `delegate_stats unknown parameter${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
     const usage = loadState();
     return aggregateVisibilityStats(readAuditLog(), {
       since: args.since,
       until: args.until,
+      model: args.model,
       recommendFor: args.recommendFor,
       jobs: listJobs(),
       external: externalThreadStats(scanExternalCodexThreads()),
@@ -397,7 +420,7 @@ lines.on('line', async (line) => {
     if (request.method === 'initialize') {
       const native = nativeMcpEnabled();
       send({ jsonrpc: '2.0', id: request.id, result: {
-        protocolVersion: request.params?.protocolVersion || '2025-11-25',
+        protocolVersion: negotiateMcpVersion(request.params?.protocolVersion),
         capabilities: {
           tools: { listChanged: false },
           ...(native ? {
@@ -405,9 +428,10 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.69.1' }
+        serverInfo: { name: 'delegate-control', version: '0.71.0' },
+        instructions: MCP_INSTRUCTIONS
       } });
-    } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } });
+    } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS.map((tool) => ({ ...tool, annotations: toolAnnotations(tool.name) })) } });
     else if (request.method === 'tools/call') {
       const result = await dispatch(request.params?.name, request.params?.arguments || {});
       send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } });

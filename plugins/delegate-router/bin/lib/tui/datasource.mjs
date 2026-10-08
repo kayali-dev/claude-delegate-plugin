@@ -247,7 +247,7 @@ export class DelegateDataSource extends EventEmitter {
       || ((consumerOptions) => new ChildTranscriptConsumer(consumerOptions));
     this.submitTransientControl = options.submitTransientControl || submitTransientControl;
     this.cancelTransientControl = options.cancelTransientControl || cancelTransientControl;
-    this.childTranscriptSubscribeTimeoutMs = Math.max(100, Number(options.childTranscriptSubscribeTimeoutMs || 3000));
+    this.childTranscriptSubscribeTimeoutMs = Math.min(10000, Math.max(100, Number(options.childTranscriptSubscribeTimeoutMs) || 3000));
     this.externalJobs = new Map();
     this.externalSources = new Map();
     this.journalCursors = new Map();
@@ -783,6 +783,7 @@ export class DelegateDataSource extends EventEmitter {
     const outcome = new Promise((resolve) => { live.resolve = resolve; });
     live.closed = new Promise((resolve) => { live.closedResolve = resolve; });
     this.liveSubagent = live;
+    let subscribeTimer;
     try {
       const consumer = this.childTranscriptConsumerFactory({ subscriptionId: live.subscriptionId });
       live.consumer = consumer;
@@ -808,13 +809,14 @@ export class DelegateDataSource extends EventEmitter {
       const result = await Promise.race([
         outcome,
         new Promise((resolve) => {
-          const timer = setTimeout(() => resolve('timeout'), this.childTranscriptSubscribeTimeoutMs);
-          timer.unref?.();
+          subscribeTimer = setTimeout(() => resolve('timeout'), this.childTranscriptSubscribeTimeoutMs);
         })
       ]);
       if (result === 'established' && !this.closed && epoch === this.subagentEpoch && this.liveSubagent === live) return true;
     } catch (error) {
       live.rejection = String(error?.message || error).slice(0, 1024);
+    } finally {
+      clearTimeout(subscribeTimer);
     }
     if (live.intake) this.cancelTransientControl(job.id, live.intake.commandId);
     live.consumer?.close();
@@ -834,13 +836,13 @@ export class DelegateDataSource extends EventEmitter {
           subscriptionId: live.subscriptionId
         });
       } catch {}
-      await Promise.race([
-        live.closed,
-        new Promise((resolve) => {
-          const timer = setTimeout(resolve, 500);
-          timer.unref?.();
-        })
-      ]);
+      let unsubscribeTimer;
+      try {
+        await Promise.race([
+          live.closed,
+          new Promise((resolve) => { unsubscribeTimer = setTimeout(resolve, 500); })
+        ]);
+      } finally { clearTimeout(unsubscribeTimer); }
     }
     if (intake) this.cancelTransientControl(live.jobId, intake.commandId);
     if (live.intake) this.cancelTransientControl(live.jobId, live.intake.commandId);

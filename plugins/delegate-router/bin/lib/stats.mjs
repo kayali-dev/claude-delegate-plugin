@@ -109,10 +109,10 @@ export function readAuditLog(file = auditLogPath()) {
 
 export function normalizeStatsModel(model) {
   const value = String(model || 'unknown');
-  const codex = value.match(/^gpt-[\d.]+-(sol|terra|luna)$/i);
+  const codex = value.match(/^gpt-[\d.]+-(astra|sol|terra|luna)$/i);
   if (codex) return codex[1].toLowerCase();
   if (/^composer(?:-|$)/i.test(value)) return 'composer';
-  if (/^grok(?:-|$)/i.test(value)) return 'grok';
+  if (/^(?:cursor-)?grok(?:-|$)/i.test(value)) return 'grok';
   return value;
 }
 
@@ -611,8 +611,42 @@ function aggregateSelectedStats(selected, selection, now) {
     planFirst: planFirstEffectiveness(records),
     cohorts: outcomeCohorts(records),
     orphanedJobs: orphanedCount(records),
-    groups
+    groups,
+    modelCohorts: exactModelCohorts(selected)
   };
+}
+
+function exactModelCohorts(selected) {
+  const cells = new Map();
+  for (const entry of selected) {
+    const record = entry.record;
+    const identity = {
+      provider: record.provider || 'unknown',
+      model: record.model || 'unknown',
+      effort: record.effort || 'unknown',
+      transport: record.transport || 'unknown',
+      providerCliVersion: record.providerCliVersion || 'unknown',
+      policyVersion: record.policyVersion || 'unknown'
+    };
+    const key = JSON.stringify(identity);
+    if (!cells.has(key)) cells.set(key, { ...identity, entries: [] });
+    cells.get(key).entries.push(entry);
+  }
+  return [...cells.values()].map(({ entries, ...identity }) => {
+    const records = entries.map(entry => entry.record);
+    const durations = records.map(record => record.durationMs).filter(value => Number.isFinite(value) && value >= 0);
+    const tokens = entries.map(entry => entry.outputTokens).filter(Number.isFinite);
+    return {
+      ...identity,
+      modelResolution: ['sol', 'astra', 'terra', 'luna', 'grok', 'grok-xhigh', 'grok-fast', 'composer', 'opus', 'sonnet', 'haiku', 'fable', 'auto', 'unknown'].includes(identity.model) ? 'generation-unknown' : 'recorded-id',
+      jobs: records.length, rates: outcomeRates(records),
+      medianDurationMs: percentile(durations, 0.5),
+      p90DurationMs: percentile(durations, 0.9),
+      p50OutputTokens: percentile(tokens, 0.5),
+      p90OutputTokens: percentile(tokens, 0.9),
+      usageSamples: tokens.length
+    };
+  }).sort((left, right) => left.provider.localeCompare(right.provider) || left.model.localeCompare(right.model) || left.effort.localeCompare(right.effort) || left.transport.localeCompare(right.transport));
 }
 
 function aggregateSelectedTotals(selected) {
@@ -632,7 +666,11 @@ function aggregateSelection(records, options = {}) {
   const now = snapshotNow(options);
   const coalesced = coalesceAuditRecords(projectRetainedAttemptEvidence(records, options.jobs));
   const selection = parseOutcomeSelection(options, now);
-  const selected = selectedRecords(coalesced, attributeAuditOutputTokens(coalesced), selection);
+  if (options.model != null && (typeof options.model !== 'string' || !options.model.trim() || options.model.length > 128)) {
+    throw brokerError('INVALID_REQUEST', 'stats model must be an exact model ID of 1-128 characters');
+  }
+  const selected = selectedRecords(coalesced, attributeAuditOutputTokens(coalesced), selection)
+    .filter(entry => options.model == null || entry.record.model === options.model.trim());
   return { now, selected, selection, records: coalesced };
 }
 
@@ -897,6 +935,7 @@ export function aggregateVisibilityStats(records, options = {}) {
   const resolved = {
     since: options.since,
     until: options.until,
+    model: options.model,
     history: options.history,
     external: options.external,
     recommendFor: options.recommendFor,

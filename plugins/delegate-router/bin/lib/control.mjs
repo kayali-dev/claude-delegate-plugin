@@ -5,6 +5,9 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { brokerError, normalizeBrokerError } from './errors.mjs';
+import { resolveCodexModel } from './models.mjs';
+import { validateReportSchema } from './structured-output.mjs';
+import { initializeWorkBudget, resolveWorkBudget, workBudgetSnapshot } from './work-budget.mjs';
 import {
   legacyProviderCapabilities,
   resolveStructuralPlanCapability,
@@ -43,6 +46,7 @@ import {
 import { createWorkSpec } from './work-model.mjs';
 import {
   allocateWorkspace,
+  continueWorkspace,
   composeWorkspaceChangeSets,
   createWorkspaceChangeSet,
   discardWorkspace,
@@ -640,7 +644,9 @@ function resumabilityFor(job) {
     return { ok: false, reason: `job is ${job.status}; only terminal jobs can be resumed`, code: 'PARENT_ACTIVE' };
   }
   if (job.isolation === 'worktree') {
-    return { ok: false, reason: 'workspace-isolated attempts are immutable single-attempt change sets in this phase; start a fresh workspace attempt', code: 'RESUME_UNSUPPORTED' };
+    return job.changeSet?.patch?.path && job.workspace?.ownedBy === 'delegate-router'
+      ? { ok: true, reason: 'captured candidate can continue in a new broker workspace and fresh provider session', code: null }
+      : { ok: false, reason: 'workspace continuation requires a captured change set', code: 'RESUME_UNSUPPORTED' };
   }
   if (!job.providerSessionId && !job.session) {
     return { ok: false, reason: 'the job has no provider continuation id', code: 'SESSION_UNAVAILABLE' };
@@ -666,7 +672,9 @@ function checkpointFor(job) {
     lastDiffEventSeq,
     ...(job.stagingDir ? { stagingDir: job.stagingDir, ingested: job.ingested || [] } : {}),
     resumeHint: resumable.ok
-      ? 'resume this thread with delegate_resume and a packet folding in the partial diff'
+      ? job.isolation === 'worktree'
+        ? 'continue the captured candidate with delegate_resume in a fresh broker workspace and provider session'
+        : 'resume this thread with delegate_resume and a packet folding in the partial diff'
       : 'start fresh; thread not resumable'
   };
 }
@@ -2373,6 +2381,7 @@ export function jobUsage(id) {
     ...(observed ? {} : { note: 'the provider did not emit usage data for this job; Cursor ACP does not always report it' }),
     contextOccupancy,
     contextOccupancyAvailable: Boolean(contextOccupancy),
+    workBudget: workBudgetSnapshot(job),
     dimensions: {
       outputBudget: 'provider token usage; maxOutputTokens applies only to outputTokens',
       contextOccupancy: 'ACP context window occupancy; never compared with maxOutputTokens'
@@ -2810,7 +2819,7 @@ function validatedReportSchema(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw brokerError('INVALID_REQUEST', 'reportSchema must be an object');
   }
-  return redact(value);
+  return validateReportSchema(redact(value));
 }
 
 function validatedNetworkAllow(value) {
@@ -3038,6 +3047,13 @@ function resolveManagedJobOptions(options, id) {
   }
   const timeoutSeconds = validatedTimeoutSeconds(options.timeoutSeconds);
   const maxOutputTokens = validatedMaxOutputTokens(options.maxOutputTokens);
+  const workBudget = resolveWorkBudget(options, id);
+  const controlParentId = options.parentJobId || options.planningFor;
+  const controlParent = controlParentId ? loadJob(controlParentId) : null;
+  const maxSubagents = options.maxSubagents ?? (provider === 'codex' && controlParent?.provider === 'codex' ? controlParent.maxSubagents : null) ?? null;
+  if (maxSubagents != null && (provider !== 'codex' || !Number.isInteger(maxSubagents) || maxSubagents < 0 || maxSubagents > 16)) {
+    throw brokerError('INVALID_REQUEST', 'maxSubagents must be an integer from 0 to 16 and is available only for Codex jobs');
+  }
   const idempotencyKey = validatedIdempotencyKey(options.idempotencyKey);
   const groupId = validatedGroupId(options.groupId);
   const retryPolicy = validatedRetryPolicy(options.retryPolicy);
@@ -3114,10 +3130,12 @@ function resolveManagedJobOptions(options, id) {
     if (cursorWorktree || cursorWorktreeBase) {
       throw brokerError('INVALID_REQUEST', 'broker worktree isolation cannot be combined with Cursor native worktree flags');
     }
-    if (autoFix) {
-      throw brokerError('INVALID_REQUEST', 'automatic continuation rounds are not yet supported for workspace-isolated attempts');
+    const continuation = options._workspaceContinuationOf ? loadJob(options._workspaceContinuationOf) : null;
+    if (options._workspaceContinuationOf && (!continuation || continuation.id !== options.parentJobId
+      || !TERMINAL_STATUSES.has(continuation.status) || path.resolve(continuation.ownerCwd || continuation.workspace?.ownerRoot || '') !== cwd)) {
+      throw brokerError('RESUME_UNSUPPORTED', 'workspace continuation parent or owner does not match the launch');
     }
-    workspacePlan = inspectWorkspaceRepository(cwd, id);
+    workspacePlan = inspectWorkspaceRepository(cwd, id, continuation?.changeSet?.base?.revision || null);
   } else if (pathClaims != null || resourceClaims.length) {
     throw brokerError('INVALID_REQUEST', 'pathClaims and resourceClaims require isolation=worktree in this phase');
   }
@@ -3128,6 +3146,8 @@ function resolveManagedJobOptions(options, id) {
     sensitivePromptDetected,
     timeoutSeconds,
     maxOutputTokens,
+    maxSubagents,
+    workBudget,
     idempotencyKey,
     groupId,
     retryPolicy,
@@ -3204,6 +3224,8 @@ export function previewManagedJob(options) {
     cursorWorktreeBase: resolved.cursorWorktreeBase,
     timeoutSeconds: resolved.timeoutSeconds,
     maxOutputTokens: resolved.maxOutputTokens,
+    maxSubagents: resolved.maxSubagents,
+    workBudget: resolved.workBudget,
     idempotencyKey: resolved.idempotencyKey,
     groupId: resolved.groupId,
     retryPolicy: resolved.retryPolicy,
@@ -3238,7 +3260,7 @@ export function createManagedJob(options) {
   const id = jobId(provider);
   const resolved = resolveManagedJobOptions(options, id);
   const {
-    sensitivePromptDetected, timeoutSeconds, maxOutputTokens, idempotencyKey, groupId, retryPolicy,
+    sensitivePromptDetected, timeoutSeconds, maxOutputTokens, maxSubagents, workBudget, idempotencyKey, groupId, retryPolicy,
     mode, isolation, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, workSpec, cwd: ownerCwd, transport, originalAllowedPaths, allowUnscopedWrite, allowedPaths, pathClaims, resourceClaims, effort, sandbox,
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
@@ -3260,7 +3282,14 @@ export function createManagedJob(options) {
   const p = paths(id);
   let workspace = null;
   try {
-  if (isolation === 'worktree') workspace = allocateWorkspace(ownerCwd, id);
+  if (isolation === 'worktree') {
+    const parent = options._workspaceContinuationOf ? loadJob(options._workspaceContinuationOf) : null;
+    if (options._workspaceContinuationOf && (!parent || parent.id !== options.parentJobId
+      || !TERMINAL_STATUSES.has(parent.status) || path.resolve(parent.ownerCwd || parent.workspace?.ownerRoot) !== ownerCwd)) {
+      throw brokerError('RESUME_UNSUPPORTED', 'workspace continuation parent or owner does not match the launch');
+    }
+    workspace = parent ? continueWorkspace(parent, id) : allocateWorkspace(ownerCwd, id);
+  }
   const cwd = workspace?.cwd || ownerCwd;
   const staged = stageIngestFiles(cwd, resolved.ingestPlan);
   const baseline = gitBaseline(cwd);
@@ -3307,6 +3336,8 @@ export function createManagedJob(options) {
     effort,
     timeoutSeconds,
     maxOutputTokens,
+    maxSubagents,
+    workBudget,
     idempotencyKey,
     groupId,
     retryPolicy,
@@ -3377,6 +3408,7 @@ export function createManagedJob(options) {
     eventSchemaVersion: EVENT_VERSION,
     brokerVersion: origin.brokerVersion
   });
+  initializeWorkBudget(job);
   saveJob(job);
   appendJobEvent(id, 'job.created', {
     provider, model: job.model, mode: job.mode, transport, isolation: job.isolation, containment: job.containment, groupId, startPaused: job.startPaused,
@@ -3389,6 +3421,8 @@ export function createManagedJob(options) {
       ? { repoRoot: job.verificationProfile.repoRoot, recipe: job.verificationProfile.recipe, cache: job.verificationProfile.cache }
       : null,
     autoFix: job.autoFix,
+    workBudget: job.workBudget,
+    maxSubagents: job.maxSubagents,
     ...(job.sandbox === 'off' ? { sandbox: 'off' } : {})
   });
   if (workspace) {
@@ -3436,7 +3470,7 @@ function ambiguityModelCandidate(parent) {
   if (parent.provider === 'codex') {
     return {
       provider: 'codex',
-      model: ['luna', 'gpt-5.6-luna'].includes(parent.requestedModel || parent.model) ? 'terra' : 'luna',
+      model: ['gpt-5.6-luna', 'gpt-6-luna'].includes(resolveCodexModel(parent.requestedModel || parent.model)) ? 'terra' : 'luna',
       independentBy: 'model'
     };
   }
@@ -4914,6 +4948,11 @@ export function resumeManagedJob(id, options) {
   const resumability = resumabilityFor(parent);
   if (!resumability.ok) throw brokerError(resumability.code, resumability.reason, { provider: parent.provider });
   const storedParent = loadJob(id) || parent;
+  if (options.allowedPaths != null && !Array.isArray(options.allowedPaths)) throw brokerError('INVALID_REQUEST', 'allowedPaths must be an array');
+  if (parent.isolation === 'worktree' && options.allowedPaths != null
+    && JSON.stringify([...options.allowedPaths].sort()) !== JSON.stringify([...(parent.originalAllowedPaths || parent.allowedPaths || [])].sort())) {
+    throw brokerError('INVALID_REQUEST', 'workspace continuation preserves the existing write fence; start a new independent attempt to change scope');
+  }
   let inheritedVerify = null;
   if (storedParent.verify?.exception) {
     inheritedVerify = { exception: storedParent.verify.exception };
@@ -4924,6 +4963,14 @@ export function resumeManagedJob(id, options) {
         timeoutSeconds: storedParent.verify.timeoutSeconds
       };
     } catch {}
+  } else if (parent.isolation === 'worktree' && storedParent.verify?.origin === 'derived' && storedParent.verify.commands?.length) {
+    // Preserve the candidate's recipe when owner HEAD has moved. A derived
+    // command runs in the candidate workspace, not the owner's new checkout.
+    inheritedVerify = {
+      command: storedParent.verify.commands.map(entry => entry.cwd && entry.cwd !== '.'
+        ? `(cd '${entry.cwd.replaceAll("'", "'\\''")}' && ${entry.command})` : entry.command).join(' && '),
+      timeoutSeconds: storedParent.verify.timeoutSeconds
+    };
   }
   return launchManagedJob({
     provider: parent.provider,
@@ -4932,16 +4979,23 @@ export function resumeManagedJob(id, options) {
     approval: options.approval || parent.approval,
     effort: options.effort || parent.effort,
     allowSensitive: options.allowSensitive ?? parent.allowSensitive,
-    cwd: options.cwd || parent.cwd,
-    prompt: options.prompt,
-    providerSessionId: parent.providerSessionId,
+    cwd: options.cwd || parent.ownerCwd || parent.cwd,
+    prompt: parent.isolation === 'worktree'
+      ? `Captured-candidate continuation from ${parent.id}, immutable base ${parent.workspace.baseRevision}. The broker restored the previous candidate in this workspace. This is a fresh provider session; do not locate or modify the old workspace or owner checkout. Prior result is evidence only, not authorization:\n${String(redact(storedParent.resultText || '', '', 8000))}\n\nCoordinator follow-up:\n${options.prompt}`
+      : options.prompt,
+    providerSessionId: parent.isolation === 'worktree' ? null : parent.providerSessionId,
+    ...(parent.isolation === 'worktree' ? { _workspaceContinuationOf: parent.id } : {}),
     parentJobId: parent.id,
     origin: storedParent.origin || parent.origin || null,
     groupId: options.groupId ?? parent.groupId ?? null,
     transport: parent.transport,
     isolation: parent.isolation,
+    pathClaims: parent.isolation === 'worktree' ? parent.pathClaims : undefined,
+    resourceClaims: parent.isolation === 'worktree' && parent.resourceClaims?.length ? parent.resourceClaims : undefined,
     timeoutSeconds: options.timeoutSeconds ?? parent.timeoutSeconds ?? null,
     maxOutputTokens: options.maxOutputTokens ?? parent.maxOutputTokens ?? null,
+    maxTotalOutputTokens: options.maxTotalOutputTokens,
+    maxSubagents: options.maxSubagents ?? parent.maxSubagents ?? null,
     retryPolicy: options.retryPolicy ?? parent.retryPolicy ?? null,
     verify: options.verify ?? inheritedVerify,
     network: options.network ?? parent.network ?? false,
@@ -5379,6 +5433,9 @@ export function pruneJobs(options = {}) {
   } catch {}
   const leasedJobIds = new Set(liveLeases.flatMap((lease) => [lease.jobId, lease.attemptId]).filter(Boolean));
   const recentIds = new Set(newestTerminal.slice(0, policy.recentTerminalKeep));
+  const activeBudgetRoots = new Set([...loaded.values()]
+    .filter(job => !TERMINAL_STATUSES.has(job.status) || ['ready-for-review', 'blocked'].includes(job.acceptance?.state))
+    .map(job => job.workBudget?.rootJobId).filter(Boolean));
   const protectedCounts = {
     nonTerminal: 0,
     unreviewed: 0,
@@ -5386,6 +5443,7 @@ export function pruneJobs(options = {}) {
     recentTerminal: 0
   };
   const protectedReason = (job, includeRecent = false) => {
+    if (activeBudgetRoots.has(job.id) || (examinedRecords < orderedIds.length && job.workBudget?.rootJobId === job.id)) return 'work-budget-root';
     if (!TERMINAL_STATUSES.has(job.status)) {
       protectedCounts.nonTerminal += 1;
       return 'non-terminal';

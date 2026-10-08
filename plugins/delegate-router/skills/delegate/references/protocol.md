@@ -39,6 +39,24 @@ historical jobs therefore stay readable across the extraction.
 
 Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.events.jsonl`. Prompts, logs, commands, and state files are created with user-only permissions. Event values are recursively redacted and size-bounded.
 
+Optional `workBudget: { rootJobId, maxOutputTokens }` links continuations and
+independent planners to a private root-artifact ledger with locked monotonic
+reported-output counters. Codex thread totals are deduplicated; Cursor attempts
+are separate. Missing/corrupt ledger state fails closed. Native-child usage is
+never independently added to a provider total, avoiding speculative double-counts.
+`maxSubagents` is a Codex-only concurrent-native-child control, not a cost metric.
+
+Codex discovery emits `model.preflight` without raw provider payloads or an
+entitlement claim. Compatible plan/report contracts use per-turn `outputSchema`;
+the broker still validates final raw/fenced JSON. Native formatting is not task
+authority, and only a pre-turn unknown-field refusal permits formatting fallback.
+Malformed last JSON fences never recover a superseded deliverable.
+
+Workspace continuations check a captured patch's digest/bytes, immutable base,
+file objects/modes, and (when recorded) result tree before starting a fresh
+provider session. Each round produces a cumulative portable candidate on that
+same base, not an owner-tree write or a same-thread resume.
+
 P3 fields are additive. Historical records may omit `verificationProfile`,
 structured `verification`, append-only `verificationEvidence`, `acceptance`,
 and `autoFix`; readers and WorkItem projections preserve that absence without
@@ -103,6 +121,22 @@ distinct `AGENT_COMPLETION_UNKNOWN` reason rather than fabricated success.
 Recent growth is active, quiet within policy is idle, reconciliation is
 idempotent, hook failure is fail-open, and ordinary job retention applies.
 
+The resident supervisor tails exactly correlated Claude child transcripts into
+bounded/redacted journal events. Durable byte and usage checkpoints prevent
+replay duplication after restart, and terminal stubs receive a final drain.
+Reasoning contributes activity markers only. `DELEGATE_AGENT_TAIL=0` disables
+ingestion independently of lifecycle hooks and their bounded TUI fallback.
+
+Selected managed Codex child transcripts use the parent worker's existing
+app-server connection. Confirmed `thread/resume` enables memory-only live
+frames over an authenticated `0600` local socket; failed or disconnected
+subscriptions fall back to bounded stored snapshots. Transient subscription
+commands never enter the parent journal and are removed on timeout, process
+loss, view exit, parent completion, or shutdown. Terminal children are never
+resumed. `thread/list` status `notLoaded` is residency metadata; parent
+subagent lifecycle evidence governs execution state. Cursor exposes child
+lifecycle rows without inventing a transcript subscription.
+
 External Codex session rows are not job records and never enter the broker store. The scanner reads at most 200 newest files and only bounded metadata/tail windows from the observed `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl` layout. The first `session_meta` payload carries stable `id`/`session_id`, `cwd`, `originator`, and `source`; token-count events near the tail may carry provider totals. Newest files win and repeated rollout files with the same stable identity collapse to one thread. An id recorded as a managed or shadow provider session is excluded. Proven Claude-adjacent originators or app-server/MCP/subagent sources may surface; interactive `codex-tui`/`cli` and unknown provenance are personal-by-default and excluded. All surfaced strings pass the shared redactor, detail reads are bounded, and every mutation rejects as read-only.
 
 Managed attempts normally have `executionOwner: "supervisor"`. The resident is
@@ -129,7 +163,7 @@ fallback.
 
 Inspect and list rows expose `lastActivityAt` from the last complete non-replay journal line (the ordinary fast path reads only the tail; a replay tail falls back to the newest live event). `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
 
-Every terminal transition also writes the job's `finishedPath` sentinel file (content: the terminal status). Its existence is the durable "job is done" signal for file watchers, which survive host harnesses that reap background waiter processes. Codex jobs that engaged the multi-agent review flow are marked `reviewFlowEngaged: true` (detected from collab-agent items), and `delegate_resume` refuses them fast with `RESUME_UNSUPPORTED`.
+Every terminal transition also writes the job's `finishedPath` sentinel file (content: the terminal status). Its existence is the durable "job is done" signal for file watchers, which survive host harnesses that reap background waiter processes. Shared-tree Codex jobs that engaged the multi-agent review flow are marked `reviewFlowEngaged: true` (detected from collab-agent items), and direct thread resume refuses with `RESUME_UNSUPPORTED`. Isolated captured candidates instead use a fresh-workspace/fresh-session continuation; they never resume that review thread.
 
 `lastSeq` changes for every event. `revision` changes only for lifecycle and control transitions. Read events after the last observed sequence. Send `expectedRevision` with steering and cancellation so concurrent controllers cannot both mutate stale state.
 

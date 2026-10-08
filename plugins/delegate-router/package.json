@@ -1,12 +1,13 @@
 {
   "name": "delegate-router-runtime",
-  "version": "0.69.1",
+  "version": "0.71.0",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:native": "claude plugin test ."
   }
 }

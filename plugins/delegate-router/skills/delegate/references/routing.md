@@ -17,14 +17,21 @@ Delegate when the objective is independently specifiable and one or more are tru
 | Task shape | First choice | Efficient fallback | Strong fallback |
 | --- | --- | --- | --- |
 | Small or context-heavy change | Current Claude | Claude Sonnet | Composer |
-| Clear multi-file implementation, refactor, or tests | Cursor Auto (Composer when explicitly pinned) | GPT-5.6 Terra | GPT-5.6 Sol |
-| Difficult debugging, terminal-heavy engineering, code review, security, frontend verification | GPT-5.6 Sol (`xhigh` for review/second opinions) | Claude Opus | Grok 4.5 |
-| Broad research plus tools, data/science/finance/legal context, creative recovery | Grok 4.5 | Claude Opus | GPT-5.6 Sol |
-| Very ambiguous long-horizon migration, vision-heavy work, or task tied to conversation judgment | Current Claude / Opus (Fable only with explicit per-task authorization) | GPT-5.6 Sol | Grok 4.5 |
-| Fast bounded low-risk coding | GPT-5.6 Luna or Claude Haiku | Composer | Current Claude |
-| Architecture or product tradeoff | Current Claude / Opus (Fable only with explicit per-task authorization) | Grok 4.5 | GPT-5.6 Sol |
+| Clear multi-file implementation, refactor, or tests | Cursor Auto (Composer when explicitly pinned) | GPT-5.6 Terra | GPT-6.1 Sol |
+| Difficult debugging, terminal-heavy engineering, code review, security, frontend verification | GPT-6.1 Sol (`xhigh` for review/second opinions) | Claude Opus | Grok 4.7 |
+| Broad research plus tools, data/science/finance/legal context, creative recovery | Grok 4.7 | Claude Opus | GPT-6.1 Sol |
+| Very ambiguous long-horizon migration, vision-heavy work, or task tied to conversation judgment | Current Claude / Opus (Fable only with explicit per-task authorization) | GPT-6.1 Sol | Grok 4.7 |
+| Fast bounded low-risk coding | GPT-6 Luna or Claude Haiku | Composer | Current Claude |
+| Architecture or product tradeoff | Current Claude / Opus (Fable only with explicit per-task authorization) | Grok 4.7 | GPT-6.1 Sol |
 
 These are routing heuristics, not cross-provider benchmark rankings. Benchmarks use different harnesses and tool environments.
+
+`astra` explicitly selects GPT-6 Astra for the most demanding work; it is not
+an automatic candidate. Claude aliases follow the host provider's current
+models (currently Opus/Sonnet/Haiku 5.5 and Fable 5.1 on Anthropic). Cursor
+aliases select eligible advertised versions, so account catalogs can differ
+from these labels. Full model IDs infer their native provider and retain their
+pin. See [model notes](models.md) for current sources and availability limits.
 
 `delegate-route` implements this matrix deterministically. The skill should call it before selecting a provider; prose reasoning is for interpreting or overriding its result, not replacing the headroom checks.
 
@@ -55,11 +62,11 @@ Bands act only on reliable data: provider-timed windows (Codex app-server, Claud
 
 Fallback order is task-specific, not a fixed provider chain. Recompute model fit after removing providers at or above the avoid threshold. Prefer finishing an already-started bounded task on its current provider when it is below 98%, because migration also consumes allowance.
 
-The Codex `PreToolUse` hook and Cursor adapter independently enforce the 90% default avoid threshold. This prevents an accidental tool call from bypassing the route calculation.
+The Codex `PreToolUse` hook independently enforces its 90% default avoid threshold; Cursor launch admission uses 80%. Provider-specific overrides apply to both routing and admission.
 
 ## Cost Discipline
 
-Fast variants (Composer Fast, Grok Fast) are opt-in: select one only when the user explicitly asks for fast; resolution otherwise defaults to the non-fast form. For non-complex Cursor work with no user-named model, default to Cursor Auto mode and let the first-party pool route it. Composer and Grok share one Cursor first-party monthly pool, and Grok drains it roughly 3-4x faster per token — prefer Auto or Composer for routine implementation and spend Grok on work that needs its breadth. Use Sol only when its verification, terminal, or reasoning advantages justify its higher cost. Staying in the current Claude conversation is often most efficient for small work because it avoids a full context handoff.
+Fast variants are opt-in when both forms exist; a fast-only ACP catalog can trigger a loudly evented compromise or a CLI-validated non-fast fallback. Non-complex unnamed Cursor work defaults to Auto, which can select third-party models. Pin Composer or Grok when Cursor Models pool selection matters. Prefer Composer for routine pinned implementation and Grok for sustained investigation; measure observed spend rather than assuming a universal token-cost ratio. Staying in the current Claude conversation often saves a context handoff for small work.
 
 For routine scoped code review and second opinions, default to one managed Codex `mode=review` run with Sol at `xhigh`; its read-only transcript, diff, and usage trail costs far less than multi-agent review. Reserve multi-agent workflows for exhaustive audits.
 

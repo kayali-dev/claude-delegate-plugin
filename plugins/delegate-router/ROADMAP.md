@@ -1,6 +1,10 @@
-# Roadmap — production-hardening waves
+# Roadmap archive — shipped production-hardening waves
 
 Consolidated from five coordinator field reports (2026-07-13) plus the CHANGELOG "Planned" list. Deduped against shipped behavior; each item carries a design sketch and size (S/M/L). Waves are release-sized: a wave ships as one version with tests.
+
+Status checked 2026-10-08: Waves 1-4 and TUI Phase 2 below are shipped historical design notes, not an outstanding implementation queue. Their original future-tense descriptions are retained as release context. Current operator behavior lives in the [control](skills/delegate/references/control.md) and [TUI](skills/delegate/references/tui.md) references; the [native-substrate program](docs/native-substrate.md#program-completion-record) records later work and remaining deferrals.
+
+Release 0.71.0 also implements [native Claude Code Mods UX](skills/delegate/references/native.md): immediate commands, scoped job panel, official allowance observation, explicit revisioned controls and a bounded read-only reviewer, with model-free host regression tests. The broker and provider configuration remain authoritative.
 
 ## Already covered (asks answered by 0.14.x or earlier — no work)
 
@@ -74,7 +78,7 @@ Waves 1-3 were implemented by delegated Codex Sol@xhigh jobs supervised through 
 - **Native harness notification from the broker (superseded by native-substrate P2a)** — a detached worker still cannot re-invoke the Claude Code harness, but Claude Code's experimental plugin monitors can push stdout lines into interactive sessions. P2a ships a read-only, edge-only plugin monitor with dedupe, cooldown, snooze, and rate limiting; `finishedPath` + a manual Monitor-tool until-loop remains the canonical fallback wherever plugin monitors are disabled or unsupported. A bounded `delegate_wait` MCP tool would still add little beyond `delegate_events`.
 - **Auto-rollback on failure** — unsafe in shared dirty worktrees (can destroy concurrent work); replaced by explicit `delegate-jobs revert` (Wave 2).
 - **`maxCostUSD`** — no trustworthy cross-provider price table; token caps only.
-- **Worktree-per-writer auto-merge** — isolation exists (`isolation: 'worktree'`); automatic merge + conflict resolution is a large project with sharp failure modes; revisit after fan-out groups land.
+- **Worktree-per-writer auto-merge** — explicit broker isolation and fan-out groups have shipped. Strict CAS preflight and integration-worktree composition exist; direct owner-tree application and automatic conflict resolution remain deferred.
 - **Per-provider concurrency cap / fair queue** — real but heavier; revisit with fan-out usage data from `stats`.
 - **Repo-scoped advisory lockfile for unmanaged editors** — only works if every other tool honors it; documented as a convention (the broker could optionally emit one) rather than promised as a guarantee.
 - **Cache-growth notices** — host-disk hygiene is outside the broker's contract; a `stats` footnote at most.

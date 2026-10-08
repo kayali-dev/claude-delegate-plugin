@@ -1,6 +1,9 @@
 # delegate-tui design spec
 
-Status: active. Owner-approved 2026-07-27 (all four tracks).
+Status: implemented across Tracks A-E; original design approved 2026-07-27.
+The diagnosis below describes the pre-redesign snapshot, not current defects.
+Progress sections record the implementation; current controls and later Plan
+and Subagents tabs are documented in [the TUI reference](../skills/delegate/references/tui.md).
 Derived from a design research pass; every diagnosis below was verified against
 the code before adoption.
 

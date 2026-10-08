@@ -87,7 +87,7 @@ function parseArgs(argv) {
 
 function usage() {
   console.log(`Usage: delegate-cursor [options] --prompt <task packet>
-  --model composer|grok|grok-xhigh|auto|<cursor-model-id>
+  --model composer|grok|grok-xhigh|grok-fast|auto|<cursor-model-id>
   --mode consult|plan|review|implement|verify
   --approval auto|force
   --cwd <path>

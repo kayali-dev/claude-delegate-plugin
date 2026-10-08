@@ -2,6 +2,7 @@
 import readline from 'node:readline';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { negotiateMcpVersion } from './lib/mcp-contract.mjs';
 import { DeltaRedactor, latestShadowJobForSession } from './lib/control.mjs';
 import { beginDirectShadow } from './lib/direct-shadow.mjs';
 import { ActivityTransitionEmitter, mapCodexMcpEvent } from './lib/providers.mjs';
@@ -188,9 +189,9 @@ if (providerEnabled('codex')) {
     if (request.id == null) return;
     if (request.method === 'initialize') {
       send({ jsonrpc: '2.0', id: request.id, result: {
-        protocolVersion: request.params?.protocolVersion || '2025-11-25',
+        protocolVersion: negotiateMcpVersion(request.params?.protocolVersion),
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'delegate-codex-disabled', version: '0.69.1' }
+        serverInfo: { name: 'delegate-codex-disabled', version: '0.71.0' }
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: [] } });
     else if (request.method === 'resources/list') send({ jsonrpc: '2.0', id: request.id, result: { resources: [] } });

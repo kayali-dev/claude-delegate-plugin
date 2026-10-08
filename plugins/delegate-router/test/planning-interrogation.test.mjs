@@ -548,6 +548,9 @@ test('structural plan parsing accepts narrated balanced JSON last while preservi
   });
   const fencedWins = parseStructuralPlan(`${invalidFenced}\n${JSON.stringify(expected)}`);
   assert.deepEqual(fencedWins, { ok: false, reason: 'invalid-target-shape' });
+  assert.deepEqual(parseStructuralPlan(`${planText(expected)}\n\`\`\`json\ninvalid\n\`\`\``), { ok: false, reason: 'no-valid-structural-json' });
+  assert.deepEqual(parseStructuralPlan(`${planText(expected)}\n${invalidFenced}`), { ok: false, reason: 'invalid-target-shape' });
+  assert.equal(parseStructuralPlan(JSON.stringify(expected)).ok, true, 'native JSON is accepted');
 });
 
 test('plan output budget stays structural instead of scaling on packet bytes and remains overridable', () => {
@@ -608,6 +611,9 @@ test('planner selection requires structural output capability and preserves mode
   assert.deepEqual({ provider: coldFallback.provider, model: coldFallback.model, independentBy: coldFallback.independentBy }, {
     provider: 'codex', model: 'luna', independentBy: 'model'
   });
+  for (const model of ['luna', 'gpt-6-luna', 'gpt-5.6-luna']) {
+    assert.equal(selectAmbiguityCandidate({ provider: 'codex', model, requestedModel: model }).model, 'terra', 'Luna parents retain model-independent comparison after alias migration');
+  }
   const capableProvider = selectAmbiguityCandidate(cursorParent);
   assert.deepEqual({ provider: capableProvider.provider, model: capableProvider.model, independentBy: capableProvider.independentBy }, {
     provider: 'codex', model: 'luna', independentBy: 'provider'

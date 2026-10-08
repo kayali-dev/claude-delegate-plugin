@@ -24,7 +24,31 @@ test('plugin metadata and MCP registrations stay portable and version-aligned', 
   assert.match(mcp.mcpServers.delegate_control.args[0], /^\$\{CLAUDE_PLUGIN_ROOT\}/);
   assert.equal(mcp.mcpServers.delegate_codex.command, 'node');
   assert.match(mcp.mcpServers.delegate_codex.args[0], /delegate-codex-mcp$/);
-  for (const executable of ['delegate-backchannel-mcp', 'delegate-config', 'delegate-codex-mcp', 'delegate-collision-hook', 'delegate-control-mcp', 'delegate-worker', 'delegate-jobs', 'delegate-monitor', 'delegate-session-hook', 'delegate-supervisor', 'delegate-tui', 'delegate-work-state']) {
+  for (const executable of ['delegate-backchannel-mcp', 'delegate-config', 'delegate-codex-mcp', 'delegate-collision-hook', 'delegate-control-mcp', 'delegate-native', 'delegate-worker', 'delegate-jobs', 'delegate-monitor', 'delegate-session-hook', 'delegate-supervisor', 'delegate-tui', 'delegate-work-state']) {
     assert.match(fs.readFileSync(path.join(plugin, 'bin', executable), 'utf8'), /^#!\/usr\/bin\/env node/);
   }
+  for (const file of ['bin/delegate-control-mcp', 'bin/delegate-codex-mcp', 'bin/lib/providers.mjs']) {
+    const code = fs.readFileSync(path.join(plugin, file), 'utf8');
+    assert.match(code, new RegExp(`version: '${manifest.version.replaceAll('.', '\\.')}\\b'`), `${file} runtime metadata is not aligned`);
+  }
+  const hooks = JSON.parse(fs.readFileSync(path.join(plugin, 'hooks/hooks.json'), 'utf8'));
+  assert.deepEqual(hooks.modules, ['./native.tsx']);
+  assert.ok(fs.existsSync(path.join(plugin, 'hooks/native.tsx')));
+  assert.equal(manifest.userConfig.refresh_seconds.min, 3);
+  assert.equal(manifest.userConfig.refresh_seconds.max, 30);
+  assert.equal(runtime.scripts['test:native'], 'claude plugin test .');
+});
+
+test('lean skill references resolve and mutation tools are not auto-approved', () => {
+  const directory = path.join(plugin, 'skills/delegate');
+  const skill = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8');
+  assert.ok(skill.length < 9_000, 'keep the always-invoked skill lean');
+  const allowlist = skill.match(/^allowed-tools: (.*)$/m)?.[1];
+  assert.ok(allowlist);
+  assert.doesNotMatch(allowlist, /delegate_(?:start|respond|cancel|steer|integrate)|Bash\(delegate-jobs/);
+  for (const match of skill.matchAll(/\]\((references\/[^)]+)\)/g)) assert.ok(fs.existsSync(path.join(directory, match[1])), `missing skill reference ${match[1]}`);
+  const reviewer = fs.readFileSync(path.join(plugin, 'agents/reviewer.md'), 'utf8');
+  assert.match(reviewer, /^tools: Read, Grep, Glob$/m);
+  assert.match(reviewer, /^maxTurns: 12$/m);
+  assert.doesNotMatch(reviewer, /^(?:permissionMode|hooks|mcpServers):/m, 'plugin agents must not claim ignored isolation/permission fields');
 });

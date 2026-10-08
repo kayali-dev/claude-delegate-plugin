@@ -1,0 +1,497 @@
+
+# Delegate Router
+
+Keep Claude as coordinator, integrator, and final reviewer. Delegate only a bounded objective whose expected benefit exceeds handoff and verification cost.
+
+## Route
+
+1. Parse explicit provider, model, mode, scope, effort, approval, network, background, timeout, idempotency, retry, verification, and output-token budget controls. Explicit user choices win unless unavailable or unsafe.
+2. Run `delegate-health --quick` once per session. Its `enabledProviders` is authoritative: never invoke or recommend a disabled provider, including optional external plugins. Run `delegate-usage refresh codex` only when Codex is enabled and a candidate. Treat missing usage as unknown, not zero. Native Mods capture official host-reported Claude windows; if unavailable, suggest `delegate-config statusline enable` once. Never read Claude OAuth credentials or query a usage endpoint directly. See [native integration](native.md).
+3. Call `delegate-route --json --mode <mode> --provider <provider-or-auto> --model <model-or-auto> --task '<bounded summary>'`. Use its eligible primary and fallbacks unless the user explicitly overrides.
+4. Read [routing.md](routing.md) when the route is surprising or model fit is ambiguous. Read [models.md](models.md) for detailed model strengths.
+5. Keep work in the current Claude session when the route returns Claude. Do not delegate merely because external tools are available.
+6. Before delegating, state the chosen provider, model, mode, scope, approval policy, background/foreground mode, and reason in one concise update.
+
+Default to one active writer. Read-only consultation or review can run concurrently only when it cannot race with a moving diff.
+
+## Prepare A Task Packet
+
+Use this contract for every external agent:
+
+```text
+Objective:
+Mode:
+Allowed scope:
+Relevant context and starting points:
+Constraints and non-goals:
+Acceptance criteria:
+Required verification:
+Stop and report when:
+Return: outcome, changed files, verification, risks, blockers, continuation id.
+```
+
+Pass `allowedPaths` on `delegate_start` for every write-mode job with a known file scope: the broker injects the fence into the worker prompt and records any out-of-scope changed file as `scopeViolations` on the job (plus a `scope.violation` event) — check it before accepting the result. Give retryable starts a caller-stable `idempotencyKey`; a replay in the same cwd returns the original job. Set `maxOutputTokens` when a run needs a hard observed-output ceiling. Use `waitFor: 'session' | 'turn' | 'first-output'` for a bounded start milestone; `waitForSession=true` remains the session alias. Use `dryRun=true` to inspect the resolved options, ingest plan, lint findings, and exact provider packet without launching.
+
+Managed write starts are plan-first by default. The broker runs a read-only plan
+turn, presents predicted files/components plus observed token/duration bands,
+and waits for revisioned `delegate_respond accept=true|false`. Acceptance
+continues the same provider thread/session into write mode; it never launches a
+fresh context. When budget permits, a second cheap plan from another provider
+or model is compared structurally by targets, approach shape, and assumptions.
+That planner must advertise `structuralPlanOutput`; provider independence is
+preferred only among capable candidates, otherwise the broker keeps model
+independence inside the parent provider. Recent comparable/unparseable probe
+outcomes and successful structural primary plans can override the declaration
+for that provider/model. With no observations, the declared lane capability is
+used rather than treating missing data as support.
+Concrete file overlap is strong agreement; disjoint file targets and explicit
+same-topic decision contradictions are blocking conflicts. Component names,
+approach ordering/granularity, and unmatched assumption wording are weak;
+approach-content differences are moderate. They remain visible as additive
+weighted variance evidence but do not overrule agreed file targets. The verdict
+remains `convergent`, `divergent`, or
+`inconclusive`; same-work naming variance is non-blocking metadata, not a fourth
+verdict.
+Contradiction evidence includes reversed pairwise precedence among shared
+anchored terms even when one plan omits other terms, high-overlap polarity
+inversion, opposing defaults/actions, and exclusive scope over known decision
+terms. Omission or verbosity without one of those conflicts remains variance.
+Structural normalization preserves the submitted spelling of paths, component
+names, assumptions, and risks for presentation and file resolution; folded
+forms exist only as derived matching/deduplication keys.
+The nominal plan output sub-budget is 8,192 tokens for the primary plan and
+Codex independent planner, or 12,288 for a Cursor independent planner. Packet
+bytes and directive markers are diagnostic only and do not scale the budget.
+`DELEGATE_PLAN_OUTPUT_TOKENS` overrides it within 128–16,384 tokens. Wall time
+derives from the limit with 300s / 600s floors and a 900s ceiling, clamped to
+the parent timeout; `DELEGATE_PLAN_TIMEOUT_SECONDS` is the explicit override.
+Parseable overruns up to 20% may be recovered; invalid output never is. An explicit
+smaller job-level `maxOutputTokens` can still cap the plan. If the independent
+pass fails, the implement attempt retains additive `planPass` state, reason,
+job id, observed cost, and limit in inspect/TUI while launch continues.
+Only material structural divergence opens an ambiguity question; non-blocking
+variance is presented as the same work with different naming or organization,
+while inconclusive comparison says so and does not gate on a guessed verdict.
+For a genuinely
+trivial write, use MCP `delegate_start_trivial` or CLI
+`delegate-jobs start --no-plan-first`; add `--no-ambiguity-check` to keep the
+primary confirmation while skipping the second pass. These are explicit
+escape hatches, not routing defaults.
+
+When the owner has intent rather than a complete packet, use the local P5
+compiler instead of guessing missing sections. Run
+`delegate-jobs spec --intent '...'` or select one or more of `--from-diff`,
+`--failure-output`, `--todo path[:line]`, `--task-record path`, and
+`--from-conventions`. Resolve acceptance with repeatable `--acceptance`, the
+write fence with `--allowed-paths`, and all three budget dimensions with
+`--timeout-seconds`, `--max-rounds`, and `--max-output-tokens`. P3 repository
+instructions/manifests supply verification unless an explicit
+`--verify-command` or `--verify-exception` wins.
+
+The compiler renders one WorkSpec confirmation card with provenance and
+high/medium/low confidence per field. Missing and low-confidence fields remain
+unresolved and block writes. `delegate-jobs start` with intent-source flags
+asks for interactive confirmation; `--accept-spec` is the explicit
+non-interactive automation confirmation and cannot accept an incomplete draft.
+The TUI launcher exposes the same sources, fields, card, and dry-run gate.
+Compilation makes no model/network call and does not create broker state.
+
+Inference is not authority: never convert a scope candidate into
+`allowedPaths`. The compiler never grants network, sandbox-off, approval,
+sensitive access, overrides, add-dir/MCP/worktree privilege, scope widening,
+or a budget increase. Confirmed compilation feeds the ordinary
+`delegate_start`/plan-first path; callers that already pass a hand-written
+packet continue unchanged.
+
+Use `profile` for a reusable packet skeleton, `groupId` for fan-out tracking, and `startPaused=true` plus `delegate_release` when the first prompt must wait behind an external gate. `ingestFiles` stages declared absolute out-of-tree inputs and copies changed content back only after completion; if the source changed meanwhile, the provider version lands at `<source>.delegate-new` and emits `ingest.diverged`. `autoNudge` is read-only and opt-in. `reportSchema` is best-effort: inspect `structuredMissing` and never treat worker JSON as stronger evidence than the mechanical diff and verification fields.
+
+Retries are opt-in: use `retryPolicy: { maxAttempts, retryOn: ['transport', 'rate-limit'] }` only for provider transport/startup failures, never to repeat task-level outcomes. Write modes derive a cached repository verification profile by default: nearest `CLAUDE.md`, then `AGENTS.md`, quality-section commands before `package.json` `check`/`checks`/`test`/`lint`/`typecheck` scripts. Explicit `verify: { command, timeoutSeconds }` always wins. When no reliable non-mutating check exists, use `verify: { exception: '<reason>' }`; `DELEGATE_VERIFY=off` is the broker-wide emergency escape hatch. Every exception is persisted and inspectable. Verification runs on the shared owner checkout for shared jobs and inside the broker worktree for isolated jobs, only after observed changes; it never changes `status` and records broker origin, state, exit, duration, stable-input evidence, a redacted tail, and engine/toolchain warnings in `caveats[]`. Caveats do not convert `passed` to failure. Never accept a worker's self-reported sandbox green as the verification of record.
+
+`autoFix: { maxRounds }` is opt-in and off by default. The broker hard-caps it at three and may continue only for deterministic verification/scope evidence, unchanged scope and privileges, remaining budget, and measurable progress. It never loops on structured review findings or other judgment calls.
+
+The broker scans outbound task packets for credential-shaped values. It fails with `SECRET_IN_PROMPT` unless `allowSensitive=true`; an override is recorded as `security.warning` and does not relax scope or preservation rules.
+
+In write-mode packets, state explicitly that a completed job with zero changed files is a failed objective — Codex can engage its internal pre-implementation review flow and return an analysis instead of code (field-observed); the broker flags this on the record as `resultSuspect: 'no-changes-write-mode'`, and the explicit contract line in the packet prevents it up front.
+
+Reference repository paths instead of pasting large files. Include only conversation context the worker cannot discover. Tell every writer to preserve existing changes and never revert unrelated work.
+
+## Delegate To Codex
+
+For observable work, call `mcp__delegate_control__delegate_start` with `provider=codex`. It launches `codex app-server`, creates a durable job, and records messages, plans, tools, file changes, diffs, usage, and thread/turn IDs. Read-only starts return promptly; write starts wait through a bounded plan checkpoint and return a `launchNotice`. Current aliases are `sol → gpt-6.1-sol`, `astra → gpt-6-astra`, `luna → gpt-6-luna`, and `terra → gpt-5.6-terra`. Full IDs pass through unchanged, including older pins; `auto` leaves selection to Codex configuration.
+
+- `approval-policy`: `on-request`
+- `sandbox`: `read-only` for consult, plan, and review; `workspace-write` for implement and verify
+- `cwd`: `${CLAUDE_PROJECT_DIR}`
+- `config.approvals_reviewer`: `auto_review`
+- `config.model_reasoning_effort`: routed effort
+- `config.sandbox_workspace_write.network_access`: `false` unless the user explicitly enables network. `network=true` is supported on start/resume for both providers; Codex read-only sandbox shell access remains restricted, while Cursor networked read-only work elevates provider mode under a strict no-write preamble. Read [control.md](control.md) for the separate sandbox and egress policies.
+- `allowSensitive=true` authorizes sensitive-path access only; the scope and preserve-existing-changes rules always remain in force
+- Include the controls from [control.md](control.md) in the task packet.
+
+Inspect the returned job revision before controlling it. `delegate_steer` with `strategy=same-turn` or `auto` maps to Codex `turn/steer` with the active expected turn ID. Use `restart` to interrupt and begin another turn on the same thread, and `next-turn` to queue a follow-up. Every correction needs a stable `correctionId` so retries are idempotent.
+
+For scoped code reviews and independent second opinions, default to managed `delegate_start` with `mode=review`, `model=sol`, `effort=xhigh`, and the read-only sandbox. Inspect its transcript, diff, and usage. Reserve multi-agent review workflows for exhaustive audits, not routine scoped review.
+
+Use direct `mcp__delegate_codex__codex` and `codex-reply` only as foreground unmanaged compatibility fallbacks when `delegate_control` is unavailable; `delegate_start` remains the preferred supervised path. Each call is shadow-journaled as a new `direct-mcp` job, and `codex-reply` links that job to its originating shadow while retaining the provider thread. Messages, normalized provider events, diffs, files, usage, terminal audit, stats, and the TUI transcript remain visible. The caller still owns the provider loop, so steer, cancel, release, respond, resume, review round, and revert reject with `DIRECT_TRANSPORT`; inspection surfaces remain read-only. If shadow storage fails, the foreground call continues with its original result and no partial record.
+
+OpenAI's official plugin remains an optional fallback for its review and rescue commands:
+
+- Invoke `codex:review` for normal review.
+- Invoke `codex:adversarial-review` for challenge review.
+- Invoke `codex:rescue --background` for investigation or implementation.
+- Use its status, result, and cancel commands for lifecycle management.
+
+Do not mix official-plugin jobs with `delegate_control` job IDs; their lifecycle stores are independent.
+
+## Delegate To Cursor
+
+For observable work, call `mcp__delegate_control__delegate_start` with `provider=cursor`. The managed adapter prefers Cursor's ACP v1 server and starts it through a login shell on macOS so the authenticated keychain is available. It negotiates the selected model and read-only/write mode inside the ACP session.
+
+Use the direct headless adapter only as a compatibility fallback:
+
+```bash
+delegate-cursor --model <composer|grok|explicit-id> --mode <mode> --cwd "${CLAUDE_PROJECT_DIR}" --timeout-seconds <seconds> --prompt-file <task-packet-file>
+```
+
+Foreground and `--background` runs each create exactly one `direct-cli` shadow job. Cursor's normalized message, ephemeral thinking activity, typed tools, file-change edit lines, usage, audit, and terminal sentinel are visible through the ordinary inspection, transcript, diff, files, stats, and TUI surfaces. These shadows are read-only from the control plane with `DIRECT_TRANSPORT`; use managed `delegate_start` when steering, cancellation, response, or resume ownership is required. Shadow-journal failure never changes the CLI's stdout or provider run.
+
+Both adapters prefer `agent`, fall back to `cursor-agent`, and accept `DELEGATE_CURSOR_BIN`. Managed ACP uses Cursor Smart Auto review and sandboxing for write modes. `approval=force` is the only mode allowed to approve an unresolved ACP permission request; normal `auto` keeps Smart Auto's safety decision and rejects anything still escalated to the client.
+
+For long work inside Claude Code, run the foreground `delegate-cursor` command with the Bash tool's native `run_in_background: true`; this keeps host lifecycle and completion notifications visible to Claude. Use `--background` plus `delegate-jobs status|result` only when the command is launched directly from a normal terminal or another host that preserves detached processes. Direct shadows cannot be cancelled through `delegate-jobs`; the launching caller owns the process. Do not poll rapidly.
+
+ACP v1 has no portable same-turn user correction. `delegate_steer strategy=auto|restart` cancels the current prompt, waits for it to settle, and sends the correction to the same session. It reports `appliedAs=restart`; never describe this as same-turn steering. `strategy=same-turn` must be rejected for Cursor. Continue completed work with `delegate_resume`, which loads the same Cursor session. Use sensitive paths only when explicitly authorized.
+
+Known Grok-via-Cursor pattern (observed repeatedly on review work, both transports): the first turn can end with narration about filing or preparing the report without pasting the findings themselves — the broker flags this as `resultSuspect` on the record. Mitigate in the task packet — "End your final message with the complete findings inline; a description of the report is not the report" — and either set read-mode `autoNudge=true` for one automatic same-session correction or resume manually.
+
+## Match Workflow Requirements To The Attempt Lane
+
+Managed Codex app-server, Cursor ACP, and Cursor headless implement one formal
+attempt-driver lifecycle: `start`, `resume`, `prompt`, `steer`, `cancel`, and
+`close`. Do not infer parity from that common surface. The negotiated
+capabilities separately cover same-turn steering, live shell stdout, mid-turn
+token totals, context occupancy, plan mode, structural-plan output, MCP injection, broker-worktree
+support, and pre-prompt pause.
+
+Run `delegate-health --capabilities` when a workflow depends on one of those
+properties. It sends no model prompt. Installed-build handshake/help facts are
+marked `probed`; facts that cannot be established without a provider turn are
+marked `declared-from-documentation`. To inspect a disabled Cursor installation
+without changing live configuration, use
+`DELEGATE_ENABLED_PROVIDERS=codex,cursor delegate-health --quick --capabilities
+--json`; the environment override is read-only and `providers.json` remains
+authoritative after the command.
+
+Schedule against the named guarantee:
+
+- Codex supports true same-turn steering, live shell-output deltas, and
+  mid-turn token totals, but does not expose a distinct context-occupancy
+  measurement.
+- Cursor ACP is restart-only, shell-output-completion-only, and has no
+  mid-turn token totals; it does expose context occupancy.
+- Cursor headless is restart-only and shell-output-completion-only. Its
+  documented stream has no token fields; installed builds may add
+  provider-reported usage only to the terminal result. It exposes no context
+  occupancy and cannot pause before its first prompt.
+- All three support primary plan-first, broker back-channel injection, and explicit
+  broker-owned worktrees on the currently supported builds, though their
+  mechanisms differ. Structural comparison planning is separate: the current
+  Codex lane is declared capable, while current Cursor lanes require positive
+  observed structural validity before selection.
+
+A workflow that requires an absent capability is refused with the lane and
+capability named. Do not convert that refusal into a weaker workflow. Ordinary
+completion-only output accounting remains valid where documented; it is not a
+mid-turn budget guarantee.
+
+## Choose The External Model And Effort
+
+**Codex** (`luna` / `terra` / `sol` / `astra`):
+
+- `luna` — high-volume, well-scoped, low-risk work: summarizing, labeling, extraction, scaffolds, simple fixes. Cheapest and fastest; never where judgment or deep verification matters.
+- `terra` — retained GPT-5.6 Terra cost-balanced route for routine substantial coding and technical writing.
+- `sol` — GPT-6.1 Sol for repeated complex coding, debugging, and review; the router's hard-engineering/review preference. Use `xhigh` for difficult review when warranted.
+- `astra` — GPT-6 Astra for the most demanding end-to-end work, selected explicitly. It is not added to automatic candidates merely because it is available.
+- Full IDs preserve a pinned generation. Check account/client availability; an unavailable current model is a refusal, not permission to substitute an older one. GPT-6 Luna does not support `ultra`.
+
+**Cursor** (`auto` / `composer` / `grok` / `grok-xhigh`):
+
+- `auto` — default for non-complex Cursor work without a named model. Cursor chooses the model; Auto may select third-party models and is not a first-party-pool guarantee. Pin `composer` or `grok` when pool selection matters.
+- `composer` — clear implementation, refactors, and tests; resolves the newest eligible non-fast Composer advertised by the installed catalog (currently 2.5).
+- `grok` — broad investigation and sustained tool work; resolves the newest eligible high-effort Grok (currently 4.7). `grok-xhigh` requires that tier to be advertised; headless fallback applies only when the CLI can honor a tier absent from ACP.
+- Fast variants (`-fast` or `grok-fast`) are opt-in when both forms exist. When ACP is fast-only, the adapter prefers a CLI-validated non-fast headless fallback; if none is available, it records `cursor:fast-fallback` and reports the compromise. See [model notes](models.md).
+- Cursor catalogs may also advertise cross-provider models (GPT, Claude) from the API pool. Use the right tool for the model: GPT models route natively through Codex, never through Cursor, unless the user explicitly asks for that or Codex is disabled or at its avoid threshold. The broker enforces this (`WRONG_LANE`); `overrideLane=true` is reserved for the explicit-user-request case. The same logic already applies to Claude models (see Use Claude).
+
+**Effort** (Codex `effort`; Claude accepts explicit Agent effort on supported hosts, Cursor via model variant):
+
+- Start one level lower than instinct suggests and escalate on measured need — most tasks hold quality one level down, and output tokens are the expensive direction.
+- `low` lookups and mechanical edits · `medium` routine implementation and review · `high` multi-file debugging, risky changes, architecture · `xhigh` hardest ambiguous reasoning and difficult review (the coding-agent sweet spot; `sol` at `xhigh` is the review/second-opinion configuration) · `max` quality-first exceptional cases — compare against `xhigh` before adopting.
+- `ultra` is a different topology, not a bigger `max`: Codex delegates to parallel internal agents and synthesizes. Use only for genuinely independent, parallelizable workstreams with explicit user budget acceptance — it multiplies token spend by design.
+- Effort compounds with allowance: when a provider is at or above its warning band, drop one effort level or route elsewhere before starting new work.
+
+## Decide Whether The Sandbox Stays On
+
+Jobs run sandboxed by default, and the default is correct for most work. `sandbox=off` on `delegate_start` (`--sandbox off` on `delegate-jobs start` and `delegate-cursor`) disables provider sandboxing — Codex `danger-full-access`, Cursor `--sandbox disabled` — so the worker can use git and `gh`, install packages, run host CLIs and Docker, and reach the live web; Codex web search is enabled automatically when the job has network or the sandbox is off.
+
+Judge from the task packet, not from habit:
+
+- Sandbox stays on when the objective is code reading, editing, tests, or anything satisfiable inside the workspace. Prefer `network=true` (Codex write modes) when the only missing capability is network.
+- Turn it off when the objective *requires* host access to succeed: pushing branches or opening PRs, installing or upgrading dependencies, invoking authenticated CLIs (gh, gcloud, docker), or researching live web sources beyond what the sandbox permits.
+- If you cannot tell whether the sandbox would block the task, ask the user before starting instead of guessing in either direction — a sandbox failure mid-job wastes the run, and an unnecessary `sandbox=off` widens the blast radius for no benefit.
+
+An unsandboxed worker has your user's host privileges: state `sandbox=off` in the pre-delegation update, keep the allowed scope tight, never combine it with `approval=force` unless the user explicitly accepts both, and review the resulting diff and transcript with proportionately more care.
+
+## Supervise Managed Work
+
+In an interactive Claude Code session where the experimental plugin Monitor
+surface is available, you will be told when a delegated job crosses an
+actionable edge: live collision detected, policy breach, required human input,
+acceptance blocked, ready for review, terminal failure, or the ten-minute stall
+policy. Treat that notification as a
+wake-up signal and inspect the named job; it never replaces acceptance review.
+Per-job `budget-breach` and provider `allowance-breach` are distinct priority-one
+edges with different remedies. When that edge already names the terminal cause,
+the monitor suppresses the redundant generic failure line; a different later
+failure cause remains actionable and is still emitted after the ordinary
+cooldown.
+Progress, deltas, tools, usage ticks, and intermediate successes remain silent.
+Push defaults to this Claude session's own launches. New records retain
+`origin.sessionId` plus a realpath-normalized `origin.workspaceId`; continuation
+rounds inherit both. A private SessionStart marker correlates the monitor. If
+that correlation is unavailable or ambiguous, the monitor records the failure,
+emits one workspace-labeled degradation line, and falls back to workspace
+scope rather than guessing a session. The degradation line states that sibling
+sessions' jobs will now be delivered. Every per-job line includes
+`origin.sessionId`, boolean `isOwnSession`, and `observedAtRevision`; input gates
+also include `expiresAt`. Cross-session gates remain visible but omit response
+affordances because only the owning session can answer. An answered gate emits
+an immediate `needs-input superseded` line so an earlier push is not mistaken
+for a live decision window. If receiver identity itself is unavailable,
+`isOwnSession=false` is paired with `sessionCorrelation=unavailable` and means
+"not confirmed as own", not proof that the origin is foreign. Use
+`DELEGATE_MONITOR_SCOPE=workspace` to include sibling sessions in this
+worktree/project, `all` only for an explicit fleet overview, or `off` to disable
+push. Origin-less historical jobs stay silent except under `all`. Scope changes
+push only: `delegate_list`, `delegate_inspect`, the TUI, and control operations
+continue to cover the complete store.
+
+Managed Codex, Cursor ACP, and Cursor headless workers receive a broker-owned
+question-only back-channel. A worker's `ask_coordinator` call enters
+`user-input-required` with one normalized, redacted question plus bounded
+stuck context, diff so far, and options considered. Inspect the current
+revision and follow the pending request's contract. Only one live input gate
+may exist per job. Cursor newline-composite request IDs are split at ingestion:
+`pendingInput.requestId` is canonical and `requestAliases[]` lists every other
+published ID accepted for that same gate. An ID outside that set fails before
+command intake. A `plan-confirmation`
+requires the boolean MCP decision `delegate_respond accept=true|false`, or CLI
+`delegate-jobs respond <id> --expected-revision N --request-id <request> --accept`
+or the same command with `--reject`; a free-form `--answer` is invalid for a
+plan. A free-form `question` takes MCP `answer`, CLI `--answer`, or `a` inside
+the job's TUI detail view. A structured response may contain only
+`{"answer":"...", "steer":"..."}`; the steer is guidance within the original
+task and is never a permission, approval, scope, budget, timeout, network,
+sandbox, or control-plane grant. Ordinary-question monitor lines retain the
+revisioned answer path. For a `plan-confirmation`, the pushed
+edge carries `requiresHumanDecision: true`, names only the pull path
+`delegate-jobs inspect <id>`, and never pre-fills an approval or rejection
+command. The emitted line preserves the same marker as
+`requiresHumanDecision=true`. Treat that notification only as a wake-up signal: it is not user
+acknowledgement, approval, or consent, and an agent must never execute the
+decision unattended. After a human reviews the pulled record, the existing
+revisioned CLI, TUI, and MCP boolean decision paths remain available.
+Cursor ACP plan confirmations also carry the latest bounded `planEntries[]`
+checklist inline. Those entries are decision evidence only: they are not a
+structural-plan artifact and never enter the ambiguity comparator.
+
+Do not silently let a question expire. The default timeout is 300 seconds and
+the declared default is rejection with `stopReason: input-timeout`; blocked
+time still consumes the original job wall-clock budget but is excluded from
+stall detection. Expiry clears live attention, moves phase out of
+`user-input-required`, and retains `pendingInput.timedOut` as history rather
+than an answerable gate. `report_progress` and Cursor's native todo/task updates need
+no response. If MCP injection is unavailable, the job uses its previous
+stop-and-report behavior. Cursor coordinator corrections remain restart-only,
+even when the worker reached the coordinator live through this back-channel.
+
+Use `delegate_interrogate` only for a running managed worker whose work item
+has a bounded `maxOutputTokens`. The command payload is exactly a question
+plus request identity: it cannot carry a steer, approval, scope change,
+privilege, or budget change. Codex answers through a no-action `turn/steer`
+frame in the live turn. Cursor queues a separate read-only turn on the same
+session after its active prompt; that is never same-turn steering. The answer
+is findings evidence, not authority, and its observed provider tokens count
+against the work item's existing output budget.
+
+For live write attempts, SessionStart arms a dynamic set containing a private
+refresh signal plus `allowedPaths` roots and files the attempt has already
+reported changing. FileChanged and fail-open Edit/Write/batch hooks add one
+collision edge per attempt/path and mark applicable verification
+`state: "stale"` with `inputChanged: true`/`base-drift`. The set is capped at
+256 absolute paths including the signal; omitted roots and watcher failures
+record a degradation reason while coordinator-hook and post-hoc detection
+continue. These alerts are early detection only. They do not prevent, contain,
+or isolate writes; use worktree isolation when containment is required.
+Accordingly, every detection-only `changedFiles.count` is labeled with
+`countIsLowerBound: true`, and text/TUI count renderings say `at least`; only a
+broker-workspace count is presented as exact.
+
+Workspace isolation is additive and explicit. For a contained write attempt,
+set `isolation: "worktree"`, keep `sandbox=auto`, provide `allowedPaths`, and
+provide concrete `pathClaims` that cover that fence; add exact
+`resourceClaims` only for non-file resources that must serialize. CLI uses
+`--isolation worktree --path-claims a,b [--resource-claims port:3000]`.
+Claims schedule; they do not fence writes. `allowedPaths` fences and reports
+scope, while the broker-owned detached worktree contains provider source
+writes. Shared-tree attempts remain detection-only and remain the compatibility
+default because worktree isolation requires a Git repository, explicit claims,
+sandboxing, and conservative integration rules; defaulting
+it would make legitimate existing launches fail. Containment is still one
+explicit `isolation: "worktree"` / `--isolation worktree` selection plus the
+required scope and claims away.
+
+This first cut requires the Git repository root and refuses bare/non-Git
+repositories, submodules, unsafe state placement, sandbox-off, `addDirs`,
+`ingestFiles`, and Cursor's separate native-worktree flags. Detached owners,
+existing linked worktrees, and dirty
+owner trees are supported from immutable committed `HEAD`; target paths still
+must pass exact CAS. A terminal attempt produces a private portable change set
+and discards its workspace. Use `delegate_integrate` or
+`delegate-jobs integrate <job...>` to CAS-preflight and compose change sets in
+a broker-owned integration worktree. Composition never uses a three-way merge
+and stops on conflict. Direct multi-file owner-tree landing is deliberately
+deferred: `delegate_decide accepted` returns `CAS_CONFLICT` for moved targets
+or `WORKSPACE_APPLY_DEFERRED` after a clean preflight. Do not describe a
+prepared integration worktree as owner-applied or accepted.
+
+Continue an isolated candidate with `delegate_resume` or `delegate_review_round`:
+the broker checks the captured patch/content manifests and restores the original
+candidate on its immutable base in a fresh worktree and provider session.
+The write fence, scheduling claims, and inherited verification recipe remain
+unchanged. Opt-in deterministic `autoFix` rounds use the same path; never call
+this a same-thread resume or an owner-tree write.
+
+For cost-aware bounds, optionally set `maxTotalOutputTokens` for the work item;
+continuations and independent planners inherit the immutable reported-output
+cap. Consult `delegate_usage.workBudget`, not context occupancy or allowance
+percentages, and never treat missing provider/child usage as zero cost.
+Codex-only `maxSubagents: 0..16` limits concurrent native children (primary
+excluded); zero disables them and omission preserves provider defaults.
+
+SessionStart, including its `source=compact` invocation after compaction,
+injects a small session-owned work projection: active attempt IDs,
+policy/human/acceptance blockers, ready-for-review attempts, and resumable
+chain leaves. Use those IDs directly after compaction; the projection is capped
+and explicitly reports omissions. It contains no prompts, diffs, repository
+paths, results, secrets, or free-form errors. The status line keeps aggregate
+running/review-ready counts and one provider allowance visible during idle
+periods.
+
+After `delegate_start`, retain the job ID and revision. Use:
+
+- `delegate_list` to discover jobs in a genuinely new session, recover entries omitted by the bounded native context, or browse outside the current session scope. SessionStart with `source=compact` already rehydrates retained IDs after compaction. The tool reconciles orphans and returns compact summaries, newest first; filter by `phase`, use `blockedOnInput=true` / `--blocked-on-input` for exactly the live human gates, filter by `groupId`, or request a group summary for fan-out completion.
+- `delegate_inspect` for lifecycle, capabilities, immutable launch `origin.sessionId` / `origin.workspaceId` / `origin.projectDir` versus delegated `cwd`, execution owner/lease attribution, continuation IDs, `resumable`, `driftReport`, any failure `checkpoint`, the final `result`, verification verdict, and current revision. Use `view: "summary"` / `--view summary` for the compact monitor projection; `full` remains the default. `resultText` is the provider-independent text of the final message; use `resultWindow` (`find`, `offset`, `maxChars`) or `delegate-jobs result` window flags for long output. A read-mode job flagged `resultSuspect: 'short-final-message'` likely narrated instead of delivering — resume it with "paste the full findings now". `delegate_list` rows carry `session` and `rootJobId` so resume chains group. Cursor plan-mode output arrives as ACP plan updates rather than message chunks, so read the plan from `result.plan` (also mirrored as `plan.updated` transcript events); `result.text` holds only the conversational messages. Inline workers retain legacy `ORPHANED` reconciliation; supervisor-owned attempts instead report exact exit/signal/lease attribution.
+- `delegate_events` with `afterSeq` and bounded `waitMs` for incremental monitoring. Always reuse the returned `nextSeq`; filtered streams advance across nonmatching events without gaps.
+- `delegate_transcript` for user-visible messages, plans, and tool activity, paginated with `afterSeq` and `limit`. Streaming deltas and raw tool output are omitted unless `verbose` is set; for just the final answer, prefer the `result` on `delegate_inspect`. Hidden reasoning is never persisted.
+- `delegate_diff` and `delegate_files` to inspect actual work. Use `statOnly=true` first on large write jobs (per-file counts), then window the full diff with `offset`/`maxChars`. Pre-existing dirty files the job never modified are excluded via baseline content hashes; files flagged `overlapsPreexisting` mix pre-existing and job hunks — never claim exact ownership of those.
+- `status` remains backward-compatible provider lifecycle. Inspect additive `attention.state` for a live human gate and terminal `conclusion` for how the job ended versus whether it was healthy. A declined plan stays `status: cancelled` but reports `conclusion.disposition: declined` and `health: healthy`; a provider failure reports `failed` / `unhealthy`. `completed` does not mean accepted. For write modes inspect additive `acceptance`: `ready-for-review` means broker evidence is clean enough for owner review, while `blocked` lists deterministic blockers. Verification failure leaves status `completed`. Shared-tree owner/coordinator decisions through `delegate-jobs accept|reject` or `delegate_decide` keep their record-only behavior. Workspace rejection discards only broker storage; workspace acceptance is not recorded until owner landing exists and currently stops at strict CAS preflight as described above.
+- When a completed shared-tree job is blocked only by obsolete verification evidence, use `delegate-jobs verify <job-id>` or MCP `delegate_verify`. The broker reruns exactly the recorded command locally on the current tree and appends to `verificationEvidence`; it never starts a provider or accepts a replacement command. Inspect the old and new revision/digest claims before deciding. A latest failure, timeout, or stale result still blocks acceptance, and discarded isolated workspaces are refused because the owner tree is not their captured artifact.
+- `lastActivityAt` comes from the journal tail. `stalled=true` means a running job has been quiet longer than `DELEGATE_STALL_SECONDS` (default 300); it is a diagnostic flag, never an automatic kill.
+- `delegate_stats` for the read-only outcome ledger. It reports provider completion, real-tree verification pass, and explicit owner acceptance separately with numerator/sample/minimum metadata; sub-minimum rates are `insufficient-data`, not percentages. `since` accepts a duration, ISO date, or broker version, `until` is an exclusive ISO-date boundary, and broker/day cohorts expose ORPHANED eras. `recommendFor` is advisory only: it needs 20 owner labels per provider plus separated 95% Wilson intervals or declines, and never changes the static router. Terminal-status/output-token totals, proven external Codex totals, and explicitly approximate unattributed allowance movement remain available.
+- `delegate_usage` for observed job usage, chain-cumulative token totals, and provider allowance as separate values.
+- MCP-capable clients may mention `delegate://work/active`,
+  `delegate://repo/profile`, or `delegate://job/{id}/diff` as read-only
+  context. Clients without resources use the unchanged inspection tools.
+- `delegate_cancel` with `expectedRevision`. Cancellation is provider-aware and becomes terminal only after provider acknowledgement or confirmed process exit.
+- When the plugin Monitor is unavailable, disabled, or unsupported, fall back
+  to the job's `finishedPath` from `delegate_inspect`/`delegate_list`: the
+  broker writes that sentinel on every terminal transition, so a manual
+  Monitor-tool until-loop on its existence remains the durable wake signal.
+  Do not rely on a background `delegate-jobs wait` process inside Claude Code;
+  the harness can reap it. `delegate-jobs wait` remains fine from a real
+  terminal.
+- A shared-tree Codex job whose transcript shows collab-agent activity carries `reviewFlowEngaged: true`; direct thread resume refuses with `RESUME_UNSUPPORTED`. Plan a fresh job that folds in verified findings. Isolated captured candidates can use the fresh-workspace/fresh-session continuation path; it never resumes that review thread.
+- `idempotencyKey` replay returns the existing job even when that job completed without meeting its objective (analysis-only turn, zero changed files, failed verification). A deliberate retry-with-changes is a new request: mint a new key rather than reusing the old one.
+
+`REVISION_CONFLICT` errors carry `currentRevision`; retry once with that value when your command is still appropriate for the newer state, instead of a full re-inspect round-trip.
+
+Ambient attention is deliberately quiet. Only edge transitions may speak, with
+per-item deduplication, cooldown, snooze, and priority policy breach → human
+input → acceptance ready → failure. Never speak after every edit/command,
+repeat a suggestion inside one logical task, announce successful intermediate
+activity, or demand immediate review merely because a provider completed.
+Everything else belongs in the status line or remains available through pull.
+
+For long managed jobs in Claude Code, use the plugin monitor or the `finishedPath` fallback above and continue other work; a background Bash waiter can be reaped by the harness. From a normal terminal, `delegate-jobs wait <job-id>` exits 0 completed, 3 failed, 4 cancelled, 5 no observed changes, 6 verification failed, or 75 wait-timeout. Bound the job with `timeoutSeconds` (60–86400; default 3600). `maxOutputTokens` uses provider-aware cancellation and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and continuation identity; enforcement can only be live on lanes with mid-turn usage.
+
+Shared write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another shared writer is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent shared writers. Workspace-isolated jobs instead require claims: overlapping path prefixes or exact resource IDs fail with `CLAIM_CONFLICT`, and a shared writer owns the whole repository for scheduling. A live shared-tree collision alert means a write already happened: inspect the named path and rerun stale verification before any acceptance decision.
+
+Store maintenance is self-managing and conservative. Age retention
+(`DELEGATE_JOB_RETENTION_DAYS`, default 14) runs before the 1.5 GiB total-state
+budget (`DELEGATE_STATE_BUDGET_BYTES`). Never describe a non-terminal,
+`ready-for-review`, `blocked`, live-leased, or newest-20 terminal job as
+reclaimable by budget. Protected overage is reported, not deleted. Terminal
+journals gzip transparently; both plain and gzip remain readable. The 32 MiB
+per-job journal cap keeps the head and newest tail and exposes a
+`journal.truncated` marker plus record metadata. Use `delegate-health` for
+bytes/files/headroom and the private bounded `maintenance.jsonl` for exact
+compression and age-versus-budget deletion history.
+
+When steering, remember a correction that shrinks the task can complete before a follow-up command lands; do not plan a steer-then-cancel sequence around a shrinking task.
+
+Read [protocol.md](protocol.md) when implementing a controller, diagnosing a stale revision, or deciding correction semantics.
+
+## Use Claude
+
+Do not recursively launch `claude -p`. Keep the work in the current session when possible; a Claude subagent spends the same five-hour and weekly windows as this session, so parallelism through Agents is not extra allowance. When Claude's own windows are at or above the warning band, prefer routing bounded work to Codex or Cursor headroom over spawning additional Claude contexts.
+
+Use a built-in `Agent` only when a fresh context, an independent second opinion, parallel read-only investigation, or worktree-isolated parallel write work is worth the handoff. Route by task shape:
+
+- `haiku` — bounded mechanical work with verifiable output (format conversion, renames, extraction against an exact spec). Keep its workload within the installed model's context and reasoning limits.
+- `sonnet` — the default for bounded coding, exploration, and coordination subtasks.
+- `opus` — complex reasoning, difficult debugging, architecture, and review; the router's default hard-task Claude tier.
+- omit the model to inherit the parent session's model — never assume what the parent is running.
+- `fable` — **never auto-select.** The current alias selects Fable 5.1 on Anthropic; availability and usage-credit billing depend on the account/provider. Use it only after explicit authorization for the specific task. The router sets `requiresAuthorization` for both the alias and full Fable IDs.
+
+Current Anthropic aliases are Opus/Sonnet/Haiku 5.5 and Fable 5.1; use Claude
+Code 2.1.293 or later for all of them. Full Claude model IDs are valid routing
+requests, but execution must honor the host's model picker and Agent tool
+catalog. Do not substitute an older model when the requested pin is unavailable.
+
+When the router recommends the highest Claude tier, read that as "opus — or fable only with explicit per-task user authorization." If the parent session already runs the recommended tier, stay in the session. Do not route Claude models through Cursor to satisfy a tier choice: Cursor catalogs list Claude ids as first-class models, but that path spends the Cursor pool for a model the Claude subscription already covers, loses native harness behavior and continuation, and gains no Cursor-specialist ability.
+
+A Claude agent that writes files is an unmanaged writer and is not contained by
+the managed `WRITER_ACTIVE` guard. Live collision hooks can report its
+Edit/Write overlap after the write, but that is not isolation. Never run one
+alongside a managed write job in the same cwd; give parallel Claude write work
+worktree isolation or coordinate it manually.
+
+The plugin's Agent/legacy Task hooks add a `claude-agent` visibility stub keyed
+by the hook `tool_use_id`; they do not supervise, authorize, or control the
+subagent. `SubagentStart`/`SubagentStop` correlate its real lifecycle by
+`agent_id`. If a session crash omits the stop, a transcript quiet window
+(default 30 minutes) ends it honestly as failed `ended-unknown`, never as
+success; recent growth renders active and quiet-within-window renders idle.
+Stub prompts and transcript tails are bounded and redacted, every mutation
+stays disabled, hook failure always yields to the original Agent call, and
+ordinary retention prevents unbounded accumulation.
+`DELEGATE_AGENT_STUBS=0` disables this visibility layer.
+
+The resident supervisor also tails correlated Claude subagent transcripts into
+bounded/redacted journal events, with durable byte/usage checkpoints and a
+final drain after terminalization. `DELEGATE_AGENT_TAIL=0` disables ingestion
+without disabling lifecycle stubs. Managed Codex/Cursor detail has a Subagents
+tab: selected running Codex children can stream through the parent worker's
+existing connection; rejected or disconnected subscriptions show stored
+snapshots. Cursor child transcripts remain explicitly unavailable.
+
+## Verify And Recover
+
+Treat all worker output as untrusted engineering input. Inspect the actual diff, verification profile source, verification result, scope, and `acceptance` evidence. The broker derives and runs real-tree checks by default; override with an explicit real command when repository conventions are incomplete. Worker green is not coordinator green: never accept a sandboxed worker's self-reported checks as final verification, because credential-free runs can silently skip or degrade environment-dependent steps. Historical `verificationOrigin: 'worker-sandbox'` remains the mechanical trigger for a coordinator rerun.
+
+Passing checks are not a correctness gate for stateful logic. Field-verified across multiple clusters: delegated work on billing/exactly-once semantics, reservation and cancel state machines, moderation-gate ordering, retry idempotency, and auth guards shipped 20-30 review-caught defects per cluster while every check run was green. Adversarially review that class of work every round — the review gate also catches the coordinator's own spec errors. Route the two failure classes differently: structural, deterministic bugs (ordering, keying, guards, limits) re-delegate well with a precise spec; subtle stateful-interaction bugs plateau under delegation — take those in-session. On fix rounds, instruct the worker to simplify rather than add machinery: new locks, manifests, and wrappers added mid-fix are where the next round's defects concentrate. Read [control.md](control.md) before any write delegation or handoff after failure.
+
+If a provider reports a quota error, set it to exhausted with `delegate-usage set <provider> 100 --source quota-error`, preserve its continuation ID and partial diff, then rerun `delegate-route` and use the best eligible fallback. Never have two agents write the same files at once. A stale `expectedRevision` is a concurrency conflict: inspect again instead of blindly retrying the old command.
+
+Failure and cancellation records include a `checkpoint` with the reason, continuation ID, last diff event, and one-sentence resume guidance. Prefer its `resumeHint` over guessing. When an owned write must be rolled back, preview `delegate-jobs revert <id> --dry-run`, then run it without `--dry-run`; it restores only files still matching the job's recorded final hashes and refuses pre-existing overlap or later edits for manual resolution.
+
+For a terminal fix/review round, use `delegate_review_round` (or `delegate-jobs review-round`) with the new findings. It refuses non-resumable parents and automatically anchors the continuation with the recorded diff stat, changed files, and scope. If stats predate the audit log, run `delegate-jobs audit backfill` once; it is idempotent.

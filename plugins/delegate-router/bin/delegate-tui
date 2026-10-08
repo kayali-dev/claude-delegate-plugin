@@ -2342,6 +2342,7 @@ clock.unref?.();
 
 screen.start();
 const probeResult = await probeTerminalWidths({
+  unrefBackground: true, // interactive background profiling must not delay exit
   screen, input: process.stdin, env: process.env, mode: widthProbeMode(process.env), cached: cachedWidths,
   onBackgroundComplete(result) {
     if (quitting) return;

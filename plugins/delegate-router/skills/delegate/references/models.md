@@ -1,85 +1,110 @@
 # Model Notes
 
-Research snapshot: 2026-07-12 (Cursor plans verified 07-11; GPT-5.6 GA, Fable subscription status, and tier benchmarks verified 07-12). Model availability and pricing can change; query installed CLIs before relying on a model ID.
+Reviewed against source and official provider documentation on 2026-10-08.
+These are routing defaults; account catalogs, client versions, and provider
+configuration determine availability. Explicit model IDs keep their generation.
 
-## Claude
+## Current Routes
 
-- Fable 5 is Anthropic's most capable route for the hardest long-running work, broad knowledge, vision, science, and large autonomous software tasks — but **it is not included in subscription usage as of 2026-07-12**: it bills through opt-in usage credits at API-tier rates ($10/$50 per MTok), runs minutes-long turns, and applies stricter safety classifiers. Never auto-select it; the router refuses to, and explicit requests carry `requiresAuthorization` so the skill obtains per-task user approval first. Anthropic has said the removal is temporary ("once capacity allows"), with no date — re-verify before relying on this status.
-- Opus 4.8 is the default hard-task route and the most capable subscription-included model: long-horizon agentic work, difficult debugging, review, architecture, memory.
-- Sonnet 5 is the daily coding and coordination default — near-Opus quality on coding and agentic work at Sonnet cost.
-- Haiku 4.5 is for deterministic, mechanical, precisely specified work only: it is explicitly weak on complex reasoning and large-codebase analysis, has a 200K context window (vs 1M for the rest of the family), and the oldest knowledge cutoff (2025-02). Never route judgment or ambiguity to it.
+| Provider | Alias | Current selection | Role |
+| --- | --- | --- | --- |
+| Codex | `sol` | `gpt-6.1-sol` | Complex coding, debugging, review |
+| Codex | `astra` | `gpt-6-astra` | Explicit escalation for the hardest work |
+| Codex | `luna` | `gpt-6-luna` | Focused coding and high-volume bounded work |
+| Codex | `terra` | `gpt-5.6-terra` | Retained cost-balanced coding tier |
+| Claude | `opus` | Opus 5.5 on Anthropic | Complex reasoning and coordination |
+| Claude | `sonnet` | Sonnet 5.5 on Anthropic | Daily coding and coordination |
+| Claude | `haiku` | Haiku 5.5 on Anthropic | Simple bounded work |
+| Claude | `fable` | Fable 5.1 on Anthropic | Explicit, authorized long-running work |
+| Cursor | `composer` | Newest eligible non-fast Composer; currently 2.5 | Clear implementation |
+| Cursor | `grok` / `grok-xhigh` | Newest advertised eligible tier; currently 4.7 | Sustained investigation and tool work |
+| Cursor | `auto` | Account's Auto selection | Default for non-complex Cursor work |
 
-Sources: https://code.claude.com/docs/en/model-config, https://www.anthropic.com/news/claude-fable-5-mythos-5, https://www.bleepingcomputer.com/news/artificial-intelligence/claude-fable-5-isnt-permanently-leaving-subscriptions-anthropic-says/, https://theaicareerlab.com/blog/which-claude-model-should-you-use
+The Codex aliases live in `bin/lib/models.mjs`. Full IDs such as `gpt-6-sol`,
+`gpt-5.6-sol`, and `gpt-5.6-luna` pass through unchanged. `auto` leaves the
+Codex model unset so its configuration wins. The router infers native providers
+from full GPT, Claude, Composer, and Grok IDs; explicit `provider` still wins.
+Managed starts require Codex or Cursor; Claude remains in-session or a built-in
+agent. Disabled providers and quota gates apply to every model generation.
 
-## Codex GPT-5.6
+OpenAI currently recommends GPT-6.1 Sol for complex coding when available and
+GPT-6 Luna for focused work. Astra is the most capable route. GPT-5.6 remains
+available during rollout, which is why Terra and explicit older pins are kept.
+An unavailable requested model is not automatically replaced. `ultra` is a
+Codex subagent topology; GPT-6 Luna supports up to `max`, not `ultra`.
+Sources: [Codex models](https://learn.chatgpt.com/docs/models),
+[GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
+[GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra), and
+[GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna).
 
-GA across ChatGPT, Codex, and the API since 2026-07-09 (after a two-week limited preview).
+## Codex Runtime Preflight
 
-- Sol is the escalation tier, not the default: security review, architecture, high-stakes changes, complex debugging, repository-wide refactors, and final judgment. Benchmarks show why it earns hard work: ~64% of repo tasks completed with zero trial-and-error (vs ~41% for Terra), and roughly 21k output tokens per completed task vs Terra's ~56k — on difficult agentic work Sol is often both better and cheaper than its 2x sticker price suggests. At `effort=xhigh` it is exceptionally strong at surfacing issues, gaps, and bugs — the first-choice configuration for review sessions and independent second opinions (field-verified by this plugin's own external reviews). Known consistent weakness: the stateful correctness boundary — exactly-once billing, reservation/cancel lifecycles, gate ordering, retry and concurrency idempotency. Sol ships green checks over that class while leaving review-caught defects behind; never accept its billing/auth/state-machine work without an independent adversarial review, and expect over-building on stateful fix rounds unless told to simplify.
-- Terra is the daily external default: routine feature development, straightforward multi-file coding, technical writing, ordinary review. Markedly chattier per task than Sol — measure before assuming the lower price wins on long runs.
-- Luna is for high-volume, well-scoped, low-risk work: summarizing, labeling, extraction, scaffolds, simple fixes.
-- `max` effort is for unusually hard single-agent work; compare against `xhigh` before adopting. `ultra` is a different topology, not a bigger max: Codex delegates to parallel internal agents and synthesizes, multiplying token spend by design — only for genuinely independent parallelizable workstreams with explicit budget acceptance.
+Managed app-server jobs fetch `model/list` with bounded pagination and hidden
+models included, caching only within that connection. Known unsupported model
+IDs, reasoning efforts, or input modalities fail before `thread/start` or
+`turn/start`; no model or effort is silently substituted. Incomplete, empty,
+or unsupported catalogs remain explicitly unverified and leave final validation
+to the provider. Discovery is not account entitlement or a successful inference.
+Source: [Codex app-server](https://learn.chatgpt.com/docs/app-server).
 
-Sources: https://openai.com/index/gpt-5-6/, https://www.vellum.ai/blog/gpt-5-6-benchmarks-explained, https://www.coderabbit.ai/blog/gpt-5-6-sol-and-terra-benchmark, https://www.toolcolumn.com/learn/gpt-5-6-max-vs-ultra
+`maxSubagents` (CLI `--max-subagents`) is a Codex-only opt-in concurrent-child
+limit, 0–16, excluding the primary agent; zero disables native subagents and a
+positive value explicitly enables that limit. Omitting it preserves provider
+configuration. It is inherited on Codex continuation and independent planning
+jobs and is not a total-spawn or token-cost guarantee. Source:
+[Codex subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
-## Cursor Plans And Pools
+## Claude Availability
 
-Cursor subscriptions (Pro $20, Pro+ $60, Ultra $200 per month; Teams Standard $40 and Premium $120 per user) meter usage in two separate monthly pools:
+Claude Code resolves its aliases for the configured provider; gateways and
+cloud providers may resolve older versions. Full pins include
+`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, and
+`claude-fable-5-1`. Use Claude Code 2.1.293 or later for all those releases.
+Fable billing depends on plan and seat tier. The router conservatively excludes
+it from automatic candidates and sets `requiresAuthorization` on both its
+alias and full IDs. Check the account's model picker before authorizing.
+Source: [Claude model configuration](https://code.claude.com/docs/en/model-config).
 
-- **First-party pool**: Auto, Composer 2.5, and Grok 4.5 draw from a dedicated, more generous allocation. This is the pool Delegate Router consumes, because it routes to Composer and Grok.
-- **API pool**: third-party models charged at API price against a tier-based inclusion ($20 / $70 / $400). Cursor catalogs can therefore advertise GPT and Claude models — do not select them through Cursor while their native lane is available: GPT models belong on Codex (better harness, no API-pool burn) unless the user explicitly asks, or Codex is disabled or at its avoid threshold. The broker refuses such starts with `WRONG_LANE`; `overrideLane=true` exists for the explicit-request case.
+## Cursor Catalogs And Pools
 
-Both pools are token-metered at per-model rates, so model choice changes how fast the shared first-party pool drains: Grok 4.5 ($2/$6 per 1M in/out) consumes it roughly 3-4x faster than Composer 2.5 ($0.5/$2.5). There are no five-hour or weekly windows; the cycle is monthly, and exhausted included usage falls through to on-demand billing rather than a hard block.
+`agent models` or `cursor-agent models` supplies CLI IDs; managed ACP uses the
+session's model config catalog, preferring `parameterizedModelPicker` values.
+Composer/Grok aliases choose the newest eligible advertised version. Pins via
+`DELEGATE_CURSOR_COMPOSER_MODEL`, `DELEGATE_CURSOR_GROK_MODEL`, or
+`DELEGATE_CURSOR_GROK_XHIGH_MODEL` must exist when a CLI catalog is available.
+A missing requested family/tier fails with `INVALID_MODEL`; an empty CLI
+catalog uses the documented fallback IDs, leaving provider validation in place.
 
-Track the **first-party pool** percentage from the dashboard: `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>`.
+ACP can expose attributed IDs such as `grok-4.7[effort=high,fast=false]` while
+CLI uses `cursor-grok-4.7-high`. Both shapes are supported. Base CLI IDs such as
+`grok-4.7` are supported for the default high-effort alias. Fast is opt-in when
+both forms exist. If ACP is fast-only, the adapter prefers a CLI-validated
+non-fast headless fallback; with no such CLI model it records
+`cursor:fast-fallback` rather than hiding the compromise. A missing ACP tier
+may use headless only when the CLI advertises that exact tier, evented as
+`cursor:acp-tier-fallback`. An active ACP session is never silently downgraded.
 
-**Auto mode** (`auto`, advertised as `default[]` over ACP) lets Cursor route within the first-party pool itself and is the default for non-complex Cursor tasks when the user has not named a model — the router emits it in that case. Pin `composer` or `grok` explicitly when the task is complex or consistent single-model behavior matters.
+Cursor Models and Other Models are separate monthly pools. Composer and Grok
+use Cursor Models; Auto can select third-party models and bill Other Models.
+Pin Composer/Grok when first-party pool selection matters. Record dashboard
+percentages manually; local tokens are not allowance. GPT selections through
+Cursor remain blocked with `WRONG_LANE` while native Codex is enabled and below
+its avoid band, unless explicitly requested with `overrideLane=true`.
+Sources: [Cursor pricing](https://cursor.com/docs/models-and-pricing),
+[Grok 4.7](https://cursor.com/docs/models/grok-4-7), and
+[Composer 2.5](https://cursor.com/docs/models/cursor-composer-2-5).
 
-**Fast variants are opt-in.** When a catalog advertises fast and non-fast forms of the same model, resolution defaults to non-fast; a fast variant is selected only when the request itself says fast (`composer-2.5-fast`, `grok-fast`, `grok-4.5-fast-high`, or an exact attributed token with `fast=true`). Never choose fast on the user's behalf — it trades allowance for latency.
+## Lane Limits And Comparison
 
-Sources: https://cursor.com/docs/models-and-pricing and https://forum.cursor.com/t/grok-4-5-pricing-for-subscription-plans/165207
+Model quality does not supply a missing transport capability. Only managed
+Codex has same-turn steering, live shell stdout, and mid-turn token totals.
+Cursor ACP has context occupancy and restart-only correction; headless has
+terminal usage when reported, no context occupancy, and no pre-prompt pause.
+All three support plan mode, MCP injection, and broker-owned worktrees on
+supported builds. `delegate-health --capabilities` distinguishes no-turn probe
+evidence from documentation declarations. Production ACP fs/terminal client
+capabilities remain false; the health probe tests them separately.
 
-## Cursor Grok 4.5
-
-Grok 4.5 is Cursor's broad frontier route for long-running creative tool use spanning software engineering, data science, finance, legal, research, and knowledge work. Its training emphasizes investigation, recovery, and verification, and it substantially outscores Composer on agentic benchmarks (SWE-Bench Pro ~65% vs ~54%) with a larger context window (500K vs 200K). It is subscription-included as a first-party model, but drains the shared first-party pool several times faster than Composer — reserve it for work that needs its breadth. Use `grok-4.5-high` for the cost-balanced route and `grok-4.5-xhigh` for the hardest cases. Avoid Fast variants unless latency matters more than allowance. On review tasks Grok has twice ended its first turn narrating that it was "filing the scan report" without pasting the findings — instruct it to inline the findings in its final message, and expect an occasional `delegate_resume` nudge.
-
-Catalog reality check (observed live 2026-07-13): the ACP session advertised `grok-4.5` only as `[effort=high,fast=true]` and `composer-2.5` only as `[fast=true]`, while the CLI catalog carried non-fast `composer-2.5` and `cursor-grok-4.5-{low,medium,high}` (note the `cursor-` prefix; no xhigh tier that day). The adapter honors the non-fast contract by escaping to headless with the CLI's non-fast id when the ACP session is fast-only, and resolves both the prefixed and unprefixed id shapes. Codex workers load trusted-project docs and hooks themselves (`capabilities.selfEnforcesProjectHooks: true`); Cursor workers do not — post-review their work instead of relying on in-worker gates.
-
-ACP sessions may advertise fewer Grok tiers than the CLI catalog (observed: ACP capped at `effort=high` while `agent models` lists `-xhigh`). When a requested tier is missing from the ACP catalog but present in the CLI catalog, the managed adapter automatically switches that job to the headless transport with the CLI-validated id — evented as `cursor:acp-tier-fallback`, with correction semantics degrading to cancel-and-resume for that job.
-
-Cursor disclosed that an earlier Cursor code snapshot entered training, so do not over-weight CursorBench when comparing it with other providers.
-
-Source: https://cursor.com/blog/grok-4-5
-
-## Cursor Composer 2.5+
-
-Composer is Cursor's coding specialist for sustained multi-file changes, refactors, tests, and clear implementation work — and it beats Grok on web-framework evals (Next.js-style ~92% vs ~83%) and multilingual code, at roughly a quarter of Grok's token cost. Composer 2.5 improved long-running coding, complex instruction following, and effort calibration. It is subscription-included as a first-party model and is the cheapest draw on the shared first-party pool, which makes it the default efficiency route; Fast costs materially more.
-
-The adapter defaults to `composer-2.5`. Override `DELEGATE_CURSOR_COMPOSER_MODEL` when a later Composer ID is available. `agent models` (or `cursor-agent models`) is the source of truth for account-specific ids: catalogs expose fully-qualified tier ids (for example `grok-4.5-high`, `grok-4.5-xhigh`, `composer-2.5`) and may include cross-provider models. ACP sessions advertise the same models as attribute-serialized values (`grok-4.5[effort=high,fast=true]`); the managed adapter normalizes both forms, so suffixed ids, bare bases, full attributed tokens, and the shorthands `composer`, `grok`, and `grok-xhigh` all resolve against the session's advertised list. Anything unmatched fails closed with `INVALID_MODEL`, and the resolved advertised value is recorded on the job as `resolvedModel`. The ids recommended in this file are pinned by a regression test against a realistic attributed catalog so docs and matcher cannot drift apart.
-
-Sources: https://cursor.com/blog/composer-2-5 and https://cursor.com/blog/composer-2-technical-report
-
-## Comparison Limits
-
-Provider benchmark numbers are not directly interchangeable: the harness, tools, prompting, and available context differ. Route by task shape, verified local behavior, allowance headroom, and total coordination cost rather than declaring one universal winner.
-
-## Cursor catalog fidelity
-
-The adapter retains ACP initialize capabilities, modes, models, and the session config-option catalogs on the job. When the model option exposes Cursor's `parameterizedModelPicker`, its values are preferred over hand-constructed bracketed IDs; the structural bracket/suffix matcher remains the compatibility fallback. Negotiated and provider-reported model/mode changes emit `model.updated` and `mode.updated` rather than silently mutating the record.
-
-`delegate-health` includes a versioned no-turn ACP probe. It advertises terminal and fs client capabilities only inside the probe and reports whether the installed build actually sends `terminal/*` or `fs/*` requests. Production initialize continues to advertise all three capabilities as false until a build demonstrably honors them.
-
-## Model choice does not erase lane limits
-
-A stronger model cannot supply a transport capability the lane lacks. Codex
-app-server is the only managed lane with true same-turn steering, live shell
-stdout, and mid-turn token totals. Cursor ACP instead exposes context occupancy
-and restart-only correction; Cursor headless exposes terminal-result usage and
-restart-only correction, without context occupancy or pre-prompt pause.
-
-Plan mode, MCP injection, and broker-owned worktrees are supported on all three
-current lanes through different mechanisms. Verify the installed build with
-`delegate-health --capabilities` before selecting a model for a workflow whose
-acceptance depends on one of those mechanisms. A capability refusal is not a
-reason to choose a larger model on the same lane; route to a capable lane or
-change the workflow explicitly.
+Route by task shape, actual verification, headroom, and coordination cost.
+Provider benchmarks and historical field observations are not interchangeable
+rankings or current account-availability guarantees.

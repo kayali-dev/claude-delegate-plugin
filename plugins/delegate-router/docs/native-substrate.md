@@ -5,6 +5,12 @@ remaining non-parities recorded below. Owner-approved 2026-07-26 as a single
 program.
 Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
+Source audit: 2026-10-08. The phases below retain their original design and
+completion record. Later model/catalog, planning-budget, and subagent
+observability, native JSON contracts, optional work budgets, and captured-candidate
+continuation updates are described in the [changelog](../CHANGELOG.md) and
+current [operator references](../skills/delegate/references/control.md).
+
 ## Progress
 
 - P9 provider attempt-driver contract is implemented. Codex app-server, Cursor
@@ -86,7 +92,7 @@ Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
   attributes provider tokens to the original work-item budget.
 - P4 native session integration is implemented additively. The existing
   status-line wrapper now composes a five-second-refresh work chip before the
-  user's original command; SessionStart and PostCompact share one bounded,
+  user's original command; SessionStart (including source=compact) supplies one bounded,
   redacted work-state projection; P2.5 remains the sole overlap invalidator;
   the control MCP advertises read-only resources/templates and two common-flow
   prompts without changing its tool array; and opt-in footer regexes turn
@@ -359,7 +365,7 @@ Fixes: 0/255 verification becomes the default path; `success` stops meaning
 
 ### P4 — Native session integration
 Status-line work-state chip, `SessionStart` context + `watchPaths`,
-`PostCompact` rehydration, `PostToolUse(Edit|Write)`/`PostToolBatch` overlap
+`SessionStart(source=compact)` rehydration, `PostToolUse(Edit|Write)`/`PostToolBatch` overlap
 invalidation, `SubagentStart/Stop` correlation, `WorktreeCreate` ownership for
 approved workflows only, MCP resources and prompts, `footerLinksRegexes`.
 
@@ -369,6 +375,12 @@ input → acceptance ready → failure; everything else stays in the status line
 
 Implemented behavior:
 
+- Release 0.71.0 adds [native Mods](../skills/delegate/references/native.md):
+  immediate scoped commands, an explicitly opened terminal/Desktop job panel,
+  official host-reported Claude allowance capture, per-plugin `/config` options,
+  and a quota-aware read-only reviewer. The Node broker owns durable state and
+  every mutation; UI controls ask a person and preserve revision/idempotency
+  contracts. Model-free host tests supplement the existing fake-provider suite.
 - `delegate-config statusline enable` retains the user's complete original
   `statusLine` object for exact restoration, runs its command with the original
   stdin/shell semantics, and prefixes `D <running> · <needs review> ·
@@ -377,7 +389,7 @@ Implemented behavior:
   still coalesces busy updates. `DELEGATE_NATIVE_STATUSLINE=0` suppresses only
   the Delegate chip.
 - SessionStart returns the P2.5 `watchPaths` plus `additionalContext`;
-  PostCompact returns the same context projection. It includes current
+  its source=compact invocation returns the same context projection. It includes current
   session-owned active attempt IDs, policy/human/acceptance blockers,
   ready-for-review attempts, and resumable chain leaves. It never reads or
   emits prompts, result text, diffs, repository paths, secrets, or free-form

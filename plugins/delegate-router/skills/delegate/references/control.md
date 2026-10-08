@@ -189,10 +189,15 @@ Every writer must:
 
 Store the Codex `threadId` or Cursor chat ID with the task. Resume only for the same objective. A follow-up should include new information, a correction, or a verification request rather than repeating the original prompt. Codex threads that engaged the multi-agent review flow (typically write-mode jobs whose approvals escalated) may refuse direct resume with `RESUME_UNSUPPORTED`; recover by starting a fresh job whose task packet folds in the prior findings.
 
-Workspace-isolated attempts are also intentionally single-attempt in this
-phase. Resume, review-round, and auto-fix continuation return
-`RESUME_UNSUPPORTED`; start a fresh isolated attempt from a newly inspected
-immutable base.
+Workspace-isolated resume, review-round, and opt-in auto-fix restore the captured
+candidate into a new detached broker worktree on the original immutable base.
+They use a fresh provider session, not a concurrent resume of the old thread.
+The private patch digest, byte count, base tree, file objects/modes, and result
+tree are checked before launch; missing or changed artifacts fail closed.
+The write fence and scheduling claims are inherited; changing `allowedPaths`
+requires an independent attempt. Derived verification recipes are preserved
+instead of being replaced by a newer owner-HEAD recipe. The owner tree is never
+modified, and each round produces a cumulative portable candidate change set.
 
 Managed control commands use optimistic concurrency. Read the current job revision immediately before steering or cancelling and send it as `expectedRevision`. A `REVISION_CONFLICT` includes `currentRevision`, so one retry with that value is enough when your command is still appropriate; never overwrite another controller's newer decision. Reuse the same `correctionId` when retrying the same request.
 
@@ -212,9 +217,11 @@ remains non-gating, but the primary plan confirmation still applies. No plan
 pass may accept itself or start write work.
 
 The default plan output sub-budget is deterministic and network-free. Packets
-receive the same 8,192-token structured default regardless of byte length or
+receive an 8,192-token primary structured default regardless of byte length or
 directive-marker count: live measurements found plan cost nearly flat in those
-dimensions, while larger allowances moved spend upward. The plan prompt
+dimensions, while larger allowances moved spend upward. Codex independent
+planning uses that same default; Cursor independent planning uses 12,288 tokens
+and a 600-second wall-time floor. The plan prompt
 requires one compact structural JSON object, no narrated analysis or repeated
 packet, and an ordinary target below 500 words. Cursor plan lanes additionally
 declare process narration without the deliverable invalid and require the
@@ -227,7 +234,8 @@ an explicit smaller job-level `maxOutputTokens` still limits the primary plan,
 and the independent pass retains its existing share of that explicit overall
 cap. The stored `planning.planBudget` records the safe metrics, source, floor,
 ceiling, and effective limit without retaining another copy of the packet.
-Wall clock derives from that effective token limit (300–900 seconds),
+Wall clock derives from that effective token limit (300–900 seconds, with the
+600-second floor for a Cursor independent planner),
 `DELEGATE_PLAN_TIMEOUT_SECONDS` overrides it, and the result is always clamped
 to the parent timeout.
 
@@ -417,6 +425,15 @@ swallows store errors after one stderr diagnostic so visibility can never block
 the Agent call. `DELEGATE_AGENT_STUBS=0` disables the hooks. These records reject
 all control mutations and obey `DELEGATE_JOB_RETENTION_DAYS` pruning.
 
+The resident supervisor additionally ingests hook-correlated Claude subagent
+transcripts as normalized, bounded/redacted messages, content-free reasoning
+activity, tools, usage, and file signals. Durable byte/usage checkpoints keep
+restart ingestion idempotent, and terminal jobs receive a final drain.
+`DELEGATE_AGENT_TAIL=0` disables this tailer while leaving lifecycle hooks active.
+TUI detail prefers ingested events and uses the bounded transcript reader only
+when journal ingestion is absent. Transcript identity comes from lifecycle IDs
+or an exact tool-use sidecar correlation, never a display name.
+
 ## Native Session Surfaces
 
 `delegate-config statusline enable` is the opt-in native work row. It saves the
@@ -561,6 +578,28 @@ Codex interruption waits up to `DELEGATE_DRAIN_GRACE_MS` (default 3000, maximum 
 
 `maxOutputTokens` is an optional per-job cap on provider-reported output tokens. Crossing it uses the normal provider-aware cancel path and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`; partial events, diff, and continuation remain inspectable. Resumes accept a new cap and otherwise inherit the parent cap.
 
+`maxTotalOutputTokens` / `--max-total-output-tokens` adds an optional work-level
+reported-output cap shared by descendants, auto-fix, and independent planners.
+Its limit is immutable on continuation. A private, locked, bounded ledger keeps
+monotonic counters, deduplicating Codex thread-cumulative reports and counting
+Cursor attempts separately. Known exhaustion blocks new descendants and turns; crossing
+the cap uses the normal cancellation path. Corrupt or missing ledgers fail
+closed rather than resetting the allowance. Active descendants protect their
+budget root from retention; a pruned historical ledger requires an independent
+work item. `delegate_usage.workBudget` exposes observed and remaining output.
+Usage may arrive only at completion, simultaneous jobs may overshoot before
+cancellation, and native-child costs may be absent from provider totals.
+Unknown usage is never evidence of zero cost; this is not a dollar/quota cap.
+Counters use per-thread/per-attempt high-watermarks: lower reports never refund
+budget and set `counterDecreasesObserved`. Stale reports and provider counter
+resets cannot be distinguished reliably, so post-reset cost coverage is unknown.
+
+`maxSubagents` / `--max-subagents 0..16` is Codex-only: concurrent native children
+excluding the primary, with zero disabling them. Omit it to keep provider
+configuration; a positive value explicitly enables the requested limit. Codex
+continuations/planners inherit it. Cursor rejects the field rather than
+pretending to enforce it.
+
 `DELEGATE_MAX_CHANGED_FILES` defaults to 200. Codex live `fileChange` paths crossing it interrupt and fail with non-retryable `LARGE_WRITE` plus a checkpoint. Cursor exposes only completion inventory, so its record is flagged `largeWrite: true` and evented `large.write` post-hoc; that asymmetry cannot prevent Cursor's writes.
 
 Every write mode gets broker verification by default. Precedence is: nearest
@@ -602,7 +641,19 @@ captured change set would verify the wrong artifact.
 
 Adapters assert their CLI versions before opening a provider session. `DELEGATE_MIN_CODEX_VERSION` and `DELEGATE_MIN_CURSOR_VERSION` override the validated built-in floors (`0.144.0` and `2026.7.0` respectively); a lower observed version fails with non-retryable `PROVIDER_TOO_OLD` and reports both versions.
 
-Profiles live under `${DELEGATE_PROFILES_DIR:-~/.delegate/profiles}/<name>.md`; simple frontmatter supplies mode/model/effort/allowedPaths/reportSchema defaults and explicit start options win. The body must contain `{{objective}}`. Packet lint warns when Objective, Allowed scope, Acceptance criteria, or Return is missing. On caller-facing write launches, missing `Allowed scope` additionally blocks launch unless explicit `allowedPaths` are supplied or `allowUnscopedWrite=true` / `--allow-unscoped-write` records an intentional unfenced override. Dry-runs remain available and report the blocker. The bundled `independent-review` profile is used only when no local override exists. Optional `reportSchema` instructs a final fenced JSON block; a conforming final object becomes `result.structured`, `objectiveMet` is surfaced, and missing or nonconforming output sets `structuredMissing` without changing terminal status.
+Profiles live under `${DELEGATE_PROFILES_DIR:-~/.delegate/profiles}/<name>.md`; simple frontmatter supplies mode/model/effort/allowedPaths/reportSchema defaults and explicit start options win. The body must contain `{{objective}}`. Packet lint warns when Objective, Allowed scope, Acceptance criteria, or Return is missing. On caller-facing write launches, missing `Allowed scope` additionally blocks launch unless explicit `allowedPaths` are supplied or `allowUnscopedWrite=true` / `--allow-unscoped-write` records an intentional unfenced override. Dry-runs remain available and report the blocker. The bundled `independent-review` profile is used only when no local override exists. Optional `reportSchema` accepts final raw or fenced JSON; a conforming final object becomes `result.structured`, `objectiveMet` is surfaced, and missing or nonconforming output sets `structuredMissing` without changing terminal status.
+
+The report-schema subset is bounded to 32 KiB, 256 nodes, and depth 12: types,
+enum/const, properties/required, boolean additionalProperties, items, numeric
+and length/count bounds, and anyOf/oneOf/allOf/not, plus title/description/$schema
+annotations. Unsupported constraints (including `$ref` and `pattern`) are
+refused at launch rather than silently ignored. Reports are bounded to 128 KiB;
+a malformed last JSON fence never falls back to an earlier report. Closed,
+fully-required compatible object schemas and structural plans use Codex
+`turn/start.outputSchema` and are still broker-validated. Optional fields are
+never made mandatory to force native support. A pre-turn unknown-field refusal
+alone permits fallback to the text contract; model/schema validation errors
+do not trigger another turn. Cursor keeps its existing text contract.
 
 The bundled independent-review profile uses the canonical review object: `objectiveMet` is boolean; `findings` is an array of `{ severity: 'blocking' | 'non-blocking', file, line, summary, evidence }`; and `clean` is true when no findings remain. Structured output remains best-effort and the inline prose findings remain required, but coordinators should triage `result.structured.findings` by severity before reading the prose fallback.
 

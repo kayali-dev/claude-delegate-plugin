@@ -32,6 +32,29 @@ function providerTuning(provider) {
 const APPROACH_KINDS = new Set([
   'inspect', 'edit', 'test', 'verify', 'docs', 'config', 'migration', 'refactor', 'other'
 ]);
+export const STRUCTURAL_PLAN_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['targets', 'approach', 'assumptions', 'risks'],
+  properties: {
+    targets: {
+      type: 'object', additionalProperties: false, required: ['files', 'components'],
+      properties: { files: { type: 'array', items: { type: 'string' } }, components: { type: 'array', items: { type: 'string' } } }
+    },
+    approach: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false, required: ['kind', 'component'],
+        properties: { kind: { type: 'string', enum: [...APPROACH_KINDS] }, component: { type: 'string' } }
+      }
+    },
+    assumptions: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false, required: ['topic', 'choice'],
+        properties: { topic: { type: 'string' }, choice: { type: 'string' } }
+      }
+    },
+    risks: { type: 'array', items: { type: 'string' } }
+  }
+};
 const PLAN_CONSTRAINT_PATTERN = /\b(?:must|never|do not|required|requirement|non-negotiable|acceptance|allowed scope|hard fence|stop and report)\b/i;
 const PLAN_LIST_ITEM_PATTERN = /^\s*(?:[-*]|\d+[.)])\s+/;
 const PLAN_SECTION_PATTERN = /^\s*(?:#{1,6}\s+|[A-Za-z][A-Za-z0-9 _/&().-]{2,}:)\s*$/;
@@ -240,7 +263,11 @@ function structuralJsonCandidates(text) {
   const wholeBody = trimmed.startsWith('{') && trimmed.endsWith('}') ? [trimmed] : [];
   const balanced = balancedJsonCandidates(source)
     .filter((candidate) => candidate !== trimmed);
-  return [...fenced.reverse(), ...wholeBody, ...balanced];
+  // The last explicit deliverable is authoritative. A malformed last fence
+  // must not resurrect an earlier, superseded plan from the same answer.
+  if (fenced.length) return [fenced.at(-1)];
+  if (wholeBody.length) return wholeBody;
+  return balanced;
 }
 
 function displayString(value) {

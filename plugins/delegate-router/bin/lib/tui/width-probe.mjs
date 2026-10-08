@@ -285,7 +285,7 @@ export async function probeTerminalWidths(options = {}) {
       input.on('data', swallowStragglers);
       const graceMs = clampMilliseconds(options.stragglerGraceMs, WIDTH_PROBE_STRAGGLER_GRACE_MS, WIDTH_PROBE_STRAGGLER_GRACE_MS);
       stragglerTimer = setTimeout(finishStragglerStage, graceMs);
-      stragglerTimer.unref?.();
+      if (options.unrefBackground === true) stragglerTimer.unref?.();
     } else {
       for (const listener of targets) input.on('data', listener);
       releasedResolve();
@@ -328,7 +328,7 @@ export async function probeTerminalWidths(options = {}) {
   const scheduleBackgroundIdle = () => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => finalize('timeout'), backgroundIdleMs);
-    idleTimer.unref?.();
+    if (options.unrefBackground === true) idleTimer.unref?.();
   };
   const enterBackground = () => {
     if (state !== 'foreground') return;
@@ -339,7 +339,7 @@ export async function probeTerminalWidths(options = {}) {
     scheduleBackgroundIdle();
     const remainingBudget = Math.max(1, backgroundBudgetMs - (performance.now() - started));
     budgetTimer = setTimeout(() => finalize('budget'), remainingBudget);
-    budgetTimer.unref?.();
+    if (options.unrefBackground === true) budgetTimer.unref?.();
   };
   const check = (chunk) => {
     if (state === 'done' || chunk == null) return;
@@ -398,7 +398,8 @@ export async function probeTerminalWidths(options = {}) {
   }
   if (state !== 'done') {
     foregroundTimer = setTimeout(enterBackground, foregroundMs);
-    foregroundTimer.unref?.();
+    // The caller is awaiting this deadline. It must keep the event loop alive
+    // even when stdin is a non-handle emitter (including on Node 18).
   }
   const result = await foreground;
   screen.writeOutput(`${cursorTo(row, 0)}${sequences.clearLine}${sequences.home}`, { context: 'probe' });

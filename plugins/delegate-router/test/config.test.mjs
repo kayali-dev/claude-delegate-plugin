@@ -129,6 +129,61 @@ test('installer rejects conflicting provider modes without changing configuratio
   assert.match(result.stderr, /Choose only one provider mode/);
 });
 
+function installerSandbox(t, { enabled, version = '2.1.294' } = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-install-native-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const bin = path.join(directory, 'fake-bin');
+  fs.mkdirSync(bin, { mode: 0o700 });
+  const log = path.join(directory, 'claude-calls.jsonl');
+  fs.writeFileSync(path.join(bin, 'claude'), `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv[2] === '--version') console.log(process.env.TEST_CLAUDE_VERSION + ' (Claude Code)');
+else fs.appendFileSync(process.env.TEST_INSTALL_LOG, JSON.stringify(process.argv.slice(2)) + '\\n', { mode: 0o600 });
+`, { mode: 0o700 });
+  for (const executable of ['codex', 'agent']) fs.writeFileSync(path.join(bin, executable), '#!/usr/bin/env node\nconsole.log("test provider");\n', { mode: 0o700 });
+  const providers = path.join(directory, 'providers.json');
+  if (enabled) fs.writeFileSync(providers, JSON.stringify({ version: 1, enabled }), { mode: 0o600 });
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, DELEGATE_STATE_FILE: path.join(directory, 'usage.json'), DELEGATE_PROVIDER_CONFIG: providers,
+    DELEGATE_USER_BIN: path.join(directory, 'user-bin'), TEST_INSTALL_LOG: log, TEST_CLAUDE_VERSION: version };
+  delete env.DELEGATE_ENABLED_PROVIDERS;
+  const install = (args = []) => spawnSync('bash', [path.join(plugin, '../../install.sh'), ...args], { cwd: directory, encoding: 'utf8', env });
+  return { install, providers, log, directory };
+}
+
+for (const enabled of [['codex'], ['cursor'], ['codex', 'cursor']]) {
+  test(`installer preserves ${enabled.join('+')} selection without an explicit preset`, (t) => {
+    const { install, providers, log } = installerSandbox(t, { enabled });
+    const result = install(['--lean']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(providers, 'utf8')).enabled, enabled);
+    const calls = fs.readFileSync(log, 'utf8');
+    assert.ok(!calls.includes('openai/codex-plugin-cc'), 'lean mode must not install the optional provider plugin');
+    assert.match(calls, /delegate-router@delegate-skill/);
+  });
+}
+
+test('installer defaults to both only for a new selection and explicit presets can change it', (t) => {
+  const fresh = installerSandbox(t);
+  const result = fresh.install(['--lean']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(fresh.providers, 'utf8')).enabled, ['codex', 'cursor']);
+  const changed = fresh.install(['--cursor-only', '--lean']);
+  assert.equal(changed.status, 0, changed.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(fresh.providers, 'utf8')).enabled, ['cursor']);
+});
+
+test('installer rejects an unsupported native host before configuration or installation writes', (t) => {
+  const { install, providers, log, directory } = installerSandbox(t, { enabled: ['codex'], version: '2.1.293' });
+  for (const args of [['--cursor-only'], ['--check']]) {
+    const result = install(args);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Claude Code 2.1.294 or later/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(providers, 'utf8')).enabled, ['codex']);
+    assert.equal(fs.existsSync(log), false);
+    assert.equal(fs.existsSync(path.join(directory, 'user-bin')), false);
+  }
+});
+
 test('statusline enable wraps an existing command, captures usage, and disable restores it', () => isolated((directory) => {
   const configBin = path.join(plugin, 'bin', 'delegate-config');
   const settingsFile = path.join(directory, 'settings.json');

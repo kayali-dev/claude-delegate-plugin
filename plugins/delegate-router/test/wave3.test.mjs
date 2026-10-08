@@ -23,6 +23,7 @@ import {
   aggregateVisibilityStats,
   attributeAuditOutputTokens,
   auditUsageBands,
+  normalizeStatsModel,
   outputTokens,
   recommendOutcomeRouting,
   structuralPlanCapabilityEvidence,
@@ -67,6 +68,44 @@ function waitFor(jobId, predicate, description) {
     predicate
   });
 }
+
+test('current full model IDs share their alias usage bands', () => {
+  for (const [model, alias] of [
+    ['gpt-6-astra', 'astra'],
+    ['gpt-6.1-sol', 'sol'],
+    ['gpt-6-luna', 'luna'],
+    ['gpt-5.6-terra', 'terra'],
+    ['cursor-grok-4.7-high', 'grok'],
+    ['cursor-grok-4.7[effort=xhigh,fast=false]', 'grok'],
+    ['composer-2.5', 'composer']
+  ]) {
+    assert.equal(normalizeStatsModel(model), alias);
+    assert.equal(usageBandKey('provider', model, 'high'), usageBandKey('provider', alias, 'high'));
+  }
+  assert.equal(normalizeStatsModel('unknown-model'), 'unknown-model');
+});
+
+test('exact model cohorts and filters preserve generations, effort, transport, and unknown history', () => {
+  const records = [
+    { at: 1000, provider: 'codex', model: 'gpt-5.6-sol', effort: 'high', transport: 'app-server', durationMs: 40, usage: { outputTokens: 100 } },
+    { at: 2000, provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', transport: 'app-server', durationMs: 20, usage: { outputTokens: 50 } },
+    { at: 3000, provider: 'codex', model: 'gpt-6.1-sol', effort: 'xhigh', transport: 'app-server', durationMs: 30 },
+    { at: 4000, provider: 'codex', model: 'sol', effort: 'high', transport: 'direct-mcp' },
+    { at: 5000, provider: 'cursor', model: 'grok-fast', effort: 'high', transport: 'acp' },
+    { at: 6000, provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', transport: 'app-server', providerCliVersion: '0.160.0', policyVersion: '1' },
+    { at: 7000, provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', transport: 'app-server', providerCliVersion: '0.161.0', policyVersion: '2' }
+  ];
+  const stats = aggregateAuditStats(records);
+  assert.equal(stats.groups.filter(group => group.transport === 'app-server').length, 1, 'family rollups remain compatible');
+  assert.equal(stats.modelCohorts.length, 7);
+  assert.equal(stats.modelCohorts.find(group => group.model === 'sol').modelResolution, 'generation-unknown');
+  assert.equal(stats.modelCohorts.find(group => group.model === 'grok-fast').modelResolution, 'generation-unknown');
+  assert.ok(stats.modelCohorts.some(group => group.providerCliVersion === '0.161.0' && group.policyVersion === '2'));
+  const filtered = aggregateVisibilityStats(records, { model: 'gpt-6.1-sol' });
+  assert.equal(filtered.jobs, 4);
+  assert.deepEqual(new Set(filtered.modelCohorts.map(group => group.model)), new Set(['gpt-6.1-sol']));
+  assert.throws(() => aggregateAuditStats(records, { model: {} }), { code: 'INVALID_REQUEST' });
+});
 
 test('stats aggregate synthetic audit records and the CLI reads audit.jsonl', () => isolated(({ root }) => {
   const now = Date.now();

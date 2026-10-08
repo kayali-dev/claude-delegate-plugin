@@ -59,20 +59,26 @@ function newestModel(ids, expression, minimum) {
 }
 
 export function resolveCursorModel(requested, ids = []) {
+  const advertisedOrFallback = (model, fallback) => {
+    if (ids.length && (!model || !ids.includes(model))) {
+      throw brokerError('INVALID_MODEL', `Cursor model '${requested}' is unavailable. Run agent models or cursor-agent models.`, { provider: 'cursor' });
+    }
+    return model || fallback;
+  };
   if (requested === 'composer') {
-    return process.env.DELEGATE_CURSOR_COMPOSER_MODEL
-      || newestModel(ids, /^composer-(\d+(?:\.\d+)*)$/, '2.5')
-      || 'composer-2.5';
+    return advertisedOrFallback(process.env.DELEGATE_CURSOR_COMPOSER_MODEL
+      || newestModel(ids, /^composer-(\d+(?:\.\d+)*)$/, '2.5'), 'composer-2.5');
   }
   if (requested === 'grok' || requested === 'grok-high') {
-    return process.env.DELEGATE_CURSOR_GROK_MODEL
-      || newestModel(ids, /^(?:cursor-)?grok-(\d+(?:\.\d+)*)-high$/, '4.5')
-      || 'grok-4.5-high';
+    return advertisedOrFallback(process.env.DELEGATE_CURSOR_GROK_MODEL
+      || newestModel(ids, /^(?:cursor-)?grok-(\d+(?:\.\d+)*)(?:-high)?$/, '4.5'), 'grok-4.7-high');
   }
   if (requested === 'grok-xhigh') {
-    return process.env.DELEGATE_CURSOR_GROK_XHIGH_MODEL
-      || newestModel(ids, /^(?:cursor-)?grok-(\d+(?:\.\d+)*)-xhigh$/, '4.5')
-      || 'grok-4.5-xhigh';
+    return advertisedOrFallback(process.env.DELEGATE_CURSOR_GROK_XHIGH_MODEL
+      || newestModel(ids, /^(?:cursor-)?grok-(\d+(?:\.\d+)*)-xhigh$/, '4.5'), 'grok-4.7-xhigh');
+  }
+  if (requested === 'grok-fast') {
+    return advertisedOrFallback(newestModel(ids, /^(?:cursor-)?grok-(\d+(?:\.\d+)*)-fast(?:-high)?$/, '4.5'), 'grok-4.7-fast-high');
   }
   if (requested === 'auto') return 'auto';
   if (ids.length && !ids.includes(requested)) {

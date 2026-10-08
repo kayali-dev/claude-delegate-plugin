@@ -47,13 +47,13 @@ import {
 
 function usage() {
   console.log(`Usage:
-  delegate-jobs start --provider codex|cursor --prompt <hand-written-packet> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-unscoped-write] [--isolation shared|worktree --path-claims a,b [--resource-claims id,id]] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--no-plan-first] [--no-ambiguity-check] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
+  delegate-jobs start --provider codex|cursor --prompt <hand-written-packet> [--profile name] [--model id] [--mode mode] [--cwd path] [--effort low|medium|high|xhigh|max|ultra] [--timeout-seconds N] [--max-output-tokens N] [--max-total-output-tokens N] [--max-subagents 0..16] [--idempotency-key key] [--group id] [--start-paused] [--ingest-files /abs/a,/abs/b] [--auto-nudge] [--report-schema json|--report-schema-file path] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-unscoped-write] [--isolation shared|worktree --path-claims a,b [--resource-claims id,id]] [--allow-sensitive] [--override-limit] [--override-writer] [--override-lane] [--no-plan-first] [--no-ambiguity-check] [--dry-run] [--wait] [--wait-for session|turn|first-output|--wait-for-session]
   delegate-jobs start --provider codex|cursor [--intent sentence] [--from-diff] [--failure-output text] [--todo path[:line]] [--task-record path] [--from-conventions] --allowed-paths a,b --acceptance criterion [--acceptance criterion ...] --timeout-seconds N --max-rounds N --max-output-tokens N [existing start options] [--accept-spec]
   delegate-jobs spec [--intent sentence] [--from-diff] [--failure-output text] [--todo path[:line]] [--task-record path] [--from-conventions] [--mode mode] [--cwd path] [--allowed-paths a,b] [--acceptance criterion ...] [--verify-command command|--verify-exception reason] [--timeout-seconds N --max-rounds N --max-output-tokens N] [--json]
   delegate-jobs status|list [job-id] [--limit N] [--active] [--status s] [--phase p] [--blocked-on-input] [--group id] [--json]
   delegate-jobs work [--json] [--id <job-or-work-id>]
   delegate-jobs group <id> [--json]
-  delegate-jobs stats [--since 7d|2026-07-17|0.42.0] [--until 2026-07-17] [--recommend-for mode] [--recommend-access read|write] [--json]
+  delegate-jobs stats [--since 7d|2026-07-17|0.42.0] [--until 2026-07-17] [--recommend-for mode] [--recommend-access read|write] [--model exact-id] [--json]
   delegate-jobs audit backfill [--json]
   delegate-jobs inspect <job-id> [--view summary|full] [--json]
   delegate-jobs events <job-id> [--after N] [--limit N] [--types a,b] [--follow] [--json]
@@ -68,7 +68,7 @@ function usage() {
   delegate-jobs respond <job-id> --expected-revision N [--request-id id] [--answer text|--accept|--reject|--response-json json] [--command-id id]
   delegate-jobs verify <job-id>   # reruns only the recorded command on the current tree; exits 6 unless the new evidence passes
   delegate-jobs accept|reject <job-id> [--reason text]
-  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-unscoped-write] [--allow-sensitive] [--override-limit] [--override-writer]
+  delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--max-total-output-tokens N] [--max-subagents 0..16] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-unscoped-write] [--allow-sensitive] [--override-limit] [--override-writer]
   delegate-jobs review-round <job-id> --prompt <findings-or-file> [--prompt-file path]
   delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs workspace discard <job-id>
@@ -79,6 +79,9 @@ function usage() {
   delegate-jobs prune [--max-age-days N]`);
   console.log(`
 Intent compilation never launches by itself. Write starts render one provenance/confidence card and require interactive confirmation; --accept-spec is the explicit non-interactive automation confirmation flag. It never resolves an unresolved field or grants allowedPaths, network, sandbox-off, privilege, or a budget increase.`);
+  console.log(`
+Codex aliases: sol=gpt-6.1-sol, astra=gpt-6-astra, luna=gpt-6-luna, terra=gpt-5.6-terra. Full IDs remain pinned; auto uses Codex configuration.
+Cursor aliases: composer, grok, grok-xhigh, grok-fast, auto. Catalogs determine versions and tiers; fast is opt-in.`);
 }
 
 function value(args, flag, fallback = undefined) {
@@ -234,6 +237,8 @@ function startOptions(args) {
     cwd: value(args, '--cwd', process.cwd()), approval: value(args, '--approval', 'auto'), prompt: prompt(args), transport: value(args, '--transport'),
     effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? null : Number(rawTimeout),
     maxOutputTokens: rawMaxOutputTokens == null ? null : Number(rawMaxOutputTokens),
+    maxSubagents: value(args, '--max-subagents') == null ? null : Number(value(args, '--max-subagents')),
+    maxTotalOutputTokens: value(args, '--max-total-output-tokens') == null ? null : Number(value(args, '--max-total-output-tokens')),
     idempotencyKey: value(args, '--idempotency-key'),
     groupId: value(args, '--group'), startPaused: args.includes('--start-paused'),
     ingestFiles: value(args, '--ingest-files')?.split(',').map((item) => item.trim()).filter(Boolean),
@@ -433,6 +438,7 @@ try {
     const stats = aggregateVisibilityStats(readAuditLog(), {
       since: value(args, '--since'),
       until: value(args, '--until'),
+      model: value(args, '--model'),
       recommendFor: recommendationShape(args),
       jobs: listJobs(),
       external: externalThreadStats(externalScan),
@@ -628,6 +634,8 @@ try {
       prompt: prompt(args), model: value(args, '--model'), mode: value(args, '--mode'), cwd: value(args, '--cwd'),
       effort: value(args, '--effort'), timeoutSeconds: rawTimeout == null ? undefined : Number(rawTimeout),
       maxOutputTokens: rawMaxOutputTokens == null ? undefined : Number(rawMaxOutputTokens),
+      maxSubagents: value(args, '--max-subagents') == null ? undefined : Number(value(args, '--max-subagents')),
+      maxTotalOutputTokens: value(args, '--max-total-output-tokens') == null ? undefined : Number(value(args, '--max-total-output-tokens')),
       retryPolicy: retryPolicy(args), verify: verifyOption(args), autoFix: autoFixOption(args),
       network: args.includes('--network') ? true : undefined, sandbox: value(args, '--sandbox'),
       networkAllow: value(args, '--network-allow')?.split(',').map((item) => item.trim()).filter(Boolean),

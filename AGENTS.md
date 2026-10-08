@@ -23,6 +23,9 @@ Provider configuration is authoritative. Installations may enable Codex only, Cu
 - `plugins/delegate-router/.claude-plugin/plugin.json`: Claude plugin manifest and release version.
 - `plugins/delegate-router/.mcp.json`: managed control and conditional native Codex MCP registrations.
 - `plugins/delegate-router/hooks/hooks.json`: quota guard (PreToolUse) and shim bootstrap (SessionStart) hooks. The quota matcher and hook match tool names by suffix because harnesses may prefix plugin MCP tool names.
+- `plugins/delegate-router/hooks/native.tsx`: Claude Code Mods commands, panel, official allowance observation, and plugin-reviewer guard. Keep host API calls literal and imports Mod-compatible; no Node built-ins here.
+- `plugins/delegate-router/bin/delegate-native` and `bin/lib/native-bridge.mjs`: fixed-action, bounded local bridge. No arbitrary process/provider launch or authority expansion.
+- `plugins/delegate-router/agents/reviewer.md`: bounded read-only native reviewer; Claude remains coordinator and final authority.
 - `plugins/delegate-router/bin/delegate-shim`: stable PATH entry point; resolves the installed plugin from `installed_plugins.json` at run time with a checkout fallback.
 - `plugins/delegate-router/bin/delegate-bootstrap`: creates and self-heals the `~/.local/bin` command symlinks; run by SessionStart and `install.sh`.
 - `plugins/delegate-router/skills/delegate/`: routing instructions and protocol, model, control, and usage references.
@@ -32,9 +35,13 @@ Provider configuration is authoritative. Installations may enable Codex only, Cu
 - `plugins/delegate-router/bin/lib/providers.mjs`: Codex app-server and Cursor ACP/headless supervision.
 - `plugins/delegate-router/bin/lib/jsonrpc.mjs`: newline-delimited JSON-RPC process client and deadlines.
 - `plugins/delegate-router/bin/lib/lock.mjs`: shared file-lock primitive used by job control, the per-cwd writer guard, and transactional usage-state mutation.
-- `.github/workflows/test.yml`: CI on the latest Node LTS; runs the suite and checks version alignment.
+- `.github/workflows/test.yml`: CI on Node 18 and the latest Node LTS; runs the suite and checks version alignment.
 - `plugins/delegate-router/bin/lib/router.mjs`: deterministic task/model/provider routing.
+- `plugins/delegate-router/bin/lib/models.mjs`: current Codex aliases and provider inference for explicit model IDs.
 - `plugins/delegate-router/bin/lib/state.mjs`: provider configuration, allowance snapshots, and invocation history.
+- `plugins/delegate-router/bin/lib/model-catalog.mjs`: bounded connection-local Codex model/effort preflight without inference or entitlement claims.
+- `plugins/delegate-router/bin/lib/structured-output.mjs`: bounded report-schema validation and compatible native output contracts.
+- `plugins/delegate-router/bin/lib/work-budget.mjs`: private monotonic work-level reported-output accounting across continuations and independent planners.
 - `plugins/delegate-router/bin/lib/cursor.mjs`: Cursor executable/model discovery and headless command construction.
 - `plugins/delegate-router/test/`: dependency-free Node test suite with fake Codex and Cursor servers.
 
@@ -87,6 +94,10 @@ Provider configuration is authoritative. Installations may enable Codex only, Cu
    ./install.sh --check
    ```
 
+   Claude Code 2.1.294+ is the tested plugin host baseline. The check also runs
+   `npm run test:native` through Claude's model-free Mods harness; native UI,
+   lifecycle and confirmation tests belong in `native-tests/*.test.ts`.
+
 6. For install or health changes, exercise every affected provider mode and run `delegate-health --quick --json`. Installation mutates user-level Claude configuration, so do it only when requested or approved.
 
 Test ownership follows the implementation boundaries:
@@ -100,6 +111,7 @@ Test ownership follows the implementation boundaries:
 - Cursor discovery and command behavior: `cursor.test.mjs`.
 - PATH shim and bootstrap linking: `shim.test.mjs`.
 - Manifest portability and release alignment: `package.test.mjs`.
+- Native broker projection, allowance parser and boundary checks: `native-bridge.test.mjs`; actual Mod events/UI: `native-tests/dashboard.test.ts`.
 
 ## Release And Installation
 
@@ -109,7 +121,7 @@ Keep these version locations aligned:
 
 - `plugins/delegate-router/package.json`
 - `plugins/delegate-router/.claude-plugin/plugin.json`
-- `plugins/delegate-router/test/package.test.mjs`
+- `plugins/delegate-router/test/package.test.mjs` verifies package/manifest agreement and a dated changelog entry; it does not pin a version literal.
 - MCP `serverInfo` values in `bin/delegate-control-mcp` and `bin/delegate-codex-mcp`
 - Provider client metadata in `bin/lib/providers.mjs`
 

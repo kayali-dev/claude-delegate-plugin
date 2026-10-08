@@ -70,6 +70,95 @@ test('Codex app-server maps events and applies true same-turn steering', () => i
   assert.equal(typeof record.result, 'string', 'subagent support does not reshape ordinary Codex results');
 }));
 
+test('Codex sends current aliases and unchanged explicit pins at thread and turn launch', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const requestLog = path.join(directory, 'model-requests.jsonl');
+  process.env.FAKE_CODEX_REQUEST_LOG = requestLog;
+  const models = [
+    ['sol', 'gpt-6.1-sol'], ['astra', 'gpt-6-astra'], ['luna', 'gpt-6-luna'],
+    ['terra', 'gpt-5.6-terra'], ['gpt-6-sol', 'gpt-6-sol'], ['gpt-5.6-sol', 'gpt-5.6-sol']
+  ];
+  for (const [requested, expected] of models) {
+    fs.writeFileSync(requestLog, '', { mode: 0o600 });
+    const job = createManagedJob({ provider: 'codex', model: requested, mode: 'review', cwd: directory, prompt: 'review model selection' });
+    await runManagedProvider(job);
+    assert.equal(inspectJob(job.id).status, 'completed');
+    const requests = fs.readFileSync(requestLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(requests.find((request) => request.method === 'thread/start').params.model, expected);
+    assert.equal(requests.find((request) => request.method === 'turn/start').params.model, expected);
+  }
+}));
+
+test('Codex rejects unavailable models and unsupported effort before starting a provider thread', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const requestLog = path.join(directory, 'preflight-requests.jsonl');
+  process.env.FAKE_CODEX_REQUEST_LOG = requestLog;
+  for (const [model, effort, code] of [['gpt-unavailable', 'high', 'INVALID_MODEL'], ['luna', 'ultra', 'INVALID_REQUEST']]) {
+    fs.writeFileSync(requestLog, '');
+    const job = createManagedJob({ provider: 'codex', model, effort, mode: 'consult', cwd: directory, prompt: 'inspect' });
+    await assert.rejects(() => runManagedProvider(job), { code });
+    assert.equal(inspectJob(job.id).status, 'failed');
+    assert.equal(inspectJob(job.id).errorCode, code);
+    const requests = fs.readFileSync(requestLog, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(requests.some(request => request.method === 'model/list'));
+    assert.ok(!requests.some(request => ['thread/start', 'turn/start'].includes(request.method)));
+  }
+}));
+
+test('Codex native reports, unknown-field fallback, and explicit subagent limits preserve sandbox policy', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const requestLog = path.join(directory, 'native-contract-requests.jsonl');
+  process.env.FAKE_CODEX_REQUEST_LOG = requestLog;
+  const previous = { reply: process.env.FAKE_CODEX_REPLY, rejection: process.env.FAKE_CODEX_REJECT_OUTPUT_SCHEMA };
+  try {
+    process.env.FAKE_CODEX_REPLY = '{"objectiveMet":true}';
+    const reportSchema = { type: 'object', additionalProperties: false, required: ['objectiveMet'], properties: { objectiveMet: { type: 'boolean' } } };
+    for (const maxSubagents of [0, 2]) {
+      fs.writeFileSync(requestLog, '');
+      if (maxSubagents === 2) process.env.FAKE_CODEX_REJECT_OUTPUT_SCHEMA = '1'; else delete process.env.FAKE_CODEX_REJECT_OUTPUT_SCHEMA;
+      const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'consult', cwd: directory, prompt: 'inspect', reportSchema, maxSubagents });
+      await runManagedProvider(job);
+      const finished = inspectJob(job.id);
+      assert.equal(finished.status, 'completed');
+      assert.deepEqual(finished.result.structured, { objectiveMet: true });
+      assert.equal(finished.modelPreflight.entitlementVerified, false);
+      const requests = fs.readFileSync(requestLog, 'utf8').trim().split('\n').map(JSON.parse);
+      const thread = requests.find(request => request.method === 'thread/start').params;
+      if (maxSubagents === 0) assert.equal(thread.config['agents.enabled'], false);
+      else {
+        assert.equal(thread.config['agents.enabled'], true);
+        assert.equal(thread.config['agents.max_concurrent_threads_per_session'], 2);
+      }
+      assert.equal(thread.approvalPolicy, 'on-request');
+      assert.equal(thread.approvalsReviewer, 'auto_review');
+      const turns = requests.filter(request => request.method === 'turn/start');
+      assert.deepEqual(turns[0].params.outputSchema, reportSchema);
+      assert.equal(turns.length, maxSubagents === 2 ? 2 : 1);
+      if (turns.length === 2) {
+        assert.equal(turns[1].params.outputSchema, undefined);
+        assert.ok(readJobEvents(job.id, { limit: 1000 }).some(event => event.data?.providerEvent === 'codex:output-schema-unavailable'));
+      }
+    }
+    for (const maxSubagents of [-1, 17, 1.5]) assert.throws(() => createManagedJob({ provider: 'codex', prompt: 'inspect', cwd: directory, maxSubagents }), { code: 'INVALID_REQUEST' });
+    assert.throws(() => createManagedJob({ provider: 'cursor', prompt: 'inspect', cwd: directory, maxSubagents: 0 }), { code: 'INVALID_REQUEST' });
+  } finally {
+    if (previous.reply == null) delete process.env.FAKE_CODEX_REPLY; else process.env.FAKE_CODEX_REPLY = previous.reply;
+    if (previous.rejection == null) delete process.env.FAKE_CODEX_REJECT_OUTPUT_SCHEMA; else process.env.FAKE_CODEX_REJECT_OUTPUT_SCHEMA = previous.rejection;
+  }
+}));
+
+test('work-level output cap uses acknowledged provider cancellation and blocks later descendants', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_GROWING_USAGE = '1';
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'consult', cwd: directory, prompt: 'inspect', maxTotalOutputTokens: 5 });
+  await assert.rejects(() => runManagedProvider(job), { code: 'BUDGET_EXCEEDED' });
+  const finished = inspectJob(job.id);
+  assert.equal(finished.status, 'failed');
+  assert.equal(finished.errorCode, 'BUDGET_EXCEEDED');
+  assert.throws(() => createManagedJob({ provider: 'codex', prompt: 'continue', cwd: directory, parentJobId: job.id }), { code: 'BUDGET_EXCEEDED' });
+  assert.ok(readJobEvents(job.id, { limit: 1000 }).some(event => event.type === 'turn.completed' && event.data.turn.status === 'interrupted'));
+}));
+
 test('running Codex child streams incrementally on the parent worker connection without touching its journal', () => isolated(async (directory) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   const requestLog = path.join(directory, 'child-live-requests.jsonl');
@@ -636,6 +725,23 @@ test('provider minimum versions fail clearly through an env-forced floor', () =>
   assert.match(failed.error, /0\.144\.1.*999\.0\.0/);
 }));
 
+test('current ACP catalogs select new Grok tiers while retaining exact older pins', async () => {
+  const { cursorModel } = await import('../bin/lib/providers.mjs');
+  const acp = [
+    { value: 'default[]' }, { value: 'composer-2.5[fast=false]' },
+    { value: 'grok-4.5[effort=high,fast=false]' },
+    { value: 'cursor-grok-4.7[effort=high,fast=false]' },
+    { value: 'cursor-grok-4.7[effort=xhigh,fast=false]' },
+    { value: 'cursor-grok-4.7[effort=high,fast=true]' }
+  ];
+  assert.equal(cursorModel(acp, 'grok'), 'cursor-grok-4.7[effort=high,fast=false]');
+  assert.equal(cursorModel(acp, 'grok-xhigh'), 'cursor-grok-4.7[effort=xhigh,fast=false]');
+  assert.equal(cursorModel(acp, 'grok-4.7-high'), 'cursor-grok-4.7[effort=high,fast=false]');
+  assert.equal(cursorModel(acp, 'grok-fast'), 'cursor-grok-4.7[effort=high,fast=true]');
+  assert.equal(cursorModel(acp, 'grok-4.5-high'), 'grok-4.5[effort=high,fast=false]');
+  assert.throws(() => cursorModel(acp, 'grok-4.7-low'), { code: 'INVALID_MODEL' });
+});
+
 test('cursor model resolution matches attribute-serialized catalogs (REG-1)', async () => {
   const { cursorModel } = await import('../bin/lib/providers.mjs');
   // Realistic ACP catalog: attribute-serialized values, as advertised by the
@@ -712,7 +818,7 @@ test('cursor model resolution also matches suffix-style catalogs and empty lists
   assert.equal(cursorModel(cli, 'grok-xhigh'), 'grok-4.5-xhigh');
   assert.equal(cursorModel(cli, 'grok-4.5'), 'grok-4.5-xhigh');
   assert.equal(cursorModel(cli, 'composer'), 'composer-2.5');
-  assert.equal(cursorModel([], 'grok'), 'grok-4.5-high');
+  assert.equal(cursorModel([], 'grok'), 'grok-4.7-high');
 });
 
 test('codex resume rejections map to an actionable RESUME_UNSUPPORTED code', async () => {

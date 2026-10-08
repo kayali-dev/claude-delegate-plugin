@@ -11,9 +11,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-(cd "$PLUGIN" && node --test test/*.test.mjs)
-claude plugin validate "$ROOT"
-claude plugin validate "$PLUGIN"
+"$ROOT/install.sh" --check
 
 git push origin main
 claude plugin marketplace update delegate-skill

@@ -13,7 +13,7 @@ usage() {
 Usage: ./install.sh [provider mode] [--lean]
 
 Provider modes (choose at most one):
-  --both          Enable Codex and Cursor (default)
+  --both          Enable Codex and Cursor (default only on a new installation)
   --codex-only    Enable Codex only
   --cursor-only   Enable Cursor only
 
@@ -47,19 +47,37 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if [[ "$CHECK" == true ]]; then
-  claude plugin validate "$ROOT"
-  claude plugin validate "$PLUGIN"
-  (cd "$PLUGIN" && npm test)
-  exit 0
-fi
-
 for command_name in claude node; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'Missing required command: %s\n' "$command_name" >&2
     exit 1
   fi
 done
+
+node -e 'if (Number(process.versions.node.split(".")[0]) < 18) process.exit(1)' || {
+  printf 'Node.js 18 or later is required.\n' >&2
+  exit 1
+}
+
+CLAUDE_VERSION="$(claude --version)"
+node -e 'const m = process.argv[1].match(/\b(\d+)\.(\d+)\.(\d+)\b/); const v = m?.slice(1).map(Number); if (!v || v[0] < 2 || (v[0] === 2 && (v[1] < 1 || (v[1] === 1 && v[2] < 294)))) process.exit(1)' "$CLAUDE_VERSION" || {
+  printf 'Claude Code 2.1.294 or later is required for native Mods. Found: %s\n' "$CLAUDE_VERSION" >&2
+  exit 1
+}
+
+if [[ "$CHECK" == true ]]; then
+  claude plugin validate "$ROOT"
+  claude plugin validate "$PLUGIN"
+  (cd "$PLUGIN" && npm test && npm run test:native)
+  exit 0
+fi
+
+if [[ "$PROVIDER_MODE_SET" == false ]]; then
+  PROVIDER_MODE="$(node --input-type=module -e 'import { pathToFileURL } from "node:url"; const { enabledProviders } = await import(pathToFileURL(process.argv[1])); const enabled = enabledProviders(); console.log(enabled.length === 2 ? "both" : enabled[0])' "$PLUGIN/bin/lib/state.mjs" 2>/dev/null)" || {
+    printf 'Cannot read provider selection. Inspect delegate-config show or select an explicit provider mode.\n' >&2
+    exit 1
+  }
+fi
 
 if [[ "$PROVIDER_MODE" == codex || "$PROVIDER_MODE" == both ]]; then
   if ! command -v codex >/dev/null 2>&1; then
@@ -74,11 +92,6 @@ if [[ "$PROVIDER_MODE" == cursor || "$PROVIDER_MODE" == both ]]; then
     exit 1
   fi
 fi
-
-node -e 'if (Number(process.versions.node.split(".")[0]) < 18) process.exit(1)' || {
-  printf 'Node.js 18 or later is required.\n' >&2
-  exit 1
-}
 
 node "$PLUGIN/bin/delegate-config" providers "$PROVIDER_MODE" >/dev/null
 claude plugin marketplace add kayali-dev/claude-delegate-plugin || claude plugin marketplace add "$ROOT" || true

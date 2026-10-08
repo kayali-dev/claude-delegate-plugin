@@ -1,10 +1,5 @@
 import { usageBandKey } from './stats.mjs';
-
-const MODEL_PROVIDER = {
-  fable: 'claude', opus: 'claude', sonnet: 'claude', haiku: 'claude', current: 'claude',
-  sol: 'codex', terra: 'codex', luna: 'codex',
-  grok: 'cursor', 'grok-xhigh': 'cursor', composer: 'cursor'
-};
+import { isFableModel, modelProvider } from './models.mjs';
 
 function inferKind(task, mode) {
   const text = task.toLowerCase();
@@ -61,31 +56,29 @@ export function routeTask({
   const resolvedKind = kind === 'auto' ? inferKind(task, mode) : kind;
   let candidates = candidatesFor(resolvedKind, mode);
   // Owner policy: when the user did not name a model, non-complex Cursor work
-  // runs in Cursor Auto mode (the first-party pool routes it) instead of
+  // runs in Cursor Auto mode (Cursor selects the model) instead of
   // pinning Composer. Complex kinds keep pinned models, and an explicit
   // model request below always wins.
   const NON_COMPLEX_KINDS = new Set(['implementation', 'general', 'small-contextual']);
   if (model === 'auto' && NON_COMPLEX_KINDS.has(resolvedKind)) {
     candidates = candidates.map((item) => item.provider === 'cursor' && item.model === 'composer'
-      ? { ...item, model: 'auto', reason: 'Cursor Auto mode routes non-complex work within the first-party pool; request composer explicitly to pin it' }
+      ? { ...item, model: 'auto', reason: 'Cursor Auto mode selects the model for non-complex work; request composer explicitly to pin a first-party model' }
       : item);
   }
-  const explicitProvider = provider !== 'auto' ? provider : model !== 'auto' ? MODEL_PROVIDER[model] : null;
+  const explicitProvider = provider !== 'auto' ? provider : model !== 'auto' ? modelProvider(model) : null;
   if (explicitProvider) candidates = candidates.filter((item) => item.provider === explicitProvider);
   if (model !== 'auto') {
     const matching = candidates.find((item) => item.model === model);
     candidates = matching
       ? [{ ...matching, score: matching.score + 100, reason: 'explicit model override' }]
       : [{ provider: explicitProvider, model, score: 200, reason: 'explicit model override' }];
-    // Fable is deliberately absent from the auto-candidate pool: it is no
-    // longer included in subscription usage (credit-billed since 2026-07-12),
-    // so it must never be auto-selected. An explicit request still routes,
-    // flagged so the skill obtains per-task user authorization first.
-    if (model === 'fable') {
+    // Fable may bill usage credits depending on the account. Keep it explicit
+    // and require authorization for full IDs as well as the alias.
+    if (isFableModel(model)) {
       candidates = candidates.map((item) => ({
         ...item,
         requiresAuthorization: true,
-        reason: `${item.reason}; Fable bills usage credits outside the subscription — obtain explicit per-task user authorization before starting`
+        reason: `${item.reason}; Fable may bill usage credits — obtain explicit per-task user authorization before starting`
       }));
     }
   }

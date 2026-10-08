@@ -1,0 +1,25 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import { dispatchNative } from './lib/native-bridge.mjs';
+import { redact } from './lib/control.mjs';
+import { normalizeBrokerError } from './lib/errors.mjs';
+
+try {
+  const chunks = [];
+  let bytes = 0;
+  for (;;) {
+    const buffer = Buffer.allocUnsafe(Math.min(8192, 65537 - bytes));
+    const count = fs.readSync(0, buffer, 0, buffer.length, null);
+    if (!count) break;
+    bytes += count;
+    if (bytes > 65536) throw new Error('native input exceeds 64 KiB');
+    chunks.push(buffer.subarray(0, count));
+  }
+  const input = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+  const result = await dispatchNative(process.argv[2], input);
+  process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
+} catch (value) {
+  const error = normalizeBrokerError(value);
+  process.stdout.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: String(redact(error.message)).slice(0, 512) } })}\n`);
+  process.exitCode = 1;
+}

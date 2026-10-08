@@ -16,6 +16,19 @@ test('Composer and Grok aliases select the newest eligible standard model', () =
   assert.equal(resolveCursorModel('grok-xhigh', ['grok-4.5-xhigh', 'grok-5-xhigh']), 'grok-5-xhigh');
 });
 
+test('current Grok catalogs support base IDs, prefixed tiers, explicit pins, and opt-in fast', () => {
+  const catalog = ['composer-2.5', 'grok-4.5-high', 'grok-4.6-high', 'cursor-grok-4.7-high', 'cursor-grok-4.7-xhigh', 'cursor-grok-4.7-fast-high'];
+  assert.equal(resolveCursorModel('grok', catalog), 'cursor-grok-4.7-high');
+  assert.equal(resolveCursorModel('grok-xhigh', catalog), 'cursor-grok-4.7-xhigh');
+  assert.equal(resolveCursorModel('grok-fast', catalog), 'cursor-grok-4.7-fast-high');
+  assert.equal(resolveCursorModel('grok', ['grok-4.5-high', 'grok-4.7']), 'grok-4.7');
+  assert.equal(resolveCursorModel('grok-4.5-high', catalog), 'grok-4.5-high');
+  assert.throws(() => resolveCursorModel('grok-xhigh', ['grok-4.7']), { code: 'INVALID_MODEL' });
+  assert.throws(() => resolveCursorModel('grok', ['grok-4.7-fast-high']), { code: 'INVALID_MODEL' });
+  assert.throws(() => resolveCursorModel('composer', ['grok-4.7-high']), { code: 'INVALID_MODEL' });
+  assert.equal(resolveCursorModel('grok'), 'grok-4.7-high');
+});
+
 test('write mode uses sandboxed Smart Auto and never embeds the prompt in argv', () => {
   const args = buildCursorArgs({
     mode: 'implement', model: 'composer-2.5', cwd: '/tmp/project', approval: 'auto'

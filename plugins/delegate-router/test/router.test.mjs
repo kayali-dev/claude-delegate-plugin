@@ -1,11 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { CODEX_MODEL_ALIASES, resolveCodexModel } from '../bin/lib/models.mjs';
 import { routeTask } from '../bin/lib/router.mjs';
 
 const available = { claude: true, codex: true, cursor: true };
 const clear = {
   claude: { known: false }, codex: { known: false }, cursor: { known: false }
 };
+
+test('Codex alias resolution preserves full pins and never resolves inherited object keys', () => {
+  for (const [alias, model] of Object.entries(CODEX_MODEL_ALIASES)) {
+    assert.equal(resolveCodexModel(alias), model);
+  }
+  for (const model of ['gpt-6-sol', 'gpt-5.6-sol', 'constructor', 'toString', '__proto__']) {
+    assert.equal(resolveCodexModel(model), model);
+  }
+  assert.equal(resolveCodexModel('auto'), null);
+});
 
 test('routes clear implementation work to Cursor Auto when no model is named', () => {
   const route = routeTask({ task: 'Implement the multi-file refactor and update tests', usage: clear, availability: available });
@@ -21,6 +32,31 @@ test('an explicit composer request still pins Composer', () => {
 test('complex kinds keep pinned Cursor models instead of Auto', () => {
   const route = routeTask({ task: 'Research the legal and financial implications with sources', mode: 'consult', usage: clear, availability: available });
   assert.ok(![route.primary, ...route.fallbacks].some((item) => item.provider === 'cursor' && item.model === 'auto'));
+});
+
+test('current full model IDs infer their native provider without rewriting the pin', () => {
+  const cases = [
+    ['astra', 'codex'], ['gpt-6-astra', 'codex'], ['gpt-6.1-sol', 'codex'],
+    ['gpt-6-sol', 'codex'], ['gpt-6-luna', 'codex'], ['gpt-5.6-terra', 'codex'],
+    ['claude-opus-5-5', 'claude'], ['claude-sonnet-5-5', 'claude'],
+    ['claude-haiku-5-5', 'claude'], ['claude-fable-5-1', 'claude'],
+    ['grok-4.7-high', 'cursor'], ['cursor-grok-4.7-xhigh', 'cursor'],
+    ['grok-4.7[effort=high,fast=false]', 'cursor'], ['composer-2.5', 'cursor']
+  ];
+  for (const [model, provider] of cases) {
+    const route = routeTask({ task: 'Review this change', model, usage: clear, availability: available });
+    assert.deepEqual([route.primary?.provider, route.primary?.model], [provider, model]);
+    assert.equal(Boolean(route.primary.requiresAuthorization), model === 'claude-fable-5-1');
+  }
+});
+
+test('current explicit models still respect provider disablement and quota', () => {
+  for (const model of ['astra', 'gpt-6.1-sol', 'gpt-6-luna']) {
+    assert.equal(routeTask({ task: 'Review', model, usage: clear, availability: { ...available, codex: false } }).primary, null);
+    assert.equal(routeTask({ task: 'Review', model, usage: { ...clear, codex: { known: true, usedPercent: 95 } }, availability: available }).primary, null);
+  }
+  const explicitLane = routeTask({ task: 'Review', provider: 'cursor', model: 'gpt-6.1-sol', usage: clear, availability: available });
+  assert.equal(explicitLane.primary.provider, 'cursor', 'explicit provider choice remains authoritative; broker lane admission is separate');
 });
 
 test('routes hard debugging and review work to Sol', () => {

@@ -29,6 +29,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   child.stdin.end();
   await waitForChildExit({ child, description: 'the initialized control MCP process to exit' });
   assert.equal(responses[0].result.serverInfo.name, 'delegate-control');
+  assert.equal(responses[0].result.protocolVersion, '2025-11-25');
+  assert.match(responses[0].result.instructions, /Claude remains coordinator/);
+  assert.equal(responses[1].result.tools.find((tool) => tool.name === 'delegate_inspect').annotations.readOnlyHint, true);
+  assert.equal(responses[1].result.tools.find((tool) => tool.name === 'delegate_start').annotations.readOnlyHint, false);
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage',
@@ -38,6 +42,18 @@ test('control MCP initializes and exposes the complete supervision surface', asy
     .filter((tool) => !['delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'].includes(tool.name))
     .map(({ name, inputSchema }) => {
       const legacy = structuredClone(inputSchema);
+      if (['delegate_start', 'delegate_resume'].includes(name)) {
+        delete legacy.properties.autoFix;
+        delete legacy.properties.maxSubagents;
+        delete legacy.properties.maxTotalOutputTokens;
+        if (legacy.properties.reportSchema) legacy.properties.reportSchema.description = 'Best-effort structured final-result contract. Missing or invalid JSON never fails the job.';
+        const verify = legacy.properties.verify;
+        legacy.properties.verify = {
+          type: 'object', required: ['command'], additionalProperties: false,
+          properties: { command: verify.properties.command, timeoutSeconds: verify.properties.timeoutSeconds },
+          ...(verify.description ? { description: verify.description } : {})
+        };
+      }
       if (name === 'delegate_start') {
         delete legacy.properties.isolation;
         delete legacy.properties.pathClaims;
@@ -55,6 +71,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
         delete legacy.properties.blockedOnInput;
       }
       if (name === 'delegate_stats') {
+        delete legacy.properties.model;
         delete legacy.properties.until;
         delete legacy.properties.recommendFor;
         legacy.properties.since.description = "Optional duration such as '24h' or '7d'.";
@@ -113,6 +130,19 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
   assert.ok(resume.inputSchema.properties.retryPolicy);
   assert.ok(resume.inputSchema.properties.verify);
+  for (const tool of [start, resume]) {
+    const verifySchema = tool.inputSchema.properties.verify;
+    assert.equal(verifySchema.required, undefined, 'exception must not require a command');
+    assert.ok(verifySchema.properties.exception);
+    assert.deepEqual(verifySchema.oneOf.map((branch) => branch.required), [['command'], ['exception']]);
+    assert.deepEqual(verifySchema.oneOf[1].not.anyOf, [{ required: ['command'] }, { required: ['timeoutSeconds'] }]);
+    assert.equal(tool.inputSchema.properties.autoFix.properties.maxRounds.maximum, 100);
+    assert.match(tool.inputSchema.properties.autoFix.description, /hard-caps execution at three/);
+    assert.equal(tool.inputSchema.properties.maxSubagents.maximum, 16);
+    assert.equal(tool.inputSchema.properties.maxSubagents.minimum, 0);
+    assert.equal(tool.inputSchema.properties.maxTotalOutputTokens.minimum, 1);
+  }
+  assert.equal(stats.inputSchema.properties.model.maxLength, 128);
   assert.equal(work.inputSchema.additionalProperties, false);
   assert.deepEqual(Object.keys(work.inputSchema.properties), ['id', 'limit']);
   assert.equal(decide.inputSchema.additionalProperties, false);
@@ -124,6 +154,17 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.equal(verify.inputSchema.additionalProperties, false);
   assert.deepEqual(Object.keys(verify.inputSchema.properties), ['jobId']);
   assert.deepEqual(integrate.inputSchema.required, ['jobIds']);
+});
+
+test('MCP servers negotiate unsupported wire versions rather than echoing them', () => {
+  for (const executable of ['delegate-control-mcp', 'delegate-codex-mcp']) {
+    const run = spawnSync(process.execPath, [path.join(root, 'bin', executable)], {
+      encoding: 'utf8', env: { ...process.env, DELEGATE_ENABLED_PROVIDERS: 'cursor' },
+      input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28' } }) + '\n'
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(JSON.parse(run.stdout).result.protocolVersion, '2025-11-25');
+  }
 });
 
 test('control MCP adds bounded resources and common-flow prompts without changing tools', async (t) => {
