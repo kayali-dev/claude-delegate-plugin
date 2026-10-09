@@ -16,6 +16,7 @@ import {
   isClaudeAgentTailCandidate
 } from './agent-transcript-ingestor.mjs';
 import { isProcessAlive } from './process.mjs';
+import { hasPendingDispatch, pumpDispatchQueue } from './dispatch-queue.mjs';
 import {
   SUPERVISOR_PROTOCOL_VERSION,
   atomicWritePrivateJson,
@@ -180,6 +181,8 @@ export class ResidentSupervisor {
     this.draining = false;
     this.drainReason = null;
     this.entries = new Map();
+    this.pendingSubmissions = new Map();
+    this.queuePump = null;
     this.agentTailIds = new Set();
     this.server = null;
     this.heartbeatTimer = null;
@@ -371,6 +374,14 @@ export class ResidentSupervisor {
   }
 
   async submit(jobId) {
+    if (this.draining) return { ok: false, code: 'SUPERVISOR_DRAINING', error: 'supervisor is draining' };
+    if (this.pendingSubmissions.has(jobId)) return this.pendingSubmissions.get(jobId);
+    const pending = this.submitAttempt(jobId).finally(() => this.pendingSubmissions.delete(jobId));
+    this.pendingSubmissions.set(jobId, pending);
+    return pending;
+  }
+
+  async submitAttempt(jobId) {
     if (!/^[a-zA-Z0-9_-]+$/.test(jobId || '')) return { ok: false, code: 'INVALID_REQUEST', error: 'invalid job id' };
     const existing = this.entries.get(jobId);
     if (existing && isProcessAlive(existing.lease.pid)) {
@@ -543,6 +554,11 @@ export class ResidentSupervisor {
   }
 
   heartbeat() {
+    if (!this.draining && !this.queuePump) {
+      this.queuePump = pumpDispatchQueue({ submit: (id) => this.submit(id) })
+        .catch((error) => this.log('pending queue unavailable', { code: error.code || 'STATE_ERROR' }))
+        .finally(() => { this.queuePump = null; });
+    }
     this.tailAgentTranscripts();
     for (const [attemptId, entry] of this.entries) {
       if (entry.adopted) {
@@ -587,7 +603,8 @@ export class ResidentSupervisor {
 
   checkIdle() {
     this.tailAgentTranscripts();
-    if (this.draining || this.entries.size > 0 || this.agentTailIds.size > 0) return;
+    if (this.draining || this.entries.size > 0 || this.agentTailIds.size > 0 || this.queuePump) return;
+    try { if (hasPendingDispatch()) return; } catch { return; }
     try { maybePruneJobs(); } catch {}
     if (Date.now() - this.lastWorkAt >= this.idleMs) this.requestDrain('idle');
   }

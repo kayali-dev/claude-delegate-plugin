@@ -126,16 +126,20 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   const lastAt = eventAt(lastEvent) || Number(job.lastActivityAt || job.updatedAt * 1000 || job.createdAt * 1000 || now);
   if (job.transport === 'claude-agent' && job.agentLifecycle === 'ended-unknown') {
     return result('ended-unknown', 'ended unknown', '?', 0, now, 'failed', {
-      capabilities, transportKey: key, visibilityNote: 'no completion signal; transcript quiet-window reconciliation'
+      capabilities, transportKey: key, visibilityNote: 'coordinator confirmed gone; no completion signal'
     });
   }
-  if (job.transport === 'claude-agent' && job.agentLifecycle === 'spawn-returned') {
+  if (job.transport === 'claude-agent' && !TERMINAL.has(job.status)
+    && (job.hostAgent || ['spawn-returned', 'host-observed'].includes(job.agentLifecycle) || job.agentActivityState === 'unknown')
+    && !signals.openTool && !['thinking', 'reasoning'].includes(signals.signal?.data?.kind)) {
     const transcriptAt = Number(job.transcriptMtimeMs || job.spawnReturnedAtMs || job.createdAtMs || lastAt);
     const { active } = classifySession(transcriptAt, { now, activeSeconds: DEFAULT_SESSION_ACTIVE_SECONDS });
-    const state = job.agentActivityState === 'active' || job.agentActivityState === 'idle'
+    const state = ['active', 'idle', 'waiting', 'pending', 'unknown'].includes(job.agentActivityState)
       ? job.agentActivityState : active ? 'active' : 'idle';
     return result(state, state, state === 'active' ? '>' : '.', transcriptAt, now, state === 'active' ? 'body' : 'dim', {
-      capabilities, transportKey: key, visibilityNote: 'completion hook with quiet-window backstop'
+      capabilities, transportKey: key, visibilityNote: state === 'unknown'
+        ? 'status unavailable; quiet output is not a timeout'
+        : job.activitySource === 'claude-host' ? 'Claude host-reported status' : 'transcript activity; not a liveness guarantee'
     });
   }
   if (job.external || job.transport === 'external') {
@@ -171,7 +175,7 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   if (capabilities.subagents && signals.openSubagents.length) {
     const parentAt = eventAt(signals.parentSignal);
     const parentProgressing = parentAt > 0 && now - parentAt <= stallMs;
-    const staleSubagent = parentProgressing ? null : signals.openSubagents
+    const staleSubagent = parentProgressing || job.transportHealth?.state !== 'stalled' ? null : signals.openSubagents
       .map((subagent) => ({ subagent, silentSince: eventAt(subagent.latest) || eventAt(subagent.start) }))
       .filter((entry) => entry.silentSince > 0 && now - entry.silentSince > stallMs)
       .sort((left, right) => left.silentSince - right.silentSince
@@ -235,7 +239,7 @@ export function deriveJobActivity(job = {}, events = [], options = {}) {
   }
 
   const idleMs = Math.max(0, now - lastAt);
-  if (job.stalled || idleMs > stallMs) return result('stalled', 'stalled', '!', lastAt, now, 'failed', { capabilities, transportKey: key, idleMs });
+  if (job.transportHealth?.state === 'stalled') return result('stalled', 'stalled', '!', lastAt, now, 'failed', { capabilities, transportKey: key, idleMs });
   if (idleMs > Number(options.quietMs ?? 30_000)) return result('quiet', 'quiet', '.', lastAt, now, 'dim', { capabilities, transportKey: key, idleMs });
 
   return result('working', 'working', '>', lastAt, now, 'body', { capabilities, transportKey: key, idleMs, visibilityNote: null });

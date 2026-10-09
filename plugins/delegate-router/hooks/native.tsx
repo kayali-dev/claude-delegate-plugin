@@ -1,4 +1,5 @@
-import { NATIVE_PANE, nativeOptions, nativeUsagePayload, overviewText, jobDetailText, reviewerGuardDecision } from './native-view.mjs';
+import { NATIVE_PANE, nativeOptions, nativeUsagePayload, overviewText, jobDetailText, reviewerGuardDecision, previewText, agentTreeRows } from './native-view.mjs';
+import { contextCandidates, agentMetadata, attentionRows, managedResultId } from './native-data.mjs';
 
 let options;
 let snapshot;
@@ -19,6 +20,20 @@ let usageWarning = false;
 let detailRequest = 0;
 let sequence = 0;
 const commandIds = new Map();
+const toolCards = new Map();
+const defaultDraft = () => ({ objective: '', acceptance: '', paths: '', provider: 'auto', model: 'auto', mode: 'review',
+  effort: 'medium', timeoutSeconds: '3600', maxOutputTokens: '16384', isolation: 'shared' });
+let draft = defaultDraft();
+let preview;
+let draftRevision = 0;
+let contexts = [];
+const chosenContext = new Set();
+let evidenceView = 'diff';
+let evidenceFile = '';
+let evidenceSearch = '';
+let pageHistory = [];
+let comparison;
+let agentWarning = '';
 
 async function registerCommands($) {
   await $.command.register({ name: 'delegate-dashboard', description: 'Open native delegation jobs and controls', immediate: true });
@@ -28,13 +43,19 @@ async function registerCommands($) {
   await $.command.register({ name: 'delegate-answer', description: 'Answer your job or explicitly confirm its plan', argumentHint: '<job-id>', immediate: true });
   await $.command.register({ name: 'delegate-cancel', description: 'Confirm a provider-aware cancellation request', argumentHint: '<job-id>', immediate: true });
   await $.command.register({ name: 'delegate-steer', description: 'Correct your running managed job', argumentHint: '<job-id>', immediate: true });
+  await $.command.register({ name: 'delegate-new', description: 'Compose, preview and approve bounded external work', immediate: true });
+  await $.command.register({ name: 'delegate-review', description: 'Open paginated diff, report and test evidence', argumentHint: '<job-id>', immediate: true });
+  await $.command.register({ name: 'delegate-queue', description: 'Inspect approved pending jobs and admission reasons', immediate: true });
+  await $.command.register({ name: 'delegate-context', description: 'Choose redacted public excerpts for a new task', immediate: true });
+  await $.command.register({ name: 'delegate-agents', description: 'View Claude and delegated agent relationships', immediate: true });
+  await $.command.register({ name: 'delegate-claim', description: 'Explicitly transfer same-workspace native supervision', argumentHint: '<job-id>', immediate: true });
 }
 
 async function bridge($, action, args = {}) {
   const sessionId = await $.session.id();
   const projectDir = await $.session.root();
   const result = await $.process.run(['node', `${$.plugin.root}/bin/delegate-native`, action], {
-    stdin: JSON.stringify({ sessionId, projectDir, scope, ...args }), timeoutMs: 5_000
+    stdin: JSON.stringify({ sessionId, projectDir, scope, ...args }), timeoutMs: ['launch', 'enqueue'].includes(action) ? 20_000 : 5_000
   });
   if (result.stdout.length > 160_000) throw new Error('Native response exceeds its size bound');
   const packet = JSON.parse(result.stdout);
@@ -49,13 +70,21 @@ async function refresh($) {
   const pending = { epoch, promise: undefined };
   pending.promise = (async () => {
     try {
+      if (options.agent_capture) {
+        try {
+          const agents = agentMetadata(await $.agent.list());
+          if (epoch !== generation) return;
+          await bridge($, 'agents', { agents });
+          agentWarning = '';
+        } catch { agentWarning = 'Claude host status unavailable; transcript observation remains a fallback, not proof of liveness.'; }
+      }
       const nextSnapshot = await bridge($, 'snapshot');
       if (epoch !== generation) return;
       snapshot = nextSnapshot;
       error = '';
       if (options.compact_status) {
         const work = snapshot.workState;
-        $.ui.status(work.runningCount || work.needsReviewCount || work.blockedCount ? snapshot.chip : undefined);
+        $.ui.status(work.runningCount || work.needsReviewCount || work.blockedCount || snapshot.queuePendingCount ? snapshot.chip : undefined);
       }
       $.ui.invalidate('ui.render');
     } catch {
@@ -93,6 +122,10 @@ async function inspectSelected($, jobId) {
   selected = result.id;
   detail = result;
   diff = undefined;
+  pageHistory = [];
+  evidenceFile = '';
+  evidenceSearch = '';
+  comparison = undefined;
   tab = 'detail';
   $.ui.invalidate('ui.render');
 }
@@ -101,8 +134,87 @@ async function openDashboard($) {
   await refresh($);
   const surfaces = await $.session.surfaces();
   if (!surfaces.some((surface) => surface === 'terminal' || surface === 'desktop')) return { text: overviewText(snapshot) };
-  await $.ui.open({ id: NATIVE_PANE, title: 'Delegate jobs', focus: true, closeOnEscape: true, columns: 56 });
+  await $.ui.open({ id: NATIVE_PANE, title: 'Delegate workspace', focus: true, closeOnEscape: true, columns: 72 });
   return {};
+}
+
+async function loadContext($) {
+  const epoch = generation;
+  const candidates = contextCandidates(await $.session.messages());
+  if (epoch !== generation) return;
+  contexts = candidates;
+  chosenContext.clear();
+  preview = undefined;
+  draftRevision++;
+  tab = 'context';
+  $.ui.invalidate('ui.render');
+}
+
+async function evidencePage($, offset = 0, find) {
+  if (!selected) return;
+  const epoch = generation;
+  const id = selected;
+  const result = await bridge($, evidenceView === 'diff' ? 'diff' : 'evidence', { jobId: id, offset,
+    ...(evidenceView !== 'diff' ? { view: evidenceView } : {}),
+    ...(evidenceFile && evidenceView === 'diff' ? { file: evidenceFile } : {}),
+    ...(find ? { find } : {}), ...(diff?.evidenceVersion ? { evidenceVersion: diff.evidenceVersion } : {}) });
+  if (epoch !== generation || id !== selected) return;
+  diff = result;
+  tab = 'diff';
+  $.ui.invalidate('ui.render');
+}
+
+async function launchDraft($, queued = false) {
+  if (!preview || busy) return;
+  const epoch = generation;
+  const version = draftRevision;
+  const approved = preview;
+  busy = true;
+  $.ui.invalidate('ui.render');
+  try {
+    const summary = previewText(approved).split('\n\nExact task packet:')[0].slice(0, 4000);
+    const choice = await $.ui.ask(`${summary}\n\nConfirm the exact packet displayed in the composer. ${queued
+      ? 'Approve delayed dispatch for up to eight hours? The pinned model, scope, workspace and quota are rechecked. Workspace changes require new approval.'
+      : 'Launch this paid external task now?'} No automatic integration or permission widening.`, ['Leave draft', queued ? 'Approve pending job' : 'Launch task']);
+    if (choice !== (queued ? 'Approve pending job' : 'Launch task')) return;
+    let authorizeCredits = false;
+    if (approved.requiresAuthorization) {
+      authorizeCredits = await $.ui.ask('This model consumes usage credits. Authorize credits for this specific task?', ['Do not authorize', 'Authorize task credits']) === 'Authorize task credits';
+      if (!authorizeCredits) return;
+    }
+    if (epoch !== generation || version !== draftRevision || approved !== preview) { error = 'Draft or session changed; preview and confirm again.'; return; }
+    const result = await bridge($, queued ? 'enqueue' : 'launch', { previewId: approved.id, confirmed: true, authorizeCredits });
+    preview = undefined;
+    await refresh($);
+    if (result.jobId) await inspectSelected($, result.jobId);
+    else tab = 'queue';
+    $.ui.log(queued ? 'Approved task is pending admission, not paused or running.' : `Launched ${result.jobId}; provider completion still requires review.`);
+  } catch (value) { error = `Launch not confirmed: ${/^[A-Z_]{1,64}$/.test(value?.message || '') ? value.message : 'broker unavailable'}. Reinspect; no automatic retry.`; }
+  finally { busy = false; $.ui.invalidate('ui.render'); }
+}
+
+async function claim($, jobId) {
+  if (!jobId) return { text: 'Usage: /delegate-claim <job-id>.' };
+  if (busy) return { text: 'Another native action is still pending.' };
+  busy = true;
+  const epoch = generation;
+  try {
+    const job = await bridge($, 'inspect', { jobId });
+    if (!job.canClaim) return { text: 'Only enabled managed jobs from another session in this recorded workspace can be claimed.' };
+    const choice = await $.ui.ask(`Transfer native supervision of ${job.id} from ${job.controllerSessionId || 'unknown'} to this session at revision ${job.revision}? Launch attribution, scope and permissions stay unchanged.`, ['Leave supervision', 'Claim supervision']);
+    if (choice !== 'Claim supervision') return { text: 'Supervision unchanged.' };
+    if (epoch !== generation) return { text: 'Session changed; reinspect before claiming.' };
+    const key = `claim:${job.id}`;
+    let identity = commandIds.get(key);
+    if (!identity) { identity = { id: `native-${await $.clock.now()}-${++sequence}`, uncertain: true }; if (commandIds.size >= 64) return { text: 'Native retry memory full; inspect pending controls first.' }; commandIds.set(key, identity); }
+    const result = await bridge($, 'claim', { jobId, expectedRevision: job.revision, commandId: identity.id, confirmed: true });
+    identity.uncertain = false;
+    commandIds.delete(key);
+    await refresh($);
+    await inspectSelected($, jobId);
+    return { text: `Native supervision transferred at revision ${result.revision}; immutable launch attribution preserved.` };
+  } catch (value) { return { text: `Claim not confirmed: ${/^[A-Z_]{1,64}$/.test(value?.message || '') ? value.message : 'broker unavailable'}. Reinspect; no automatic overwrite.` }; }
+  finally { busy = false; $.ui.invalidate('ui.render'); }
 }
 
 async function act($, action, jobId) {
@@ -205,7 +317,13 @@ export function register(on, values = {}) {
     usageFingerprint = undefined;
     usageWarning = false;
     detailRequest += 1;
-    if (e.source !== 'compact') commandIds.clear();
+    preview = undefined;
+    draftRevision++;
+    contexts = [];
+    chosenContext.clear();
+    comparison = undefined;
+    toolCards.clear();
+    if (e.source !== 'compact') { commandIds.clear(); draft = defaultDraft(); }
     if (options.native_enabled) {
       scope = 'session';
       tab = 'jobs';
@@ -224,6 +342,9 @@ export function register(on, values = {}) {
   on('session.end', async ($, e, next) => {
     active = false;
     generation += 1;
+    preview = undefined;
+    contexts = [];
+    chosenContext.clear();
     timer?.cancel();
     return next(e);
   });
@@ -236,8 +357,15 @@ export function register(on, values = {}) {
     const sessionId = await $.session.id();
     const projectDir = await $.session.root();
     const cwd = await $.session.cwd();
-    return next({ ...e, origin: undefined, originSessionId: sessionId, originProjectDir: projectDir,
+    const result = await next({ ...e, origin: undefined, originSessionId: sessionId, originProjectDir: projectDir,
       originWorkspaceId: projectDir, originCwd: cwd, originLaunchedAtMs: undefined });
+    const jobId = managedResultId(result);
+    if (jobId && e.tool_use_id) {
+      if (toolCards.size >= 64) toolCards.delete(toolCards.keys().next().value);
+      toolCards.set(e.tool_use_id, jobId);
+      await refresh($);
+    }
+    return result;
   });
   on('agent.spawn', { subagentType: 'delegate-router:reviewer' }, async ($, e, next) => {
     if (!options.native_enabled || !options.reviewer_guard || e.subagentType !== 'delegate-router:reviewer') return next(e);
@@ -247,6 +375,15 @@ export function register(on, values = {}) {
     const reason = reviewerGuardDecision(e, snapshot, options.reviewer_guard);
     return reason ? { deny: reason } : next(e);
   }).catch(($, e, next) => ({ deny: 'Reviewer allowance guard unavailable. Inspect usage and route explicitly; no model substitution.' }));
+  on('agent.spawn', async ($, e, next) => {
+    const result = await next(e);
+    if (options.native_enabled && options.agent_capture && result.agentId && e.tool_use_id) {
+      try { await bridge($, 'agent-bind', { spawn: { toolUseId: e.tool_use_id, agentId: result.agentId,
+        type: e.subagentType, description: e.description, model: result.model || e.model || e.parentModel,
+        parentId: e.parentAgentId } }); await refresh($); } catch { agentWarning = 'Native spawn binding unavailable; classic hooks remain active.'; }
+    }
+    return result;
+  });
   on('command.run', { command: 'delegate-dashboard' }, async ($, e) => e.origin?.kind === 'plugin'
     ? { text: 'Open /delegate-dashboard yourself to focus the native panel.' } : openDashboard($));
   on('command.run', { command: 'delegate-status' }, async ($) => { await refresh($); return { text: overviewText(snapshot) + (error ? `\n${error}` : '') }; });
@@ -259,9 +396,44 @@ export function register(on, values = {}) {
   on('command.run', { command: 'delegate-answer' }, async ($, e) => e.origin?.kind === 'plugin' ? { text: 'A person must answer the pending decision.' } : act($, 'respond', e.args.trim()));
   on('command.run', { command: 'delegate-cancel' }, async ($, e) => e.origin?.kind === 'plugin' ? { text: 'A person must confirm cancellation.' } : act($, 'cancel', e.args.trim()));
   on('command.run', { command: 'delegate-steer' }, async ($, e) => e.origin?.kind === 'plugin' ? { text: 'A person must supply the correction.' } : act($, 'steer', e.args.trim()));
+  on('command.run', { command: 'delegate-new' }, async ($, e) => {
+    if (e.origin?.kind === 'plugin') return { text: 'A person must open the task composer and approve work.' };
+    tab = 'new'; return openDashboard($);
+  });
+  on('command.run', { command: 'delegate-review' }, async ($, e) => {
+    try { await inspectSelected($, e.args.trim()); evidenceView = 'diff'; await evidencePage($); return e.origin?.kind === 'plugin' ? { text: jobDetailText(detail) } : openDashboard($); }
+    catch { return { text: 'Review unavailable; inspect this job through CLI/MCP.' }; }
+  });
+  on('command.run', { command: 'delegate-queue' }, async ($, e) => { tab = 'queue'; return e.origin?.kind === 'plugin' ? { text: 'Open /delegate-queue yourself to focus the panel.' } : openDashboard($); });
+  on('command.run', { command: 'delegate-context' }, async ($, e) => {
+    if (e.origin?.kind === 'plugin') return { text: 'A person must select public conversation excerpts.' };
+    try { await loadContext($); return openDashboard($); } catch { return { text: 'Context inspector unavailable; no conversation exported.' }; }
+  });
+  on('command.run', { command: 'delegate-agents' }, async ($, e) => { tab = 'agents'; return e.origin?.kind === 'plugin' ? { text: 'Open /delegate-agents yourself to focus the panel.' } : openDashboard($); });
+  on('command.run', { command: 'delegate-claim' }, async ($, e) => e.origin?.kind === 'plugin' ? { text: 'A person must confirm supervision transfer.' } : claim($, e.args.trim()));
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const jobId = toolCards.get(e.props.tool_use_id);
+    if (!options.native_enabled || !options.inline_cards || !jobId) return next(e);
+    const original = await next(e);
+    const { Box, Text, Button } = $.ui.resolve(e);
+    const job = snapshot?.jobs?.find((row) => row.id === jobId);
+    return <Box flexDirection="column" gap={1}>
+      {original}
+      <Text dimColor>{job ? `${job.provider}/${job.model} · ${job.phase} · r${job.revision}` : `Managed job ${jobId}; refresh to inspect its current state.`}</Text>
+      <Button key={`inspect-${jobId}`} label="Inspect delegated work" onPress={() => {}} />
+    </Box>;
+  });
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const attention = attentionRows(snapshot).slice(0, 3);
+    if (!options.native_enabled || !options.attention_band || e.props.hasSurvey || !attention.length) return next(e);
+    const { Box, Text, Button } = $.ui.resolve(e);
+    return <Box flexDirection="column"><Text dimColor>Delegate attention · no automatic model turn</Text>
+      {attention.map((job) => <Button key={`inspect-${job.id}`} label={`${job.provider}: ${job.pendingInput ? 'input needed' : job.acceptance === 'ready-for-review' ? 'review ready' : job.scopeViolationCount ? 'scope violation' : 'failed'} · ${job.id}`} onPress={() => {}} />)}
+    </Box>;
+  });
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== NATIVE_PANE || !options.native_enabled) return next(e);
-    const { Box, Text, Button, Select, Code } = $.ui.resolve(e);
+    const { Box, Text, Button, Select, Code, Input } = $.ui.resolve(e);
     return <Box flexDirection="column" gap={1}>
       <Box gap={1}>
         <Button key="tab-jobs" label="Jobs" onPress={() => {}} />
@@ -269,9 +441,15 @@ export function register(on, values = {}) {
         <Button key="tab-diff" label="Diff" onPress={() => {}} />
         <Button key="refresh" label="Refresh" onPress={() => {}} />
       </Box>
+      <Box gap={1}>
+        <Button key="tab-new" label="New task" onPress={() => {}} />
+        <Button key="tab-queue" label="Queue" onPress={() => {}} />
+        <Button key="tab-agents" label="Agents" onPress={() => {}} />
+      </Box>
       <Select key="scope" label="View scope" value={scope} options={[{ label: 'This session', value: 'session' }, { label: 'Workspace (read-only for other sessions)', value: 'workspace' }, { label: 'All jobs (read-only for other sessions)', value: 'all' }]} onSelect={() => {}} />
       <Text dimColor>{snapshot?.chip || 'Loading local job state…'}</Text>
       {error ? <Text color="yellow">{error}</Text> : null}
+      {agentWarning ? <Text dimColor>{agentWarning}</Text> : null}
       {busy ? <Text dimColor>Waiting for your answer or broker intake…</Text> : null}
       {tab === 'jobs' ? <Box flexDirection="column" gap={1}>
         <Text dimColor>{snapshot?.allowance?.map((entry) => `${entry.provider} ${entry.known ? `${entry.usedPercent}%` : '?'}`).join(' · ') || 'Allowance unknown'}</Text>
@@ -280,8 +458,57 @@ export function register(on, values = {}) {
           <Text dimColor>{job.id} · {job.model} · {job.isOwnSession ? 'this session' : 'other session'}</Text>
         </Box>) : <Text>No jobs in this scope. Delegate bounded work with /delegate-router:delegate.</Text>}
         {snapshot?.omittedCount ? <Text dimColor>{snapshot.omittedCount} older jobs omitted; CLI/MCP expose the full store.</Text> : null}
-      </Box> : tab === 'diff' ? <Box flexDirection="column"><Code source={diff?.diff || 'Select a job, then open Diff.'} language="diff" />{diff?.nextOffset != null ? <Text dimColor>Diff truncated; use delegate-jobs diff for windowed inspection.</Text> : null}</Box> : <Box flexDirection="column" gap={1}>
+      </Box> : tab === 'new' ? <Box flexDirection="column" gap={1}>
+        <Text>Objective (bounded work)</Text>
+        <Input key="draft-objective" label="Objective (bounded work)" value={draft.objective} onChange={() => {}} onSubmit={() => {}} />
+        <Text>Acceptance criteria</Text>
+        <Input key="draft-acceptance" label="Acceptance criteria" value={draft.acceptance} onChange={() => {}} onSubmit={() => {}} />
+        <Text>Allowed paths, comma separated (required for writes)</Text>
+        <Input key="draft-paths" label="Allowed paths, comma separated (required for writes)" value={draft.paths} onChange={() => {}} onSubmit={() => {}} />
+        <Select key="draft-provider" label="Provider" value={draft.provider} options={[{ value: 'auto', label: 'Automatic enabled route' }, ...(snapshot?.enabledProviders || []).map((provider) => ({ value: provider, label: provider }))]} onSelect={() => {}} />
+        <Text>Model ID (auto or explicit, never substituted)</Text>
+        <Input key="draft-model" label="Model ID (auto or explicit, never substituted)" value={draft.model} onChange={() => {}} onSubmit={() => {}} />
+        <Select key="draft-mode" label="Mode" value={draft.mode} options={['consult', 'plan', 'review', 'implement', 'verify'].map((value) => ({ value, label: value }))} onSelect={() => {}} />
+        <Select key="draft-effort" label="Requested effort (preflight validates support)" value={draft.effort} options={['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: value }))} onSelect={() => {}} />
+        <Select key="draft-isolation" label="Workspace" value={draft.isolation} options={[{ value: 'shared', label: 'Shared worktree (one writer)' }, { value: 'worktree', label: 'Isolated worktree (concrete scope paths)' }]} onSelect={() => {}} />
+        <Text>Wall-clock budget, seconds (includes approval wait)</Text>
+        <Input key="draft-timeoutSeconds" label="Wall-clock budget, seconds (includes approval wait)" value={draft.timeoutSeconds} onChange={() => {}} onSubmit={() => {}} />
+        <Text>Reported output-token cap (unknown usage is not zero)</Text>
+        <Input key="draft-maxOutputTokens" label="Reported output-token cap (unknown usage is not zero)" value={draft.maxOutputTokens} onChange={() => {}} onSubmit={() => {}} />
+        <Button key="context-load" label={`Select public context (${chosenContext.size} chosen)`} onPress={() => {}} />
+        <Button key="draft-preview" label="Preview exact task, route and checks" onPress={() => {}} />
+        <Code source={previewText(preview)} language="text" />
+        {preview && !busy ? <Box gap={1}><Button key="draft-launch" label="Confirm launch…" onPress={() => {}} /><Button key="draft-enqueue" label="Approve pending job…" onPress={() => {}} /></Box> : null}
+      </Box> : tab === 'context' ? <Box flexDirection="column" gap={1}>
+        <Text>Only checked public text is included. Tools and hidden reasoning are excluded; credentials are redacted. Up to 8 excerpts, 2,000 characters each.</Text>
+        {contexts.map((entry) => <Box key={entry.id} flexDirection="column"><Button key={`context-${entry.id}`} label={`${chosenContext.has(entry.id) ? '[x]' : '[ ]'} ${entry.role}${entry.redacted ? ' · redacted' : ''}${entry.truncated ? ' · truncated' : ''}`} onPress={() => {}} /><Code source={entry.text} language="text" /></Box>)}
+      </Box> : tab === 'queue' ? <Box flexDirection="column" gap={1}>
+        <Text>Approved pending work, not turn pause. Dispatch rechecks quota, provider capacity, writer locks and workspace/verification drift. Approval expires after 8 hours.</Text>
+        {(snapshot?.queue || []).map((entry) => <Box key={entry.id} flexDirection="column"><Text>{entry.provider}/{entry.model} · {entry.state} · priority {entry.priority} · {entry.reason || 'admitted'}</Text><Text dimColor>{entry.id} · r{entry.revision}</Text>
+          {entry.jobId ? <Button key={`job-${entry.jobId}`} label="Inspect dispatched job" onPress={() => {}} /> : entry.state === 'pending' && entry.isOwnSession ? <Box gap={1}><Button key={`queue-cancel-${entry.id}`} label="Cancel pending…" onPress={() => {}} /><Button key={`queue-priority-${entry.id}`} label="Change priority…" onPress={() => {}} /></Box> : null}
+        </Box>)}
+        {!snapshot?.queue?.length ? <Text>No pending tasks in this scope.</Text> : null}
+        {snapshot?.omittedQueueCount ? <Text dimColor>{snapshot.omittedQueueCount} queue rows omitted; pending tasks sort first. Cancel obsolete pending drafts to expose additional rows.</Text> : null}
+      </Box> : tab === 'agents' ? <Box flexDirection="column" gap={1}>
+        <Text>Host-reported Claude status; broker-managed jobs; provider-reported children. Missing usage and relationships are unknown, not zero. No control of native Claude agents is added.</Text>
+        {agentTreeRows(snapshot?.jobs).map((job) => <Box key={job.id} flexDirection="column"><Button key={`job-${job.id}`} label={`${'  '.repeat(job.depth)}${job.provider} · ${job.agentName || job.model} · ${job.hostStatus || job.agentActivityState || job.phase}`} onPress={() => {}} /><Text dimColor>{job.id} · output tokens {job.observedOutputTokens ?? 'unknown'}{job.parentAgentId || job.parentJobId ? ` · parent ${job.parentAgentId || job.parentJobId}` : ''}</Text>
+          {(job.reportedChildren || []).map((child, index) => <Text key={`child-${index}`} dimColor>{'  '.repeat(job.depth + 1)}↳ {child.label || child.id} · {child.status} · usage unknown (provider-reported)</Text>)}
+        </Box>)}
+      </Box> : tab === 'diff' ? <Box flexDirection="column" gap={1}>
+        <Select key="evidence-view" label="Evidence" value={evidenceView} options={['diff', 'plan', 'result'].map((value) => ({ value, label: value }))} onSelect={() => {}} />
+        {evidenceView === 'diff' ? <Select key="evidence-file" label="Changed file" value={evidenceFile} options={[{ value: '', label: 'All recorded files' }, ...(diff?.files || []).map((file) => ({ value: file.path, label: file.path }))]} onSelect={() => {}} /> : null}
+        <Text>Find text (literal, case-sensitive)</Text>
+        <Input key="evidence-search" label="Find text (literal, case-sensitive)" value={evidenceSearch} onChange={() => {}} onSubmit={() => {}} />
+        <Box gap={1}><Button key="evidence-find" label="Find next" onPress={() => {}} /><Button key="evidence-reset" label="Restart evidence" onPress={() => {}} />{pageHistory.length ? <Button key="evidence-previous" label="Previous page" onPress={() => {}} /> : null}{diff?.nextOffset != null ? <Button key="evidence-next" label="Next page" onPress={() => {}} /> : null}</Box>
+        <Text dimColor>Offset {diff?.offset || 0}{diff?.nextOffset != null ? ' · more evidence follows' : ' · last page'} · mixed revisions are refused.{diff?.omittedFiles ? ` ${diff.omittedFiles} file choices omitted; CLI exposes the full inventory.` : ''}</Text>
+        <Code source={diff?.diff || diff?.resultText || 'Select a job, then open evidence.'} language={evidenceView === 'diff' ? 'diff' : 'text'} />
+      </Box> : <Box flexDirection="column" gap={1}>
         <Text>{jobDetailText(detail)}</Text>
+        {detail?.verification?.command ? <Text>Broker checks: {detail.verification.command} · exit {detail.verification.exitCode ?? 'unknown'}</Text> : null}
+        {detail?.verification?.outputTail ? <Code source={detail.verification.outputTail} language="text" /> : null}
+        {detail ? <Select key="compare-job" label="Compare candidate (evidence only, never merge)" value={comparison?.id || ''} options={[{ value: '', label: 'No comparison' }, ...(snapshot?.jobs || []).filter((job) => job.id !== detail.id && job.provider !== 'claude' && job.workspaceId === detail.workspaceId).map((job) => ({ value: job.id, label: `${job.provider}/${job.model} · ${job.id}` }))]} onSelect={() => {}} /> : null}
+        {comparison ? <Text>{`Candidate comparison:\n${detail.id}: ${detail.acceptance} · checks ${detail.verification?.state} · base ${detail.baseRevision || 'unknown'}\n${comparison.id}: ${comparison.acceptance} · checks ${comparison.verification?.state} · base ${comparison.baseRevision || 'unknown'}\n${detail.baseRevision && comparison.baseRevision ? detail.baseRevision === comparison.baseRevision ? 'Same recorded base; still inspect both diffs.' : 'Different recorded bases; do not assume comparable diffs.' : 'Base comparison unavailable.'}`}</Text> : null}
+        {detail?.canClaim ? <Button key="claim" label="Claim same-workspace supervision…" onPress={() => {}} /> : null}
         {detail?.canAnswer ? <Button key="answer" label={detail.pendingInput.kind === 'plan-confirmation' ? 'Review and decide plan' : 'Answer worker'} onPress={() => {}} /> : null}
         {detail?.canSteer ? <Button key="steer" label={detail.provider === 'cursor' ? 'Correct (cancel and resume)' : 'Correct running turn'} onPress={() => {}} /> : null}
         {detail?.canCancel ? <Button key="cancel" label="Request cancellation…" onPress={() => {}} /> : null}
@@ -290,24 +517,82 @@ export function register(on, values = {}) {
     </Box>;
   });
   on('ui.press', async ($, e, next) => {
-    if (e.plugin !== $.plugin.name || e.requestId !== NATIVE_PANE) return next(e);
+    if (e.plugin !== $.plugin.name || !options.native_enabled) return next(e);
     const key = e.element;
+    if (key.startsWith('inspect-') && ['AbovePrompt', 'ToolResult'].includes(e.component)) {
+      try { await inspectSelected($, key.slice(8)); await openDashboard($); } catch { error = 'Inspection unavailable.'; }
+      return { element: key };
+    }
+    if (e.requestId !== NATIVE_PANE) return next(e);
     try {
       if (key === 'refresh') { await refresh($); if (selected) await inspectSelected($, selected); }
       else if (key.startsWith('job-')) await inspectSelected($, key.slice(4));
       else if (key === 'tab-jobs') tab = 'jobs';
       else if (key === 'tab-detail') { if (selected) await inspectSelected($, selected); else tab = 'detail'; }
-      else if (key === 'tab-diff') { if (selected) { diff = await bridge($, 'diff', { jobId: selected }); tab = 'diff'; } }
+      else if (key === 'tab-diff') { evidenceView = 'diff'; diff = undefined; pageHistory = []; evidenceFile = ''; if (selected) await evidencePage($); else tab = 'diff'; }
+      else if (['tab-new', 'tab-queue', 'tab-agents'].includes(key)) tab = key.slice(4);
+      else if (key === 'context-load') await loadContext($);
+      else if (key.startsWith('context-excerpt-')) {
+        const id = key.slice(8);
+        if (!contexts.some((entry) => entry.id === id)) return next(e);
+        if (chosenContext.has(id)) chosenContext.delete(id);
+        else if (chosenContext.size < 8) chosenContext.add(id);
+        else error = 'Select at most eight context excerpts.';
+        preview = undefined; draftRevision++;
+      }
+      else if (key === 'draft-preview') {
+        const epoch = generation; const version = draftRevision;
+        const result = await bridge($, 'preview', { draft: { ...draft,
+          context: contexts.filter((entry) => chosenContext.has(entry.id)).map((entry) => ({ role: entry.role, text: entry.text })) } });
+        if (epoch === generation && version === draftRevision) { preview = result; error = ''; }
+      }
+      else if (key === 'draft-launch' || key === 'draft-enqueue') await launchDraft($, key === 'draft-enqueue');
+      else if (key === 'evidence-next' && diff?.nextOffset != null) { const offset = diff.offset || 0; await evidencePage($, diff.nextOffset); pageHistory.push(offset); }
+      else if (key === 'evidence-previous' && pageHistory.length) { const offset = pageHistory.at(-1); await evidencePage($, offset); pageHistory.pop(); }
+      else if (key === 'evidence-reset') { diff = undefined; pageHistory = []; await evidencePage($); }
+      else if (key === 'evidence-find' && evidenceSearch.trim()) { await evidencePage($, diff?.nextOffset ?? diff?.offset ?? 0, evidenceSearch.trim().slice(0, 256)); pageHistory = []; }
+      else if (key === 'claim' && selected) $.ui.log((await claim($, selected)).text);
+      else if (key.startsWith('queue-cancel-') || key.startsWith('queue-priority-')) {
+        if (busy) return { element: key };
+        const entry = snapshot?.queue?.find((value) => value.id === key.slice(key.startsWith('queue-cancel-') ? 13 : 15));
+        if (!entry || entry.state !== 'pending' || !entry.isOwnSession) return { element: key };
+        const epoch = generation; busy = true;
+        try {
+          const cancel = key.startsWith('queue-cancel-');
+          const answer = await $.ui.ask(cancel ? `Cancel approved pending ${entry.id} before dispatch?` : `Set ${entry.id} priority from -5 to 5. Higher values are admitted first.`, cancel ? ['Leave pending', 'Cancel pending job'] : ['Leave priority', '-1', '0', '1']);
+          if (epoch !== generation || (cancel ? answer !== 'Cancel pending job' : !/^-?[0-5]$/.test(answer))) return { element: key };
+          await bridge($, 'queue-control', { queueId: entry.id, queueAction: cancel ? 'cancel' : 'priority', expectedRevision: entry.revision,
+            ...(cancel ? {} : { priority: Number(answer) }), confirmed: true });
+          await refresh($);
+        } finally { busy = false; }
+      }
       else if (['answer', 'cancel', 'steer'].includes(key) && selected) {
         const result = await act($, key === 'answer' ? 'respond' : key, selected);
         $.ui.log(result.text);
       } else return next(e);
-    } catch { error = 'Native action unavailable; use the CLI/MCP fallback.'; }
+    } catch (value) { error = `Native action unavailable: ${/^[A-Z_]{1,64}$/.test(value?.message || '') ? value.message : 'broker unavailable'}. Reinspect or use CLI/MCP.`; }
     $.ui.invalidate('ui.render');
     return { element: e.element };
   });
   on('ui.select', async ($, e, next) => {
-    if (e.plugin !== $.plugin.name || e.requestId !== NATIVE_PANE || e.element !== 'scope') return next(e);
+    if (e.plugin !== $.plugin.name || e.requestId !== NATIVE_PANE || !options.native_enabled) return next(e);
+    if (e.element.startsWith('draft-') && ['provider', 'mode', 'effort', 'isolation'].includes(e.element.slice(6))) {
+      draft = { ...draft, [e.element.slice(6)]: e.value }; preview = undefined; draftRevision++; $.ui.invalidate('ui.render'); return { element: e.element, value: e.value };
+    }
+    if (e.element === 'compare-job') {
+      const epoch = generation; const id = selected;
+      try { const result = e.value ? await bridge($, 'inspect', { jobId: e.value }) : undefined; if (epoch === generation && id === selected) comparison = result; }
+      catch { error = 'Comparison unavailable.'; }
+      $.ui.invalidate('ui.render'); return { element: e.element, value: comparison?.id || '' };
+    }
+    if (e.element === 'evidence-view' || e.element === 'evidence-file') {
+      if (e.element === 'evidence-view') { evidenceView = ['diff', 'plan', 'result'].includes(e.value) ? e.value : 'diff'; evidenceFile = ''; }
+      else evidenceFile = e.value;
+      diff = undefined; pageHistory = [];
+      try { await evidencePage($); } catch { error = 'Evidence unavailable; restart or use CLI/MCP.'; }
+      $.ui.invalidate('ui.render'); return { element: e.element, value: e.value };
+    }
+    if (e.element !== 'scope') return next(e);
     scope = ['session', 'workspace', 'all'].includes(e.value) ? e.value : 'session';
     generation += 1;
     snapshot = undefined;
@@ -317,5 +602,15 @@ export function register(on, values = {}) {
     tab = 'jobs';
     await refresh($);
     return { element: e.element, value: scope };
+  });
+  on('ui.input', async ($, e, next) => {
+    if (e.plugin !== $.plugin.name || e.requestId !== NATIVE_PANE || !options.native_enabled) return next(e);
+    const field = e.element.startsWith('draft-') ? e.element.slice(6) : '';
+    const bounds = { objective: 8000, acceptance: 4000, paths: 8000, model: 128, timeoutSeconds: 6, maxOutputTokens: 7 };
+    if (Object.prototype.hasOwnProperty.call(bounds, field)) { draft = { ...draft, [field]: e.value.slice(0, bounds[field]) }; preview = undefined; draftRevision++; }
+    else if (e.element === 'evidence-search') evidenceSearch = e.value.slice(0, 256);
+    else return next(e);
+    $.ui.invalidate('ui.render');
+    return { element: e.element, value: field ? draft[field] : evidenceSearch };
   });
 }

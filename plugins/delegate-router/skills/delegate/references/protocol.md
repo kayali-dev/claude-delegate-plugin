@@ -120,9 +120,13 @@ semantics, while a background spawn return stays non-terminal.
 `SubagentStart`/`SubagentStop` add `agent_id` lifecycle correlation and the stop
 hook records the terminal response. A derivable subagent transcript is retained
 only as a pointer and read with the same bounded-tail/redaction discipline as
-coordinator Sessions. A non-terminal stub with no transcript growth for the
-configured quiet window becomes failed `ended-unknown` at inspection, with a
-distinct `AGENT_COMPLETION_UNKNOWN` reason rather than fabricated success.
+coordinator Sessions. Native Mods additionally bind exact spawn/tool IDs and
+observe closed host status/parent metadata. Fresh native status wins over quiet
+transcript age; missing catalog rows are not completion. A non-terminal stub
+with no growth past the quiet window is unknown, not failed. Only a positively
+confirmed exit of its recorded coordinator PID/start-time identity permits
+failed `ended-unknown` reconciliation, with an `AGENT_COMPLETION_UNKNOWN` reason
+rather than fabricated success. Unknown process identity cannot prove death.
 Recent growth is active, quiet within policy is idle, reconciliation is
 idempotent, hook failure is fail-open, and ordinary job retention applies.
 
@@ -166,7 +170,15 @@ including when Claude Code invokes it with `source=compact` after compaction;
 `delegate_list` remains the new-session, overflow, and cross-scope discovery
 fallback.
 
-Inspect and list rows expose `lastActivityAt` from the last complete non-replay journal line (the ordinary fast path reads only the tail; a replay tail falls back to the newest live event). `stalled=true` means a running job has emitted nothing for more than `DELEGATE_STALL_SECONDS` (default 300); this flag never cancels work.
+Inspect and list rows expose `lastActivityAt` from the last complete non-replay journal line (the ordinary fast path reads only the tail; a replay tail falls back to the newest live event). `outputQuiet=true` is informational after `DELEGATE_STALL_SECONDS` (default 300); it does not establish liveness or failure. `stalled=true` requires explicit `transportHealth.state=stalled`, not missing output. Neither flag cancels work. `timeBudget` uses the same elapsed wall-clock limit as provider supervision; new jobs record `effectiveTimeoutSeconds` for stable defaults.
+
+Private native launch previews and an independently revisioned pending queue
+store only bounded approved packets/metadata. Dispatch revalidates workspace
+and verification contracts and reserves an idempotent managed job before
+provider submission. Optional `controller: { sessionId, changedAt }` transfers
+session supervision without changing immutable `origin`; `controller.transferred`
+is a revisioned transition. Native controls recheck that controller under the
+job lock. Existing explicit CLI/MCP cross-session controls remain available.
 
 Every terminal transition also writes the job's `finishedPath` sentinel file (content: the terminal status). Its existence is the durable "job is done" signal for file watchers, which survive host harnesses that reap background waiter processes. Shared-tree Codex jobs that engaged the multi-agent review flow are marked `reviewFlowEngaged: true` (detected from collab-agent items), and direct thread resume refuses with `RESUME_UNSUPPORTED`. Isolated captured candidates instead use a fresh-workspace/fresh-session continuation; they never resume that review thread.
 
@@ -180,6 +192,7 @@ Stable types include:
 
 ```text
 job.created, job.state, job.completed, job.cancelled
+agent.status, controller.transferred
 provider.initialized, session.created, session.updated, turn.started, turn.completed
 message.user, message.delta, message.completed
 activity

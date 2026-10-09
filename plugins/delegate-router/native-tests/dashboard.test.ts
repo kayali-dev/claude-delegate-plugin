@@ -18,7 +18,7 @@ const PANE = {
   props: { title: 'Delegate jobs', isFocused: true, bodyColumns: 60, placement: 'inline', scroll: { offset: 0, bodyRows: 20 }, view: {} }
 } as const;
 
-function setup(on, values: { question?: string, beforeAnswer?: () => Promise<void>, snapshot?: any, job?: any, surfaces?: string[], failAction?: string, failAfter?: number, errorCode?: string, usage?: any } = {}) {
+function setup(on, values: { question?: string, beforeAnswer?: () => Promise<void>, snapshot?: any, job?: any, surfaces?: string[], failAction?: string, failAfter?: number, errorCode?: string, usage?: any, agents?: any[], messages?: any[], processResult?: (action: string, payload: any) => any } = {}) {
   const calls: any[] = [];
   const commands: any[] = [];
   const questions: any[] = [];
@@ -30,6 +30,8 @@ function setup(on, values: { question?: string, beforeAnswer?: () => Promise<voi
   on('session.cwd', () => ({ value: '/tmp/native-project/subdir' }));
   on('session.usage', () => ({ value: values.usage || { context: {}, rateLimits: [] } }));
   on('session.surfaces', () => ({ value: values.surfaces || ['terminal'] }));
+  on('agent.list', () => ({ value: values.agents || [] }));
+  on('session.messages', () => ({ value: values.messages || [] }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('session.end', () => ({ sessionId: 'native-session' }));
   on('session.measure', ($, e) => ({ changed: e.changed }));
@@ -50,10 +52,10 @@ function setup(on, values: { question?: string, beforeAnswer?: () => Promise<voi
     if (action === values.failAction && calls.filter((call) => call.argv[2] === action).length > (values.failAfter || 0)) {
       return { value: { exitCode: 1, stdout: JSON.stringify({ ok: false, error: { code: values.errorCode || 'REVISION_CONFLICT' } }), stderr: '' } };
     }
-    const result = action === 'snapshot' ? values.snapshot || SNAPSHOT
+    const result = values.processResult?.(action, JSON.parse(e.init.stdin)) ?? (action === 'snapshot' ? values.snapshot || SNAPSHOT
       : action === 'inspect' ? values.job || JOB
         : action === 'diff' ? { diff: 'diff --git a/a b/a\n+changed', nextOffset: null }
-          : action === 'usage' ? { captured: 0 } : { commandId: 'native-command' };
+          : action === 'usage' ? { captured: 0 } : { commandId: 'native-command' });
     return { value: { exitCode: 0, stdout: JSON.stringify({ ok: true, result }), stderr: '' } };
   });
   return { calls, commands, questions, logs, opened, clock };
@@ -64,9 +66,153 @@ test('native startup registers immediate commands and status requires no model c
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
   const answer = await $.command.run({ command: 'delegate-status', args: '' });
   expect(answer.text).toContain('native-job');
-  expect(commands.length).toBe(7);
+  expect(commands.length).toBe(13);
   expect(commands.every((command) => command.immediate === true)).toBe(true);
   expect(calls.every((call) => call.argv[0] === 'node' && call.argv[1].endsWith('/bin/delegate-native'))).toBe(true);
+});
+
+const PREVIEW = { id: 'preview-1234', provider: 'codex', model: 'gpt-6.1-sol', mode: 'review', isolation: 'shared',
+  timeoutSeconds: 3600, maxOutputTokens: 16384, scope: [], packet: 'Exact public packet', verification: null, warnings: [], contextChars: 0 };
+
+test('composer previews before launch, refuses dismissal, and invalidates approval on draft edit', async ($, on) => {
+  const { calls } = setup(on, { question: 'Leave draft', processResult: (action) => action === 'preview' ? PREVIEW : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-new', args: '' });
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
+  expect(await ui.find({ key: 'draft-launch' })).toBeUndefined();
+  await ui.input({ key: 'draft-objective', text: 'Inspect the parser' });
+  await ui.input({ key: 'draft-acceptance', text: 'Report verified findings' });
+  await ui.press({ key: 'draft-preview' });
+  expect(await ui.find({ key: 'draft-launch' })).toBeDefined();
+  expect(await ui.find({ type: 'Code', source: /Exact public packet/ })).toBeDefined();
+  await ui.press({ key: 'draft-launch' });
+  expect(calls.filter((call) => call.argv[2] === 'launch').length).toBe(0);
+  await ui.input({ key: 'draft-objective', text: 'Changed scope' });
+  expect(await ui.find({ key: 'draft-launch' })).toBeUndefined();
+  const payload = JSON.parse(calls.find((call) => call.argv[2] === 'preview').init.stdin);
+  expect(payload.draft.objective).toBe('Inspect the parser');
+  expect(payload.draft.context.length).toBe(0);
+  await ui.unmount();
+});
+
+for (const queued of [false, true]) {
+  test(`human ${queued ? 'queue approval' : 'launch approval'} uses the preview identity without a Claude turn`, async ($, on) => {
+    const { calls, questions } = setup(on, { question: queued ? 'Approve pending job' : 'Launch task', processResult: (action) => action === 'preview' ? PREVIEW : action === 'launch' ? { jobId: 'native-job' } : undefined });
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+    await $.command.run({ command: 'delegate-new', args: '' });
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
+    await ui.press({ key: 'draft-preview' });
+    await ui.press({ key: queued ? 'draft-enqueue' : 'draft-launch' });
+    const payload = JSON.parse(calls.find((call) => call.argv[2] === (queued ? 'enqueue' : 'launch')).init.stdin);
+    expect(payload.previewId).toBe(PREVIEW.id); expect(payload.confirmed).toBe(true);
+    expect(payload.draft).toBeUndefined();
+    if (queued) expect(questions[0].question).toContain('eight hours');
+    await ui.unmount();
+  });
+}
+
+test('session clear during task confirmation prevents launch or queue submission', async ($, on) => {
+  const { calls } = setup(on, { question: 'Launch task', processResult: (action) => action === 'preview' ? PREVIEW : undefined,
+    beforeAnswer: async () => { await $.classic.SessionStart({ source: 'clear' }); } });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-new', args: '' });
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
+  await ui.press({ key: 'draft-preview' }); await ui.press({ key: 'draft-launch' });
+  expect(calls.filter((call) => ['launch', 'enqueue'].includes(call.argv[2])).length).toBe(0);
+  await ui.unmount();
+});
+
+test('conversation inspector exports only explicitly selected redacted public text', async ($, on) => {
+  const { calls } = setup(on, { messages: [{ role: 'assistant', text: 'Useful public context API_KEY=sk-12345678901234567890', reasoning: 'hidden', toolUses: [{ input: 'private-tool' }] }] });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-context', args: '' });
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
+  await ui.press({ key: 'context-excerpt-0' }); await ui.press({ key: 'tab-new' }); await ui.press({ key: 'draft-preview' });
+  const payload = JSON.parse(calls.find((call) => call.argv[2] === 'preview').init.stdin);
+  expect(payload.draft.context.length).toBe(1);
+  expect(payload.draft.context[0].text).toContain('Useful public context');
+  expect(JSON.stringify(payload)).not.toContain('sk-12345678901234567890');
+  expect(JSON.stringify(payload)).not.toContain('private-tool'); expect(JSON.stringify(payload)).not.toContain('hidden');
+  await ui.unmount();
+});
+
+test('native catalog observation keeps status metadata but not prompts or reasoning', async ($, on) => {
+  const { calls, opened } = setup(on, { agents: [{ id: 'native-agent', status: 'waiting', type: 'Explore', description: 'Inspect', prompt: 'private-prompt', reasoning: 'hidden' }] });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  const payload = JSON.parse(calls.find((call) => call.argv[2] === 'agents').init.stdin);
+  expect(payload.agents[0].status).toBe('waiting'); expect(payload.agents[0].id).toBe('native-agent');
+  expect(JSON.stringify(payload)).not.toContain('private-prompt'); expect(JSON.stringify(payload)).not.toContain('hidden');
+  expect(opened.length).toBe(0);
+});
+
+test('native evidence pages preserve the content version and changed-file selection', async ($, on) => {
+  const { calls } = setup(on, { processResult: (action, input) => action === 'diff' ? { diff: input.offset ? 'second page' : 'first page', offset: input.offset || 0, nextOffset: input.offset ? null : 32000, evidenceVersion: 'digest', files: [{ path: 'src/a.ts' }] } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-review', args: 'native-job' });
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
+  await ui.press({ key: 'evidence-next' });
+  const pages = calls.filter((call) => call.argv[2] === 'diff').map((call) => JSON.parse(call.init.stdin));
+  expect(pages[1].offset).toBe(32000); expect(pages[1].evidenceVersion).toBe('digest');
+  await ui.select({ key: 'evidence-file', value: 'src/a.ts' });
+  const last = JSON.parse(calls.filter((call) => call.argv[2] === 'diff').at(-1).init.stdin);
+  expect(last.offset).toBe(0); expect(last.file).toBe('src/a.ts');
+  await ui.unmount();
+});
+
+test('same-workspace supervision claim needs a human answer and fresh revision', async ($, on) => {
+  const { calls } = setup(on, { question: 'Claim supervision', job: { ...JOB, isOwnSession: false, canClaim: true, revision: 8 }, processResult: (action) => action === 'claim' ? { revision: 9 } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-claim', args: 'native-job' });
+  const payload = JSON.parse(calls.find((call) => call.argv[2] === 'claim').init.stdin);
+  expect(payload.expectedRevision).toBe(8); expect(payload.confirmed).toBe(true);
+  expect(payload.commandId).toContain('native-');
+});
+
+test('attention band exposes inspection without automatically opening a panel', async ($, on) => {
+  const { opened } = setup(on, { snapshot: { ...SNAPSHOT, jobs: [{ ...JOB, pendingInput: { requestId: 'q1' } }] } });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  const ui = await $.ui.mount({ plugin: 'delegate-router', component: 'AbovePrompt', requestId: 'AbovePrompt', surface: 'terminal', viewport: PANE.viewport,
+    props: { hasSurvey: false, isWorking: true, maxRows: 8, bodyColumns: 100, scroll: { offset: 0, bodyRows: 8 }, view: {} } });
+  expect(await ui.find({ key: 'inspect-native-job' })).toBeDefined(); expect(opened.length).toBe(0);
+  await ui.press({ key: 'inspect-native-job' }); expect(opened.length).toBe(1);
+  await ui.unmount();
+});
+
+test('inline managed-tool cards preserve core output and open only on user inspection', async ($, on) => {
+  const { opened } = setup(on);
+  on('tool.call', { tool: 'mcp__plugin_delegate-router_delegate_control__delegate_start' }, () => ({ result: { id: 'native-job' } }));
+  on('ui.render', { component: 'ToolResult' }, () => ({ type: 'Text', props: {}, children: ['Original tool evidence'] }));
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.tool.call({ tool: 'mcp__plugin_delegate-router_delegate_control__delegate_start', tool_use_id: 'tool-card-1', prompt: 'Review' });
+  const ui = await $.ui.mount({ plugin: 'delegate-router', component: 'ToolResult', requestId: 'tool-card-1', surface: 'terminal', viewport: PANE.viewport,
+    props: { tool_use_id: 'tool-card-1', tool: 'mcp__plugin_delegate-router_delegate_control__delegate_start', output: { id: 'native-job' }, isErrored: false } });
+  expect(await ui.find({ type: 'Text', text: 'Original tool evidence' })).toBeDefined();
+  expect(await ui.find({ key: 'inspect-native-job' })).toBeDefined(); expect(opened.length).toBe(0);
+  await ui.press({ key: 'inspect-native-job' }); expect(opened.length).toBe(1);
+  await ui.unmount();
+});
+
+test('native queue controls hide foreign entries and preserve fresh revisions', async ($, on) => {
+  const { calls } = setup(on, { question: 'Cancel pending job', snapshot: { ...SNAPSHOT, queue: [
+    { id: 'own', provider: 'codex', model: 'sol', state: 'pending', priority: 0, revision: 3, isOwnSession: true },
+    { id: 'foreign', provider: 'cursor', model: 'composer', state: 'pending', revision: 1, isOwnSession: false } ] } });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-queue', args: '' });
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
+  expect(await ui.find({ key: 'queue-cancel-foreign' })).toBeUndefined();
+  await ui.press({ key: 'queue-cancel-own' });
+  const payload = JSON.parse(calls.find((call) => call.argv[2] === 'queue-control').init.stdin);
+  expect(payload.queueId).toBe('own'); expect(payload.expectedRevision).toBe(3); expect(payload.confirmed).toBe(true);
+  await ui.unmount();
+});
+
+test('native agent-spawn binding observes the exact tool id without copying the prompt', async ($, on) => {
+  const { calls } = setup(on);
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.agent.spawn({ prompt: 'Do not retain this private prompt', description: 'Inspect', subagentType: 'Explore', parentModel: 'sonnet', background: true, fork: false, tool_use_id: 'toolu-exact-1' });
+  const payload = JSON.parse(calls.find((call) => call.argv[2] === 'agent-bind').init.stdin);
+  expect(payload.spawn.toolUseId).toBe('toolu-exact-1'); expect(payload.spawn.agentId).toBe('stub-agent');
+  expect(JSON.stringify(payload)).not.toContain('Do not retain');
 });
 
 test('native pane renders and inspects jobs in terminal and desktop', async ($, on) => {
@@ -306,7 +452,7 @@ test('clear rehydrates scoped state without preserving a selected job', async ($
 test('a fresh clear or compact hook restores commands without a native start event', async ($, on) => {
   const { commands, calls } = setup(on);
   await $.classic.SessionStart({ source: 'compact' });
-  expect(commands.length).toBe(7);
+  expect(commands.length).toBe(13);
   expect(calls.some((call) => call.argv[2] === 'snapshot')).toBe(true);
   const answer = await $.command.run({ command: 'delegate-status', args: '' });
   expect(answer.text).toContain('native-job');

@@ -315,8 +315,8 @@ test('fleet freshness follows unselected record, journal, and clock transitions 
     });
     state = source.refresh({ force: true });
     const future = Date.now() + 600_000;
-    assert.match(activityText(state, future), /stalled/, 'the one-second clock re-derives activity buckets');
+    assert.match(activityText(state, future), /quiet/, 'silence is informational rather than a stall');
     const dashboard = dashboardViewModel(state, { now: future }, { width: 100, height: 30 });
-    assert.ok(dashboard.meta.attentionJobIds.includes(target), 'Dashboard and Fleet agree on the stalled transition');
+    assert.ok(!dashboard.meta.attentionJobIds.includes(target), 'quiet investigation does not need user intervention');
   } finally { source.close(); }
 }));

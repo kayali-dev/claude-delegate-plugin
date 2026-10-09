@@ -77,7 +77,16 @@ bounded; task-level failures are not transport retries.
 ## Supervise without noisy polling
 
 Retain job ID and latest revision. Use native `/delegate-dashboard`,
-`/delegate-status`, inspect/diff commands, or the existing monitor.
+`/delegate-status`, inspect/diff commands, or the existing monitor. A quiet agent
+may still be investigating: silence alone is not a stall or timeout. Native host
+status is preferred; absent status/usage stays unknown. Managed timeouts count
+elapsed wall-clock, including approval waits, not time since the last output.
+
+For human-operated composition/review, point to `/delegate-new`,
+`/delegate-review`, `/delegate-context`, `/delegate-queue` and `/delegate-agents`
+and load [native UX](references/native.md). Do not invoke human-only launch,
+queue, plan or supervision-claim decisions on the person's behalf. Pending jobs
+are not paused Claude turns; explicit `/delegate-claim` changes supervision only.
 These observations are never acceptance or permission grants.
 Headless/disabled Mods retain CLI/MCP and durable `finishedPath` fallback.
 Native mutations ask a human, are owner-session-only, and queue normal broker

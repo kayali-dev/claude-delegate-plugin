@@ -123,6 +123,19 @@ export function monitorCorrelationDirectory(stateDirectory) {
   return path.join(path.resolve(String(stateDirectory)), 'monitor-correlation');
 }
 
+export function sessionCoordinatorIdentity(stateDirectory, sessionId) {
+  if (!safeSessionId(sessionId)) return null;
+  let files;
+  try { files = listCorrelationFiles(monitorCorrelationDirectory(stateDirectory)); } catch { return null; }
+  for (const file of files.slice(-128).reverse()) {
+    try {
+      const marker = markerFromRecord(readPrivateJson(file), file);
+      if (marker?.sessionId === sessionId) return { pid: marker.coordinatorPid, startTimeMs: marker.coordinatorStartTimeMs };
+    } catch {}
+  }
+  return null;
+}
+
 export function cleanupMonitorCorrelation(stateDirectory, now = Date.now(), options = {}) {
   const directory = monitorCorrelationDirectory(stateDirectory);
   let files;

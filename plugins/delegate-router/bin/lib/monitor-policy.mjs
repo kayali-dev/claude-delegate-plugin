@@ -175,13 +175,15 @@ function sessionIdLabel(value) {
 function notificationIdentity(job, options = {}) {
   if (!Object.hasOwn(options, 'recipientSessionId')) return {};
   const originSessionId = sessionIdLabel(job?.origin?.sessionId);
+  const controllerSessionId = sessionIdLabel(job?.controller?.sessionId || job?.origin?.sessionId);
   const recipientSessionId = sessionIdLabel(options.recipientSessionId);
   const sessionComparisonKnown = recipientSessionId !== 'unknown';
   const revision = Number(job?.revision);
   return {
     originSessionId,
-    isOwnSession: sessionComparisonKnown && originSessionId !== 'unknown'
-      && originSessionId === recipientSessionId,
+    ...(controllerSessionId !== originSessionId ? { controllerSessionId } : {}),
+    isOwnSession: sessionComparisonKnown && controllerSessionId !== 'unknown'
+      && controllerSessionId === recipientSessionId,
     sessionComparisonKnown,
     observedAtRevision: Number.isSafeInteger(revision) && revision >= 0 ? revision : null
   };
@@ -247,6 +249,7 @@ export function detectActionableEdges(snapshot, options = {}) {
   const activityAt = lastActivityAt(snapshot);
   if (ACTIVE_STATUSES.has(job.status)
     && !['paused', 'user-input-required'].includes(job.phase)
+    && job.transportHealth?.state === 'stalled'
     && activityAt != null
     && now - activityAt >= stallMs) {
     edges.push(candidate(job, 'stalled', 'stalled', 6, { idleMs: Math.max(0, now - activityAt) }));
@@ -284,6 +287,7 @@ export function formatEdgeLine(edge) {
   const identity = Object.hasOwn(edge, 'isOwnSession')
     ? [
         `origin.sessionId=${edge.originSessionId || 'unknown'}`,
+        ...(edge.controllerSessionId ? [`controller.sessionId=${edge.controllerSessionId}`] : []),
         `isOwnSession=${edge.isOwnSession === true}`,
         `observedAtRevision=${Number.isSafeInteger(edge.observedAtRevision) ? edge.observedAtRevision : 'unknown'}`,
         ...(Number.isSafeInteger(edge.expiresAt) ? [`expiresAt=${edge.expiresAt}`] : []),

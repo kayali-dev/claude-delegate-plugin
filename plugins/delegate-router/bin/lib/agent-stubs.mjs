@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { appendJobEvent, inspectJob, launchOrigin, redact, updateManagedJob } from './control.mjs';
-import { listJobs, loadJob, saveJob } from './state.mjs';
+import { dataDir, listJobs, loadJob, saveJob } from './state.mjs';
+import { sessionCoordinatorIdentity } from './monitor-correlation.mjs';
 import { initializeOutcomeAttempt } from './outcome-ledger.mjs';
 import {
   agentMetadataPath,
@@ -93,6 +94,7 @@ export function createClaudeAgentStub(options = {}) {
     capabilities: { events: true, transcript: 'bounded-read-only', correction: 'read-only', cancel: false, resume: false, usage: false },
     toolUseId: boundedText(options.toolUseId, 256),
     coordinatorSessionId: boundedText(options.sessionId, 256) || null,
+    coordinatorIdentity: sessionCoordinatorIdentity(dataDir(), options.sessionId),
     groupId,
     agentType: boundedText(options.agentType, 128) || null,
     agentName: boundedText(options.agentName, 128) || null,

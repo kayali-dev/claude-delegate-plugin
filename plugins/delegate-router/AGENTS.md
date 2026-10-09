@@ -21,7 +21,7 @@ Read `../../AGENTS.md` first. It is the canonical contributor guide for architec
 - Provider configuration or allowance state: `bin/lib/state.mjs`, `test/config.test.mjs`, and `test/state-hook.test.mjs`.
 - Public MCP tools: `bin/delegate-control-mcp`, `.mcp.json`, `test/control-mcp.test.mjs`, and `skills/delegate/SKILL.md`.
 - CLI behavior: update the executable, its help text, README examples, and focused tests together.
-- Native Mods: `hooks/native.tsx`, `hooks/native-view.mjs`, `bin/lib/native-bridge.mjs`, `test/native-bridge.test.mjs`, `native-tests/dashboard.test.ts`, and `skills/delegate/references/native.md`. Keep fixed-action subprocess calls, human confirmation, own-session controls, and CLI/MCP fallbacks. Read the current primary Mods documentation before changing host API calls; do not import Node built-ins into a Mod.
+- Native Mods: `hooks/native.tsx`, `hooks/native-view.mjs`, `hooks/native-data.mjs`, `bin/lib/native-bridge.mjs`, `test/native-bridge.test.mjs`, `test/native-workflows.test.mjs`, `native-tests/dashboard.test.ts`, and `skills/delegate/references/native.md`. Keep fixed-action subprocess calls, human confirmation, controller-session controls, immutable launch attribution, and CLI/MCP fallbacks. Read the current primary Mods documentation before changing host API calls; do not import Node built-ins into a Mod.
 
 ## Verification
 

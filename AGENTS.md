@@ -24,7 +24,8 @@ Provider configuration is authoritative. Installations may enable Codex only, Cu
 - `plugins/delegate-router/.mcp.json`: managed control and conditional native Codex MCP registrations.
 - `plugins/delegate-router/hooks/hooks.json`: quota guard (PreToolUse) and shim bootstrap (SessionStart) hooks. The quota matcher and hook match tool names by suffix because harnesses may prefix plugin MCP tool names.
 - `plugins/delegate-router/hooks/native.tsx`: Claude Code Mods commands, panel, official allowance observation, and plugin-reviewer guard. Keep host API calls literal and imports Mod-compatible; no Node built-ins here.
-- `plugins/delegate-router/bin/delegate-native` and `bin/lib/native-bridge.mjs`: fixed-action, bounded local bridge. No arbitrary process/provider launch or authority expansion.
+- `plugins/delegate-router/bin/delegate-native` and `bin/lib/native-bridge.mjs`: fixed-action, bounded local bridge. Human-approved preview launches use normal broker admission; no arbitrary process/provider commands or authority expansion.
+- `bin/lib/native-launch.mjs`, `dispatch-queue.mjs`, `native-agents.mjs`, and `job-health.mjs` under the plugin: private launch previews, approved pending dispatch, host agent lifecycle metadata, and shared wall-clock budget calculation. Quiet output is not a timeout or a liveness verdict.
 - `plugins/delegate-router/agents/reviewer.md`: bounded read-only native reviewer; Claude remains coordinator and final authority.
 - `plugins/delegate-router/bin/delegate-shim`: stable PATH entry point; resolves the installed plugin from `installed_plugins.json` at run time with a checkout fallback.
 - `plugins/delegate-router/bin/delegate-bootstrap`: creates and self-heals the `~/.local/bin` command symlinks; run by SessionStart and `install.sh`.
@@ -111,7 +112,7 @@ Test ownership follows the implementation boundaries:
 - Cursor discovery and command behavior: `cursor.test.mjs`.
 - PATH shim and bootstrap linking: `shim.test.mjs`.
 - Manifest portability and release alignment: `package.test.mjs`.
-- Native broker projection, allowance parser and boundary checks: `native-bridge.test.mjs`; actual Mod events/UI: `native-tests/dashboard.test.ts`.
+- Native broker projection, allowance parser and boundary checks: `native-bridge.test.mjs`; launch/queue/claim/agent/evidence boundaries: `native-workflows.test.mjs`; actual Mod events/UI: `native-tests/dashboard.test.ts`.
 
 ## Release And Installation
 

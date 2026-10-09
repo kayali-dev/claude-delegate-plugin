@@ -1,7 +1,7 @@
 {
   "name": "delegate-router",
   "displayName": "Delegate Router",
-  "version": "0.71.1",
+  "version": "0.72.0",
   "description": "Quota-aware delegation and live supervision for Codex and Cursor agents.",
   "author": {
     "name": "Mahmoud Kayyali",
@@ -33,6 +33,18 @@
     "reviewer_guard": {
       "type": "boolean", "title": "Protect Claude reviewer headroom", "default": true,
       "description": "Refuse this plugin's reviewer above the Claude avoid threshold; never changes an explicitly requested model."
+    },
+    "attention_band": {
+      "type": "boolean", "title": "Show delegation attention above the prompt", "default": true,
+      "description": "Show bounded input/review/failure links without opening a pane or starting a Claude turn."
+    },
+    "inline_cards": {
+      "type": "boolean", "title": "Inline managed-job inspection cards", "default": true,
+      "description": "Add local job status and inspection links beneath this plugin's start-tool results; preserve the original result."
+    },
+    "agent_capture": {
+      "type": "boolean", "title": "Observe native Claude agent status", "default": true,
+      "description": "Capture closed host agent lifecycle metadata. No prompts, hidden reasoning or native-agent controls. Classic hooks remain independent."
     },
     "refresh_seconds": {
       "type": "number", "title": "Local dashboard refresh interval", "default": 5, "min": 3, "max": 30,

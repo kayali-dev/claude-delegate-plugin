@@ -25,7 +25,8 @@ test('activity precedence ranks approval, input, tool, thinking, streaming, phas
     ['stalled', [event(1, 'message.completed', { text: 'done' }, 300_001)]]
   ];
   for (const [expected, events] of sequences) {
-    const job = expected === 'verifying' ? { ...baseJob, phase: 'verifying' } : baseJob;
+    const job = expected === 'verifying' ? { ...baseJob, phase: 'verifying' }
+      : expected === 'stalled' ? { ...baseJob, transportHealth: { state: 'stalled' } } : baseJob;
     assert.equal(deriveJobActivity(job, events, { now: NOW, stallSeconds: 300 }).kind, expected);
   }
   const all = [
@@ -90,7 +91,7 @@ test('active subagents drive fleet activity until their terminal lifecycle event
   assert.notEqual(completed.kind, 'quiet');
 });
 
-test('a stale named child stalls despite fresh sibling chatter while the ordinary boundary stays exact', () => {
+test('quiet output is informational; only explicitly unhealthy transport can stall', () => {
   const boundaryEvent = event(1, 'message.completed', { text: 'still governed by the parent clock' }, 300_000);
   const boundary = deriveJobActivity(baseJob, [boundaryEvent], { now: NOW, stallSeconds: 300 });
   assert.deepEqual(
@@ -102,7 +103,7 @@ test('a stale named child stalls despite fresh sibling chatter while the ordinar
   ], { now: NOW, stallSeconds: 300 });
   assert.deepEqual(
     { kind: pastBoundary.kind, since: pastBoundary.since, age: pastBoundary.age, idleMs: pastBoundary.idleMs },
-    { kind: 'stalled', since: NOW - 300_001, age: '5m', idleMs: 300_001 }
+    { kind: 'quiet', since: NOW - 300_001, age: '5m', idleMs: 300_001 }
   );
 
   const activity = deriveJobActivity(baseJob, [
@@ -119,10 +120,8 @@ test('a stale named child stalls despite fresh sibling chatter while the ordinar
       type: 'worker', task: 'Inspect the renderer', status: 'interacted'
     }, 1_000)
   ], { now: NOW, stallSeconds: 300 });
-  assert.equal(activity.kind, 'stalled');
-  assert.equal(activity.stalledSubagentId, 'schrodinger');
-  assert.equal(activity.stalledSubagentLabel, 'Schrodinger');
-  assert.equal(activity.stalledSubagentSilentAge, '6m');
+  assert.notEqual(activity.kind, 'stalled');
+  assert.equal(activity.stalledSubagentId, undefined);
 });
 
 test('recent parent progress protects a slow child and completed guardians cannot poison liveness', () => {

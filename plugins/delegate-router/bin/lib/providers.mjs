@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { managedTimeoutMs, jobTimeBudget } from './job-health.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -302,8 +303,8 @@ function beginPrimaryPlanRetry(jobId, assessment, reason, options = {}) {
 function planConfirmationTimeout(job) {
   const seconds = Number(process.env.DELEGATE_PLAN_CONFIRM_TIMEOUT_SECONDS ?? 3600);
   const configured = (Number.isFinite(seconds) ? Math.min(Math.max(seconds, 10), 86400) : 3600) * 1000;
-  if (!job.timeoutSeconds || !job.createdAt) return configured;
-  return Math.max(1, Math.min(configured, job.createdAt * 1000 + job.timeoutSeconds * 1000 - Date.now()));
+  const budget = jobTimeBudget(job);
+  return budget ? Math.max(1, Math.min(configured, budget.deadlineAt - Date.now())) : configured;
 }
 
 async function presentPlanForConfirmation(jobId, primaryText) {
@@ -1038,10 +1039,7 @@ function boundedTimeoutMs(name, fallbackSeconds, maximumSeconds = 86400) {
 }
 
 function jobTimeoutMs(job, name, fallbackSeconds, maximumSeconds = 86400) {
-  if (Number.isFinite(job?.timeoutSeconds) && job.timeoutSeconds > 0) {
-    return Math.min(Math.max(job.timeoutSeconds, 60), maximumSeconds) * 1000;
-  }
-  return boundedTimeoutMs(name, fallbackSeconds, maximumSeconds);
+  return managedTimeoutMs(job, name, fallbackSeconds, maximumSeconds);
 }
 
 function acpGraceMs() {
@@ -2000,7 +1998,7 @@ async function runCodex(job, driver) {
   let planPhase = planningActive(job) ? 'planning' : 'disabled';
   let planDeclined = false;
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CODEX_TIMEOUT_SECONDS', 3600);
-  const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
+  const deadline = Number(job.createdAtMs || Number(job.createdAt || 0) * 1000 || Date.now()) + timeoutMs;
   const binary = process.env.DELEGATE_CODEX_BIN || 'codex';
   persistProviderCliVersion(job.id, assertProviderVersion('codex', binary));
   let childSubscriptions = null;
@@ -2139,7 +2137,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.71.1' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.72.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -3245,7 +3243,7 @@ async function runCursorAcpTransport(job, driver) {
   let planPhase = planningActive(job) ? 'planning' : 'disabled';
   let planDeclined = false;
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
-  const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
+  const deadline = Number(job.createdAtMs || Number(job.createdAt || 0) * 1000 || Date.now()) + timeoutMs;
   const rpc = new JsonRpcProcess(launch.command, launch.args, {
     cwd: job.cwd,
     onStderr: (text) => {
@@ -3336,7 +3334,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.71.1' }
+      clientInfo: { name: 'delegate-router', version: '0.72.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,
@@ -3914,7 +3912,7 @@ async function runCursorHeadlessTransport(job, driver) {
   if (!binary) throw brokerError('TRANSPORT_ERROR', 'neither agent nor cursor-agent is executable', { provider: job.provider });
   persistProviderCliVersion(job.id, assertProviderVersion('cursor', binary));
   const timeoutMs = jobTimeoutMs(job, 'DELEGATE_CURSOR_TIMEOUT_SECONDS', 3600);
-  const deadline = (job.createdAt || Math.floor(Date.now() / 1000)) * 1000 + timeoutMs;
+  const deadline = Number(job.createdAtMs || Number(job.createdAt || 0) * 1000 || Date.now()) + timeoutMs;
   const ids = process.platform === 'darwin' && process.env.DELEGATE_CURSOR_LOGIN_SHELL !== '0'
     ? []
     : availableModelIds(binary);
@@ -4301,7 +4299,7 @@ function remainingOutputBudget(job) {
 
 function remainingWallTime(job) {
   if (!job.timeoutSeconds) return null;
-  const startedAt = Number(job.autoFix?.startedAtMs || Number(job.createdAt || 0) * 1000);
+  const startedAt = Number(job.autoFix?.startedAtMs || job.createdAtMs || Number(job.createdAt || 0) * 1000);
   return Math.max(0, Math.floor((job.timeoutSeconds * 1000 - Math.max(0, Date.now() - startedAt)) / 1000));
 }
 

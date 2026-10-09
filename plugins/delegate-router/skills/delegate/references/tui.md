@@ -194,7 +194,12 @@ The activity derivation uses this capability table; a missing capability means â
 | Codex direct MCP | Context compaction, provider subagents, thinking, streaming, command/MCP/file tools, plan, usage, broker phase, quiet, stalled |
 | Cursor ACP | Provider subagents, thinking, streaming, titled/location-bearing tools, approval, required input, broker phase, quiet, stalled |
 | Cursor headless | Provider subagents when stream-json exposes them, thinking markers, streaming assistant text, structured tool starts/completions, broker phase, quiet, stalled, terminal status; no approval/input callback signal |
-| Claude Agent stub | Agent/Task hooks plus correlated SubagentStart/SubagentStop lifecycle; supervisor-ingested messages, tools, observed usage, and content-free reasoning activity when available. Missing stop signals use transcript activity/idle age and become failed `ended-unknown` after the quiet window, never inferred success. |
+| Claude Agent stub | Exact native spawn binding and fresh host lifecycle metadata when Mods are enabled, plus Agent/Task and SubagentStart/SubagentStop hooks; supervisor-ingested messages, tools, observed usage, and content-free reasoning activity when available. Quiet output alone cannot fail an agent: stale observations are unknown unless a recorded coordinator PID/start-time identity is positively confirmed gone. Missing usage stays unknown. |
+
+Quiet output is informational, not a heartbeat or timeout. No-output age alone
+does not create a Needs you/stalled warning, even for a quiet provider child.
+Stall classification requires explicit transport-health evidence. Actual
+provider exits and wall-clock/RPC deadline errors remain failures to inspect.
 | External Codex | Bounded redacted session tail only; metadata-proven tool origin, never live control |
 
 Cursor headless thinking/tool state comes only from actual stream-json events; the TUI never infers approval or input waits that transport cannot produce. Thought text is never persisted or displayed.

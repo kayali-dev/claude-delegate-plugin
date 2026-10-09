@@ -2,6 +2,34 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.72.0 — 2026-10-09
+
+- Add native task composition, exact route/scope/check/budget preview, explicit
+  paid-launch confirmation and opt-in redacted public conversation excerpts.
+  Writes retain plan-first gates; no arbitrary commands, permissions or model
+  substitution enter the native bridge.
+- Add a private durable pending queue with priorities, bounded resident passes,
+  provider admission caps, quota/writer/claim blockers, eight-hour approval
+  expiry and workspace/verification revalidation. Crash recovery reuses the
+  reserved idempotent job. This queues jobs, not Claude turns.
+- Add paginated diff/plan/report evidence, literal search and recorded-file
+  selection with content-version checks, broker verification output and candidate
+  base comparison. No automatic owner acceptance or integration.
+- Add inline managed-tool inspection cards and a bounded AbovePrompt attention
+  band without automatic focus/model turns, plus a unified Claude/broker/provider
+  agent view with unknown usage and relationship gaps labeled honestly.
+- Add explicit same-workspace revisioned/idempotent supervision claims. Preserve
+  immutable launch attribution and permission boundaries; monitor/session scope
+  follows the current controller, including subsequent managed continuations.
+- Fix Claude monitoring with exact native spawn binding and host lifecycle
+  snapshots, retaining classic-hook/transcript fallbacks. Silence alone never
+  fails an agent or raises a stall alert; unknown state stays unknown. Quiet
+  orphan reconciliation additionally requires a confirmed coordinator exit.
+- Unify displayed and enforced wall-clock budgets, retain millisecond start
+  precision and freeze default timeout configuration for new jobs. Approval
+  wait counts; output silence is not a timer or heartbeat. Add fake-only broker
+  and model-free native regression coverage and align operator documentation.
+
 ## 0.71.1 — 2026-10-08
 
 - Detect the removal of `codex mcp-server` through bounded top-level CLI help,

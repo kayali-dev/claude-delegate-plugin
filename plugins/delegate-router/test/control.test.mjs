@@ -565,7 +565,7 @@ test('inspect reconciles orphaned running jobs to failed with an audit event', (
   assert.equal(inspectJob(job.id).status, 'failed');
 }));
 
-test('inspect and list expose journal-tail activity and flag stalled running jobs', () => isolated((directory) => {
+test('inspect and list distinguish quiet output from explicit transport failure', () => isolated((directory) => {
   const previous = process.env.DELEGATE_STALL_SECONDS;
   process.env.DELEGATE_STALL_SECONDS = '1';
   try {
@@ -577,12 +577,16 @@ test('inspect and list expose journal-tail activity and flag stalled running job
     fs.writeFileSync(file, `${oldEvents.map((event) => JSON.stringify(event)).join('\n')}\n`);
     const stalled = inspectJob(job.id);
     assert.equal(stalled.lastActivityAt, oldAt);
-    assert.equal(stalled.stalled, true);
-    assert.equal(listManagedJobs().jobs.find((row) => row.id === job.id).stalled, true);
+    assert.equal(stalled.stalled, false);
+    assert.equal(stalled.outputQuiet, true);
+    assert.equal(listManagedJobs().jobs.find((row) => row.id === job.id).stalled, false);
+    updateManagedJob(job.id, (current) => { current.transportHealth = { state: 'stalled' }; });
+    assert.equal(inspectJob(job.id).stalled, true);
     const fresh = appendJobEvent(job.id, 'plan.updated', { plan: ['continue'] });
     const active = inspectJob(job.id);
     assert.equal(active.lastActivityAt, fresh.at);
-    assert.equal(active.stalled, false);
+    assert.equal(active.outputQuiet, false);
+    assert.equal(active.stalled, true, 'transport health is not inferred from output alone');
   } finally {
     if (previous == null) delete process.env.DELEGATE_STALL_SECONDS;
     else process.env.DELEGATE_STALL_SECONDS = previous;

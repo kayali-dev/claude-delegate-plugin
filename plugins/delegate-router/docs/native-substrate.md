@@ -5,7 +5,7 @@ remaining non-parities recorded below. Owner-approved 2026-07-26 as a single
 program.
 Supersedes the direction in `ROADMAP.md` (whose waves shipped through v0.26.x).
 
-Source audit: 2026-10-08. The phases below retain their original design and
+Source audit: 2026-10-09. The phases below retain their original design and
 completion record. Later model/catalog, planning-budget, and subagent
 observability, native JSON contracts, optional work budgets, and captured-candidate
 continuation updates are described in the [changelog](../CHANGELOG.md) and
@@ -13,6 +13,13 @@ current [operator references](../skills/delegate/references/control.md).
 
 ## Progress
 
+- Native Mods UX now includes human-approved task composition and pending
+  dispatch, opt-in public context, paginated review/search/file selection,
+  broker check output, candidate comparison, inline inspection/attention,
+  unified agent metadata and same-workspace supervision claims. Quiet output
+  no longer fabricates failure; host lifecycle status and wall-clock budgets
+  are independent. The [native reference](../skills/delegate/references/native.md)
+  records bounds, explicit approval, drift checks and remaining fallbacks.
 - P9 provider attempt-driver contract is implemented. Codex app-server, Cursor
   ACP, and Cursor headless now resolve through one formal lane registry with
   `start`, `resume`, `prompt`, `steer`, `cancel`, and `close` lifecycle

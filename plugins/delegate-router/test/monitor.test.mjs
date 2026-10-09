@@ -82,12 +82,18 @@ test('monitor edge detection covers every actionable class in priority order', (
     [snapshot({ id: 'failed', status: 'failed', errorCode: 'PROVIDER_ERROR' }), 'failure'],
     [snapshot({ id: 'orphaned', status: 'failed', errorCode: 'ORPHANED' }), 'failure'],
     [snapshot({ id: 'cancel-error', status: 'cancelled', errorCode: 'TRANSPORT_ERROR' }), 'failure'],
-    [snapshot({ id: 'stalled' }, [], NOW - 10 * 60 * 1000), 'stalled']
+    [snapshot({ id: 'stalled', transportHealth: { state: 'stalled' } }, [], NOW - 10 * 60 * 1000), 'stalled']
   ];
   for (const [value, expected] of cases) {
     const edges = detectActionableEdges(value, { now: NOW, stallMs: 10 * 60 * 1000 });
     assert.equal(edges[0]?.key, expected, value.job.id);
   }
+});
+
+test('silent investigation is not a timeout or stall, even after a long output gap', () => {
+  assert.deepEqual(detectActionableEdges(snapshot({ id: 'quiet' }, [], NOW - 3600_000), { now: NOW }), []);
+  assert.deepEqual(detectActionableEdges(snapshot({ id: 'thinking' }, [event(1, 'activity', { kind: 'thinking' }, NOW - 3600_000)]), { now: NOW }), []);
+  assert.equal(detectActionableEdges(snapshot({ id: 'actual-timeout', status: 'failed', errorCode: 'TIMEOUT' }), { now: NOW })[0].key, 'failure');
 });
 
 test('an auto-rejected timed-out question is not emitted as live input attention', () => {

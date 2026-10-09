@@ -22,6 +22,7 @@ import {
   transcriptPathMatchesAgentId
 } from '../agent-stubs.mjs';
 import { isProcessAlive } from '../process.mjs';
+import { outputQuiet } from '../job-health.mjs';
 import { profilesDir } from '../profiles.mjs';
 import {
   auditLogPath,
@@ -392,13 +393,14 @@ export class DelegateDataSource extends EventEmitter {
   }
 
   activityFields(job, cached = null) {
-    if (job.transport === 'claude-agent' && job.agentLifecycle === 'spawn-returned') {
+    if (job.transport === 'claude-agent') {
       const activity = agentStubActivity({
         ...job,
         transcriptMtimeMs: cached?.transcriptMtimeMs || job.transcriptMtimeMs
       });
       const lastActivityAt = Number(activity?.lastGrowthAt || job.spawnReturnedAtMs || job.createdAtMs || job.createdAt * 1000 || 0) || null;
-      return { lastActivityAt, stalled: false, agentActivityState: activity?.state || 'idle' };
+      return { lastActivityAt, stalled: false, agentActivityState: activity?.state || 'unknown',
+        activitySource: job.hostAgent?.observedAt > Date.now() - 90_000 ? 'claude-host' : 'transcript-observation' };
     }
     const recordActivityAt = job.updatedAt || job.createdAt ? (job.updatedAt || job.createdAt) * 1000 : null;
     const lastActivityAt = cached?.lastActivityAt == null
@@ -408,10 +410,9 @@ export class DelegateDataSource extends EventEmitter {
     const stallSeconds = Number.isFinite(configured) && configured >= 0 ? configured : 300;
     return {
       lastActivityAt,
-      stalled: job.status === 'running'
-        && job.phase !== 'user-input-required'
-        && lastActivityAt != null
-        && Date.now() - lastActivityAt > stallSeconds * 1000
+      outputQuiet: outputQuiet(job, lastActivityAt, Date.now(), stallSeconds),
+      stalled: job.status === 'running' && !job.pendingInput && !['paused', 'user-input-required'].includes(job.phase)
+        && job.transportHealth?.state === 'stalled'
     };
   }
 

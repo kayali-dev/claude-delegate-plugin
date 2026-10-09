@@ -3,6 +3,7 @@ import path from 'node:path';
 import { resolveMonitorSession } from './monitor-correlation.mjs';
 import { NotificationPolicy } from './monitor-policy.mjs';
 import { MonitorStore, preferenceSnoozed } from './monitor-store.mjs';
+import { controllerSession } from './admission.mjs';
 
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_DEBOUNCE_MS = 75;
@@ -39,7 +40,7 @@ export function scopeMonitorSnapshots(snapshots, options = {}) {
   if (scope === 'session') {
     const sessionId = typeof options.sessionId === 'string' ? options.sessionId : null;
     if (!sessionId) return [];
-    return snapshots.filter((snapshot) => snapshot?.job?.origin?.sessionId === sessionId);
+    return snapshots.filter((snapshot) => controllerSession(snapshot?.job || {}) === sessionId);
   }
   const workspaceId = normalizeMonitorProjectDirectory(options.workspaceId || options.projectDir);
   if (!workspaceId) return [];

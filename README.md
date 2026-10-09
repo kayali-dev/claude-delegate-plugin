@@ -88,18 +88,44 @@ The plugin uses [Claude Code Mods](https://code.claude.com/docs/en/plugins/mods/
 /delegate-answer <job-id>
 /delegate-cancel <job-id>
 /delegate-steer <job-id>
+/delegate-new
+/delegate-review <job-id>
+/delegate-queue
+/delegate-context
+/delegate-agents
+/delegate-claim <job-id>
 ```
 
 The panel defaults to this session's jobs, with explicit workspace/all-job views.
 It shows input gates, review readiness, verification, scope, policy and bounded
-diffs. Foreign-session jobs are inspectable but cannot be controlled here.
+diffs. Review adds file selection, literal search, paginated plans/reports, check
+output and candidate comparison. Foreign-session jobs are read-only until a
+person explicitly claims an enabled managed job in the same recorded workspace;
+immutable launch attribution and permissions stay unchanged.
 Every mutation re-inspects the job and asks a person; cancellation is queued,
 not declared complete before provider acknowledgement. Truncated plan evidence
 cannot be accepted through the panel. Cursor corrections are labeled restarts.
 
+`/delegate-new` previews a bounded task's exact packet, route, scope, repository
+checks and wall-clock/output budgets before asking you to approve paid external
+work. Selected public context is opt-in, redacted and capped; tools and hidden
+reasoning are excluded. Writes remain plan-first. Git workspace/verification
+drift invalidates approval. `/delegate-queue` separates approved pending work
+from running jobs, with priorities and quota/capacity/writer blockers; approval
+expires after eight hours. This queues jobs, not Claude turns.
+
+`/delegate-agents` combines native Claude lifecycle status, broker jobs and
+provider-reported children. Classic hooks/transcripts remain fallbacks. Quiet
+investigation is not a timeout or failure: managed budgets count elapsed wall
+time, including approval wait, independently of visible output. Native Claude
+agent usage stays unknown unless actually reported. Inline tool cards and the
+AbovePrompt attention band offer inspection without automatically taking focus
+or starting a Claude turn.
+
 The panel renders on terminal and Desktop; other surfaces get text status and
 retain CLI/MCP. It never auto-opens or steals focus. `/config` exposes native
-enablement, allowance capture, compact status, reviewer guard and a 3–30-second
+enablement, allowance capture, compact status, reviewer guard, agent observation,
+attention/inline cards and a 3–30-second
 local refresh interval. Disabling native integration leaves the existing broker,
 classic hooks and CLI intact; it does not change provider configuration.
 
@@ -201,8 +227,9 @@ historical aliases remain generation-unknown rather than being backfilled.
 | `DELEGATE_ALLOW_OVER_LIMIT` | empty | Comma-separated explicit overrides such as `codex,cursor` |
 | `DELEGATE_ENABLED_PROVIDERS` | installed config | Temporary comma-separated override such as `codex` or `cursor` |
 | `DELEGATE_PROVIDER_CONFIG` | state directory | Override the persistent provider configuration file |
-| `DELEGATE_CURSOR_TIMEOUT_SECONDS` | `3600` | Cursor timeout when unset: managed jobs use 60-86400 seconds; direct CLI uses 10-86400 |
-| `DELEGATE_CODEX_TIMEOUT_SECONDS` | `3600` | Managed Codex job timeout when unset, bounded to 60-86400 seconds |
+| `DELEGATE_CURSOR_TIMEOUT_SECONDS` | `3600` | Captured managed default when unset (environment bound 10–86400); explicit managed budgets 60–86400, direct CLI 10–86400 |
+| `DELEGATE_CODEX_TIMEOUT_SECONDS` | `3600` | Captured managed default when unset; environment bound 10–86400 seconds, explicit job budgets 60–86400 |
+| `DELEGATE_CODEX_MAX_CONCURRENT`, `DELEGATE_CURSOR_MAX_CONCURRENT` | unset | Optional managed admission caps 1–32 (0 = unlimited); pending admission defaults to 2, ordinary launches retain unlimited read-job admission when unset |
 | `DELEGATE_JOB_RETENTION_DAYS` | `14` | Prune terminal job records older than this many days |
 | `DELEGATE_RPC_TIMEOUT_MS` | `30000` | Startup and control JSON-RPC request deadline |
 | `DELEGATE_ACP_GRACE_MS` | `250` | Bounded 0-2000ms grace period for late Cursor ACP events |

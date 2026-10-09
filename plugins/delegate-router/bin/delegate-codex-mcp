@@ -196,7 +196,7 @@ if (enabled && legacyMcp.available) {
       send({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: negotiateMcpVersion(request.params?.protocolVersion),
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: enabled ? 'delegate-codex-unavailable' : 'delegate-codex-disabled', version: '0.71.1' },
+        serverInfo: { name: enabled ? 'delegate-codex-unavailable' : 'delegate-codex-disabled', version: '0.72.0' },
         ...(enabled ? { instructions: legacyMcp.note } : {})
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: [] } });

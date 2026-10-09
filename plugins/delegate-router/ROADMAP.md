@@ -4,7 +4,7 @@ Consolidated from five coordinator field reports (2026-07-13) plus the CHANGELOG
 
 Status checked 2026-10-08: Waves 1-4 and TUI Phase 2 below are shipped historical design notes, not an outstanding implementation queue. Their original future-tense descriptions are retained as release context. Current operator behavior lives in the [control](skills/delegate/references/control.md) and [TUI](skills/delegate/references/tui.md) references; the [native-substrate program](docs/native-substrate.md#program-completion-record) records later work and remaining deferrals.
 
-Release 0.71.0 also implements [native Claude Code Mods UX](skills/delegate/references/native.md): immediate commands, scoped job panel, official allowance observation, explicit revisioned controls and a bounded read-only reviewer, with model-free host regression tests. The broker and provider configuration remain authoritative.
+Releases 0.71.0–0.72.0 implement [native Claude Code Mods UX](skills/delegate/references/native.md): immediate commands, task/context composition, approved pending dispatch, paginated evidence review, scoped jobs/agents, official allowance and host lifecycle observation, explicit revisioned controls and supervision transfer, plus a bounded read-only reviewer. Quiet output does not imply failure. Model-free host tests cover the UX; the broker and provider configuration remain authoritative.
 
 ## Already covered (asks answered by 0.14.x or earlier — no work)
 

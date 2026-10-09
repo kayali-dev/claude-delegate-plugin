@@ -14,6 +14,9 @@ export function nativeOptions(values = {}) {
     usage_capture: values.usage_capture !== false,
     compact_status: values.compact_status !== false,
     reviewer_guard: values.reviewer_guard !== false,
+    attention_band: values.attention_band !== false,
+    inline_cards: values.inline_cards !== false,
+    agent_capture: values.agent_capture !== false,
     refresh_seconds: Math.min(30, Math.max(3, Number(values.refresh_seconds) || 5))
   };
 }
@@ -40,6 +43,8 @@ export function jobDetailText(job) {
     ...(job.scope ? [`Recorded scope: ${job.scope.state}\n${job.scope.paths.join('\n') || 'No explicit paths recorded.'}${job.scope.omittedCount ? `\n${job.scope.omittedCount} paths omitted.` : ''}`] : []),
     ...(job.policy ? [`Policy: ${job.policy.approval} approval · ${job.policy.sandbox} sandbox · network ${job.policy.network == null ? 'unknown' : job.policy.network ? 'enabled' : 'disabled'}`] : []),
     ...(job.budget ? [`Budget: ${job.budget.timeoutSeconds ?? '?'}s · output cap ${job.budget.maxOutputTokens ?? '?'}`] : []),
+    ...(job.timeBudget ? [`Wall-clock budget: ${job.timeBudget.remainingSeconds}s remaining of ${job.timeBudget.limitSeconds}s, including approval wait. Quiet output does not mean timeout.`] : []),
+    ...(job.hostStatus ? [`Claude host: ${job.hostStatus}. Agent token usage is ${job.observedOutputTokens == null ? 'unknown' : `${job.observedOutputTokens} reported output tokens`}.`] : []),
     ...(job.evidenceTruncated ? ['Evidence is truncated. Inspect the full plan/report via CLI/MCP before accepting.'] : []),
     ...(!job.isOwnSession ? ['Other session: native controls are disabled.'] : []),
     ...(job.pendingInput ? [`Pending ${job.pendingInput.kind}; expires ${job.pendingInput.expiresAt ? new Date(job.pendingInput.expiresAt).toISOString() : 'unknown'}`] : []),
@@ -49,6 +54,24 @@ export function jobDetailText(job) {
     ...(job.verification?.caveats?.length ? [`Verification caveats:\n${job.verification.caveats.join('\n')}`] : []),
     ...(job.resultText ? [`Result (bounded; inspect via CLI/MCP for the full report):\n${job.resultText}`] : [])
   ].join('\n\n');
+}
+
+export function previewText(preview) {
+  return preview ? `${preview.provider}/${preview.model} · ${preview.mode} · ${preview.isolation}\n${preview.timeoutSeconds}s wall-clock · ${preview.maxOutputTokens} reported output-token cap\nScope: ${preview.scope.join(', ') || 'read-only investigation'}\nPlan first: ${preview.planFirst ? 'yes' : 'no'} · selected context: ${preview.contextChars} characters\nRoute: ${preview.reason || 'explicit/eligible managed route'} · allowance ${preview.allowance?.known ? `${preview.allowance.usedPercent}% used` : 'unknown'}\nVerification: ${JSON.stringify(preview.verification)}\n${(preview.warnings || []).join('\n')}\n\nExact task packet:\n${preview.packet}` : 'Fill the objective and acceptance criteria, then preview the exact packet. Nothing launches until you confirm.';
+}
+
+export function agentTreeRows(jobs = []) {
+  const byJob = new Map(jobs.map((job) => [job.id, job]));
+  const byAgent = new Map(jobs.filter((job) => job.agentId).map((job) => [job.agentId, job]));
+  const parent = (job) => byJob.get(job.parentJobId) || byAgent.get(job.parentAgentId);
+  const depth = (job) => { const seen = new Set([job.id]); let count = 0; let current = parent(job);
+    while (current && !seen.has(current.id) && count < 8) { seen.add(current.id); count++; current = parent(current); } return count; };
+  const sorted = [...jobs].sort((a, b) => depth(a) - depth(b));
+  const rows = [];
+  const walk = (job, seen) => { if (seen.has(job.id)) return; seen.add(job.id); rows.push({ ...job, depth: depth(job) });
+    sorted.filter((child) => parent(child)?.id === job.id).forEach((child) => walk(child, seen)); };
+  const seen = new Set(); sorted.filter((job) => !parent(job)).forEach((job) => walk(job, seen));
+  sorted.forEach((job) => walk(job, seen)); return rows;
 }
 
 export function reviewerGuardDecision(event, usage, enabled = true) {

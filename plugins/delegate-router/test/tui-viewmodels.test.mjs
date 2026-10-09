@@ -687,7 +687,7 @@ test('dashboard is attention-first and derives today tiles, providers, feed, and
   assert.deepEqual(grid.get(0, 1).style, expectedPalette.body);
 });
 
-test('dashboard names the stale child whose silence survives fresh sibling chatter', () => {
+test('dashboard does not treat a quiet child as stalled while siblings are investigating', () => {
   const store = syntheticStore();
   const stale = {
     ...store.jobs.find((job) => job.status === 'running'),
@@ -713,8 +713,7 @@ test('dashboard names the stale child whose silence survives fresh sibling chatt
 
   const frame = dashboardViewModel(store, { now: NOW, timestampMode: 'relative' }, { width: 120, height: 30 });
   const attention = frame.panes.find((pane) => pane.title === 'Needs you');
-  assert.deepEqual(frame.meta.attentionJobIds, [stale.id]);
-  assert.match(attention.content.rows[0].need.text, /^stalled 6m .*subagent Schrodinger silent 6m$/);
+  assert.deepEqual(frame.meta.attentionJobIds, []);
 });
 
 test('subagent errors enter the feed without creating a Needs you row', () => {

@@ -21,6 +21,7 @@ import {
 } from '../bin/lib/control.mjs';
 import { loadJob, saveJob } from '../bin/lib/state.mjs';
 import { deriveJobActivity } from '../bin/lib/tui/activity.mjs';
+import { readProcessIdentityTable } from '../bin/lib/process-identity.mjs';
 
 const pluginRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const hook = path.join(pluginRoot, 'bin', 'delegate-agent-hook');
@@ -263,15 +264,13 @@ test('a nested transcript with a readable sidecar never binds to an unrelated pe
   assert.equal(inspectJob(second.id).transcriptAgentId, null);
 }));
 
-test('a quiet background stub reconciles at read time to ended-unknown idempotently without fabricated success', (t) => isolated(t, (root) => {
+test('a quiet background stub stays running with unknown activity instead of fabricating failure', (t) => isolated(t, (root) => {
   const stub = backgroundStub(root, 'quiet');
   writeAgentTranscript(root, 'quiet', Date.now() - 31 * 60 * 1000);
   const first = inspectJob(stub.id);
-  assert.equal(first.status, 'failed');
-  assert.equal(first.phase, 'ended-unknown');
-  assert.equal(first.agentLifecycle, 'ended-unknown');
-  assert.equal(first.errorCode, 'AGENT_COMPLETION_UNKNOWN');
-  assert.match(first.error, /no completion signal; transcript quiet for 31m/);
+  assert.equal(first.status, 'running');
+  assert.equal(first.agentActivityState, 'unknown');
+  assert.equal(first.errorCode, undefined);
   assert.notEqual(first.status, 'completed');
   const eventCount = readJobEvents(stub.id).length;
   const revision = first.revision;
@@ -280,7 +279,7 @@ test('a quiet background stub reconciles at read time to ended-unknown idempoten
   assert.equal(readJobEvents(stub.id).length, eventCount);
 }));
 
-test('a two-day-old pre-existing spawn-returned record heals on inspection without migration', (t) => isolated(t, (root) => {
+test('old legacy records without a coordinator identity do not infer death from silence', (t) => isolated(t, (root) => {
   const twoDaysAgo = Date.now() - 2 * 86400 * 1000;
   const id = 'claude-agent-owner-shape';
   saveJob({
@@ -306,10 +305,22 @@ test('a two-day-old pre-existing spawn-returned record heals on inspection witho
     updatedAt: Math.floor(twoDaysAgo / 1000)
   });
   const healed = inspectJob(id);
-  assert.equal(healed.status, 'failed');
-  assert.equal(healed.agentLifecycle, 'ended-unknown');
+  assert.equal(healed.status, 'running');
+  assert.equal(healed.agentActivityState, 'unknown');
   assert.equal(loadJob(id).schemaVersion, 2);
-  assert.match(healed.agentEndedReason, /transcript quiet for 2880m/);
+  assert.equal(healed.agentEndedReason, undefined);
+}));
+
+test('quiet orphan reconciliation requires confirmed coordinator exit and is idempotent', (t) => isolated(t, (root) => {
+  if (!readProcessIdentityTable().ok) { t.skip('process identity inspection unavailable in sandbox'); return; }
+  const stub = backgroundStub(root, 'confirmed-orphan');
+  writeAgentTranscript(root, 'confirmed-orphan', Date.now() - 31 * 60 * 1000);
+  const record = loadJob(stub.id); record.coordinatorIdentity = { pid: 999999999, startTimeMs: 1 }; saveJob(record);
+  const first = inspectJob(stub.id);
+  assert.equal(first.status, 'failed'); assert.equal(first.agentLifecycle, 'ended-unknown');
+  assert.match(first.error, /coordinator process confirmed gone/);
+  const count = readJobEvents(stub.id).length;
+  assert.equal(inspectJob(stub.id).revision, first.revision); assert.equal(readJobEvents(stub.id).length, count);
 }));
 
 test('recent transcript growth stays active and quiet-within-window renders idle', (t) => isolated(t, (root) => {
@@ -400,7 +411,7 @@ test('SubagentStart launches the tail supervisor fire-and-forget without changin
   assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), ['start', '--json']);
 }));
 
-test('retention reconciliation prunes old non-terminal agent stubs instead of accumulating them', (t) => isolated(t, (root) => {
+test('retention does not prune a quiet agent with no positive completion or death evidence', (t) => isolated(t, (root) => {
   const old = backgroundStub(root, 'retention');
   const record = loadJob(old.id);
   const oldAt = Date.now() - 2 * 86400 * 1000;
@@ -411,6 +422,6 @@ test('retention reconciliation prunes old non-terminal agent stubs instead of ac
   record.updatedAt = Math.floor(oldAt / 1000);
   saveJob(record);
   const result = pruneJobs({ maxAgeDays: 1 });
-  assert.deepEqual(result.pruned, [old.id]);
-  assert.equal(loadJob(old.id), null);
+  assert.deepEqual(result.pruned, []);
+  assert.equal(loadJob(old.id).status, 'running');
 }));

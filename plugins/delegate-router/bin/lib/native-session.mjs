@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { controllerSession } from './admission.mjs';
 import path from 'node:path';
 import {
   avoidPercentFor,
@@ -65,7 +66,7 @@ function scopeJobs(jobs, options) {
   if (scope === 'all') return jobs;
   if (scope === 'session') {
     if (!options.sessionId) return [];
-    return jobs.filter((job) => job?.origin?.sessionId === options.sessionId);
+    return jobs.filter((job) => controllerSession(job || {}) === options.sessionId);
   }
   if (!options.workspaceId) return [];
   return jobs.filter((job) => sameDirectory(

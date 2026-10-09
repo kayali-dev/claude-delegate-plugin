@@ -77,6 +77,9 @@ import {
 } from './store-maintenance.mjs';
 import { listSupervisorLeases } from './supervisor-common.mjs';
 import { executeVerification } from './verification-runner.mjs';
+import { jobTimeBudget, outputQuiet, managedTimeoutMs } from './job-health.mjs';
+import { controllerSession, providerConcurrencyLimit } from './admission.mjs';
+import { processIdentityIsAlive, readProcessIdentityTable } from './process-identity.mjs';
 import {
   pendingRequestIds,
   pendingRequestMatches,
@@ -964,6 +967,7 @@ export function appendJobEventsAndUpdate(id, entries = [], mutate = null) {
   const result = withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    const wasTerminal = TERMINAL_STATUSES.has(job.status);
     const events = normalizedEntries.map((entry) => appendUnlocked(
       job,
       entry.type,
@@ -972,6 +976,7 @@ export function appendJobEventsAndUpdate(id, entries = [], mutate = null) {
     ));
     if (typeof mutate === 'function') mutate(job, events);
     ensureCheckpoint(job);
+    if (!wasTerminal && TERMINAL_STATUSES.has(job.status)) writeTerminalArtifacts(job, false);
     job.updatedAt = Math.floor(Date.now() / 1000);
     saveJob(job);
     return { events, job };
@@ -1246,6 +1251,17 @@ export function readJobEventPage(id, options = {}) {
 }
 
 export const QUEUED_STALE_SECONDS = 600;
+let agentProcessTable;
+let agentProcessTableAt = 0;
+
+function agentCoordinatorGone(job) {
+  if (!job.coordinatorIdentity?.pid || !job.coordinatorIdentity?.startTimeMs) return false;
+  if (Date.now() - agentProcessTableAt > 1000) {
+    agentProcessTable = readProcessIdentityTable();
+    agentProcessTableAt = Date.now();
+  }
+  return agentProcessTable?.ok && !processIdentityIsAlive(job.coordinatorIdentity, agentProcessTable.processes);
+}
 
 function discoverAgentTranscript(job) {
   const transcriptAgentId = transcriptAgentIdForJob(job);
@@ -1277,8 +1293,10 @@ export function agentStubActivity(job, options = {}) {
   const quietForMs = Math.max(0, now - lastGrowthAt);
   const state = job.agentLifecycle === 'ended-unknown'
     ? 'ended-unknown'
-    : quietForMs >= quietMs ? 'ended-unknown'
-      : quietForMs <= activeMs && transcriptMtimeMs != null ? 'active' : 'idle';
+    : job.hostAgent?.observedAt > now - 90_000 && ['pending', 'running', 'waiting', 'idle'].includes(job.hostAgent.status)
+      ? job.hostAgent.status === 'running' ? 'active' : job.hostAgent.status
+      : quietForMs <= activeMs && transcriptMtimeMs != null ? 'active'
+        : quietForMs >= quietMs ? agentCoordinatorGone(job) ? 'ended-unknown' : 'unknown' : 'idle';
   return { state, lastGrowthAt, quietForMs, quietMs, activeMs, transcriptPath, transcriptMtimeMs };
 }
 
@@ -1290,7 +1308,7 @@ function reconcileAgentStub(id, original) {
     const activity = agentStubActivity(current);
     if (!current || !activity || activity.state !== 'ended-unknown' || TERMINAL_STATUSES.has(current.status)) return current;
     const quietMinutes = Math.max(1, Math.floor(activity.quietForMs / 60000));
-    const reason = `AGENT_COMPLETION_UNKNOWN: no completion signal; transcript quiet for ${quietMinutes}m`;
+    const reason = `AGENT_COMPLETION_UNKNOWN: coordinator process confirmed gone; no completion signal; transcript quiet for ${quietMinutes}m`;
     current.status = 'failed';
     current.phase = 'ended-unknown';
     current.agentLifecycle = 'ended-unknown';
@@ -1373,6 +1391,7 @@ function activityFields(job) {
       lastActivityAt: agent.lastGrowthAt,
       stalled: false,
       agentActivityState: agent.state,
+      activitySource: job.hostAgent?.observedAt > Date.now() - 90_000 ? 'claude-host' : 'transcript-observation',
       transcriptMtimeMs: agent.transcriptMtimeMs ?? job.transcriptMtimeMs ?? null
     };
   }
@@ -1383,10 +1402,9 @@ function activityFields(job) {
   const stallSeconds = Number.isFinite(configured) && configured >= 0 ? configured : 300;
   return {
     lastActivityAt,
-    stalled: job.status === 'running'
-      && job.phase !== 'user-input-required'
-      && lastActivityAt != null
-      && Date.now() - lastActivityAt > stallSeconds * 1000
+    outputQuiet: outputQuiet(job, lastActivityAt, Date.now(), stallSeconds),
+    stalled: job.status === 'running' && !job.pendingInput && !['paused', 'user-input-required'].includes(job.phase)
+      && job.transportHealth?.state === 'stalled'
   };
 }
 
@@ -1446,6 +1464,7 @@ export function inspectJob(id) {
     verificationEvidence: verificationEvidenceChain(job),
     attention: jobAttention(job),
     conclusion: jobConclusion(job),
+    timeBudget: jobTimeBudget(job),
     ...activityFields(job),
     resumable: jobResumability(job),
     driftReport: driftReportFor(job),
@@ -3257,6 +3276,8 @@ export function createManagedJob(options) {
     throw brokerError('INVALID_REQUEST', 'compiled WorkSpec requires explicit confirmation before launch');
   }
   const provider = validateProvider(options.provider);
+  const controlParentId = options.parentJobId || options.planningFor;
+  const controlParent = controlParentId ? loadJob(controlParentId) : null;
   const id = jobId(provider);
   const resolved = resolveManagedJobOptions(options, id);
   const {
@@ -3335,6 +3356,7 @@ export function createManagedJob(options) {
     approval: options.approval || 'auto',
     effort,
     timeoutSeconds,
+    effectiveTimeoutSeconds: managedTimeoutMs({ timeoutSeconds }, provider === 'codex' ? 'DELEGATE_CODEX_TIMEOUT_SECONDS' : 'DELEGATE_CURSOR_TIMEOUT_SECONDS') / 1000,
     maxOutputTokens,
     maxSubagents,
     workBudget,
@@ -3383,6 +3405,7 @@ export function createManagedJob(options) {
     ownerCwd,
     ...(workspace ? { workspace } : {}),
     origin,
+    ...(controlParent?.controller ? { controller: { ...controlParent.controller } } : {}),
     transport,
     managedBy: 'delegate-control',
     capabilities: legacyProviderCapabilities(provider, transport),
@@ -4378,7 +4401,7 @@ function writerLockPath(options) {
   return path.join(jobsDir(), `.writer-${digest}.lock`);
 }
 
-export function launchManagedJob(options) {
+export function launchManagedJob(options, runtime = {}) {
   if (options.dryRun === true) return previewManagedJob(options);
   const prepared = prepareManagedOptions(options, { reportLint: options.reportLint });
   prepared.planFirst = planFirstDefault(prepared.mode || 'consult', prepared);
@@ -4395,7 +4418,7 @@ export function launchManagedJob(options) {
   // Boot reconciliation happens before writer admission, so a dead leased
   // writer cannot block the first post-restart launch. This call is strictly
   // best-effort: every error is absorbed by the inline launch fallback.
-  try { ensureSupervisorReady(); } catch {}
+  if (!runtime.deferSubmit) { try { ensureSupervisorReady(); } catch {} }
 
   const create = () => {
     if (launchOptions.idempotencyKey) {
@@ -4405,6 +4428,12 @@ export function launchManagedJob(options) {
       if (existing) return { job: inspectJob(existing.id), replayed: true };
     }
     if (!providerEnabled(provider)) throw brokerError('PROVIDER_DISABLED', `${provider} is disabled for this installation`, { provider });
+    const limit = runtime.concurrencyLimit ?? providerConcurrencyLimit(provider);
+    if (limit > 0) {
+      const active = listJobs().filter((job) => job.provider === provider && job.managedBy === 'delegate-control'
+        && ['queued', 'running'].includes(reconcileJob(job.id).status));
+      if (active.length >= limit) throw brokerError('PROVIDER_BUSY', `${provider} has ${active.length} active jobs (limit ${limit}); queue or wait`, { provider });
+    }
     const overrides = String(process.env.DELEGATE_ALLOW_OVER_LIMIT || '')
       .split(',').map((value) => value.trim()).filter(Boolean);
     const usage = effectiveUsage(loadState(), provider);
@@ -4428,9 +4457,14 @@ export function launchManagedJob(options) {
   // concurrent retries cannot create or launch a second record.
   const needsLock = Boolean(launchOptions.idempotencyKey)
     || WRITE_MODES.has(launchOptions.mode);
-  const launched = needsLock ? withFileLock(writerLockPath(launchOptions), create) : create();
+  const createInWorkspace = () => needsLock ? withFileLock(writerLockPath(launchOptions), create) : create();
+  const limit = runtime.concurrencyLimit ?? providerConcurrencyLimit(provider);
+  const launched = limit > 0
+    ? withFileLock(path.join(jobsDir(), `.admission-${provider}.lock`), createInWorkspace)
+    : createInWorkspace();
   if (launched.replayed) return launched.job;
   const job = launched.job;
+  if (runtime.deferSubmit) return job;
   let supervised = null;
   try { supervised = submitJobToSupervisor(job.id); } catch {}
   if (supervised?.ok && supervised.accepted === true) return inspectJob(job.id);
@@ -4494,6 +4528,45 @@ export async function launchManagedJobForCaller(options, waitTarget = null) {
   return waitForPlanFirstLaunch(launched.id);
 }
 
+// Native supervision is separate from immutable launch attribution. Explicit
+// CLI/MCP cross-session coordination remains available; native controls check
+// the controller again under this same job lock, closing handoff/control races.
+export function claimJobController(id, options) {
+  assertJobId(id);
+  if (options.confirmed !== true || !coordinatorSessionIdentity(options.sessionId)
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(options.commandId || '')) {
+    throw brokerError('INVALID_REQUEST', 'confirmed session claim and stable commandId required');
+  }
+  return withLock(id, () => {
+    const job = loadJob(id);
+    if (!job) throw brokerError('NOT_FOUND', 'job not found');
+    if (job.managedBy !== 'delegate-control') throw brokerError('UNMANAGED_JOB', 'only managed jobs can transfer native supervision');
+    if (!providerEnabled(job.provider)) throw brokerError('PROVIDER_DISABLED', 'job provider disabled');
+    const workspace = job.origin?.workspaceId || job.origin?.projectDir;
+    if (!workspace || !options.projectDir || !path.isAbsolute(options.projectDir)
+      || canonicalOriginDirectory(options.projectDir) !== canonicalOriginDirectory(workspace)) {
+      throw brokerError('INVALID_REQUEST', 'handoff requires the same recorded workspace');
+    }
+    const previous = job.controllerClaims?.[options.commandId];
+    if (previous) {
+      if (previous.sessionId !== options.sessionId) throw brokerError('INVALID_REQUEST', 'claim id belongs to another session');
+      return { jobId: id, sessionId: controllerSession(job), duplicate: true, revision: job.revision };
+    }
+    if (!Number.isInteger(options.expectedRevision) || options.expectedRevision !== job.revision) {
+      throw brokerError('REVISION_CONFLICT', 'claim revision changed; reinspect and confirm again', { currentRevision: job.revision });
+    }
+    if (Object.keys(job.controllerClaims || {}).length >= 64) throw brokerError('INVALID_REQUEST', 'job claim history full; use explicit CLI/MCP coordination');
+    const from = controllerSession(job);
+    job.controller = { sessionId: options.sessionId, changedAt: Date.now() };
+    job.controllerClaims ||= {};
+    job.controllerClaims[options.commandId] = { sessionId: options.sessionId };
+    job.revision = (job.revision || 0) + 1;
+    appendUnlocked(job, 'controller.transferred', { fromSessionId: from, toSessionId: options.sessionId, commandId: options.commandId });
+    saveJob(job);
+    return { jobId: id, sessionId: options.sessionId, revision: job.revision, duplicate: false };
+  });
+}
+
 export function submitControl(id, command, expectedRevision) {
   assertJobId(id);
   if (!command?.type) throw brokerError('INVALID_REQUEST', 'control command type is required');
@@ -4501,6 +4574,9 @@ export function submitControl(id, command, expectedRevision) {
   return withLock(id, () => {
     const job = loadJob(id);
     if (!job) throw brokerError('NOT_FOUND', `job not found: ${id}`);
+    if (command.controllerSessionId != null && controllerSession(job) !== command.controllerSessionId) {
+      throw brokerError('INVALID_REQUEST', 'native supervision has moved to another session; reinspect before controlling this job');
+    }
     if (isReadOnlyTransport(job)) {
       if (!isDirectTransport(job)) throw brokerError('READ_ONLY_TRANSPORT', 'hook-observed jobs are read-only in the control plane', { provider: job.provider });
       throw brokerError('DIRECT_TRANSPORT', 'direct-transport jobs are read-only in the control plane; the caller session owns the provider loop', { provider: job.provider });

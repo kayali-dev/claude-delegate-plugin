@@ -415,11 +415,15 @@ Plugin PreToolUse/PostToolUse hooks still create and correlate a
 hooks attach and finish it by `agent_id`. Model, agent type, cwd, prompt summary,
 and terminal response are redacted and bounded. When available, the stub retains
 a pointer to the coordinator session's `subagents/agent-*.jsonl` file for
-bounded read-only TUI tailing. Because a session crash can omit every stop
-signal, inspection also reconciles a non-terminal stub whose transcript has
-been quiet past `DELEGATE_AGENT_STUB_QUIET_SECONDS` (default 1800) to failed
-`agentLifecycle: "ended-unknown"` with an explicit no-completion-signal reason.
-Recent transcript growth renders active; quiet within the window renders idle.
+bounded read-only TUI tailing. Native Mods additionally bind exact spawn IDs and
+observe closed Claude host lifecycle/parent metadata; fresh host status takes
+precedence, and absence from a catalog is not completion. A quiet transcript
+never proves agent failure. Past `DELEGATE_AGENT_STUB_QUIET_SECONDS` (default
+1800), activity is unknown unless the recorded coordinator PID/start-time is
+positively confirmed gone; only then does orphan reconciliation mark failed
+`agentLifecycle: "ended-unknown"` with a no-completion-signal reason. Missing
+identity or unavailable process inspection cannot establish death. Recent
+transcript growth renders active; quiet within the window renders idle.
 No success is inferred. Every hook exits zero, performs no network access, and
 swallows store errors after one stderr diagnostic so visibility can never block
 the Agent call. `DELEGATE_AGENT_STUBS=0` disables the hooks. These records reject
@@ -484,7 +488,8 @@ automatically start `delegate-monitor`. It reads bounded job records and
 journal tails and pushes only actionable edge transitions, in this order:
 scope policy breach, per-job output `budget-breach`, provider
 `allowance-breach`, human input or blocked permission, ready for review,
-terminal failure, and stalled running work. Budget and allowance are separate
+terminal failure, and explicitly unhealthy stalled transport. Output silence
+alone is informational and never a stall edge. Budget and allowance are separate
 priority-one classes because raising `maxOutputTokens` and waiting for quota
 reset/rerouting are different remedies. When a terminal error code is the same
 budget or allowance cause already represented by the active breach edge, the
@@ -573,6 +578,21 @@ never a completion or acceptance dependency.
 ## Timeouts
 
 Managed jobs are bounded by `timeoutSeconds` (60–86400) or, when unset, `DELEGATE_CODEX_TIMEOUT_SECONDS` / `DELEGATE_CURSOR_TIMEOUT_SECONDS` (default 3600). Defaults are deliberately long — LLM agent jobs legitimately run long — so set an explicit value only when the task warrants a tighter or looser bound. A timeout interrupts the active turn and fails the job with a `TIMEOUT:` error; the thread remains resumable.
+
+This is wall-clock elapsed time from the millisecond job creation timestamp,
+including startup, planning and approval/input waits; it is not time since the
+last output. New jobs capture the effective default at creation so later config
+changes do not rewrite the running deadline. `inspect.timeBudget` reports the
+same limit/deadline/remaining time used by provider supervision. Approved pending
+queue time does not consume a job budget before reservation. Output quietness
+is informational, not a liveness verdict. Claude host agents have no plugin
+timeout. RPC/input/verification deadlines are separate bounds, not idle timers.
+
+Native approved previews, pending admission and explicit same-workspace session
+claims are documented in [native UX](native.md). Claims transfer supervision
+and session attention, not immutable origin or provider permissions. Queue
+dispatch revalidates the approved packet, workspace and checks, without a model
+swap, task-level retry or automatic scope widening.
 
 Codex interruption waits up to `DELEGATE_DRAIN_GRACE_MS` (default 3000, maximum 15000) for the turn to settle before the provider process is killed. Every terminal failure or cancellation records a `checkpoint` containing `failureReason`, `continuationId`, `lastDiffEventSeq`, and an actionable `resumeHint`.
 
