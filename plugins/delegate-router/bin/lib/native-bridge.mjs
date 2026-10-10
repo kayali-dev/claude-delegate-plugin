@@ -53,6 +53,9 @@ function inScope(job, input) {
 }
 
 function row(job, input, enabled) {
+  const reportedUsage = job.usage?.total && typeof job.usage.total === 'object' ? job.usage.total : job.usage;
+  const outputTokens = [reportedUsage?.outputTokens, reportedUsage?.output_tokens, reportedUsage?.completionTokens, reportedUsage?.completion_tokens]
+    .find((value) => Number.isFinite(value) && value >= 0);
   const own = ownSession(job, input);
   const active = ['queued', 'running'].includes(job.status);
   const managed = job.managedBy === 'delegate-control';
@@ -63,6 +66,7 @@ function row(job, input, enabled) {
     id: job.id,
     provider: text(job.provider, 16),
     model: text(job.model || job.requestedModel || 'provider default', 128),
+    title: text(job.sessionTitle || job.agentName || '', 160),
     mode: text(job.mode, 24),
     status: text(job.status, 32),
     phase: text(job.phase || job.status, 64),
@@ -96,7 +100,7 @@ function row(job, input, enabled) {
     agentActivityState: job.transport === 'claude-agent' && !['completed', 'failed', 'cancelled'].includes(job.status)
       ? agentStubActivity(job)?.state || 'unknown' : null,
     timeBudget: jobTimeBudget(job),
-    observedOutputTokens: Number.isFinite(job.usage?.outputTokens) ? job.usage.outputTokens : null,
+    observedOutputTokens: outputTokens ?? null,
     reportedChildren: (Array.isArray(job.result?.subagents) ? job.result.subagents : []).slice(0, 16).map((child) => ({
       id: text(child.id || child.agentId, 128), status: text(child.status || 'unknown', 32),
       label: text(child.agentName || child.task || child.type, 128) }))
@@ -109,9 +113,11 @@ export function nativeOverview(input, options = {}) {
   const all = options.jobs || listJobs();
   const jobs = all.filter((job) => ID.test(job?.id || '') && inScope(job, input))
     .sort((a, b) => {
-      const priority = (job) => job.pendingInput && job.pendingInput.timedOut !== true ? 0
-        : job.acceptance?.state === 'ready-for-review' ? 1
-          : ['queued', 'running'].includes(job.status) ? 2 : 3;
+      const priority = (job) => job.pendingInput && job.pendingInput.timedOut !== true
+        && (!job.pendingInput.expiresAt || job.pendingInput.expiresAt > Date.now()) ? 0
+        : job.status === 'failed' || job.acceptance?.state === 'blocked' || job.scopeViolations?.length ? 1
+          : job.acceptance?.state === 'ready-for-review' ? 2
+            : ['queued', 'running'].includes(job.status) ? 3 : 4;
       return priority(a) - priority(b) || (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
     });
   const workState = buildNativeWorkState({ jobs: all, usageState, enabled, ...input, workspaceId: input.projectDir });
@@ -194,14 +200,18 @@ export async function dispatchNative(action, input = {}) {
       plan: text(planText, 8_000),
       verification: {
         state: text(job.verification?.state || 'unknown', 32),
+        reason: text(job.verification?.reason, 1000),
         caveats: (job.verification?.caveats || []).slice(0, 10).map((value) => text(value, 256)),
         exitCode: job.verification?.exitCode ?? null,
         outputTail: text(job.verification?.outputTail || job.verification?.output, 8000),
         command: text(job.verify?.command, 2000)
       },
-      baseRevision: text(job.changeSet?.base?.revision || job.workspace?.baseRevision, 128) || null,
+      baseRevision: text(job.changeSet?.base?.revision || job.workspace?.baseRevision || job.baseRevision, 128) || null,
       drift: { baseDrift: job.baseDrift === true || job.driftReport?.baseDrift === true,
         outsideScope: (job.scopeViolations || []).length },
+      changeObservation: job.changeObservation ? { source: text(job.changeObservation.source, 32),
+        state: text(job.changeObservation.state, 32), diffAvailable: job.changeObservation.diffAvailable === true } : null,
+      observationWarnings: (job.observationWarnings || []).slice(0, 5).map((warning) => text(warning, 1000)),
       canClaim: !ownSession(job, input) && job.managedBy === 'delegate-control'
         && enabledProviders().includes(job.provider)
         && canonical(input.projectDir) != null

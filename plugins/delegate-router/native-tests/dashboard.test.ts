@@ -74,6 +74,36 @@ test('native startup registers immediate commands and status requires no model c
 const PREVIEW = { id: 'preview-1234', provider: 'codex', model: 'gpt-6.1-sol', mode: 'review', isolation: 'shared',
   timeoutSeconds: 3600, maxOutputTokens: 16384, scope: [], packet: 'Exact public packet', verification: null, warnings: [], contextChars: 0 };
 
+test('native tabs expose selection and hotkeys while advanced budgets stay collapsed', async ($, on) => {
+  setup(on);
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-new', args: '' });
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
+  expect(await ui.find({ key: 'tab-new', label: '● New task', plain: true, hotkey: 'n' })).toBeDefined();
+  expect(await ui.find({ key: 'draft-timeoutSeconds' })).toBeUndefined();
+  await ui.press({ key: 'draft-advanced' });
+  expect(await ui.find({ key: 'draft-timeoutSeconds' })).toBeDefined();
+  await ui.press({ key: 'draft-advanced' });
+  expect(await ui.find({ key: 'draft-timeoutSeconds' })).toBeUndefined();
+  await ui.unmount();
+});
+
+test('native details use collapsible evidence and host diff/report renderers', async ($, on) => {
+  setup(on, { job: { ...JOB, resultText: '# Findings\n\nVerified report.', plan: 'Plan body' } });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await $.command.run({ command: 'delegate-inspect', args: 'native-job' });
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' });
+  expect(await ui.find({ type: 'Markdown', text: /Verified report/ })).toBeDefined();
+  expect(await ui.find({ type: 'Markdown', text: 'Plan body' })).toBeUndefined();
+  await ui.press({ key: 'expand-plan' });
+  expect(await ui.find({ type: 'Markdown', text: 'Plan body' })).toBeDefined();
+  await ui.press({ key: 'tab-diff' });
+  expect(await ui.find({ type: 'Code', format: 'diff' })).toBeDefined();
+  await ui.press({ key: 'refresh' });
+  expect(await ui.find({ key: 'evidence-view' })).toBeDefined();
+  await ui.unmount();
+});
+
 test('composer previews before launch, refuses dismissal, and invalidates approval on draft edit', async ($, on) => {
   const { calls } = setup(on, { question: 'Leave draft', processResult: (action) => action === 'preview' ? PREVIEW : undefined });
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
@@ -170,10 +200,12 @@ test('same-workspace supervision claim needs a human answer and fresh revision',
 
 test('attention band exposes inspection without automatically opening a panel', async ($, on) => {
   const { opened } = setup(on, { snapshot: { ...SNAPSHOT, jobs: [{ ...JOB, pendingInput: { requestId: 'q1' } }] } });
+  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', props: {}, children: ['Another plugin status'] }));
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
   const ui = await $.ui.mount({ plugin: 'delegate-router', component: 'AbovePrompt', requestId: 'AbovePrompt', surface: 'terminal', viewport: PANE.viewport,
     props: { hasSurvey: false, isWorking: true, maxRows: 8, bodyColumns: 100, scroll: { offset: 0, bodyRows: 8 }, view: {} } });
   expect(await ui.find({ key: 'inspect-native-job' })).toBeDefined(); expect(opened.length).toBe(0);
+  expect(await ui.find({ type: 'Text', text: 'Another plugin status' })).toBeDefined();
   await ui.press({ key: 'inspect-native-job' }); expect(opened.length).toBe(1);
   await ui.unmount();
 });

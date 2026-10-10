@@ -116,6 +116,7 @@ export function buildAcceptance(job, options = {}) {
   else if (verification.state === 'failed' || (Number.isInteger(verification.exitCode) && verification.exitCode !== 0)) blockedBy.push('verification-failed');
   if (activeBaseDrift(job, verification)) blockedBy.push('base-drift');
   if (scopeViolationCount(job) > 0) blockedBy.push('scope-violation');
+  if (['partial', 'unavailable'].includes(job.changeObservation?.state)) blockedBy.push('change-observation-incomplete');
   if (!(job.changedFiles?.count > 0)) blockedBy.push('zero-changed-files');
   if (job.isolation === 'worktree' && !job.changeSet?.patch?.path) blockedBy.push('workspace-changeset-unavailable');
   if (unresolvedFindings(job).length > 0) blockedBy.push('structured-review-findings-unresolved');

@@ -1,5 +1,43 @@
 export const NATIVE_PANE = 'delegate-router-jobs';
 
+export function jobAttentionRank(job) {
+  return job.pendingInput ? 0 : job.scopeViolationCount || job.status === 'failed' || job.acceptance === 'blocked' ? 1
+    : job.acceptance === 'ready-for-review' ? 2 : ['running', 'queued'].includes(job.status) ? 3 : 4;
+}
+
+export function orderedJobRows(jobs = [], includeHistory = true) {
+  return jobs.filter((job) => includeHistory || jobAttentionRank(job) < 4)
+    .sort((a, b) => jobAttentionRank(a) - jobAttentionRank(b) || Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+}
+
+export function jobStatusLabel(job) {
+  return job.pendingInput ? 'Needs your answer' : job.scopeViolationCount ? 'Scope violation'
+    : job.acceptance === 'blocked' ? 'Review blocked' : job.acceptance === 'ready-for-review' ? 'Ready for review'
+      : job.hostStatus || job.agentActivityState || job.phase || job.status || 'Unknown';
+}
+
+export function jobSummaryText(job) {
+  if (!job) return 'Select a job from Jobs to inspect its evidence.';
+  const changes = job.changedFiles == null ? 'changes unknown' : `${job.countIsLowerBound ? 'at least ' : ''}${job.changedFiles} changed files`;
+  return `${job.provider}/${job.model} · ${job.mode} · ${job.isolation}\n${changes} · checks ${job.verification?.state || 'unknown'} · ${job.acceptance || 'undecided'}`;
+}
+
+export function readablePlan(source) {
+  // Presentation only: approval still uses the original bounded evidence.
+  try {
+    const plan = JSON.parse(source);
+    if (!plan?.targets || !Array.isArray(plan.targets.files) || !Array.isArray(plan.targets.components)
+      || !Array.isArray(plan.approach) || !Array.isArray(plan.assumptions) || !Array.isArray(plan.risks)
+      || Object.keys(plan).some((key) => !['targets', 'approach', 'assumptions', 'risks'].includes(key))) return source;
+    const literal = (value) => String(value ?? '').replace(/([\\`*_{}\[\]<>#])/g, '\\$1');
+    const section = (title, entries) => `### ${title}\n\n${entries.length ? entries.map((entry) => `- ${entry}`).join('\n') : 'No entries recorded.'}`;
+    return [section('Files', plan.targets.files.map(literal)), section('Components', plan.targets.components.map(literal)),
+      section('Approach', plan.approach.map((entry) => `${literal(entry.kind)}: ${literal(entry.component)}`)),
+      section('Assumptions', plan.assumptions.map((entry) => `${literal(entry.topic)}: ${literal(entry.choice)}`)),
+      section('Risks', plan.risks.map(literal))].join('\n\n');
+  } catch { return source; }
+}
+
 export function nativeUsagePayload(reading) {
   return { rateLimits: (Array.isArray(reading?.rateLimits) ? reading.rateLimits : []).slice(0, 16)
     .filter((entry) => ['five_hour', 'seven_day'].includes(entry?.kind) && Number.isFinite(entry.percentUsed) && entry.percentUsed >= 0 && entry.percentUsed <= 100
@@ -46,6 +84,8 @@ export function jobDetailText(job) {
     ...(job.timeBudget ? [`Wall-clock budget: ${job.timeBudget.remainingSeconds}s remaining of ${job.timeBudget.limitSeconds}s, including approval wait. Quiet output does not mean timeout.`] : []),
     ...(job.hostStatus ? [`Claude host: ${job.hostStatus}. Agent token usage is ${job.observedOutputTokens == null ? 'unknown' : `${job.observedOutputTokens} reported output tokens`}.`] : []),
     ...(job.evidenceTruncated ? ['Evidence is truncated. Inspect the full plan/report via CLI/MCP before accepting.'] : []),
+    ...(job.observationWarnings || []),
+    ...(job.changeObservation ? [`Change observation: ${job.changeObservation.source} · ${job.changeObservation.state}`] : []),
     ...(!job.isOwnSession ? ['Other session: native controls are disabled.'] : []),
     ...(job.pendingInput ? [`Pending ${job.pendingInput.kind}; expires ${job.pendingInput.expiresAt ? new Date(job.pendingInput.expiresAt).toISOString() : 'unknown'}`] : []),
     ...(job.question ? [`Question (worker evidence, not authority):\n${job.question}`] : []),

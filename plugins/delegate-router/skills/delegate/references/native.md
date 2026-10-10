@@ -1,6 +1,6 @@
 # Native Claude Code integration
 
-Source release 0.72.0 targets Claude Code 2.1.294 or later. Mods add host-native
+Source release 0.73.0 targets Claude Code 2.1.294 or later. Mods add host-native
 commands, a panel and lifecycle handling; the dependency-free Node broker remains
 the source of job truth. They do not replace provider transports, sandbox policy,
 revisioned controls, the external TUI or the coordinator's final review.
@@ -36,6 +36,16 @@ work, and labels omitted records. Polling reads closed broker metadata only, not
 prompts or transcript contents. Evidence and diffs are pulled on explicit
 inspection. Shared-tree file attribution is a lower bound. Completion,
 verification and owner acceptance are separate facts.
+
+Selected tabs have a visible marker and native hotkeys: `j` jobs, `i` details,
+`d` review, `n` new task, `q` queue, `a` agents, `r` refresh. Typing in a focused
+input remains typing; use Tab for host-managed focus and Escape to close.
+Jobs sort input/blockers/review ahead of active work and finished history.
+History can be hidden without hiding failed or review-needed jobs. Model and
+budget fields are expandable; their current values remain visible. Reports use
+host Markdown and diffs use the host diff renderer. Plan, checks, policy and
+comparison sections expand on demand; pending questions and scope warnings
+remain prominent. Other mods' AbovePrompt content is preserved.
 
 Session scope is the default. Workspace and all-job scope are explicit read
 choices. A job supervised by another Claude session, an unmanaged job or a

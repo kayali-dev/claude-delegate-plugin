@@ -12,6 +12,12 @@ or ~/.local/state/delegate-router/usage.json
 
 ## Provider Truth
 
+`delegate_stats` summarizes recorded terminal attempts; pending plan-first jobs
+are not yet in its requested/completed counts. Inspect/list/monitor describe live
+work. Event `redacted: true` means the entry passed through the redaction boundary,
+not that every value was removed. Numeric usage counters, including cache-write
+input tokens, remain visible; string/boolean credential values remain redacted.
+
 - Codex: `delegate-usage refresh codex` queries the official app-server `account/rateLimits/read` method and stores primary (five-hour) and secondary (weekly) windows. Managed Codex jobs also capture pushed `account/rateLimits/updated` notifications, so the snapshot stays fresh during every job. Both paths append bounded allowance snapshots to history for capture-window comparison.
 - Claude: native Mods consume official `$.session.usage()` / `session.measure` subscription windows and copy only five-hour/weekly percentage/reset fields into usage state. No breakdown/model call, credential read or usage endpoint is used. Empty readings remain unknown, not zero. Optional `delegate-config statusline enable` wraps (or installs) the status line to capture its official `rate_limits.five_hour` and `rate_limits.seven_day` payload too. The wrapper prefixes the session-scoped work chip, then runs the user's original command unchanged; `delegate-config statusline disable` restores the exact previous configuration. Manual values remain valid. See [native integration](native.md).
 - Cursor: no stable public quota CLI/API is assumed. Cursor meters two monthly pools: Cursor Models for Composer/Grok and Other Models for third-party selections. Auto may consume either; pin a first-party model when pool selection matters. Record each relevant dashboard percentage with `delegate-usage set cursor <percent> --window first-party --source dashboard --reset <cycle-end-epoch>` (use `--window other-models` for the other pool). The guard uses the maximum reliable active window. `--reset` expires an entry at the billing boundary. Invocation history and local transcript estimates are never converted into quota percentages.

@@ -191,6 +191,19 @@ The default Cursor write policy is Smart Auto review inside Cursor's sandbox. Un
 
 ## Execution Contracts
 
+Managed writes reconcile the actual shared tree, so shell edits do not depend
+on provider file-change events. Non-Git CLI/MCP jobs expose bounded filesystem
+fingerprint detection and an early warning; they can run explicit verification
+but have no Git diff/revision. Incomplete observation blocks acceptance.
+Shared-tree attribution remains best-effort; use an isolated worktree for
+containment. Native launch approval still requires Git for drift revalidation.
+
+Prepared worktree integrations are reviewable handoffs, never automatic owner
+application. `delegate-jobs integration inspect <integration-id>` shows the
+candidate; `integration discard <integration-id>` removes only its broker
+worktree and keeps the private patch/manifest. The MCP equivalent is
+`delegate_integration` with `action: "inspect"|"discard"`.
+
 Managed Codex jobs preflight the installed client's paginated model catalog and
 reject known unsupported models or reasoning efforts before starting a turn.
 Catalog discovery is not proof of account entitlement. Older clients without
@@ -261,7 +274,7 @@ dashboards but are never treated as provider quota.
 
 On any machine, run the one-step install above — no clone needed. The session-start bootstrap creates and refreshes the command symlinks under `${DELEGATE_USER_BIN:-~/.local/bin}`; the shim they point at resolves the currently installed plugin version at run time. Provider selection and runtime state live under `${XDG_STATE_HOME:-~/.local/state}/delegate-router` unless overridden. No source file embeds the installation directory.
 
-Managed transcript and diff artifacts remain local and use user-only permissions. Credential assignments and values are redacted, strings are bounded, and hidden reasoning is never journaled. Cursor Git inventory is baseline-aware: sensitive paths, pre-existing untracked files, internal delegation state, binary payloads, and oversized untracked contents are never copied into diff events. Shared dirty worktrees still have best-effort attribution; the coordinator must inspect the actual diff before integration.
+Managed transcript and diff artifacts remain local and use user-only permissions. Credential assignments and values are redacted, strings are bounded, and hidden reasoning is never journaled. Shared-tree Git inventory for both providers is baseline-aware: sensitive paths, pre-existing untracked files, internal delegation state, binary payloads, and oversized untracked contents are never copied into diff events. Shared dirty worktrees still have best-effort attribution; the coordinator must inspect the actual diff before integration.
 
 Documentation map: [model notes](plugins/delegate-router/skills/delegate/references/models.md), [routing](plugins/delegate-router/skills/delegate/references/routing.md), [controls](plugins/delegate-router/skills/delegate/references/control.md), [protocol](plugins/delegate-router/skills/delegate/references/protocol.md), [usage](plugins/delegate-router/skills/delegate/references/usage.md), [native UX](plugins/delegate-router/skills/delegate/references/native.md), [advanced workflows](plugins/delegate-router/skills/delegate/references/workflows.md), and [TUI](plugins/delegate-router/skills/delegate/references/tui.md). The [changelog](plugins/delegate-router/CHANGELOG.md) records releases; the [roadmap](plugins/delegate-router/ROADMAP.md) archives shipped waves, while [native-substrate](plugins/delegate-router/docs/native-substrate.md) records implemented boundaries and explicit deferrals.
 

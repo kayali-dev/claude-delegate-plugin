@@ -36,10 +36,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage',
-    'delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'
+    'delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_integration', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'
   ]);
   const legacySchemas = responses[1].result.tools
-    .filter((tool) => !['delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'].includes(tool.name))
+    .filter((tool) => !['delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_integration', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'].includes(tool.name))
     .map(({ name, inputSchema }) => {
       const legacy = structuredClone(inputSchema);
       if (['delegate_start', 'delegate_resume'].includes(name)) {
@@ -62,6 +62,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
       }
       if (name === 'delegate_resume') {
         delete legacy.properties.allowUnscopedWrite;
+      }
+      if (name === 'delegate_review_round') {
+        delete legacy.properties.planFirst;
+        delete legacy.properties.ambiguityCheck;
       }
       if (name === 'delegate_inspect') {
         delete legacy.properties.view;
@@ -125,6 +129,13 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(respond.inputSchema.required, ['jobId', 'expectedRevision']);
   for (const option of ['requestId', 'answer', 'accept', 'response', 'commandId']) assert.ok(respond.inputSchema.properties[option], `delegate_respond.${option}`);
   assert.ok(responses[1].result.tools.find((tool) => tool.name === 'delegate_review_round'));
+  const reviewRound = responses[1].result.tools.find((tool) => tool.name === 'delegate_review_round');
+  assert.equal(reviewRound.inputSchema.properties.planFirst.type, 'boolean');
+  assert.equal(reviewRound.inputSchema.properties.ambiguityCheck.type, 'boolean');
+  const integration = responses[1].result.tools.find((tool) => tool.name === 'delegate_integration');
+  assert.equal(integration.inputSchema.additionalProperties, false);
+  assert.deepEqual(integration.inputSchema.properties.action.enum, ['inspect', 'discard']);
+  assert.equal(integration.annotations.readOnlyHint, false, 'combined inspect/discard must not advertise blanket read-only');
   assert.equal(stats.inputSchema.additionalProperties, false);
   assert.ok(stats.inputSchema.properties.since);
   assert.ok(resume.inputSchema.properties.maxOutputTokens);
@@ -264,7 +275,7 @@ test('control MCP adds bounded resources and common-flow prompts without changin
     resources: { listChanged: false },
     prompts: { listChanged: false }
   });
-  assert.equal(byId.get(2).result.tools.length, 22);
+  assert.equal(byId.get(2).result.tools.length, 23);
   assert.deepEqual(byId.get(3).result.resources.map((resource) => resource.uri), [
     'delegate://work/active',
     'delegate://repo/profile'
@@ -303,7 +314,7 @@ test('native MCP opt-out hides only resources and prompts while preserving every
   assert.equal(result.status, 0, result.stderr);
   const responses = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
   assert.deepEqual(responses[0].result.capabilities, { tools: { listChanged: false } });
-  assert.equal(responses[1].result.tools.length, 22);
+  assert.equal(responses[1].result.tools.length, 23);
   assert.equal(responses[2].error.code, -32601);
 });
 

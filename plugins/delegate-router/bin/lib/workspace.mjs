@@ -399,7 +399,13 @@ function workingEntry(root, file) {
 
 export function preflightWorkspaceChangeSets(jobs) {
   if (!Array.isArray(jobs) || !jobs.length) throw brokerError('INVALID_REQUEST', 'at least one workspace job is required');
-  const ownerRoots = [...new Set(jobs.map((job) => canonicalDirectory(job?.workspace?.ownerRoot || '')))];
+  const unavailable = jobs.filter((job) => job?.isolation !== 'worktree' || job.workspace?.ownedBy !== 'delegate-router'
+    || !path.isAbsolute(job.workspace?.ownerRoot || '') || !job.changeSet?.patch?.path);
+  if (unavailable.length) return {
+    ok: false, ownerRoot: null, currentRevision: null,
+    conflicts: unavailable.map((job) => ({ jobId: job?.id || null, path: null, reason: 'portable workspace change set is unavailable' }))
+  };
+  const ownerRoots = [...new Set(jobs.map((job) => canonicalDirectory(job.workspace.ownerRoot)))];
   if (ownerRoots.length !== 1 || !ownerRoots[0]) {
     throw brokerError('INVALID_REQUEST', 'change sets must belong to one owner repository');
   }
@@ -571,4 +577,32 @@ export function discardWorkspace(workspace) {
     state: 'discarded',
     discardedAt: new Date().toISOString()
   };
+}
+
+export function inspectIntegration(id) {
+  if (!/^integration-[a-z0-9]+-[a-f0-9]{6}$/.test(id || '')) throw brokerError('INVALID_REQUEST', 'invalid integration id');
+  const recordPath = path.join(dataDir(), 'integrations', `${id}.json`);
+  let record;
+  try {
+    const stat = fs.lstatSync(recordPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > SHAPE_MAX_BYTES) throw new Error('invalid integration record');
+    record = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
+  } catch (error) { throw brokerError('NOT_FOUND', `cannot inspect integration ${id}: ${error.message}`); }
+  if (record.id !== id || record.ownerApplied !== false || !path.isAbsolute(record.ownerRoot || '')
+    || record.path !== integrationRootFor(id) || !['prepared', 'discarded'].includes(record.state)
+    || !Array.isArray(record.jobIds) || !record.jobIds.length || record.jobIds.some((jobId) => !SAFE_ID.test(jobId))) {
+    throw brokerError('WORKSPACE_PATH_UNSAFE', 'integration record does not match broker ownership');
+  }
+  return { ...record, recordPath };
+}
+
+export function discardIntegration(id) {
+  const record = inspectIntegration(id);
+  if (record.state === 'discarded') return record;
+  const discard = removeOwnedWorktree(record.ownerRoot, record.path, path.join(dataDir(), 'integrations'));
+  const updated = { ...record, state: 'discarded', discardedAt: new Date().toISOString(), discard };
+  // Retain the private patch and manifest: cleanup is recoverable evidence,
+  // not owner application or acceptance.
+  writePrivate(record.recordPath, `${JSON.stringify(updated, null, 2)}\n`);
+  return updated;
 }

@@ -10,6 +10,7 @@ import {
   mapCodexItem,
   mapCodexMcpEvent,
   mapCursorAcpNotification,
+  recordGitState,
   recordSession,
   runManagedProvider
 } from '../bin/lib/providers.mjs';
@@ -121,6 +122,7 @@ test('Codex native reports, unknown-field fallback, and explicit subagent limits
       const finished = inspectJob(job.id);
       assert.equal(finished.status, 'completed');
       assert.deepEqual(finished.result.structured, { objectiveMet: true });
+      assert.notEqual(finished.resultSuspect, 'short-final-message');
       assert.equal(finished.modelPreflight.entitlementVerified, false);
       const requests = fs.readFileSync(requestLog, 'utf8').trim().split('\n').map(JSON.parse);
       const thread = requests.find(request => request.method === 'thread/start').params;
@@ -566,7 +568,7 @@ test('a completed write-mode job with zero changes is flagged no-changes-write-m
   assert.equal(completed.resultSuspect, 'no-changes-write-mode');
 }));
 
-test('detection-only changed-file counts stay explicit lower bounds when a worker write is unobserved', () => isolated(async (directory) => {
+test('non-Git shell writes are detected without provider fileChange events and remain explicit lower bounds', () => isolated(async (directory) => {
   process.env.DELEGATE_CODEX_BIN = fakeCodex;
   process.env.FAKE_CODEX_FILE_CHANGES = '0';
   process.env.FAKE_CODEX_WRITE_PATH = 'pnpm-lock.yaml';
@@ -576,9 +578,98 @@ test('detection-only changed-file counts stay explicit lower bounds when a worke
   const completed = inspectJob(job.id);
   assert.equal(fs.existsSync(path.join(directory, 'pnpm-lock.yaml')), true);
   assert.equal(completed.containment, 'detection-only');
-  assert.equal(completed.changedFiles.count, 0);
+  assert.equal(completed.changedFiles.count, 1);
+  assert.deepEqual(completed.changedFiles.files, ['pnpm-lock.yaml']);
+  assert.equal(completed.changeObservation.source, 'filesystem');
   assert.equal(completed.changedFiles.countIsLowerBound, true);
   assert.equal(completed.acceptance.evidence.changes.countIsLowerBound, true);
+}));
+
+for (const gitWorkspace of [false, true]) {
+  test(`shell writes trigger broker verification in ${gitWorkspace ? 'Git' : 'non-Git'} workspaces`, () => isolated(async (directory) => {
+    if (gitWorkspace) spawnSync('git', ['init', '-q'], { cwd: directory });
+    process.env.DELEGATE_CODEX_BIN = fakeCodex;
+    process.env.FAKE_CODEX_FILE_CHANGES = '0';
+    process.env.FAKE_CODEX_WRITE_PATH = 'hello.txt';
+    process.env.FAKE_CODEX_WRITE_CONTENT = 'hello\n';
+    const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory,
+      prompt: 'Create hello.txt', allowedPaths: ['hello.txt'], verify: { command: 'grep -qx hello hello.txt' } });
+    await runManagedProvider(job);
+    const completed = inspectJob(job.id);
+    assert.deepEqual(completed.changedFiles.files, ['hello.txt']);
+    assert.equal(completed.verification.state, 'passed');
+    assert.equal(completed.acceptance.state, 'ready-for-review');
+    assert.notEqual(completed.resultSuspect, 'no-changes-write-mode');
+    assert.ok(completed.completedAtMs >= completed.createdAtMs);
+  }));
+  test(`shell scope breaches are detected in ${gitWorkspace ? 'Git' : 'non-Git'} workspaces`, () => isolated(async (directory) => {
+    if (gitWorkspace) spawnSync('git', ['init', '-q'], { cwd: directory });
+    process.env.DELEGATE_CODEX_BIN = fakeCodex;
+    process.env.FAKE_CODEX_FILE_CHANGES = '0';
+    process.env.FAKE_CODEX_WRITE_PATH = 'outside.txt';
+    const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory,
+      prompt: 'Write bounded files', allowedPaths: ['hello.txt'] });
+    await runManagedProvider(job);
+    const completed = inspectJob(job.id);
+    assert.ok(completed.scopeViolations.some((file) => file.path === 'outside.txt'));
+    assert.ok(completed.acceptance.blockedBy.includes('scope-violation'));
+  }));
+}
+
+test('explicit concise answers are not flagged as incomplete', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'consult', cwd: directory, prompt: 'Reply with a single-word marker.' });
+  await runManagedProvider(job);
+  assert.notEqual(inspectJob(job.id).resultSuspect, 'short-final-message');
+}));
+
+test('applied concise steering is not mistaken for an incomplete report', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'consult', cwd: directory, prompt: 'Inspect the repository.' });
+  const running = runManagedProvider(job);
+  const active = await waitFor(job.id, (current) => Boolean(current.providerTurnId), 'an active turn');
+  submitControl(job.id, { type: 'steer', text: 'Reply with a single-word marker.', correctionId: 'terse-contract' }, active.revision);
+  await running;
+  assert.notEqual(inspectJob(job.id).resultSuspect, 'short-final-message');
+}));
+
+test('missing private non-Git baseline blocks acceptance without fabricating a no-op', () => isolated(async (directory) => {
+  process.env.DELEGATE_CODEX_BIN = fakeCodex;
+  process.env.FAKE_CODEX_FILE_CHANGES = '0';
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'Implement.' });
+  assert.ok(job.observationWarnings.length);
+  assert.equal(job.filesystemBaseline, undefined, 'large fingerprints are a private artifact, not an inspect payload');
+  assert.equal(fs.statSync(job.filesystemBaselinePath).mode & 0o777, 0o600);
+  fs.unlinkSync(job.filesystemBaselinePath);
+  await runManagedProvider(job);
+  const completed = inspectJob(job.id);
+  assert.equal(completed.changeObservation.state, 'unavailable');
+  assert.equal(completed.resultSuspect, 'change-observation-incomplete');
+  assert.ok(completed.acceptance.blockedBy.includes('change-observation-incomplete'));
+}));
+
+test('Git reconciliation preserves owner untracked bodies and catches dirty restoration and committed shell edits', () => isolated(async (directory) => {
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: directory, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'base\n');
+  git('add', 'tracked.txt'); git('commit', '-qm', 'base');
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'owner-dirty\n');
+  fs.writeFileSync(path.join(directory, 'owner-untracked.txt'), 'private owner body\n');
+  fs.writeFileSync(path.join(directory, '.env'), 'private credential body\n');
+  const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'implement', cwd: directory, prompt: 'Edit tracked.txt' });
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'base\n');
+  fs.appendFileSync(path.join(directory, 'owner-untracked.txt'), 'candidate\n');
+  const state = recordGitState(job, null);
+  assert.ok(state.files.some((file) => file.path === 'tracked.txt' && file.overlapsPreexisting));
+  assert.doesNotMatch(state.diff, /private owner body|private credential body/);
+  assert.equal(state.files.find((file) => file.path === '.env').unchangedSinceBaseline, true);
+  fs.writeFileSync(path.join(directory, 'tracked.txt'), 'committed candidate\n');
+  git('add', 'tracked.txt'); git('commit', '-qm', 'candidate');
+  const committed = recordGitState(job, null);
+  assert.match(committed.diff, /committed candidate/);
 }));
 
 test('a session advertising only fast variants falls back to headless non-fast (live-catalog shape)', () => isolated(async (directory) => {

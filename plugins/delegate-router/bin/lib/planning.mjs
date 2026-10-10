@@ -751,7 +751,7 @@ function boundedDifferenceValue(value, limit = 240) {
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
-export function compareStructuralPlans(leftInput, rightInput) {
+export function compareStructuralPlans(leftInput, rightInput, options = {}) {
   const left = leftInput?.ok === true ? leftInput : parseStructuralPlan(leftInput);
   const right = rightInput?.ok === true ? rightInput : parseStructuralPlan(rightInput);
   if (!left.ok || !right.ok) {
@@ -767,6 +767,22 @@ export function compareStructuralPlans(leftInput, rightInput) {
   const differences = [];
   const variances = [];
   const signals = [];
+  if (options.allowedPaths?.length) {
+    // Compare concrete paths against the granted fence, never folded naming
+    // aliases. Shared targets cannot make an extra unauthorized target agree.
+    const inScope = (file) => options.allowedPaths.some((entry) => {
+      const clean = String(file).replace(/^\.\//, '');
+      if (clean.split('/').includes('..') || clean.startsWith('/') || /^[A-Za-z]:/.test(clean)) return false;
+      const pattern = entry.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+      return new RegExp(`^${pattern}(?:/|$)`).test(clean);
+    });
+    const outside = [...new Set([...left.plan.targets.files, ...right.plan.targets.files].filter((file) => !inScope(file)))];
+    if (outside.length) {
+      differences.push(blockingDifference('targets.scope', options.allowedPaths, outside, 'targets-outside-allowed-scope'));
+      comparable.push('targets.scope');
+      signals.push(structuralSignal('targets.scope', 'strong', 'conflict', 'targets-outside-allowed-scope'));
+    }
+  }
   let targetAgreement = false;
 
   const leftFiles = left.plan.targets.files;

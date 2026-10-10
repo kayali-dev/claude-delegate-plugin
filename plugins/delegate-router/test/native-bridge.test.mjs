@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { claudeUsageWindows, captureClaudeUsage } from '../bin/lib/claude-usage.mjs';
 import { dispatchNative, nativeOverview } from '../bin/lib/native-bridge.mjs';
 import { negotiateMcpVersion, toolAnnotations } from '../bin/lib/mcp-contract.mjs';
-import { nativeOptions, overviewText, reviewerGuardDecision } from '../hooks/native-view.mjs';
+import { nativeOptions, overviewText, reviewerGuardDecision, orderedJobRows, readablePlan } from '../hooks/native-view.mjs';
 import { loadState, saveJob, saveState, effectiveUsage } from '../bin/lib/state.mjs';
 
 const plugin = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -32,6 +32,35 @@ function job(id, extra = {}) {
     ...extra
   };
 }
+
+test('native inspection retains shared base and nested Codex output usage', async (t) => {
+  isolated(t);
+  saveJob(job('usage-job', { baseRevision: 'abc123', usage: { total: { outputTokens: 99 } } }));
+  const result = await dispatchNative('inspect', { sessionId: 'native-session', jobId: 'usage-job' });
+  assert.equal(result.observedOutputTokens, 99);
+  assert.equal(result.baseRevision, 'abc123');
+  saveJob(job('input-only-job', { usage: { inputTokens: 99 } }));
+  const unknown = await dispatchNative('inspect', { sessionId: 'native-session', jobId: 'input-only-job' });
+  assert.equal(unknown.observedOutputTokens, null, 'input-only usage does not establish zero output');
+});
+
+test('native job ordering keeps attention ahead of active work and history', () => {
+  const rows = [{ id: 'done', status: 'completed' }, { id: 'run', status: 'running' },
+    { id: 'review', acceptance: 'ready-for-review' }, { id: 'failed', status: 'failed' }, { id: 'answer', pendingInput: {} }];
+  assert.deepEqual(orderedJobRows(rows).map((row) => row.id), ['answer', 'failed', 'review', 'run', 'done']);
+  assert.deepEqual(orderedJobRows(rows, false).map((row) => row.id), ['answer', 'failed', 'review', 'run']);
+});
+
+test('native structural plans render readable exact evidence without hiding unknown fields', () => {
+  const plan = { targets: { files: ['src/A.js'], components: ['Core'] }, approach: [{ kind: 'edit', component: 'Core' }],
+    assumptions: [{ topic: 'scope', choice: 'unchanged' }], risks: ['review required'] };
+  const formatted = readablePlan(JSON.stringify(plan));
+  for (const value of ['src/A.js', 'Core', 'edit', 'scope', 'unchanged', 'review required']) assert.ok(formatted.includes(value));
+  assert.match(formatted, /### Files/);
+  const unknown = JSON.stringify({ ...plan, extra: 'do not hide' });
+  assert.equal(readablePlan(unknown), unknown);
+  assert.equal(readablePlan('truncated JSON'), 'truncated JSON');
+});
 
 test('official native usage handles ISO resets and rejects malformed or unrelated windows', (t) => {
   isolated(t);

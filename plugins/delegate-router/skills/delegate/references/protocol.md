@@ -44,6 +44,16 @@ historical jobs therefore stay readable across the extraction.
 
 Job snapshots live at `jobs/<id>.json`. Normalized events live at `jobs/<id>.events.jsonl`. Prompts, logs, commands, and state files are created with user-only permissions. Event values are recursively redacted and size-bounded.
 
+New non-Git write attempts keep a bounded filesystem fingerprint baseline in a
+private job artifact, not inline in inspect responses. Shared-tree completion
+reconciles filesystem/Git evidence even when shell tools emit no file-change
+event. `changeObservation` distinguishes complete, partial and unavailable;
+incomplete observation blocks acceptance. Credentials, private state and owner
+untracked bodies never enter inventory diffs. This remains detection, not
+containment. Attempt timestamps use `createdAtMs` / `completedAtMs`, separately
+from immutable chain origin. Terminal cancellation/failure marks not-run
+pending verification skipped rather than leaving a live check forever.
+
 Optional `workBudget: { rootJobId, maxOutputTokens }` links continuations and
 independent planners to a private root-artifact ledger with locked monotonic
 reported-output counters. Codex thread totals are deduplicated; Cursor attempts

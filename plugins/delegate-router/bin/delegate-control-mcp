@@ -12,6 +12,8 @@ import {
   capEventsBySize,
   decideAcceptance,
   discardManagedWorkspace,
+  discardManagedIntegration,
+  inspectManagedIntegration,
   diffStat,
   filterDiffPaths,
   groupSummary,
@@ -113,7 +115,8 @@ const TOOLS = [
   { name: 'delegate_work', description: 'Return read-only WorkItem compatibility projections derived from existing job records. Accepts either a job id or projected work id; unfiltered reads default to the 20 most recent WorkItems.', inputSchema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 } } } },
   { name: 'delegate_decide', description: 'Record an owner/coordinator acceptance decision against current broker evidence. Shared-tree behavior is unchanged. Workspace rejection discards only broker storage; workspace acceptance performs strict CAS preflight and currently refuses direct owner-tree landing.', inputSchema: { type: 'object', required: ['jobId', 'decision'], additionalProperties: false, properties: { jobId: { type: 'string' }, decision: { enum: ['accepted', 'rejected'] }, reason: { type: 'string', maxLength: 2000 } } } },
   { name: 'delegate_workspace_discard', description: 'Discard a terminal broker-owned workspace without touching the owner tree. Legacy shared-tree jobs remain on delegate-jobs revert.', inputSchema: jobOnly() },
-  { name: 'delegate_integrate', description: 'Strictly CAS-preflight one or more portable workspace change sets and compose them in a broker-owned integration worktree. Conflicts stop composition; this never writes the owner tree.', inputSchema: { type: 'object', required: ['jobIds'], additionalProperties: false, properties: { jobIds: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } }, preflight: { type: 'boolean' } } } }
+  { name: 'delegate_integrate', description: 'Strictly CAS-preflight one or more portable workspace change sets and compose them in a broker-owned integration worktree. Conflicts stop composition; this never writes the owner tree.', inputSchema: { type: 'object', required: ['jobIds'], additionalProperties: false, properties: { jobIds: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } }, preflight: { type: 'boolean' } } } },
+  { name: 'delegate_integration', description: 'Inspect a prepared integration handoff, or explicitly discard only its broker worktree. Discard retains the private patch/manifest and never applies or accepts owner changes.', inputSchema: { type: 'object', required: ['integrationId'], additionalProperties: false, properties: { integrationId: { type: 'string' }, action: { enum: ['inspect', 'discard'] } } } }
 ];
 
 // Advertise the verification exception and bounded auto-fix controls already
@@ -170,6 +173,11 @@ TOOLS.push(
     }
   }
 );
+
+Object.assign(TOOLS.find((tool) => tool.name === 'delegate_review_round').inputSchema.properties, {
+  planFirst: { type: 'boolean', description: 'Defaults to the normal human plan gate. Set false only for an explicitly trivial in-scope correction; never infer approval from review findings.' },
+  ambiguityCheck: { type: 'boolean', description: 'Explicitly disable the independent comparison pass without disabling the human plan gate.' }
+});
 
 const RESOURCES = [
   {
@@ -393,6 +401,12 @@ async function dispatch(name, args) {
     });
   }
   if (name === 'delegate_workspace_discard') return discardManagedWorkspace(args.jobId);
+  if (name === 'delegate_integration') {
+    if (Object.keys(args).some((key) => !['integrationId', 'action'].includes(key)) || (args.action != null && !['inspect', 'discard'].includes(args.action))) {
+      throw brokerError('INVALID_REQUEST', 'delegate_integration accepts integrationId and action=inspect|discard only');
+    }
+    return args.action === 'discard' ? discardManagedIntegration(args.integrationId) : inspectManagedIntegration(args.integrationId);
+  }
   if (name === 'delegate_integrate') {
     return args.preflight === true
       ? preflightManagedIntegration(args.jobIds)
@@ -428,7 +442,7 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.72.0' },
+        serverInfo: { name: 'delegate-control', version: '0.73.0' },
         instructions: MCP_INSTRUCTIONS
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS.map((tool) => ({ ...tool, annotations: toolAnnotations(tool.name) })) } });

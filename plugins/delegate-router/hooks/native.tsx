@@ -1,4 +1,4 @@
-import { NATIVE_PANE, nativeOptions, nativeUsagePayload, overviewText, jobDetailText, reviewerGuardDecision, previewText, agentTreeRows } from './native-view.mjs';
+import { NATIVE_PANE, nativeOptions, nativeUsagePayload, overviewText, jobDetailText, reviewerGuardDecision, previewText, agentTreeRows, orderedJobRows, jobStatusLabel, jobSummaryText, readablePlan } from './native-view.mjs';
 import { contextCandidates, agentMetadata, attentionRows, managedResultId } from './native-data.mjs';
 
 let options;
@@ -34,6 +34,9 @@ let evidenceSearch = '';
 let pageHistory = [];
 let comparison;
 let agentWarning = '';
+let advancedDraft = false;
+let includeHistory = true;
+const expanded = new Set();
 
 async function registerCommands($) {
   await $.command.register({ name: 'delegate-dashboard', description: 'Open native delegation jobs and controls', immediate: true });
@@ -119,6 +122,11 @@ async function inspectSelected($, jobId) {
   const request = ++detailRequest;
   const result = await bridge($, 'inspect', { jobId });
   if (epoch !== generation || request !== detailRequest) return;
+  if (selected !== result.id) {
+    expanded.clear();
+    if (result.pendingInput) expanded.add('plan');
+    if (result.resultText) expanded.add('result');
+  }
   selected = result.id;
   detail = result;
   diff = undefined;
@@ -323,6 +331,7 @@ export function register(on, values = {}) {
     chosenContext.clear();
     comparison = undefined;
     toolCards.clear();
+    expanded.clear(); advancedDraft = false; includeHistory = true;
     if (e.source !== 'compact') { commandIds.clear(); draft = defaultDraft(); }
     if (options.native_enabled) {
       scope = 'session';
@@ -420,31 +429,34 @@ export function register(on, values = {}) {
     return <Box flexDirection="column" gap={1}>
       {original}
       <Text dimColor>{job ? `${job.provider}/${job.model} · ${job.phase} · r${job.revision}` : `Managed job ${jobId}; refresh to inspect its current state.`}</Text>
-      <Button key={`inspect-${jobId}`} label="Inspect delegated work" onPress={() => {}} />
+      <Button key={`inspect-${jobId}`} plain label="Inspect delegated work" onPress={() => {}} />
     </Box>;
   });
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const attention = attentionRows(snapshot).slice(0, 3);
     if (!options.native_enabled || !options.attention_band || e.props.hasSurvey || !attention.length) return next(e);
+    const original = await next(e);
     const { Box, Text, Button } = $.ui.resolve(e);
-    return <Box flexDirection="column"><Text dimColor>Delegate attention · no automatic model turn</Text>
-      {attention.map((job) => <Button key={`inspect-${job.id}`} label={`${job.provider}: ${job.pendingInput ? 'input needed' : job.acceptance === 'ready-for-review' ? 'review ready' : job.scopeViolationCount ? 'scope violation' : 'failed'} · ${job.id}`} onPress={() => {}} />)}
+    return <Box flexDirection="column">{original}<Text dimColor>Delegate · needs attention</Text>
+      {attention.map((job) => <Button key={`inspect-${job.id}`} plain label={`${job.provider} · ${jobStatusLabel(job)} · ${job.id.slice(-6)}`} onPress={() => {}} />)}
     </Box>;
   });
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== NATIVE_PANE || !options.native_enabled) return next(e);
-    const { Box, Text, Button, Select, Code, Input } = $.ui.resolve(e);
+    const { Box, Text, Button, Select, Code, Input, Markdown } = $.ui.resolve(e);
+    const jobs = orderedJobRows(snapshot?.jobs, includeHistory);
     return <Box flexDirection="column" gap={1}>
+      <Text bold>Delegate workspace</Text>
       <Box gap={1}>
-        <Button key="tab-jobs" label="Jobs" onPress={() => {}} />
-        <Button key="tab-detail" label="Details" onPress={() => {}} />
-        <Button key="tab-diff" label="Diff" onPress={() => {}} />
-        <Button key="refresh" label="Refresh" onPress={() => {}} />
+        <Button key="tab-jobs" plain hotkey="j" dimColor={tab !== 'jobs'} label={tab === 'jobs' ? '● Jobs' : 'Jobs'} onPress={() => {}} />
+        <Button key="tab-detail" plain hotkey="i" dimColor={tab !== 'detail'} label={tab === 'detail' ? '● Details' : 'Details'} onPress={() => {}} />
+        <Button key="tab-diff" plain hotkey="d" dimColor={tab !== 'diff'} label={tab === 'diff' ? '● Review' : 'Review'} onPress={() => {}} />
+        <Button key="refresh" plain hotkey="r" label="Refresh" onPress={() => {}} />
       </Box>
       <Box gap={1}>
-        <Button key="tab-new" label="New task" onPress={() => {}} />
-        <Button key="tab-queue" label="Queue" onPress={() => {}} />
-        <Button key="tab-agents" label="Agents" onPress={() => {}} />
+        <Button key="tab-new" plain hotkey="n" dimColor={tab !== 'new' && tab !== 'context'} label={tab === 'new' || tab === 'context' ? '● New task' : 'New task'} onPress={() => {}} />
+        <Button key="tab-queue" plain hotkey="q" dimColor={tab !== 'queue'} label={tab === 'queue' ? '● Queue' : 'Queue'} onPress={() => {}} />
+        <Button key="tab-agents" plain hotkey="a" dimColor={tab !== 'agents'} label={tab === 'agents' ? '● Agents' : 'Agents'} onPress={() => {}} />
       </Box>
       <Select key="scope" label="View scope" value={scope} options={[{ label: 'This session', value: 'session' }, { label: 'Workspace (read-only for other sessions)', value: 'workspace' }, { label: 'All jobs (read-only for other sessions)', value: 'all' }]} onSelect={() => {}} />
       <Text dimColor>{snapshot?.chip || 'Loading local job state…'}</Text>
@@ -453,67 +465,78 @@ export function register(on, values = {}) {
       {busy ? <Text dimColor>Waiting for your answer or broker intake…</Text> : null}
       {tab === 'jobs' ? <Box flexDirection="column" gap={1}>
         <Text dimColor>{snapshot?.allowance?.map((entry) => `${entry.provider} ${entry.known ? `${entry.usedPercent}%` : '?'}`).join(' · ') || 'Allowance unknown'}</Text>
-        {snapshot?.jobs?.length ? snapshot.jobs.map((job) => <Box key={job.id} flexDirection="column">
-          <Button key={`job-${job.id}`} label={`${job.provider} · ${job.phase}${job.pendingInput ? ' · input needed' : ''}${job.acceptance === 'ready-for-review' ? ' · review ready' : ''}`} onPress={() => {}} />
-          <Text dimColor>{job.id} · {job.model} · {job.isOwnSession ? 'this session' : 'other session'}</Text>
-        </Box>) : <Text>No jobs in this scope. Delegate bounded work with /delegate-router:delegate.</Text>}
+        <Button key="jobs-history" plain label={includeHistory ? 'Hide finished history' : 'Show finished history'} onPress={() => {}} />
+        {jobs.length ? jobs.map((job) => <Box key={job.id} flexDirection="column">
+          <Button key={`job-${job.id}`} plain label={`${job.provider} · ${jobStatusLabel(job)} · ${job.id.slice(-6)}`} onPress={() => {}} />
+          <Text dimColor>{job.title || `${job.mode} · ${job.model}`}{job.isOwnSession ? '' : ' · other session (read-only)'}</Text>
+        </Box>) : <Text>{!snapshot ? 'Loading local jobs…' : snapshot.jobs?.length ? 'No active or attention-needed jobs. Show finished history to review earlier work.' : 'No jobs yet. Use New task to preview bounded work.'}</Text>}
         {snapshot?.omittedCount ? <Text dimColor>{snapshot.omittedCount} older jobs omitted; CLI/MCP expose the full store.</Text> : null}
       </Box> : tab === 'new' ? <Box flexDirection="column" gap={1}>
-        <Text>Objective (bounded work)</Text>
         <Input key="draft-objective" label="Objective (bounded work)" value={draft.objective} onChange={() => {}} onSubmit={() => {}} />
-        <Text>Acceptance criteria</Text>
         <Input key="draft-acceptance" label="Acceptance criteria" value={draft.acceptance} onChange={() => {}} onSubmit={() => {}} />
-        <Text>Allowed paths, comma separated (required for writes)</Text>
         <Input key="draft-paths" label="Allowed paths, comma separated (required for writes)" value={draft.paths} onChange={() => {}} onSubmit={() => {}} />
         <Select key="draft-provider" label="Provider" value={draft.provider} options={[{ value: 'auto', label: 'Automatic enabled route' }, ...(snapshot?.enabledProviders || []).map((provider) => ({ value: provider, label: provider }))]} onSelect={() => {}} />
-        <Text>Model ID (auto or explicit, never substituted)</Text>
-        <Input key="draft-model" label="Model ID (auto or explicit, never substituted)" value={draft.model} onChange={() => {}} onSubmit={() => {}} />
         <Select key="draft-mode" label="Mode" value={draft.mode} options={['consult', 'plan', 'review', 'implement', 'verify'].map((value) => ({ value, label: value }))} onSelect={() => {}} />
-        <Select key="draft-effort" label="Requested effort (preflight validates support)" value={draft.effort} options={['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: value }))} onSelect={() => {}} />
         <Select key="draft-isolation" label="Workspace" value={draft.isolation} options={[{ value: 'shared', label: 'Shared worktree (one writer)' }, { value: 'worktree', label: 'Isolated worktree (concrete scope paths)' }]} onSelect={() => {}} />
-        <Text>Wall-clock budget, seconds (includes approval wait)</Text>
+        <Text dimColor>{`${draft.model} · ${draft.effort} effort · ${draft.timeoutSeconds}s wall-clock · ${draft.maxOutputTokens} reported output-token cap`}</Text>
+        <Button key="draft-advanced" plain label={advancedDraft ? '▾ Hide model and budgets' : '▸ Model and budgets'} onPress={() => {}} />
+        {advancedDraft ? <Box flexDirection="column" gap={1}>
+        <Input key="draft-model" label="Model ID (auto or explicit, never substituted)" value={draft.model} onChange={() => {}} onSubmit={() => {}} />
+        <Select key="draft-effort" label="Requested effort (preflight validates support)" value={draft.effort} options={['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: value }))} onSelect={() => {}} />
         <Input key="draft-timeoutSeconds" label="Wall-clock budget, seconds (includes approval wait)" value={draft.timeoutSeconds} onChange={() => {}} onSubmit={() => {}} />
-        <Text>Reported output-token cap (unknown usage is not zero)</Text>
         <Input key="draft-maxOutputTokens" label="Reported output-token cap (unknown usage is not zero)" value={draft.maxOutputTokens} onChange={() => {}} onSubmit={() => {}} />
-        <Button key="context-load" label={`Select public context (${chosenContext.size} chosen)`} onPress={() => {}} />
+        </Box> : null}
+        <Button key="context-load" plain label={`Select public context (${chosenContext.size} chosen)`} onPress={() => {}} />
         <Button key="draft-preview" label="Preview exact task, route and checks" onPress={() => {}} />
-        <Code source={previewText(preview)} language="text" />
+        <Text dimColor>{previewText(preview).split('\n\nExact task packet:')[0]}</Text>
+        {preview ? <Code source={preview.packet} language="text" /> : null}
         {preview && !busy ? <Box gap={1}><Button key="draft-launch" label="Confirm launch…" onPress={() => {}} /><Button key="draft-enqueue" label="Approve pending job…" onPress={() => {}} /></Box> : null}
       </Box> : tab === 'context' ? <Box flexDirection="column" gap={1}>
         <Text>Only checked public text is included. Tools and hidden reasoning are excluded; credentials are redacted. Up to 8 excerpts, 2,000 characters each.</Text>
         {contexts.map((entry) => <Box key={entry.id} flexDirection="column"><Button key={`context-${entry.id}`} label={`${chosenContext.has(entry.id) ? '[x]' : '[ ]'} ${entry.role}${entry.redacted ? ' · redacted' : ''}${entry.truncated ? ' · truncated' : ''}`} onPress={() => {}} /><Code source={entry.text} language="text" /></Box>)}
       </Box> : tab === 'queue' ? <Box flexDirection="column" gap={1}>
-        <Text>Approved pending work, not turn pause. Dispatch rechecks quota, provider capacity, writer locks and workspace/verification drift. Approval expires after 8 hours.</Text>
+        <Text dimColor>Approved, not running. Admission rechecks quota and workspace; approval expires after 8 hours.</Text>
         {(snapshot?.queue || []).map((entry) => <Box key={entry.id} flexDirection="column"><Text>{entry.provider}/{entry.model} · {entry.state} · priority {entry.priority} · {entry.reason || 'admitted'}</Text><Text dimColor>{entry.id} · r{entry.revision}</Text>
           {entry.jobId ? <Button key={`job-${entry.jobId}`} label="Inspect dispatched job" onPress={() => {}} /> : entry.state === 'pending' && entry.isOwnSession ? <Box gap={1}><Button key={`queue-cancel-${entry.id}`} label="Cancel pending…" onPress={() => {}} /><Button key={`queue-priority-${entry.id}`} label="Change priority…" onPress={() => {}} /></Box> : null}
         </Box>)}
         {!snapshot?.queue?.length ? <Text>No pending tasks in this scope.</Text> : null}
         {snapshot?.omittedQueueCount ? <Text dimColor>{snapshot.omittedQueueCount} queue rows omitted; pending tasks sort first. Cancel obsolete pending drafts to expose additional rows.</Text> : null}
       </Box> : tab === 'agents' ? <Box flexDirection="column" gap={1}>
-        <Text>Host-reported Claude status; broker-managed jobs; provider-reported children. Missing usage and relationships are unknown, not zero. No control of native Claude agents is added.</Text>
+        <Text dimColor>Claude host status takes precedence. Unknown usage is not zero; silence is not timeout.</Text>
         {agentTreeRows(snapshot?.jobs).map((job) => <Box key={job.id} flexDirection="column"><Button key={`job-${job.id}`} label={`${'  '.repeat(job.depth)}${job.provider} · ${job.agentName || job.model} · ${job.hostStatus || job.agentActivityState || job.phase}`} onPress={() => {}} /><Text dimColor>{job.id} · output tokens {job.observedOutputTokens ?? 'unknown'}{job.parentAgentId || job.parentJobId ? ` · parent ${job.parentAgentId || job.parentJobId}` : ''}</Text>
           {(job.reportedChildren || []).map((child, index) => <Text key={`child-${index}`} dimColor>{'  '.repeat(job.depth + 1)}↳ {child.label || child.id} · {child.status} · usage unknown (provider-reported)</Text>)}
         </Box>)}
       </Box> : tab === 'diff' ? <Box flexDirection="column" gap={1}>
         <Select key="evidence-view" label="Evidence" value={evidenceView} options={['diff', 'plan', 'result'].map((value) => ({ value, label: value }))} onSelect={() => {}} />
         {evidenceView === 'diff' ? <Select key="evidence-file" label="Changed file" value={evidenceFile} options={[{ value: '', label: 'All recorded files' }, ...(diff?.files || []).map((file) => ({ value: file.path, label: file.path }))]} onSelect={() => {}} /> : null}
-        <Text>Find text (literal, case-sensitive)</Text>
         <Input key="evidence-search" label="Find text (literal, case-sensitive)" value={evidenceSearch} onChange={() => {}} onSubmit={() => {}} />
         <Box gap={1}><Button key="evidence-find" label="Find next" onPress={() => {}} /><Button key="evidence-reset" label="Restart evidence" onPress={() => {}} />{pageHistory.length ? <Button key="evidence-previous" label="Previous page" onPress={() => {}} /> : null}{diff?.nextOffset != null ? <Button key="evidence-next" label="Next page" onPress={() => {}} /> : null}</Box>
         <Text dimColor>Offset {diff?.offset || 0}{diff?.nextOffset != null ? ' · more evidence follows' : ' · last page'} · mixed revisions are refused.{diff?.omittedFiles ? ` ${diff.omittedFiles} file choices omitted; CLI exposes the full inventory.` : ''}</Text>
-        <Code source={diff?.diff || diff?.resultText || 'Select a job, then open evidence.'} language={evidenceView === 'diff' ? 'diff' : 'text'} />
+        {diff?.diff && evidenceView === 'diff' ? <Code source={diff.diff} format="diff" />
+          : diff?.resultText ? <Markdown text={diff.resultText} /> : <Text dimColor>{selected ? evidenceView === 'diff' ? 'No recorded diff. Non-Git checks expose changed paths, not Git hunks.' : 'No recorded evidence on this page.' : 'Select a job from Jobs, then open Review.'}</Text>}
       </Box> : <Box flexDirection="column" gap={1}>
-        <Text>{jobDetailText(detail)}</Text>
-        {detail?.verification?.command ? <Text>Broker checks: {detail.verification.command} · exit {detail.verification.exitCode ?? 'unknown'}</Text> : null}
-        {detail?.verification?.outputTail ? <Code source={detail.verification.outputTail} language="text" /> : null}
-        {detail ? <Select key="compare-job" label="Compare candidate (evidence only, never merge)" value={comparison?.id || ''} options={[{ value: '', label: 'No comparison' }, ...(snapshot?.jobs || []).filter((job) => job.id !== detail.id && job.provider !== 'claude' && job.workspaceId === detail.workspaceId).map((job) => ({ value: job.id, label: `${job.provider}/${job.model} · ${job.id}` }))]} onSelect={() => {}} /> : null}
-        {comparison ? <Text>{`Candidate comparison:\n${detail.id}: ${detail.acceptance} · checks ${detail.verification?.state} · base ${detail.baseRevision || 'unknown'}\n${comparison.id}: ${comparison.acceptance} · checks ${comparison.verification?.state} · base ${comparison.baseRevision || 'unknown'}\n${detail.baseRevision && comparison.baseRevision ? detail.baseRevision === comparison.baseRevision ? 'Same recorded base; still inspect both diffs.' : 'Different recorded bases; do not assume comparable diffs.' : 'Base comparison unavailable.'}`}</Text> : null}
-        {detail?.canClaim ? <Button key="claim" label="Claim same-workspace supervision…" onPress={() => {}} /> : null}
+        <Text bold>{detail ? jobStatusLabel(detail) : 'Job details'}</Text>
+        <Text>{jobSummaryText(detail)}</Text>
+        {detail?.evidenceTruncated ? <Text color="yellow">Evidence truncated. Review full evidence before accepting.</Text> : null}
+        {detail && !detail.isOwnSession ? <Text dimColor>Other session: inspection only; controls disabled.</Text> : null}
+        {detail?.scopeViolations?.length ? <Text color="yellow">{`Scope violations: ${detail.scopeViolations.join(', ')}`}</Text> : null}
+        {detail?.timeBudget ? <Text dimColor>{`${detail.timeBudget.remainingSeconds}s remaining · wall-clock includes approval wait`}</Text> : null}
+        {detail?.question ? <Markdown text={detail.question} /> : null}
         {detail?.canAnswer ? <Button key="answer" label={detail.pendingInput.kind === 'plan-confirmation' ? 'Review and decide plan' : 'Answer worker'} onPress={() => {}} /> : null}
-        {detail?.canSteer ? <Button key="steer" label={detail.provider === 'cursor' ? 'Correct (cancel and resume)' : 'Correct running turn'} onPress={() => {}} /> : null}
-        {detail?.canCancel ? <Button key="cancel" label="Request cancellation…" onPress={() => {}} /> : null}
+        {detail?.canSteer ? <Button key="steer" plain label={detail.provider === 'cursor' ? 'Correct (cancel and resume)' : 'Correct running turn'} onPress={() => {}} /> : null}
+        {detail?.canCancel ? <Button key="cancel" plain label="Request cancellation…" onPress={() => {}} /> : null}
+        {detail?.canClaim ? <Button key="claim" plain label="Claim same-workspace supervision…" onPress={() => {}} /> : null}
+        {detail ? ['plan', 'result', 'checks', 'diagnostics', 'compare'].map((section) => <Box key={`section-${section}`} flexDirection="column" gap={1}>
+          <Button key={`expand-${section}`} plain label={`${expanded.has(section) ? '▾' : '▸'} ${section === 'diagnostics' ? 'Scope, policy and identifiers' : section === 'compare' ? 'Compare candidates' : section === 'checks' ? 'Broker checks' : section === 'plan' ? 'Plan evidence' : 'Worker report'}`} onPress={() => {}} />
+          {expanded.has(section) ? section === 'plan' ? detail.plan && detail.plan !== 'null' ? <Markdown text={readablePlan(detail.plan)} /> : <Text dimColor>No plan recorded.</Text>
+            : section === 'result' ? detail.resultText ? <Markdown text={detail.resultText} /> : <Text dimColor>No final report yet.</Text>
+            : section === 'checks' ? <Box flexDirection="column"><Text>{`${detail.verification?.state || 'unknown'} · exit ${detail.verification?.exitCode ?? 'not recorded'}`}</Text>{detail.verification?.reason ? <Text dimColor>{detail.verification.reason}</Text> : null}{detail.verification?.command ? <Code source={detail.verification.command} language="text" /> : null}{detail.verification?.outputTail ? <Code source={detail.verification.outputTail} language="text" /> : null}{detail.verification?.caveats?.length ? <Text dimColor>{detail.verification.caveats.join('\n')}</Text> : null}</Box>
+            : section === 'diagnostics' ? <Text>{jobDetailText({ ...detail, question: null, plan: null, resultText: null })}</Text>
+            : <Select key="compare-job" label="Compare candidate (evidence only, never merge)" value={comparison?.id || ''} options={[{ value: '', label: 'No comparison' }, ...(snapshot?.jobs || []).filter((job) => job.id !== detail.id && job.provider !== 'claude' && job.workspaceId === detail.workspaceId).map((job) => ({ value: job.id, label: `${job.provider}/${job.model} · ${job.id.slice(-6)}` }))]} onSelect={() => {}} /> : null}
+        </Box>) : null}
+        {comparison ? <Text>{`Candidate comparison:\n${detail.id}: ${detail.acceptance} · checks ${detail.verification?.state} · base ${detail.baseRevision || 'unknown'}\n${comparison.id}: ${comparison.acceptance} · checks ${comparison.verification?.state} · base ${comparison.baseRevision || 'unknown'}\n${detail.baseRevision && comparison.baseRevision ? detail.baseRevision === comparison.baseRevision ? 'Same recorded base; still inspect both diffs.' : 'Different recorded bases; do not assume comparable diffs.' : 'Base comparison unavailable.'}`}</Text> : null}
       </Box>}
-      <Text dimColor>Completion is not acceptance. Controls always re-inspect and require a human answer.</Text>
+      <Text dimColor>Completion ≠ acceptance · Tab to navigate · Esc to close</Text>
     </Box>;
   });
   on('ui.press', async ($, e, next) => {
@@ -525,7 +548,17 @@ export function register(on, values = {}) {
     }
     if (e.requestId !== NATIVE_PANE) return next(e);
     try {
-      if (key === 'refresh') { await refresh($); if (selected) await inspectSelected($, selected); }
+      if (key === 'refresh') {
+        const currentTab = tab;
+        await refresh($);
+        if (selected && currentTab === 'detail') await inspectSelected($, selected);
+        if (selected && currentTab === 'diff') { diff = undefined; pageHistory = []; await evidencePage($); }
+      }
+      else if (key === 'draft-advanced') advancedDraft = !advancedDraft;
+      else if (key === 'jobs-history') includeHistory = !includeHistory;
+      else if (key.startsWith('expand-') && ['plan', 'result', 'checks', 'diagnostics', 'compare'].includes(key.slice(7))) {
+        const section = key.slice(7); if (expanded.has(section)) expanded.delete(section); else expanded.add(section);
+      }
       else if (key.startsWith('job-')) await inspectSelected($, key.slice(4));
       else if (key === 'tab-jobs') tab = 'jobs';
       else if (key === 'tab-detail') { if (selected) await inspectSelected($, selected); else tab = 'detail'; }

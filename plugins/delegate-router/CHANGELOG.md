@@ -2,6 +2,28 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.73.0 — 2026-10-10
+
+- Reconcile Codex shell writes from the actual shared tree before scope checks,
+  verification and acceptance. Non-Git writes use a bounded fingerprint baseline
+  with an early observability notice; incomplete inventories block acceptance.
+  Preserve owner untracked bodies, credential exclusions and private runtime state.
+- Treat out-of-fence plan targets as structural conflicts even when the plans
+  share other targets. Expose explicit trivial review-round plan/comparison
+  options without removing the default human gate.
+- Refuse shared-job integration without inventing an owner cwd/revision. Add
+  explicit integration inspection and idempotent worktree cleanup, retaining
+  private patches/manifests. Owner application remains intentionally deferred.
+- Correct nested Codex output usage, shared base revision, cache-write counters,
+  summary revisions and millisecond attempt timestamps. Mark pending checks as
+  skipped on cancellation/failure. Valid structured and explicitly terse results
+  no longer trigger the short-final heuristic.
+- Polish native selected tabs/hotkeys, attention-first jobs, optional history,
+  compact composer, expandable evidence/diagnostics and host diff/Markdown
+  rendering. Preserve other AbovePrompt content and review view on refresh.
+- Add fake-provider, filesystem/privacy, integration and model-free native UI
+  regressions; document observation limits and asynchronous intake semantics.
+
 ## 0.72.0 — 2026-10-09
 
 - Add native task composition, exact route/scope/check/budget preview, explicit

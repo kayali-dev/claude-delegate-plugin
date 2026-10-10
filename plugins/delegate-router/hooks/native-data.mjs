@@ -29,7 +29,7 @@ export function agentMetadata(agents) {
 
 export function attentionRows(snapshot) {
   return (snapshot?.jobs || []).filter((job) => job.pendingInput || job.acceptance === 'ready-for-review'
-    || job.status === 'failed' || job.scopeViolationCount > 0).slice(0, 8);
+    || job.acceptance === 'blocked' || job.status === 'failed' || job.scopeViolationCount > 0).slice(0, 8);
 }
 
 export function managedResultId(result, depth = 0) {

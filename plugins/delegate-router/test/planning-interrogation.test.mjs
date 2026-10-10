@@ -65,6 +65,17 @@ function approachEntries(entries) {
   });
 }
 
+test('partial target overlap cannot hide a target outside the granted scope', () => {
+  const left = parseStructuralPlan(planText(structuralPlan({ targets: { files: ['math.mjs'], components: ['math'] } })));
+  const right = parseStructuralPlan(planText(structuralPlan({ targets: { files: ['math.mjs', 'other.txt'], components: ['math'] } })));
+  assert.equal(compareStructuralPlans(left, right).verdict, 'convergent');
+  const comparison = compareStructuralPlans(left, right, { allowedPaths: ['math.mjs'] });
+  assert.equal(comparison.verdict, 'divergent');
+  assert.equal(comparison.evidence.blocking, true);
+  assert.ok(comparison.differences.some((entry) => entry.reason === 'targets-outside-allowed-scope'));
+  assert.equal(compareStructuralPlans(left, right, { allowedPaths: ['*.mjs', 'other.txt'] }).verdict, 'convergent');
+});
+
 function assertNonBlockingNamingVariance(left, right, expectedDimensions) {
   const parsedLeft = parseStructuralPlan(planText(left));
   const parsedRight = parseStructuralPlan(planText(right));
@@ -706,7 +717,9 @@ test('write dry-runs announce the stricter plan-first default and both explicit 
 }));
 
 test('plan-first confirmation continues the same Codex thread and switches only the confirmed turn to workspace-write', () => isolated(async (directory) => {
-  const requestLog = path.join(directory, 'requests.jsonl');
+  const logDirectory = path.join(directory, 'jobs');
+  fs.mkdirSync(logDirectory, { recursive: true });
+  const requestLog = path.join(logDirectory, 'requests.jsonl');
   process.env.FAKE_CODEX_REQUEST_LOG = requestLog;
   const created = createManagedJob({
     provider: 'codex',

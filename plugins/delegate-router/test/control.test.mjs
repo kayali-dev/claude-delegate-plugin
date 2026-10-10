@@ -58,6 +58,35 @@ function brokerPackageVersion() {
   return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 }
 
+test('cache-write numeric counters remain useful without allowing token-shaped secrets', () => {
+  assert.deepEqual(redact({ cacheWriteInputTokens: 42, cache_write_input_tokens: 7,
+    token: 123, cacheWriteOutputTokens: 'secret', cacheWriteTokens: true }), {
+    cacheWriteInputTokens: 42, cache_write_input_tokens: 7, token: '[REDACTED]',
+    cacheWriteOutputTokens: '[REDACTED]', cacheWriteTokens: '[REDACTED]'
+  });
+  assert.equal(redact({ accessToken: 123 }).accessToken, '[REDACTED]');
+});
+
+test('working fingerprints refuse traversal and symlink-parent reads outside cwd', () => isolated((directory) => {
+  const workspace = path.join(directory, 'workspace'); fs.mkdirSync(workspace);
+  fs.writeFileSync(path.join(directory, 'outside.txt'), 'owner content');
+  fs.symlinkSync(directory, path.join(workspace, 'linked'));
+  assert.equal(hashWorkingFile(workspace, '../outside.txt'), null);
+  assert.equal(hashWorkingFile(workspace, 'linked/outside.txt'), null);
+  assert.equal(hashWorkingFile(workspace, 'absent.txt'), 'absent');
+}));
+
+test('managed summaries include control revision and terminal no-run verification is not pending', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory,
+    prompt: 'Create a bounded file', verify: { command: 'true' } });
+  assert.equal(job.createdAt, Math.floor(job.createdAtMs / 1000));
+  updateManagedJob(job.id, (current) => { current.status = 'cancelled'; });
+  const summary = inspectJobSummary(job.id);
+  assert.equal(summary.revision, inspectJob(job.id).revision);
+  assert.equal(summary.verification.state, 'skipped');
+  assert.ok(inspectJob(job.id).completedAtMs >= job.createdAtMs);
+}));
+
 test('managed jobs persist ordered redacted events and derived views', () => isolated((directory) => {
   const job = createManagedJob({ provider: 'codex', model: 'sol', mode: 'review', cwd: directory, prompt: 'review public code' });
   appendJobEvent(job.id, 'file.changed', { changes: [{ path: 'src/a.js', token: 'secret-value' }] });
@@ -1009,6 +1038,7 @@ test('inspect summary is materially smaller while retaining monitor-critical fie
   assert.ok(summaryBytes < fullBytes / 10, `summary=${summaryBytes} full=${fullBytes}`);
   assert.deepEqual(summary, {
     id: job.id,
+    revision: full.revision,
     status: 'completed',
     phase: 'completed',
     origin: { sessionId: 'session-summary-size' },

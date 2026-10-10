@@ -7,6 +7,8 @@ import {
   backfillAuditLog,
   decideAcceptance,
   discardManagedWorkspace,
+  discardManagedIntegration,
+  inspectManagedIntegration,
   diffStat,
   filterDiffPaths,
   groupSummary,
@@ -69,10 +71,11 @@ function usage() {
   delegate-jobs verify <job-id>   # reruns only the recorded command on the current tree; exits 6 unless the new evidence passes
   delegate-jobs accept|reject <job-id> [--reason text]
   delegate-jobs resume <job-id> --prompt <text> [--model id] [--mode mode] [--cwd path] [--effort level] [--timeout-seconds N] [--max-output-tokens N] [--max-total-output-tokens N] [--max-subagents 0..16] [--retry-max-attempts N --retry-on transport,rate-limit] [--verify-command command|--verify-exception reason] [--verify-timeout-seconds N] [--auto-fix-rounds N] [--network] [--network-allow domain,*.domain] [--sandbox auto|off] [--add-dir path ...] [--approve-mcps] [--cursor-worktree [--cursor-worktree-base path]] [--allowed-paths a,b] [--allow-unscoped-write] [--allow-sensitive] [--override-limit] [--override-writer]
-  delegate-jobs review-round <job-id> --prompt <findings-or-file> [--prompt-file path]
+  delegate-jobs review-round <job-id> --prompt <findings-or-file> [--prompt-file path] [--no-plan-first] [--no-ambiguity-check]
   delegate-jobs revert <job-id> [--dry-run]
   delegate-jobs workspace discard <job-id>
   delegate-jobs integrate <job-id> [job-id ...] [--preflight]
+  delegate-jobs integration inspect|discard <integration-id>
   delegate-jobs usage <job-id> [--json]
   delegate-jobs result <job-id> [--find text] [--offset N] [--max-chars N] [--json]
   delegate-jobs logs <job-id> [--stderr]
@@ -556,6 +559,9 @@ try {
   } else if (command === 'workspace') {
     if (args[0] !== 'discard') throw new Error("workspace subcommand must be 'discard'");
     json(discardManagedWorkspace(args[1]));
+  } else if (command === 'integration') {
+    if (!['inspect', 'discard'].includes(args[0]) || args.length !== 2) throw new Error('usage: integration inspect|discard <integration-id>');
+    json(args[0] === 'inspect' ? inspectManagedIntegration(args[1]) : discardManagedIntegration(args[1]));
   } else if (command === 'integrate') {
     const jobIds = args.filter((item) => !item.startsWith('--'));
     json(args.includes('--preflight')
@@ -649,7 +655,9 @@ try {
       overrideLimit: args.includes('--override-limit'), overrideWriter: args.includes('--override-writer')
     }));
   } else if (command === 'review-round') {
-    const result = withStdoutDiagnosticsRedirected(() => reviewRoundManagedJob(args[0], { prompt: prompt(args) }));
+    const result = withStdoutDiagnosticsRedirected(() => reviewRoundManagedJob(args[0], { prompt: prompt(args),
+      planFirst: args.includes('--no-plan-first') ? false : undefined,
+      ambiguityCheck: args.includes('--no-ambiguity-check') ? false : undefined }));
     json(result);
   } else if (command === 'usage') {
     json(jobUsage(args[0]));

@@ -10,6 +10,8 @@ import {
   createManagedJob,
   decideAcceptance,
   inspectJob,
+  inspectManagedIntegration,
+  discardManagedIntegration,
   launchManagedJob,
   prepareManagedIntegration,
   preflightManagedIntegration,
@@ -263,6 +265,13 @@ test('strict CAS prepares a clean integration worktree and refuses moved owner c
   assert.equal(integrated.applied, true);
   assert.equal(integrated.stage, 'integration-worktree');
   assert.equal(fs.readFileSync(path.join(integrated.integration.path, 'target.txt'), 'utf8'), 'candidate\n');
+  assert.equal(inspectManagedIntegration(integrated.integration.id).ownerApplied, false);
+  const discarded = discardManagedIntegration(integrated.integration.id);
+  assert.equal(discarded.state, 'discarded');
+  assert.equal(fs.existsSync(discarded.path), false);
+  assert.equal(fs.existsSync(discarded.patch.path), true, 'private patch retained for recovery');
+  assert.equal(fs.readFileSync(path.join(root, 'target.txt'), 'utf8'), 'base\n');
+  assert.equal(discardManagedIntegration(discarded.id).discardedAt, discarded.discardedAt);
   assert.equal(fs.readFileSync(path.join(root, 'target.txt'), 'utf8'), 'base\n');
   assert.throws(
     () => decideAcceptance(job.id, 'accepted'),
@@ -282,6 +291,16 @@ test('strict CAS prepares a clean integration worktree and refuses moved owner c
     (error) => error.code === 'CAS_CONFLICT' && error.conflictingPaths.includes('target.txt')
   );
   assert.equal(inspectJob(job.id).acceptance.state, 'ready-for-review');
+});
+
+test('shared integration preflight never invents the coordinator cwd or revision', (t) => {
+  withState(t);
+  const result = preflightWorkspaceChangeSets([{ id: 'shared', isolation: 'shared', cwd: '/nonexistent' }]);
+  assert.equal(result.ok, false);
+  assert.equal(result.ownerRoot, null);
+  assert.equal(result.currentRevision, null);
+  assert.match(result.conflicts[0].reason, /unavailable/);
+  assert.throws(() => inspectManagedIntegration('../escape'), /invalid integration id/);
 });
 
 test('path and resource claims schedule workspace writers while shared launches retain the conservative whole-tree guard', (t) => {

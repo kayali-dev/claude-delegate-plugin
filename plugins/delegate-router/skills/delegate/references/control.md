@@ -138,6 +138,22 @@ write job launched from a non-empty Git baseline emits `baseline.dirty` with a
 bounded path list; treat either signal as a coordination warning, not proof that
 no other editor is active.
 
+Provider file-change events are not exhaustive: shell redirection, scripts and
+formatters can write without them. Both managed providers reconcile the shared
+tree before terminal scope/verification/acceptance checks. Git uses the launch
+baseline and bounded status/diff inspection; unchanged pre-existing dirty paths
+are excluded and pre-existing untracked bodies are never copied into a diff.
+When Git status is unavailable, write launches emit a `filesystem-baseline`
+notice and use private fingerprints (no bodies) with 5,000-entry, two-second,
+32 MiB hash-read bounds. Symlink directories, dependency/Git directories,
+credential-directory contents and private broker state are not traversed.
+Oversized files use size/mode/time metadata rather than body hashing.
+Non-Git changed paths can trigger explicit verification, but have no Git diff
+or revision. `changeObservation` labels its source and completeness;
+incomplete observation blocks acceptance. These are still shared-tree lower
+bounds, never isolation or proof of which editor wrote a file. Native launch
+approval retains its stricter Git requirement for drift revalidation.
+
 Give any start that may be retried a stable `idempotencyKey`. Lookup and job creation are atomic under the per-cwd launch lock, so a replay returns the existing job instead of launching a second worker.
 
 An opt-in `retryPolicy` may set `maxAttempts` from 1–5 and choose `transport` and/or `rate-limit`. Retries reuse the same job and provider session when one exists, are journaled as `job.retry`, and never apply to scope, quota, model, budget, user-input, or other task-level outcomes. The default is one attempt.
@@ -173,6 +189,17 @@ acceptance or touching owner bytes. Rejection and
 broker workspace storage. `delegate-jobs revert` continues unchanged for
 legacy shared-tree jobs and refuses workspace jobs.
 
+Inspect the handoff with `delegate_integration { integrationId }` or
+`delegate-jobs integration inspect <integration-id>`; the record supplies the
+candidate worktree, exact private patch, base and files for owner review. Owner
+landing remains a separate, explicitly authorized integration workflow: review
+the patch/checks, recheck the owner tree and choose the appropriate Git landing
+procedure. Prepared or inspected does not mean accepted or applied. To abandon
+the candidate, use `delegate_integration { integrationId, action: "discard" }`
+or `delegate-jobs integration discard <integration-id>`. Cleanup is idempotent
+and removes only the validated broker integration worktree; its private patch
+and manifest remain recoverable, and owner bytes/acceptance remain unchanged.
+
 No `WorktreeCreate` hook is globally registered. The explicit broker launch
 option is the owner-approved workflow boundary, so ordinary Claude Code and
 Git worktree creation retain their default behavior.
@@ -187,6 +214,17 @@ Every writer must:
 
 ## Continuations
 
+Review rounds retain the default plan-first/human confirmation boundary.
+For an explicitly trivial correction inside the existing fence, the coordinator
+may deliberately supply `planFirst: false` to `delegate_review_round` or
+`--no-plan-first` to `delegate-jobs review-round`. `ambiguityCheck: false` /
+`--no-ambiguity-check` skips only the independent pass, retaining the human gate.
+Neither is inferred from a one-line diff or an earlier accepted scope; scope,
+permissions, verification and inherited work budgets remain unchanged.
+
+`origin.launchedAtMs` is immutable chain attribution, not this attempt's start.
+Use `createdAtMs` and `completedAtMs` for attempt timing and timeout evidence.
+
 Store the Codex `threadId` or Cursor chat ID with the task. Resume only for the same objective. A follow-up should include new information, a correction, or a verification request rather than repeating the original prompt. Codex threads that engaged the multi-agent review flow (typically write-mode jobs whose approvals escalated) may refuse direct resume with `RESUME_UNSUPPORTED`; recover by starting a fresh job whose task packet folds in the prior findings.
 
 Workspace-isolated resume, review-round, and opt-in auto-fix restore the captured
@@ -200,6 +238,13 @@ instead of being replaced by a newer owner-HEAD recipe. The owner tree is never
 modified, and each round produces a cumulative portable candidate change set.
 
 Managed control commands use optimistic concurrency. Read the current job revision immediately before steering or cancelling and send it as `expectedRevision`. A `REVISION_CONFLICT` includes `currentRevision`, so one retry with that value is enough when your command is still appropriate; never overwrite another controller's newer decision. Reuse the same `correctionId` when retrying the same request.
+
+Ordinary control replies acknowledge durable queued intake, not provider
+application. Their revision belongs to that intake transition; it can advance
+again immediately. Pull a fresh inspect (including `view=summary`, which carries
+`revision`) before a subsequent control, and inspect command-applied events for
+provider acknowledgement. A post-apply revision could also become stale before
+the next call; no reply grants a permanent control revision.
 
 `startPaused=true` opens the provider thread/session and sets phase `paused` before any prompt. Release it with `delegate_release` (or `delegate-jobs release`) at the current revision; cancellation works while paused, `waitFor='session'` (and the `waitForSession` alias) returns as soon as the paused session exists, and `timeoutSeconds` continues counting during the pause. `waitFor='turn'` and `waitFor='first-output'` use the same bounded journal-cursor poller.
 

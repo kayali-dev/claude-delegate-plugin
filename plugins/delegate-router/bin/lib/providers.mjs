@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { observeDirectory, compareDirectoryObservations, fileMetadata, sensitiveObservationPath } from './file-observation.mjs';
 import fs from 'node:fs';
 import { managedTimeoutMs, jobTimeBudget } from './job-health.mjs';
 import os from 'node:os';
@@ -334,7 +335,12 @@ async function presentPlanForConfirmation(jobId, primaryText) {
       differences: []
     };
   } else {
-    comparison = compareStructuralPlans(primary, parseStructuralPlan(probe.result?.plan || probe.resultText || probe.result));
+    comparison = compareStructuralPlans(primary, parseStructuralPlan(probe.result?.plan || probe.resultText || probe.result), { allowedPaths: job.allowedPaths });
+  }
+  const primaryScope = compareStructuralPlans(primary, primary, { allowedPaths: job.allowedPaths });
+  if (primaryScope.differences?.some((entry) => entry.reason === 'targets-outside-allowed-scope')
+    && !comparison.differences?.some((entry) => entry.reason === 'targets-outside-allowed-scope')) {
+    comparison = { ...primaryScope, reason: 'primary-plan-targets-outside-allowed-scope' };
   }
   const estimate = observedPlanEstimate(job);
   const presentation = planReviewPresentation(primary, comparison, estimate);
@@ -1267,6 +1273,18 @@ function recordBudgetExceeded(job, error, options = {}) {
   }, options);
 }
 
+function conciseAnswerRequested(job) {
+  try {
+    const stat = fs.statSync(job.promptPath);
+    if (stat.size > 256 * 1024) return false;
+    const recent = readJobEvents(job.id, { afterSeq: Math.max(0, Number(job.lastSeq || 0) - 200), limit: 200 });
+    const applied = new Set(recent.filter((event) => ['correction.applied', 'correction.restarted'].includes(event.type)).map((event) => event.data?.commandId));
+    const correction = recent.filter((event) => event.type === 'correction.requested' && applied.has(event.data?.commandId)).at(-1)?.data?.text;
+    const packet = `${fs.readFileSync(job.promptPath, 'utf8')}\n${correction || ''}`;
+    return /\b(?:return|respond|answer|reply|output)\b[^\n]{0,100}\b(?:one[- ]word|single[- ]word|one[- ]line|single[- ]line|briefly|concisely|only (?:the |a )?(?:word|marker|json|number|yes|no))\b/i.test(packet);
+  } catch { return false; }
+}
+
 function terminal(job, status, phase, extra = {}) {
   // The worker's final message is self-reported and can contradict what it
   // actually did; record the plugin's own observation of changed files so the
@@ -1278,6 +1296,9 @@ function terminal(job, status, phase, extra = {}) {
   let scopeViolations = null;
   let workspaceCaptureError = null;
   if (['implement', 'verify'].includes(job.mode)) {
+    // Provider fileChange events do not cover shell tools. Always reconcile the
+    // real shared tree, including on cancellation/failure, before accepting it.
+    if (job.isolation !== 'worktree') recordGitState(loadJob(job.id) || job, job.providerSessionId);
     if (job.isolation === 'worktree') {
       try {
         captureManagedWorkspace(job.id);
@@ -1308,7 +1329,11 @@ function terminal(job, status, phase, extra = {}) {
         : jobFiles(job.id);
       const baseline = new Set(job.baselineFiles || []);
       const entries = files.map((file) => {
-        const finalHash = file.finalHash || hashWorkingFile(job.cwd, file.path);
+        const privateOrSensitive = sensitiveObservationPath(file.path) || (job.observationExclude || []).some((root) => {
+          const absolute = path.resolve(job.cwd, file.path);
+          return absolute === root || absolute.startsWith(`${root}${path.sep}`);
+        });
+        const finalHash = file.finalHash || (privateOrSensitive ? null : hashWorkingFile(job.cwd, file.path));
         return {
           path: file.path,
           ...(file.status ? { status: file.status } : {}),
@@ -1391,7 +1416,10 @@ function terminal(job, status, phase, extra = {}) {
     };
     current.status = deferVerification ? 'running' : status;
     current.phase = deferVerification ? 'verifying' : phase;
-    if (!deferVerification) current.completedAt = Math.floor(Date.now() / 1000);
+    if (!deferVerification) {
+      current.completedAtMs = Date.now();
+      current.completedAt = Math.floor(current.completedAtMs / 1000);
+    }
     if (changedFiles) current.changedFiles = changedFiles;
     if (finalHashes) current.finalHashes = finalHashes;
     if (scopeViolations) current.scopeViolations = scopeViolations;
@@ -1412,6 +1440,9 @@ function terminal(job, status, phase, extra = {}) {
       : typeof current.result.result === 'string' ? current.result.result
       : null;
     if (text != null) current.resultText = text;
+    if (!deferVerification && status !== 'completed' && current.verification?.state === 'pending') {
+      current.verification = { state: 'skipped', reason: `Provider ${status} before broker verification`, recordedAt: new Date().toISOString() };
+    }
     if (!deferVerification && status === 'completed') {
       if (current.verification?.state === 'pending' && changedFiles?.count === 0) {
         current.verification = {
@@ -1440,7 +1471,8 @@ function terminal(job, status, phase, extra = {}) {
     // findings is a recurring provider pattern; flag it so the coordinator
     // resumes with "paste the full findings now" instead of trusting it.
     if (!current.resultSuspect && !deferVerification && status === 'completed' && ['consult', 'plan', 'review'].includes(job.mode)
-      && !current.result?.plan && (!text || text.trim().length < 200)) {
+      && !current.result?.plan && !current.result?.structured && !conciseAnswerRequested(current)
+      && (!text || text.trim().length < 200)) {
       current.resultSuspect = 'short-final-message';
     }
     // The write-mode analogue (field-observed: a Codex pre-implementation
@@ -1449,7 +1481,8 @@ function terminal(job, status, phase, extra = {}) {
     // only via the wait exit code.
     if (!current.resultSuspect && !deferVerification && status === 'completed' && ['implement', 'verify'].includes(job.mode)
       && changedFiles && changedFiles.count === 0) {
-      current.resultSuspect = 'no-changes-write-mode';
+      current.resultSuspect = ['partial', 'unavailable'].includes(current.changeObservation?.state)
+        ? 'change-observation-incomplete' : 'no-changes-write-mode';
     }
     const subagentOutputChars = (current.result?.subagents || [])
       .reduce((total, subagent) => total + String(subagent?.output || '').trim().length, 0);
@@ -2137,7 +2170,7 @@ async function runCodex(job, driver) {
 
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.72.0' },
+      clientInfo: { name: 'delegate-router', title: 'Delegate Router', version: '0.73.0' },
       capabilities: { experimentalApi: true, requestAttestation: false }
     });
     rpc.notify('initialized', {});
@@ -2849,33 +2882,67 @@ export function mapCursorAcpNotification(job, method, params = {}, sessionId = n
 
 function gitWorkspaceState(job) {
   const cwd = job.cwd;
-  const options = { cwd, encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 };
+  const options = { cwd, encoding: 'utf8', timeout: 5000, maxBuffer: 8 * 1024 * 1024 };
   const status = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], options);
   if (status.status !== 0) return { diff: '', files: [], error: (status.stderr || 'git status failed').trim() };
   const entries = status.stdout.split('\0').filter(Boolean);
   const files = [];
+  let revisionInventoryError = null;
   const baseline = new Set(job.baselineFiles || []);
   const sensitive = /(?:^|\/)(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]*(?:secret|credential|private.?key|token)[^/]*|[^/]+\.(?:pem|key|p12|pfx|crt|cer))$/i;
   const internalRoot = job.promptPath ? path.relative(cwd, path.dirname(job.promptPath)) : null;
-  const isInternal = (file) => internalRoot && internalRoot !== '..' && !internalRoot.startsWith(`..${path.sep}`)
-    && (file === internalRoot || file.startsWith(`${internalRoot}/`));
+  const isInternal = (file) => (internalRoot && internalRoot !== '..' && !internalRoot.startsWith(`..${path.sep}`)
+    && (file === internalRoot || file.startsWith(`${internalRoot}/`)))
+    || (job.observationExclude || []).some((root) => {
+      const absolute = path.resolve(cwd, file);
+      return absolute === root || absolute.startsWith(`${root}${path.sep}`);
+    });
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     const statusCode = entry.slice(0, 2);
     const file = entry.slice(3);
-    if (file) files.push({ path: file, status: statusCode, preexisting: baseline.has(file), contentExcluded: sensitive.test(file) || isInternal(file) });
+    if (file && !isInternal(file)) files.push({ path: file, status: statusCode, preexisting: baseline.has(file), contentExcluded: sensitive.test(file) });
     if (/[RC]/.test(statusCode) && entries[i + 1]) {
       const source = entries[++i];
-      files.push({ path: source, status: `${statusCode}:source`, preexisting: baseline.has(source), contentExcluded: sensitive.test(source) || isInternal(source) });
+      if (!isInternal(source)) files.push({ path: source, status: `${statusCode}:source`, preexisting: baseline.has(source), contentExcluded: sensitive.test(source) });
+    }
+  }
+  if (/^[a-f0-9]{40,64}$/.test(job.baseRevision || '')) {
+    const revisionDiff = spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', '--name-status', '-z', '--no-renames', job.baseRevision, '--'], options);
+    if (revisionDiff.status !== 0) revisionInventoryError = 'immutable-base file inventory unavailable';
+    else {
+      const changed = revisionDiff.stdout.split('\0').filter(Boolean);
+      for (let i = 0; i + 1 < changed.length; i += 2) {
+        const file = changed[i + 1];
+        if (!isInternal(file) && !files.some((item) => item.path === file)) files.push({
+          path: file, status: changed[i], preexisting: baseline.has(file), contentExcluded: sensitive.test(file)
+        });
+      }
     }
   }
   let diff = '';
   let includesPreexisting = false;
-  const errors = [];
+  const errors = revisionInventoryError ? [revisionInventoryError] : [];
+  const inventoryDeadline = Date.now() + 10_000;
   const baselineHashes = job.baselineHashes || {};
+  // A formerly dirty path can disappear from status when the worker restores
+  // HEAD. That is still a change relative to the job-start baseline.
+  for (const file of baseline) {
+    if (!files.some((item) => item.path === file) && !isInternal(file)
+      && baselineHashes[file] && hashWorkingFile(cwd, file) !== baselineHashes[file]) {
+      files.push({ path: file, status: ' M', preexisting: true, overlapsPreexisting: true, contentExcluded: sensitive.test(file) });
+    }
+  }
   const limit = Math.min(files.length, 1000);
   if (files.length > limit) errors.push(`file inventory capped at ${limit} of ${files.length}`);
   for (const item of files.slice(0, limit)) {
+    if (Date.now() >= inventoryDeadline) { errors.push('Git inventory time bound exceeded'); break; }
+    options.timeout = Math.max(1, Math.min(5000, inventoryDeadline - Date.now()));
+    if (item.preexisting && !job.baselineHashes?.[item.path] && job.baselineMetadata?.[item.path]
+      && job.baselineMetadata[item.path] === fileMetadata(cwd, item.path)) {
+      item.unchangedSinceBaseline = true;
+      continue;
+    }
     if (item.contentExcluded) continue;
     if (item.preexisting) {
       // A path-only baseline cannot distinguish "job merely read this dirty
@@ -2892,25 +2959,30 @@ function gitWorkspaceState(job) {
     }
     let result;
     if (item.status === '??') {
-      if (item.preexisting && !item.overlapsPreexisting) continue;
+      // Even modified pre-existing untracked bodies belong to the owner.
+      if (item.preexisting) continue;
       try {
         if (fs.statSync(path.join(cwd, item.path)).size > 5 * 1024 * 1024) {
           errors.push(`untracked file too large to diff: ${item.path}`);
           continue;
         }
       } catch { continue; }
-      result = spawnSync('git', ['diff', '--no-index', '--', '/dev/null', item.path], options);
+      result = spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', '--no-index', '--', '/dev/null', item.path], options);
       if (result.status !== 0 && result.status !== 1) errors.push((result.stderr || `cannot diff untracked file ${item.path}`).trim());
     } else {
-      result = spawnSync('git', ['diff', '--no-ext-diff', 'HEAD', '--', item.path], options);
+      result = spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', job.baseRevision || 'HEAD', '--', item.path], options);
       if (result.status !== 0) {
-        const cached = spawnSync('git', ['diff', '--no-ext-diff', '--cached', '--', item.path], options);
-        const unstaged = spawnSync('git', ['diff', '--no-ext-diff', '--', item.path], options);
+        const cached = spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', '--cached', '--', item.path], options);
+        const unstaged = spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', '--', item.path], options);
         result = { status: cached.status || unstaged.status, stdout: `${cached.stdout || ''}${unstaged.stdout || ''}`, stderr: cached.stderr || unstaged.stderr };
       }
       if (result.status !== 0) errors.push((result.stderr || `cannot diff tracked file ${item.path}`).trim());
     }
     if (result?.stdout) {
+      if (Buffer.byteLength(diff) + Buffer.byteLength(result.stdout) > 8 * 1024 * 1024) {
+        errors.push('shared-tree diff byte bound exceeded');
+        break;
+      }
       diff += result.stdout;
       if (item.preexisting) includesPreexisting = true;
     }
@@ -2919,7 +2991,31 @@ function gitWorkspaceState(job) {
 }
 
 export function recordGitState(job, sessionId, options = {}) {
+  if (job.filesystemBaselinePath || job.filesystemBaseline) {
+    let before = job.filesystemBaseline;
+    try {
+      if (!before) {
+        const expected = path.join(path.dirname(job.promptPath), `${job.id}.artifacts`, 'filesystem-baseline.json');
+        if (job.filesystemBaselinePath !== expected || fs.lstatSync(expected).isSymbolicLink() || fs.statSync(expected).size > 16 * 1024 * 1024) throw new Error('invalid filesystem baseline');
+        before = JSON.parse(fs.readFileSync(expected, 'utf8'));
+      }
+      if (!before || typeof before.complete !== 'boolean' || !before.files || typeof before.files !== 'object'
+        || Array.isArray(before.files) || Object.keys(before.files).length > 5000) throw new Error('invalid filesystem baseline shape');
+    } catch {
+      updateManagedJob(job.id, (current) => { current.changeObservation = { source: 'filesystem', state: 'unavailable', diffAvailable: false }; }, { incrementRevision: false });
+      appendJobEvent(job.id, 'provider.event', { providerEvent: 'filesystem-inventory-warning', error: 'Private filesystem baseline unavailable; acceptance remains blocked' }, { sessionId });
+      return { files: [], diff: '', error: 'filesystem baseline unavailable' };
+    }
+    const after = observeDirectory(job.cwd, { exclude: job.observationExclude });
+    const files = compareDirectoryObservations(before, after);
+    for (const file of files) appendJobEvent(job.id, 'file.changed', file, { sessionId });
+    const complete = before.complete && after.complete;
+    updateManagedJob(job.id, (current) => { current.changeObservation = { source: 'filesystem', state: complete ? 'complete' : 'partial', diffAvailable: false }; }, { incrementRevision: false });
+    if (!complete) appendJobEvent(job.id, 'provider.event', { providerEvent: 'filesystem-inventory-warning', error: 'Bounded filesystem inventory incomplete; acceptance remains blocked' }, { sessionId });
+    return { files, diff: '', error: complete ? null : 'filesystem inventory incomplete' };
+  }
   const state = gitWorkspaceState(job);
+  updateManagedJob(job.id, (current) => { current.changeObservation = { source: 'git', state: state.error ? 'partial' : 'complete', diffAvailable: Boolean(state.diff) }; }, { incrementRevision: false });
   const changed = state.files.filter((file) => !file.unchangedSinceBaseline);
   const counts = options.includeLineCounts === true
     ? new Map(diffStat(state.diff).files.map((file) => [file.path, { added: file.additions, removed: file.deletions }]))
@@ -3334,7 +3430,7 @@ async function runCursorAcpTransport(job, driver) {
     const initialized = await rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'delegate-router', version: '0.72.0' }
+      clientInfo: { name: 'delegate-router', version: '0.73.0' }
     });
     const initializeRecord = redact({
       protocolVersion: initialized.protocolVersion,

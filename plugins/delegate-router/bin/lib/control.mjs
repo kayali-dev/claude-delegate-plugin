@@ -50,6 +50,8 @@ import {
   composeWorkspaceChangeSets,
   createWorkspaceChangeSet,
   discardWorkspace,
+  inspectIntegration,
+  discardIntegration,
   inspectWorkspaceRepository,
   preflightWorkspaceChangeSets
 } from './workspace.mjs';
@@ -78,6 +80,7 @@ import {
 import { listSupervisorLeases } from './supervisor-common.mjs';
 import { executeVerification } from './verification-runner.mjs';
 import { jobTimeBudget, outputQuiet, managedTimeoutMs } from './job-health.mjs';
+import { observeDirectory, fileMetadata } from './file-observation.mjs';
 import { controllerSession, providerConcurrencyLimit } from './admission.mjs';
 import { processIdentityIsAlive, readProcessIdentityTable } from './process-identity.mjs';
 import {
@@ -107,7 +110,7 @@ const SENSITIVE_VALUE = /(?:sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+\/-]{12
 // cacheCreationInputTokens, which this list did not know, and their counts were
 // written to the journal as [REDACTED]. Rescuing a key is not a way in for a
 // secret — an allow-listed key whose value is a string is still redacted below.
-const USAGE_TOKEN_KEY = /^(?:(?:(?:max|observed|cache|cached|creation|read|reasoning|billable|prompt|completion|input|output|total|context)+tokens?(?:count|usage)?)|tokens?(?:count|usage))$/i;
+const USAGE_TOKEN_KEY = /^(?:(?:(?:max|observed|cache|cached|creation|read|write|reasoning|billable|prompt|completion|input|output|total|context)+tokens?(?:count|usage)?)|tokens?(?:count|usage))$/i;
 const SAFE_JOB_ID = /^[a-zA-Z0-9_-]+$/;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WRITE_MODES = new Set(['implement', 'verify']);
@@ -400,6 +403,11 @@ function compressTerminalJournal(job, options = {}) {
 
 function writeTerminalArtifacts(job, wasTerminal) {
   if (wasTerminal || !TERMINAL_STATUSES.has(job.status)) return;
+  job.completedAtMs ||= Date.now();
+  job.completedAt ||= Math.floor(job.completedAtMs / 1000);
+  if (job.verification?.state === 'pending' && job.status !== 'completed') {
+    job.verification = { state: 'skipped', reason: `Job ${job.status} before broker verification`, recordedAt: new Date().toISOString() };
+  }
   // A terminal record and its sentinel are public completion boundaries.
   // Finish the journal move and audit publication first so any reader that
   // observes either boundary can read the complete durable journal.
@@ -1003,6 +1011,11 @@ export function updateManagedJob(id, mutate, options = {}) {
     if (options.incrementRevision !== false) job.revision = (job.revision || 0) + 1;
     job.updatedAt = Math.floor(Date.now() / 1000);
     if (!wasTerminal && TERMINAL_STATUSES.has(job.status)) {
+      job.completedAtMs ||= Date.now();
+      job.completedAt ||= Math.floor(job.completedAtMs / 1000);
+      if (job.verification?.state === 'pending' && job.status !== 'completed') {
+        job.verification = { state: 'skipped', reason: `Job ${job.status} before broker verification`, recordedAt: new Date().toISOString() };
+      }
       writeTerminalArtifacts(job, wasTerminal);
       saveJob(job);
     } else {
@@ -1481,6 +1494,7 @@ export function inspectJobSummary(id) {
   const job = inspectJob(id);
   return {
     id: job.id,
+    revision: job.revision,
     status: job.status,
     phase: job.phase || null,
     origin: { sessionId: job.origin?.sessionId || null },
@@ -1641,6 +1655,25 @@ export function preflightManagedIntegration(ids) {
     return job;
   });
   return preflightWorkspaceChangeSets(jobs);
+}
+
+export function inspectManagedIntegration(id) {
+  return redact(inspectIntegration(id));
+}
+
+export function discardManagedIntegration(id) {
+  const record = inspectIntegration(id);
+  for (const jobId of record.jobIds) {
+    const provider = inspectJob(jobId).provider;
+    if (!providerEnabled(provider)) throw brokerError('PROVIDER_DISABLED', 'integration provider disabled', { provider });
+  }
+  const discarded = discardIntegration(id);
+  for (const jobId of record.jobIds) updateManagedJob(jobId, (job) => {
+    for (const integration of job.integrations || []) if (integration.id === id) {
+      integration.state = 'discarded'; integration.discardedAt = discarded.discardedAt;
+    }
+  }, { incrementRevision: false });
+  return redact(discarded);
 }
 
 export function prepareManagedIntegration(ids) {
@@ -2427,13 +2460,21 @@ const BASELINE_HASH_MAX_BYTES = 10 * 1024 * 1024;
 // means unknown (too large, unreadable), which callers must treat as
 // "cannot prove unchanged" and fall back to including the file.
 export function hashWorkingFile(cwd, file) {
-  const absolute = path.join(cwd, file);
+  const root = path.resolve(cwd);
+  const absolute = path.resolve(root, file);
+  const relative = path.relative(root, absolute);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
   let stat;
   try {
     stat = fs.lstatSync(absolute);
   } catch {
     return 'absent';
   }
+  try {
+    const parent = fs.realpathSync(path.dirname(absolute));
+    const parentRelative = path.relative(fs.realpathSync(root), parent);
+    if (parentRelative === '..' || parentRelative.startsWith(`..${path.sep}`) || path.isAbsolute(parentRelative)) return null;
+  } catch { return null; }
   if (stat.isSymbolicLink()) {
     try { return crypto.createHash('sha256').update(`symlink:${fs.readlinkSync(absolute)}`).digest('hex'); }
     catch { return null; }
@@ -2484,7 +2525,7 @@ function gitBaseline(cwd, options = {}) {
   const result = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
     cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 8 * 1024 * 1024
   });
-  if (result.status !== 0) return { files: [], hashes: {} };
+  if (result.status !== 0) return { files: [], hashes: {}, gitAvailable: false };
   const entries = result.stdout.split('\0').filter(Boolean);
   const files = [];
   const internalState = [
@@ -2508,12 +2549,15 @@ function gitBaseline(cwd, options = {}) {
   }
   const unique = [...new Set(files)];
   const hashes = {};
+  const metadata = {};
   for (const file of unique) {
-    if (options.excludeSensitive === true && SENSITIVE_PATH.test(file.replaceAll('\\', '/'))) continue;
+    const observed = fileMetadata(cwd, file);
+    if (observed) metadata[file] = observed;
+    if (SENSITIVE_PATH.test(file.replaceAll('\\', '/'))) continue;
     const hash = hashWorkingFile(cwd, file);
     if (hash) hashes[file] = hash;
   }
-  return { files: unique, hashes };
+  return { files: unique, hashes, metadata, gitAvailable: true };
 }
 
 const TIMEOUT_MIN_SECONDS = 60;
@@ -3285,7 +3329,8 @@ export function createManagedJob(options) {
     mode, isolation, planFirst, ambiguityCheck, verify, verification, verificationProfile, autoFix, reportSchema, workSpec, cwd: ownerCwd, transport, originalAllowedPaths, allowUnscopedWrite, allowedPaths, pathClaims, resourceClaims, effort, sandbox,
     networkAllow, addDirs, approveMcps, cursorWorktree, cursorWorktreeBase
   } = resolved;
-  const now = Math.floor(Date.now() / 1000);
+  const nowMs = Date.now();
+  const now = Math.floor(nowMs / 1000);
   const compiledPlanBudget = planOutputTokenBudget(options.prompt);
   const effectivePlanOutputTokenLimit = Math.min(
     compiledPlanBudget.limit,
@@ -3314,6 +3359,13 @@ export function createManagedJob(options) {
   const cwd = workspace?.cwd || ownerCwd;
   const staged = stageIngestFiles(cwd, resolved.ingestPlan);
   const baseline = gitBaseline(cwd);
+  const observationExclude = [jobsDir(), auditLogPath(), statePath(), `${statePath()}.lock`, providerConfigPath(),
+    ...['verification-profiles', 'collision-watch.signal', 'supervisor', 'native', 'dispatch', 'workspaces', 'integrations'].map((name) => path.join(dataDir(), name))];
+  if (path.resolve(dataDir()) !== path.resolve(cwd)) observationExclude.push(dataDir());
+  const filesystemBaseline = WRITE_MODES.has(mode) && !baseline.gitAvailable
+    ? observeDirectory(cwd, { exclude: observationExclude }) : null;
+  const filesystemBaselinePath = filesystemBaseline ? path.join(p.artifacts, 'filesystem-baseline.json') : null;
+  if (filesystemBaselinePath) writePrivate(filesystemBaselinePath, JSON.stringify(filesystemBaseline));
   for (const item of staged.ingested) {
     const hash = hashWorkingFile(cwd, item.staged);
     if (hash) baseline.hashes[item.staged] = hash;
@@ -3418,13 +3470,22 @@ export function createManagedJob(options) {
     parentJobId: options.parentJobId || null,
     planningFor: options.planningFor || null,
     createdAt: now,
+    createdAtMs: nowMs,
     updatedAt: now,
     isolation,
     attributionConfidence: isolation === 'worktree' ? 'high' : 'best-effort',
     containment: isolation === 'worktree' ? 'broker-workspace' : 'detection-only',
     baseRevision: workspace?.baseRevision || verificationRepositoryRevision(cwd),
     baselineFiles: baseline.files,
-    baselineHashes: baseline.hashes
+    baselineHashes: baseline.hashes,
+    baselineMetadata: baseline.metadata || {},
+    gitAvailable: baseline.gitAvailable,
+    observationExclude,
+    ...(filesystemBaseline ? {
+      filesystemBaselinePath,
+      changeObservation: { source: 'filesystem', state: filesystemBaseline.complete ? 'baseline-ready' : 'partial', diffAvailable: false },
+      observationWarnings: ['Git unavailable: bounded filesystem detection only; no Git diff/revision. Shared-tree attribution remains best-effort.']
+    } : {})
   };
   initializeOutcomeAttempt(job, {
     packet: options.prompt,
@@ -3476,6 +3537,10 @@ export function createManagedJob(options) {
   if (WRITE_MODES.has(job.mode) && baseline.files.length) {
     appendJobEvent(id, 'baseline.dirty', { count: baseline.files.length, paths: baseline.files.slice(0, 20) });
   }
+  if (filesystemBaseline) appendJobEvent(id, 'provider.event', {
+    providerEvent: 'filesystem-baseline', complete: filesystemBaseline.complete,
+    message: 'Non-Git workspace: bounded filesystem fingerprints detect writes; no Git diff or revision is available. Shared-tree attribution remains best-effort.'
+  });
   appendJobEvent(id, 'message.user', { text: options.prompt });
   if (!signalCollisionWatchRefresh()) {
     recordCollisionWatchDegradation([id], { reason: 'watch-refresh-signal-unavailable' });
