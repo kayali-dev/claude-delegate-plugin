@@ -65,6 +65,28 @@ function approachEntries(entries) {
   });
 }
 
+test('read-only verification targets do not breach a write fence and scope evidence names both sides honestly', () => {
+  const plan = structuralPlan({ targets: { files: ['math.mjs', 'test.mjs'], writeFiles: ['math.mjs'], components: ['math'] } });
+  const comparison = compareStructuralPlans(planText(plan), planText(plan), { allowedPaths: ['math.mjs'] });
+  assert.equal(comparison.verdict, 'convergent');
+  const other = { ...plan, targets: { ...plan.targets, writeFiles: ['math.mjs', 'test.mjs'] } };
+  const conflict = compareStructuralPlans(planText(plan), planText(other), { allowedPaths: ['math.mjs'] });
+  const scope = conflict.differences.find((entry) => entry.dimension === 'targets.scope');
+  assert.deepEqual(scope.left, []); assert.deepEqual(scope.right, ['test.mjs']);
+  const question = planReviewPresentation(planText(plan), conflict, {}).question;
+  assert.equal(question.split('The independent plans materially diverge:').length, 2);
+  const invalid = { ...plan, targets: { ...plan.targets, writeFiles: ['unlisted.mjs'] } };
+  assert.equal(parseStructuralPlan(planText(invalid)).ok, false);
+  assert.match(planPrompt({ prompt: 'bounded write' }), /Always include targets.writeFiles/);
+});
+
+test('shared read targets do not hide differing explicit write targets', () => {
+  const common = { files: ['a.mjs', 'b.mjs', 'test.mjs'], components: ['math'] };
+  const left = structuralPlan({ targets: { ...common, writeFiles: ['a.mjs'] } });
+  const right = structuralPlan({ targets: { ...common, writeFiles: ['b.mjs'] } });
+  assert.equal(compareStructuralPlans(planText(left), planText(right)).verdict, 'divergent');
+});
+
 test('partial target overlap cannot hide a target outside the granted scope', () => {
   const left = parseStructuralPlan(planText(structuralPlan({ targets: { files: ['math.mjs'], components: ['math'] } })));
   const right = parseStructuralPlan(planText(structuralPlan({ targets: { files: ['math.mjs', 'other.txt'], components: ['math'] } })));

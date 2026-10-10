@@ -1,5 +1,6 @@
 import { redact } from './control.mjs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 const WRITE_MODES = new Set(['implement', 'verify']);
 const READ_MODES = new Set(['consult', 'plan', 'review']);
@@ -104,6 +105,7 @@ function blockedApproval(events) {
 }
 
 function inputOutstanding(job, events) {
+  if (job?.status === 'cancelled') return false;
   if (job?.pendingInput?.timedOut === true
     || job?.phase === 'input-timeout'
     || job?.stopReason === 'input-timeout') return false;
@@ -227,7 +229,7 @@ export function detectActionableEdges(snapshot, options = {}) {
       ? Number(job.pendingInput.expiresAt)
       : null
   }));
-  if (blockedApproval(events)) edges.push(candidate(job, 'needs-input:permission', 'needs-input', 2, { input: 'permission' }));
+  if (job.status !== 'cancelled' && blockedApproval(events)) edges.push(candidate(job, 'needs-input:permission', 'needs-input', 2, { input: 'permission' }));
 
   if (job.status === 'completed' && WRITE_MODES.has(job.mode) && job.acceptance?.state === 'blocked') {
     edges.push(candidate(job, 'acceptance:blocked', 'blocked', 3, {
@@ -412,9 +414,11 @@ function preferred(left, right) {
 }
 
 function edgeIdentity(edge) {
-  return edge.category === 'needs-input'
+  const value = edge.category === 'needs-input'
     ? `${edge.key}:${edge.requestId || edge.input || 'unknown'}`
     : edge.key;
+  // Opaque identity: checkpointing must not retain paths or provider payloads.
+  return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 function answeredSupersede(snapshot, emittedEdge, options = {}) {
@@ -456,6 +460,46 @@ export class NotificationPolicy {
       windowMs: options.rateWindowMs
     });
     this.bootstrapped = false;
+  }
+
+  checkpoint() {
+    return {
+      version: 1, bootstrapped: this.bootstrapped,
+      active: [...this.active].filter(([, keys]) => keys.size).map(([id, keys]) => [id, [...keys]]),
+      pending: [...this.pending].map(([id, edges]) => [id, [...edges.keys()]]),
+      emittedActive: [...this.emittedActive].map(([id, edges]) => [id, [...edges].map(([key, edge]) => [key, {
+        category: edge.category,
+        requestId: /^[A-Za-z0-9_.:-]{1,256}$/.test(edge.requestId || '') ? edge.requestId : null,
+        observedAtRevision: Number.isSafeInteger(edge.observedAtRevision) ? edge.observedAtRevision : null,
+        expiresAt: Number.isSafeInteger(edge.expiresAt) ? edge.expiresAt : null
+      }])]),
+      lastEmittedAt: [...this.lastEmittedAt],
+      rate: { windowStart: this.rate.windowStart, emitted: this.rate.emitted, suppressed: this.rate.suppressed,
+        suppressedProjects: [...this.rate.suppressedProjects].map((label) => field(label, 'workspace', 160)) }
+    };
+  }
+
+  restore(value) {
+    if (!value || value.version !== 1) return;
+    const entries = (rows) => Array.isArray(rows) ? rows.filter((entry) => Array.isArray(entry)
+      && /^[A-Za-z0-9_-]{1,128}$/.test(entry[0] || '')) : [];
+    const keys = (rows) => Array.isArray(rows) ? rows.filter((key) => /^[a-f0-9]{64}$/.test(key)) : [];
+    this.active = new Map(entries(value.active).map(([id, rows]) => [id, new Set(keys(rows))]));
+    this.pending = new Map(entries(value.pending).map(([id, rows]) => [id, new Map(keys(rows).map((key) => [key, null]))]));
+    this.emittedActive = new Map(entries(value.emittedActive).map(([id, rows]) => [id, new Map(
+      (Array.isArray(rows) ? rows : []).filter((row) => Array.isArray(row) && /^[a-f0-9]{64}$/.test(row[0]) && row[1]?.category === 'needs-input')
+        .map(([key, edge]) => [key, { category: 'needs-input',
+          requestId: /^[A-Za-z0-9_.:-]{1,256}$/.test(edge.requestId || '') ? edge.requestId : null,
+          observedAtRevision: Number.isSafeInteger(edge.observedAtRevision) ? edge.observedAtRevision : null,
+          expiresAt: Number.isSafeInteger(edge.expiresAt) ? edge.expiresAt : null }])
+    )]));
+    this.lastEmittedAt = new Map(entries(value.lastEmittedAt).filter(([, time]) => Number.isFinite(time) && time >= 0));
+    const rate = value.rate || {};
+    this.rate.windowStart = Number.isFinite(rate.windowStart) ? rate.windowStart : null;
+    this.rate.emitted = Number.isSafeInteger(rate.emitted) && rate.emitted >= 0 ? rate.emitted : 0;
+    this.rate.suppressed = Number.isSafeInteger(rate.suppressed) && rate.suppressed >= 0 ? rate.suppressed : 0;
+    this.rate.suppressedProjects = new Set((Array.isArray(rate.suppressedProjects) ? rate.suppressedProjects : []).slice(0, 5000).map((label) => field(label, 'workspace', 160)));
+    this.bootstrapped = value.bootstrapped === true;
   }
 
   bootstrap(snapshots = [], options = {}) {
@@ -501,13 +545,14 @@ export class NotificationPolicy {
         if (current.has(identity)) continue;
         emitted.delete(identity);
         const supersede = answeredSupersede(snapshot, priorEdge, options);
-        if (supersede) output.push(formatEdgeLine(supersede));
+        if (supersede && !options.snoozed) output.push(...this.rate.offer(formatEdgeLine(supersede), now, monitorProjectLabel(supersede.job)));
       }
       if (emitted.size) this.emittedActive.set(jobId, emitted);
       else this.emittedActive.delete(jobId);
       const pending = new Map(
         [...(this.pending.get(jobId) || new Map())]
           .filter(([key]) => current.has(key))
+          .map(([key]) => [key, byKey.get(key)])
       );
       for (const edge of edges) {
         const identity = edgeIdentity(edge);

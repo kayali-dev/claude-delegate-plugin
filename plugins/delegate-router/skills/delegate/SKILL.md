@@ -77,10 +77,17 @@ bounded; task-level failures are not transport retries.
 ## Supervise without noisy polling
 
 Retain job ID and latest revision. Use native `/delegate-dashboard`,
-`/delegate-status`, inspect/diff commands, or the existing monitor. A quiet agent
+`/delegate-status`, inspect/diff commands, or native notifications with legacy
+monitor fallback. Status is a cached observation with age, not a synchronous
+provider query. Notifications append metadata without starting a Claude turn.
+A quiet agent
 may still be investigating: silence alone is not a stall or timeout. Native host
 status is preferred; absent status/usage stays unknown. Managed timeouts count
 elapsed wall-clock, including approval waits, not time since the last output.
+For MCP pull monitoring use `delegate_inspect view="summary"`; for long results,
+use `view="result"` with `resultWindow` rather than the full snapshot. Start
+statistics reads with `delegate_stats view="summary"`; detail pages preserve
+full-population rates and expose `display.nextOffset`.
 
 For human-operated composition/review, point to `/delegate-new`,
 `/delegate-review`, `/delegate-context`, `/delegate-queue` and `/delegate-agents`

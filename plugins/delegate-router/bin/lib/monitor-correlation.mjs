@@ -247,6 +247,8 @@ function correlationStateReason(error) {
 function writeResolution(options) {
   const now = Number(options.now ?? Date.now());
   const resolutionId = crypto.randomUUID();
+  const requestedScope = ['session', 'workspace', 'all', 'off'].includes(options.requestedScope)
+    ? options.requestedScope : 'session';
   const record = {
     version: 2,
     kind: 'monitor-resolution',
@@ -257,7 +259,8 @@ function writeResolution(options) {
     createdAtMs: now,
     expiresAtMs: now + RECORD_RETENTION_MS,
     status: options.ok ? 'correlated' : 'degraded',
-    effectiveScope: options.ok ? 'session' : 'workspace',
+    requestedScope,
+    effectiveScope: requestedScope === 'session' ? (options.ok ? 'session' : 'workspace') : requestedScope,
     sessionId: options.ok ? options.sessionId : null,
     reason: options.reason || null,
     markerId: options.markerId || null,
@@ -299,6 +302,7 @@ function resolvedResult(options) {
 }
 
 export function resolveMonitorSession(options = {}) {
+  const recordResult = (result) => resolvedResult({ ...result, requestedScope: options.requestedScope });
   const workspaceId = canonicalDirectory(options.workspaceId);
   const monitorPid = safePid(options.monitorPid ?? process.pid);
   const monitorParentPid = safePid(options.parentPid ?? options.coordinatorPid ?? process.ppid);
@@ -313,7 +317,7 @@ export function resolveMonitorSession(options = {}) {
   const chainResult = walkProcessIdentityChain(monitorParentPid, options);
   cleanupMonitorCorrelation(options.stateDirectory, now, { processes: chainResult.processes });
   if (!chainResult.ok) {
-    return resolvedResult({
+    return recordResult({
       stateDirectory: options.stateDirectory,
       now,
       ok: false,
@@ -352,7 +356,7 @@ export function resolveMonitorSession(options = {}) {
   }
 
   if (!candidates.length) {
-    return resolvedResult({
+    return recordResult({
       stateDirectory: options.stateDirectory,
       now,
       ok: false,
@@ -368,7 +372,7 @@ export function resolveMonitorSession(options = {}) {
   const nearest = candidates.filter((candidate) => candidate.match.monitorDepth === bestDepth);
   const sessionIds = [...new Set(nearest.map((candidate) => candidate.marker.sessionId))];
   if (sessionIds.length !== 1) {
-    return resolvedResult({
+    return recordResult({
       stateDirectory: options.stateDirectory,
       now,
       ok: false,
@@ -386,7 +390,7 @@ export function resolveMonitorSession(options = {}) {
     || right.marker.markerId.localeCompare(left.marker.markerId)
   ));
   const selected = nearest[0];
-  return resolvedResult({
+  return recordResult({
     stateDirectory: options.stateDirectory,
     now,
     ok: true,

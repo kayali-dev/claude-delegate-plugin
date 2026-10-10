@@ -30,7 +30,7 @@ Stop and report when:
 Return: outcome, changed files, verification, risks, blockers, continuation id.
 ```
 
-Pass `allowedPaths` on `delegate_start` for every write-mode job with a known file scope: the broker injects the fence into the worker prompt and records any out-of-scope changed file as `scopeViolations` on the job (plus a `scope.violation` event) — check it before accepting the result. Give retryable starts a caller-stable `idempotencyKey`; a replay in the same cwd returns the original job. Set `maxOutputTokens` when a run needs a hard observed-output ceiling. Use `waitFor: 'session' | 'turn' | 'first-output'` for a bounded start milestone; `waitForSession=true` remains the session alias. Use `dryRun=true` to inspect the resolved options, ingest plan, lint findings, and exact provider packet without launching.
+Pass `allowedPaths` on `delegate_start` for every write-mode job with a known file scope: the broker injects the fence into the worker prompt and records any out-of-scope changed file as `scopeViolations` on the job (plus a `scope.violation` event) — check it before accepting the result. Give retryable starts a caller-stable `idempotencyKey`; a replay in the same cwd returns the original job. Set `maxOutputTokens` when a run needs a hard observed-output ceiling. Use `waitFor: 'session' | 'turn' | 'first-output'` for a bounded start milestone; `turn` means STARTED, not finished, and `waitForSession=true` remains the session alias. Use `dryRun=true` to inspect the resolved options, ingest plan, lint findings, advisory writer/claim blockers, and exact provider packet without launching or reconciling jobs. Admission is checked again at real launch.
 
 Managed write starts are plan-first by default. The broker runs a read-only plan
 turn, presents predicted files/components plus observed token/duration bands,
@@ -45,7 +45,10 @@ outcomes and successful structural primary plans can override the declaration
 for that provider/model. With no observations, the declared lane capability is
 used rather than treating missing data as support.
 Concrete file overlap is strong agreement; disjoint file targets and explicit
-same-topic decision contradictions are blocking conflicts. Component names,
+same-topic decision contradictions are blocking conflicts. New plans separate
+`targets.writeFiles` from read-only files: only declared edits face the write
+fence, and differing explicit edits remain blocking. Legacy plans lacking that
+field retain conservative all-target scope checks. Component names,
 approach ordering/granularity, and unmatched assumption wording are weak;
 approach-content differences are moderate. They remain visible as additive
 weighted variance evidence but do not overrule agreed file targets. The verdict
@@ -421,7 +424,7 @@ repeat a suggestion inside one logical task, announce successful intermediate
 activity, or demand immediate review merely because a provider completed.
 Everything else belongs in the status line or remains available through pull.
 
-For long managed jobs in Claude Code, use the plugin monitor or the `finishedPath` fallback above and continue other work; a background Bash waiter can be reaped by the harness. From a normal terminal, `delegate-jobs wait <job-id>` exits 0 completed, 3 failed, 4 cancelled, 5 no observed changes, 6 verification failed, or 75 wait-timeout. Bound the job with `timeoutSeconds` (60–86400; default 3600). `maxOutputTokens` uses provider-aware cancellation and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and continuation identity; enforcement can only be live on lanes with mid-turn usage.
+For long managed jobs in Claude Code, use native notifications with legacy monitor fallback, or the `finishedPath` fallback above, and continue other work; a background Bash waiter can be reaped by the harness. From a normal terminal, `delegate-jobs wait <job-id>` exits 0 completed, 3 failed, 4 cancelled, 5 no observed changes, 6 verification failed, or 75 wait-timeout. Bound the job with `timeoutSeconds` (60–86400; default 3600). `maxOutputTokens` uses provider-aware cancellation and fails with `stoppedReason: "budget"` plus `BUDGET_EXCEEDED`, preserving partial state and continuation identity; enforcement can only be live on lanes with mid-turn usage.
 
 Shared write modes (`implement`, `verify`) are refused with `WRITER_ACTIVE` while another shared writer is active in the same cwd; wait or cancel the active writer, and pass `overrideWriter=true` only when the user explicitly accepts concurrent shared writers. Workspace-isolated jobs instead require claims: overlapping path prefixes or exact resource IDs fail with `CLAIM_CONFLICT`, and a shared writer owns the whole repository for scheduling. A live shared-tree collision alert means a write already happened: inspect the named path and rerun stale verification before any acceptance decision.
 

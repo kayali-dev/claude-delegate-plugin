@@ -83,6 +83,9 @@ function usage() {
   console.log(`
 Intent compilation never launches by itself. Write starts render one provenance/confidence card and require interactive confirmation; --accept-spec is the explicit non-interactive automation confirmation flag. It never resolves an unresolved field or grants allowedPaths, network, sandbox-off, privilege, or a budget increase.`);
   console.log(`
+--wait-for turn waits for turn START, not completion; use wait <job-id> for completion.
+--dry-run reports advisory writer/claim blockers without reconciling jobs; admission is checked again at launch.`);
+  console.log(`
 Codex aliases: sol=gpt-6.1-sol, astra=gpt-6-astra, luna=gpt-6-luna, terra=gpt-5.6-terra. Full IDs remain pinned; auto uses Codex configuration.
 Cursor aliases: composer, grok, grok-xhigh, grok-fast, auto. Catalogs determine versions and tiers; fast is opt-in.`);
 }

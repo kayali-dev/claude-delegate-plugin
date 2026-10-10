@@ -1,5 +1,20 @@
 export const NATIVE_PANE = 'delegate-router-jobs';
 
+// Terminal ui.log paints only its first 2,000 characters and sanitizes embedded
+// newlines. Use separate bounded lines, preserving surrogate pairs.
+export function commandLogPages(source) {
+  const pages = [];
+  for (const text of String(source).split('\n')) {
+    if (!text) { pages.push(''); continue; }
+    for (let offset = 0; offset < text.length;) {
+      let end = Math.min(text.length, offset + 1800);
+      if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end--;
+      pages.push(text.slice(offset, end)); offset = end;
+    }
+  }
+  return pages;
+}
+
 export function jobAttentionRank(job) {
   return job.pendingInput ? 0 : job.scopeViolationCount || job.status === 'failed' || job.acceptance === 'blocked' ? 1
     : job.acceptance === 'ready-for-review' ? 2 : ['running', 'queued'].includes(job.status) ? 3 : 4;
@@ -31,7 +46,9 @@ export function readablePlan(source) {
       || Object.keys(plan).some((key) => !['targets', 'approach', 'assumptions', 'risks'].includes(key))) return source;
     const literal = (value) => String(value ?? '').replace(/([\\`*_{}\[\]<>#])/g, '\\$1');
     const section = (title, entries) => `### ${title}\n\n${entries.length ? entries.map((entry) => `- ${entry}`).join('\n') : 'No entries recorded.'}`;
-    return [section('Files', plan.targets.files.map(literal)), section('Components', plan.targets.components.map(literal)),
+    return [section('Files', plan.targets.files.map(literal)),
+      ...(Array.isArray(plan.targets.writeFiles) ? [section('Intended edits', plan.targets.writeFiles.map(literal))] : []),
+      section('Components', plan.targets.components.map(literal)),
       section('Approach', plan.approach.map((entry) => `${literal(entry.kind)}: ${literal(entry.component)}`)),
       section('Assumptions', plan.assumptions.map((entry) => `${literal(entry.topic)}: ${literal(entry.choice)}`)),
       section('Risks', plan.risks.map(literal))].join('\n\n');
@@ -49,6 +66,7 @@ export function nativeUsagePayload(reading) {
 export function nativeOptions(values = {}) {
   return {
     native_enabled: values.native_enabled !== false,
+    native_notifications: values.native_notifications !== false,
     usage_capture: values.usage_capture !== false,
     compact_status: values.compact_status !== false,
     reviewer_guard: values.reviewer_guard !== false,

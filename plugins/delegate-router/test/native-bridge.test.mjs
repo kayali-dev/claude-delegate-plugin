@@ -8,10 +8,19 @@ import { fileURLToPath } from 'node:url';
 import { claudeUsageWindows, captureClaudeUsage } from '../bin/lib/claude-usage.mjs';
 import { dispatchNative, nativeOverview } from '../bin/lib/native-bridge.mjs';
 import { negotiateMcpVersion, toolAnnotations } from '../bin/lib/mcp-contract.mjs';
-import { nativeOptions, overviewText, reviewerGuardDecision, orderedJobRows, readablePlan } from '../hooks/native-view.mjs';
+import { nativeOptions, overviewText, reviewerGuardDecision, orderedJobRows, readablePlan, commandLogPages } from '../hooks/native-view.mjs';
 import { loadState, saveJob, saveState, effectiveUsage } from '../bin/lib/state.mjs';
 
 const plugin = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+test('native command logs retain complete text within terminal paint limits', () => {
+  const body = 'x'.repeat(1799) + '😀' + 'x'.repeat(6000);
+  const pages = commandLogPages(body);
+  assert.equal(pages.join(''), body);
+  assert.ok(pages.every((page) => page.length <= 1800));
+  assert.ok(pages.every((page) => !/[\ud800-\udbff]$/.test(page)));
+  assert.deepEqual(commandLogPages('first\nsecond\n'), ['first', 'second', '']);
+});
 function isolated(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-native-bridge-'));
   const before = { state: process.env.DELEGATE_STATE_FILE, providers: process.env.DELEGATE_ENABLED_PROVIDERS };
@@ -42,6 +51,35 @@ test('native inspection retains shared base and nested Codex output usage', asyn
   saveJob(job('input-only-job', { usage: { inputTokens: 99 } }));
   const unknown = await dispatchNative('inspect', { sessionId: 'native-session', jobId: 'input-only-job' });
   assert.equal(unknown.observedOutputTokens, null, 'input-only usage does not establish zero output');
+});
+
+test('native notifications use ambient session scope even when the panel shows all jobs', async (t) => {
+  isolated(t);
+  const previous = { scope: process.env.DELEGATE_MONITOR_SCOPE, enabled: process.env.DELEGATE_MONITOR };
+  process.env.DELEGATE_MONITOR_SCOPE = 'session'; process.env.DELEGATE_MONITOR = '1';
+  t.after(() => {
+    for (const [name, value] of [['DELEGATE_MONITOR_SCOPE', previous.scope], ['DELEGATE_MONITOR', previous.enabled]]) {
+      if (value == null) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+  await dispatchNative('notifications', { sessionId: 'native-session', projectDir: '/tmp/native-project' });
+  saveJob(job('own-input', { pendingInput: { requestId: 'own-request', kind: 'plan-confirmation', requiresHumanDecision: true } }));
+  saveJob(job('foreign-input', { origin: { sessionId: 'other' }, pendingInput: { requestId: 'foreign-request' } }));
+  const result = await dispatchNative('notifications', { sessionId: 'native-session', projectDir: '/tmp/native-project', scope: 'all' });
+  assert.equal(result.lines.length, 1); assert.ok(!JSON.stringify(result).includes('foreign-input'));
+  assert.match(result.lines[0], /requiresHumanDecision=true/);
+  await dispatchNative('notifications-ack', { sessionId: 'native-session', projectDir: '/tmp/native-project', deliveryId: result.deliveryId });
+  assert.deepEqual((await dispatchNative('notifications', { sessionId: 'native-session', projectDir: '/tmp/native-project' })).lines, []);
+  process.env.DELEGATE_MONITOR = '0';
+  assert.equal((await dispatchNative('notifications', { sessionId: 'native-session', projectDir: '/tmp/native-project' })).disabled, true);
+});
+
+test('native projections do not expose terminal requests as actionable', () => {
+  const result = nativeOverview({ sessionId: 'native-session' }, { enabled: ['codex'], usageState: { providers: { claude: { windows: {} }, codex: { windows: {} } }, history: [] }, queue: [], jobs: [
+    job('cancelled-gate', { status: 'cancelled', phase: 'cancelled', errorCode: 'USER_INPUT_REQUIRED', pendingInput: { requestId: 'stale' } })
+  ] });
+  assert.equal(result.jobs[0].pendingInput, null); assert.equal(result.jobs[0].canAnswer, false);
+  assert.equal(result.workState.blockedCount, 0);
 });
 
 test('native job ordering keeps attention ahead of active work and history', () => {
@@ -201,6 +239,7 @@ test('native options are conservative and reviewer guard never rewrites a model'
   assert.equal(nativeOptions({ refresh_seconds: 0 }).refresh_seconds, 5);
   assert.equal(nativeOptions({ refresh_seconds: 999 }).refresh_seconds, 30);
   assert.equal(nativeOptions({ native_enabled: false }).native_enabled, false);
+  assert.equal(nativeOptions({ native_notifications: false }).native_notifications, false);
   const usage = { allowance: [{ provider: 'claude', known: true, usedPercent: 95, avoidPercent: 90 }] };
   assert.match(reviewerGuardDecision({ subagentType: 'delegate-router:reviewer', model: 'opus' }, usage), /do not silently change/);
   assert.equal(reviewerGuardDecision({ subagentType: 'Explore' }, usage), null);

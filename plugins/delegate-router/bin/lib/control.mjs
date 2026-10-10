@@ -402,6 +402,10 @@ function compressTerminalJournal(job, options = {}) {
 }
 
 function writeTerminalArtifacts(job, wasTerminal) {
+  if (TERMINAL_STATUSES.has(job.status) && job.pendingInput && job.pendingInput.timedOut !== true) {
+    job.lastPendingInput = { ...pendingInputSummary(job.pendingInput), closedReason: job.status };
+    job.pendingInput = null;
+  }
   if (wasTerminal || !TERMINAL_STATUSES.has(job.status)) return;
   job.completedAtMs ||= Date.now();
   job.completedAt ||= Math.floor(job.completedAtMs / 1000);
@@ -1441,7 +1445,7 @@ function pendingInputSummary(pendingInput) {
 }
 
 export function jobAttention(job) {
-  if (job?.pendingInput?.timedOut === true
+  if (TERMINAL_STATUSES.has(job?.status) || job?.pendingInput?.timedOut === true
     || (job?.phase !== 'user-input-required' && !job?.pendingInput)) return null;
   return {
     state: 'user-input-required',
@@ -1463,7 +1467,8 @@ export function jobConclusion(job) {
     health,
     reason: declined
       ? 'plan-declined'
-      : job.stoppedReason || job.stopReason || job.errorCode || null
+      : [job.stoppedReason, job.stopReason, job.errorCode].find((value) => value && value !== 'USER_INPUT_REQUIRED')
+        || (job.status === 'cancelled' ? 'CANCELLED' : null)
   };
 }
 
@@ -2534,7 +2539,7 @@ function gitBaseline(cwd, options = {}) {
     auditLogPath(),
     statePath(),
     providerConfigPath(),
-    path.join(dataDir(), 'verification-profiles')
+    ...['verification-profiles', 'notification-handoff', 'monitor-correlation', 'native-previews', 'native', 'dispatch', 'supervisor'].map((name) => path.join(dataDir(), name))
   ].filter(Boolean).map((candidate) => path.relative(cwd, candidate).replaceAll('\\', '/').replace(/\/+$/, ''))
     .filter((candidate) => candidate && candidate !== '..' && !candidate.startsWith('../') && !path.isAbsolute(candidate));
   const internal = (file) => internalState.some((candidate) => file === candidate || file.startsWith(`${candidate}/`));
@@ -3251,6 +3256,15 @@ export function previewManagedJob(options) {
   prepared.ambiguityCheck = prepared.planFirst && ambiguityDefault(prepared);
   const provider = validateProvider(prepared.provider);
   const resolved = resolveManagedJobOptions(prepared, jobId(provider));
+  const launchBlockers = resolved.unscopedWriteBlocked ? ['missing-allowed-scope'] : [];
+  let writerBlocker = null;
+  try { assertNoActiveWriter({ ...prepared, ...resolved,
+    resourceClaims: resolved.resourceClaims?.length ? resolved.resourceClaims : undefined }, { reconcile: false }); }
+  catch (error) {
+    if (!['WRITER_ACTIVE', 'CLAIM_CONFLICT'].includes(error.code)) throw error;
+    launchBlockers.push(error.code);
+    writerBlocker = { code: error.code, activeJobId: error.activeJobId || error.details?.activeJobId || null };
+  }
   const packetJob = {
     allowSensitive: prepared.allowSensitive === true,
     allowedPaths: resolved.allowedPaths,
@@ -3273,8 +3287,9 @@ export function previewManagedJob(options) {
     cwd: resolved.cwd,
     originalAllowedPaths: resolved.originalAllowedPaths,
     allowUnscopedWrite: resolved.allowUnscopedWrite,
-    launchBlocked: resolved.unscopedWriteBlocked,
-    launchBlockers: resolved.unscopedWriteBlocked ? ['missing-allowed-scope'] : [],
+    launchBlocked: launchBlockers.length > 0,
+    launchBlockers,
+    ...(writerBlocker ? { writerBlocker } : {}),
     allowedPaths: resolved.allowedPaths,
     pathClaims: resolved.pathClaims,
     resourceClaims: resolved.resourceClaims,
@@ -3360,7 +3375,7 @@ export function createManagedJob(options) {
   const staged = stageIngestFiles(cwd, resolved.ingestPlan);
   const baseline = gitBaseline(cwd);
   const observationExclude = [jobsDir(), auditLogPath(), statePath(), `${statePath()}.lock`, providerConfigPath(),
-    ...['verification-profiles', 'collision-watch.signal', 'supervisor', 'native', 'dispatch', 'workspaces', 'integrations'].map((name) => path.join(dataDir(), name))];
+    ...['verification-profiles', 'collision-watch.signal', 'supervisor', 'native', 'native-previews', 'notification-handoff', 'monitor-correlation', 'dispatch', 'workspaces', 'integrations'].map((name) => path.join(dataDir(), name))];
   if (path.resolve(dataDir()) !== path.resolve(cwd)) observationExclude.push(dataDir());
   const filesystemBaseline = WRITE_MODES.has(mode) && !baseline.gitAvailable
     ? observeDirectory(cwd, { exclude: observationExclude }) : null;
@@ -4416,7 +4431,7 @@ export function latestShadowJobForSession(provider, providerSessionId) {
       - Number(left.createdAtMs || Number(left.createdAt || 0) * 1000))[0] || null;
 }
 
-function assertNoActiveWriter(options) {
+function assertNoActiveWriter(options, runtime = {}) {
   if (!WRITE_MODES.has(options.mode) || options.overrideWriter === true) return;
   const cwd = path.resolve(options.cwd || process.cwd());
   const isolation = options.isolation || 'shared';
@@ -4427,7 +4442,7 @@ function assertNoActiveWriter(options) {
     claimContains(leftClaim, rightClaim) || claimContains(rightClaim, leftClaim)));
   for (const other of listJobs()) {
     if (other.managedBy !== 'delegate-control' || !WRITE_MODES.has(other.mode)) continue;
-    const current = ['running', 'queued'].includes(other.status) ? reconcileJob(other.id) : other;
+    const current = runtime.reconcile !== false && ['running', 'queued'].includes(other.status) ? reconcileJob(other.id) : other;
     if (TERMINAL_STATUSES.has(current.status)) continue;
     const otherIsolation = current.isolation || 'shared';
     const otherRoot = canonicalOriginDirectory(current.workspace?.ownerRoot || verificationRepositoryRoot(current.cwd || cwd));
@@ -4582,7 +4597,7 @@ export function launchManagedJob(options, runtime = {}) {
 export async function launchManagedJobForCaller(options, waitTarget = null) {
   if (options.dryRun !== true) {
     const policy = previewManagedJob({ ...options, dryRun: true });
-    if (policy.launchBlocked) {
+    if (policy.launchBlockers.includes('missing-allowed-scope')) {
       throw brokerError('INVALID_REQUEST', 'write launch requires an Allowed scope section or explicit allowedPaths; use allowUnscopedWrite=true / --allow-unscoped-write only for an intentional unfenced write');
     }
   }

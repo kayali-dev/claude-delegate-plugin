@@ -22,6 +22,7 @@ import {
   jobUsage,
   launchManagedJob,
   launchManagedJobForCaller,
+  previewManagedJob,
   listManagedJobs,
   pruneJobs,
   readJobEventPage,
@@ -635,6 +636,34 @@ test('write-mode launches are blocked while another writer is active in the same
     assert.equal(error.activeJobId, writer.id);
   }
   assert.throws(() => launchManagedJob({ provider: 'codex', mode: 'verify', cwd: directory, prompt: 'verifier' }), /WRITER_ACTIVE/);
+}));
+
+test('dry-run writer admission reports blockers without reconciling or changing any job', () => isolated(async (directory) => {
+  const writer = createManagedJob({ provider: 'codex', mode: 'implement', cwd: directory, prompt: 'writer' });
+  updateManagedJob(writer.id, (current) => { current.status = 'running'; current.workerPid = process.pid; });
+  const before = loadJob(writer.id);
+  const request = { provider: 'codex', mode: 'implement', cwd: directory, prompt: 'second writer', allowedPaths: ['hello.txt'], planFirst: false };
+  const preview = previewManagedJob(request);
+  assert.equal(preview.launchBlocked, true);
+  assert.deepEqual(preview.launchBlockers, ['WRITER_ACTIVE']);
+  assert.equal(preview.writerBlocker.activeJobId, writer.id);
+  assert.deepEqual(loadJob(writer.id), before);
+  await assert.rejects(() => launchManagedJobForCaller(request), { code: 'WRITER_ACTIVE' });
+  assert.equal(previewManagedJob({ ...request, overrideWriter: true }).launchBlocked, false);
+}));
+
+test('terminal cancellation closes a live decision and removes stale input attention', () => isolated((directory) => {
+  const job = createManagedJob({ provider: 'codex', cwd: directory, prompt: 'decision' });
+  updateManagedJob(job.id, (current) => {
+    current.status = 'running'; current.workerPid = process.pid; current.phase = 'user-input-required';
+    current.errorCode = 'USER_INPUT_REQUIRED';
+    current.pendingInput = { requestId: 'plan-gate', kind: 'plan-confirmation', requiresHumanDecision: true };
+  });
+  updateManagedJob(job.id, (current) => { current.status = 'cancelled'; current.phase = 'cancelled'; });
+  const result = inspectJob(job.id);
+  assert.equal(result.pendingInput, null); assert.equal(result.attention, null);
+  assert.equal(result.conclusion.reason, 'CANCELLED');
+  assert.equal(loadJob(job.id).lastPendingInput.closedReason, 'cancelled');
 }));
 
 test('writer guard honors an explicit overrideWriter bypass', () => isolated((directory) => {

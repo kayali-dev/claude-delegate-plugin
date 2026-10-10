@@ -12,6 +12,51 @@ import { waitForChildExit, waitForCondition } from './helpers/wait.mjs';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const server = path.join(root, 'bin', 'delegate-control-mcp');
 
+test('MCP result-only inspection stays compact and full windows remove both unbounded text aliases', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-result-window-'));
+  const previous = process.env.DELEGATE_STATE_FILE;
+  process.env.DELEGATE_STATE_FILE = path.join(directory, 'usage.json');
+  let child;
+  try {
+    const { createManagedJob, updateManagedJob } = await import('../bin/lib/control.mjs');
+    const job = createManagedJob({ provider: 'codex', mode: 'consult', cwd: directory, prompt: 'No provider is launched.' });
+    const body = 'verified-result '.repeat(3000);
+    updateManagedJob(job.id, (current) => {
+      current.status = 'completed'; current.resultText = body; current.result = { text: body, structured: { summary: 'Retained structured metadata' } };
+      current.plan = 'unrelated-full-metadata '.repeat(1000);
+    });
+    child = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, DELEGATE_ENABLED_PROVIDERS: 'codex' } });
+    const responses = [];
+    const lines = readline.createInterface({ input: child.stdout });
+    lines.on('line', (line) => responses.push(JSON.parse(line)));
+    for (const [index, view] of ['result', 'full'].entries()) {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: index, method: 'tools/call', params: {
+        name: 'delegate_inspect', arguments: { jobId: job.id, view, resultWindow: { offset: 500, maxChars: 1500 } }
+      } })}\n`);
+    }
+    await waitForCondition({ description: 'both result-window responses', timeoutMs: 2000,
+      observe: () => responses.length, predicate: (count) => count === 2 });
+    child.stdin.end(); await waitForChildExit({ child, description: 'result window MCP exit' });
+    const compactText = responses.find((response) => response.id === 0).result.content[0].text;
+    const compact = JSON.parse(compactText);
+    const full = JSON.parse(responses.find((response) => response.id === 1).result.content[0].text);
+    for (const result of [compact, full]) {
+      assert.equal(result.resultText, body.slice(500, 2000));
+      assert.equal(result.totalChars, body.length); assert.equal(result.nextOffset, 2000);
+    }
+    assert.equal(compact.result, undefined, 'compact pages must not duplicate final text');
+    assert.equal(full.result.text, body.slice(500, 2000));
+    assert.equal(full.result.structured.summary, 'Retained structured metadata');
+    assert.ok(compactText.length < 5000); assert.equal(compact.plan, undefined);
+    assert.ok(full.plan.length > 20_000, 'full metadata is intentionally separate from the result text window');
+  } finally {
+    if (child && child.exitCode == null) child.kill('SIGTERM');
+    if (previous == null) delete process.env.DELEGATE_STATE_FILE; else process.env.DELEGATE_STATE_FILE = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('control MCP initializes and exposes the complete supervision surface', async () => {
   const child = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, DELEGATE_ENABLED_PROVIDERS: 'codex,cursor' } });
   const lines = readline.createInterface({ input: child.stdout });
@@ -46,6 +91,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
         delete legacy.properties.autoFix;
         delete legacy.properties.maxSubagents;
         delete legacy.properties.maxTotalOutputTokens;
+        if (legacy.properties.waitFor) legacy.properties.waitFor.description = 'Bounded wait for provider session establishment, the first turn, or the first visible output event.';
         if (legacy.properties.reportSchema) legacy.properties.reportSchema.description = 'Best-effort structured final-result contract. Missing or invalid JSON never fails the job.';
         const verify = legacy.properties.verify;
         legacy.properties.verify = {
@@ -75,6 +121,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
         delete legacy.properties.blockedOnInput;
       }
       if (name === 'delegate_stats') {
+        for (const option of ['view', 'limit', 'offset', 'maxChars']) delete legacy.properties[option];
         delete legacy.properties.model;
         delete legacy.properties.until;
         delete legacy.properties.recommendFor;
@@ -119,7 +166,7 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.ok(start.inputSchema.properties.waitForSession);
   assert.ok(start.inputSchema.properties.dryRun);
   assert.ok(inspect.inputSchema.properties.resultWindow);
-  assert.deepEqual(inspect.inputSchema.properties.view.enum, ['summary', 'full']);
+  assert.deepEqual(inspect.inputSchema.properties.view.enum, ['summary', 'full', 'result']);
   assert.equal(inspect.inputSchema.properties.view.default, 'full');
   assert.ok(list.inputSchema.properties.phase);
   assert.ok(list.inputSchema.properties.blockedOnInput);

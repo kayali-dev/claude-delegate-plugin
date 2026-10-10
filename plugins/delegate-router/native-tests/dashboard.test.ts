@@ -18,19 +18,21 @@ const PANE = {
   props: { title: 'Delegate jobs', isFocused: true, bodyColumns: 60, placement: 'inline', scroll: { offset: 0, bodyRows: 20 }, view: {} }
 } as const;
 
-function setup(on, values: { question?: string, beforeAnswer?: () => Promise<void>, snapshot?: any, job?: any, surfaces?: string[], failAction?: string, failAfter?: number, errorCode?: string, usage?: any, agents?: any[], messages?: any[], processResult?: (action: string, payload: any) => any } = {}) {
+function setup(on, values: { question?: string, beforeAnswer?: () => Promise<void>, snapshot?: any, job?: any, surfaces?: string[], failAction?: string, failAfter?: number, errorCode?: string, usage?: any, agents?: any[], agentList?: () => Promise<void>, appendDeny?: string, messages?: any[], processResult?: (action: string, payload: any) => any } = {}) {
   const calls: any[] = [];
   const commands: any[] = [];
   const questions: any[] = [];
   const logs: any[] = [];
   const opened: any[] = [];
+  const appended: any[] = [];
   const clock = mock.clock(on);
   on('session.id', () => ({ value: 'native-session' }));
   on('session.root', () => ({ value: '/tmp/native-project' }));
   on('session.cwd', () => ({ value: '/tmp/native-project/subdir' }));
   on('session.usage', () => ({ value: values.usage || { context: {}, rateLimits: [] } }));
   on('session.surfaces', () => ({ value: values.surfaces || ['terminal'] }));
-  on('agent.list', () => ({ value: values.agents || [] }));
+  on('agent.list', async () => { await values.agentList?.(); return { value: values.agents || [] }; });
+  on('session.append', ($, e, next) => { appended.push(e); return values.appendDeny ? { deny: values.appendDeny } : next(e); });
   on('session.messages', () => ({ value: values.messages || [] }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('session.end', () => ({ sessionId: 'native-session' }));
@@ -58,8 +60,46 @@ function setup(on, values: { question?: string, beforeAnswer?: () => Promise<voi
           : action === 'usage' ? { captured: 0 } : { commandId: 'native-command' });
     return { value: { exitCode: 0, stdout: JSON.stringify({ ok: true, result }), stderr: '' } };
   });
-  return { calls, commands, questions, logs, opened, clock };
+  return { calls, commands, questions, logs, opened, appended, clock };
 }
+
+test('status does not wait behind an in-flight host-agent refresh', async ($, on) => {
+  let block = false, entered, release;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const { clock, calls, logs } = setup(on, { agentList: async () => { if (block) { entered(); await held; } } });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  block = true;
+  const refreshing = clock.advance(5_000);
+  await started;
+  try {
+    const response = await $.command.run({ command: 'delegate-status', args: '' });
+    expect(response.text).toContain('native-job');
+    expect(calls.filter((call) => call.argv[2] === 'snapshot').length).toBe(1);
+    expect(logs.some((line) => line.to === 'debug' && line.text.includes('response ready'))).toBe(true);
+  } finally { release(); await refreshing; }
+});
+
+test('native notifications append observations without a new turn, then acknowledge delivery', async ($, on) => {
+  const { calls, appended, logs, clock } = setup(on, { processResult: (action) => action === 'notifications'
+    ? { deliveryId: 'd'.repeat(32), lines: ['delegate[project]: native-job failure (PROVIDER_ERROR)'] } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(5_000);
+  expect(appended.length).toBe(1);
+  expect(appended[0].message.type).toBe('user');
+  expect(appended[0].message.content[0].text).toContain('not human approval');
+  expect(logs.filter((line) => line.text.includes('native-job failure')).length).toBe(1);
+  expect(calls.filter((call) => call.argv[2] === 'notifications-ack').length).toBe(2);
+  expect(calls.some((call) => /launch|enqueue|respond|steer/.test(call.argv[2]))).toBe(false);
+});
+
+test('failed native observation delivery is not acknowledged and leaves monitor fallback available', async ($, on) => {
+  const { calls, logs } = setup(on, { appendDeny: 'diagnostic denial', processResult: (action) => action === 'notifications'
+    ? { deliveryId: 'd'.repeat(32), lines: ['delegate[project]: job needs-input'] } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  expect(calls.filter((call) => call.argv[2] === 'notifications-ack').length).toBe(0);
+  expect(logs.some((line) => line.text.includes('legacy monitor will take over'))).toBe(true);
+});
 
 test('native startup registers immediate commands and status requires no model call', async ($, on) => {
   const { commands, calls } = setup(on);
@@ -69,6 +109,17 @@ test('native startup registers immediate commands and status requires no model c
   expect(commands.length).toBe(13);
   expect(commands.every((command) => command.immediate === true)).toBe(true);
   expect(calls.every((call) => call.argv[0] === 'node' && call.argv[1].endsWith('/bin/delegate-native'))).toBe(true);
+});
+
+test('human status output uses immediately painted logs without a duplicate delayed result', async ($, on) => {
+  const { logs } = setup(on, { snapshot: { ...SNAPSHOT, jobs: [] } });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  const answer = await $.command.run({ command: 'delegate-status', args: '', origin: { kind: 'composer' } });
+  expect(answer.text).toBeUndefined();
+  expect(logs.filter((entry) => entry.to !== 'debug' && entry.text.includes('No jobs in this scope.')).length).toBe(1);
+  expect(logs.filter((entry) => entry.to !== 'debug').every((entry) => !entry.text.includes('\n'))).toBe(true);
+  const sdk = await $.command.run({ command: 'delegate-status', args: '', origin: { kind: 'sdk' } });
+  expect(sdk.text).toContain('No jobs in this scope.');
 });
 
 const PREVIEW = { id: 'preview-1234', provider: 'codex', model: 'gpt-6.1-sol', mode: 'review', isolation: 'shared',
@@ -443,8 +494,9 @@ test('unsupported surfaces use text status and never open a pane', async ($, on)
 });
 
 test('failed refresh keeps prior evidence visibly stale', async ($, on) => {
-  setup(on, { failAction: 'snapshot', failAfter: 1 });
+  const { clock } = setup(on, { failAction: 'snapshot', failAfter: 1 });
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(5_000);
   const answer = await $.command.run({ command: 'delegate-status', args: '' });
   expect(answer.text).toContain('native-job');
   expect(answer.text).toContain('may be stale');

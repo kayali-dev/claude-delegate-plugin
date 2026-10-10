@@ -246,7 +246,7 @@ again immediately. Pull a fresh inspect (including `view=summary`, which carries
 provider acknowledgement. A post-apply revision could also become stale before
 the next call; no reply grants a permanent control revision.
 
-`startPaused=true` opens the provider thread/session and sets phase `paused` before any prompt. Release it with `delegate_release` (or `delegate-jobs release`) at the current revision; cancellation works while paused, `waitFor='session'` (and the `waitForSession` alias) returns as soon as the paused session exists, and `timeoutSeconds` continues counting during the pause. `waitFor='turn'` and `waitFor='first-output'` use the same bounded journal-cursor poller.
+`startPaused=true` opens the provider thread/session and sets phase `paused` before any prompt. Release it with `delegate_release` (or `delegate-jobs release`) at the current revision; cancellation works while paused, `waitFor='session'` (and the `waitForSession` alias) returns as soon as the paused session exists, and `timeoutSeconds` continues counting during the pause. `waitFor='turn'` waits for a provider turn to START, normally returning `running`, not completed. `waitFor='first-output'` waits for visible output. Both use the same bounded journal-cursor poller; use events/finishedPath/CLI wait for completion.
 
 Write launches are plan-first by default. The broker runs a bounded read-only
 plan turn, presents its structural blast radius and observed-band estimates,
@@ -274,6 +274,13 @@ entire final message to be the single fenced JSON object, with nothing before
 or after it. Parsing still prefers fenced JSON and a whole-body object,
 then accepts a balanced object embedded in narration; the same structural
 target, approach, assumption, and risk validation applies afterward.
+New plan contracts require `targets.writeFiles` for intended creates/edits/deletes;
+`targets.files` also lists read-only inspection/verification inputs. Scope
+comparison fences only the explicit edits and shows the actual violations from
+each plan, not a fence on one side and violations on the other. Differing
+explicit write sets are material conflicts even with shared read targets.
+Legacy persisted plans without `writeFiles` retain conservative all-target
+scope checks. Prose never widens the fence or substitutes for declared intent.
 `DELEGATE_PLAN_OUTPUT_TOKENS` remains an exact bounded override (128–16,384);
 an explicit smaller job-level `maxOutputTokens` still limits the primary plan,
 and the independent pass retains its existing share of that explicit overall
@@ -529,7 +536,11 @@ MCP tool, TUI, `finishedPath`, or inspection/control pull behavior.
 ## Ambient Push Bridge
 
 Interactive Claude Code sessions with the experimental Monitor surface
-automatically start `delegate-monitor`. It reads bounded job records and
+automatically start `delegate-monitor`. Native Mods now deliver the primary
+notifications; the monitor remains on light standby, skipping job scans and
+watchers while a native heartbeat is healthy. It automatically takes over after
+expiry or release with shared dedupe/cooldown/rate state. See [native notification
+delivery](native.md#native-notifications-and-monitor-fallback). Both read bounded job records and
 journal tails and pushes only actionable edge transitions, in this order:
 scope policy breach, per-job output `budget-breach`, provider
 `allowance-breach`, human input or blocked permission, ready for review,
@@ -563,8 +574,9 @@ The monitor is read-only with respect to jobs and control. The separate
 collision hook may add `collision.detected`/staleness evidence, after which the
 monitor only reads that edge. The monitor cannot start,
 steer, cancel, respond to, reconcile, or otherwise mutate a job, and it cannot
-invoke a provider or spend allowance. Its only write is private
-`0600` session-correlation metadata under `<state-dir>/monitor-correlation/`.
+invoke a provider or spend allowance. Its writes are private `0600`
+session-correlation metadata under `<state-dir>/monitor-correlation/` and
+closed notification-policy/delivery state under `<state-dir>/notification-handoff/`.
 Per-job edge deduplication (including exact collision paths), a 30-second
 cooldown, and a six-lines-per-minute global ceiling enforce the nagware
 boundary. The stall threshold defaults to
@@ -580,7 +592,7 @@ alone as a demand for review. Non-actionable state belongs in the native
 status-line chip.
 
 Push defaults to `DELEGATE_MONITOR_SCOPE=session`: only records whose
-`origin.sessionId` matches the SessionStart correlation marker can emit.
+current controller session (or legacy `origin.sessionId`) matches the SessionStart correlation marker can emit.
 The private marker lasts 72 hours and records the coordinator plus a bounded
 ancestor chain as `(pid, process start time)` pairs. At boot the monitor walks
 its own parent chain, selects the marker with the nearest common identity, and
@@ -737,7 +749,7 @@ On timeout, output-budget exhaustion, quota exhaustion, or agent failure:
 
 `delegate_inspect` exposes `resumable: { ok, reason }` from the same predicate used by `delegate_resume`, plus `driftReport: { modified, newFiles, outsideScope }`. For manual rollback, run `delegate-jobs revert <id> --dry-run` first. Revert requires a terminal job, restores only non-overlapping files whose current content still matches the recorded final state, and reports `{ reverted, skipped, conflicts }`; it never overwrites pre-existing or later edits.
 
-Use `delegate_inspect view="summary"` or `delegate-jobs inspect --view summary` for the compact monitoring projection; `full` remains the default and is required for `resultWindow`. `delegate_list` / `delegate-jobs list` accept `phase`, and `blockedOnInput=true` / `--blocked-on-input` selects only live human gates. Long result text can be read with `delegate_inspect.resultWindow` or `delegate-jobs result --find/--offset/--max-chars`; offsets and `nextOffset` are absolute. A cancel queued during retry backoff is applied as `cancel-before-retry` before another provider starts, while steering between attempts is rejected clearly.
+Use `delegate_inspect view="summary"` or `delegate-jobs inspect --view summary` for compact metadata. MCP `view="result"` adds a bounded result window (8,000 characters by default), omitting the full snapshot's prompts/plans/evidence. `full` remains the default: `resultWindow` windows both `result` and `resultText`, but does not cap the other metadata. `delegate_list` / `delegate-jobs list` accept `phase`, and `blockedOnInput=true` / `--blocked-on-input` selects only live human gates. Long result text can also be read with `delegate-jobs result --find/--offset/--max-chars`; offsets and `nextOffset` are absolute. Terminal cancellation closes live requests; timed-out historical requests remain inspectable but are not actionable. A cancel queued during retry backoff is applied as `cancel-before-retry` before another provider starts, while steering between attempts is rejected clearly.
 
 ## Acceptance
 
@@ -779,6 +791,14 @@ UTC-day cohorts retain an explicit ORPHANED count. An optional
 provider and non-overlapping fixed 95% Wilson intervals before it returns an
 advisory provider; sparse or overlapping evidence declines. This advisory
 shape is read-only and does not feed or modify the static router.
+
+MCP statistics bound display AFTER full-population aggregation. `view="summary"`
+omits group/cohort detail; the default `full` pages groups with `limit=20`
+(1–100), `offset=0`, and a pretty-JSON `maxChars=32000` ceiling (4,000–64,000).
+`display` reports total/returned groups, omitted detail and the next group offset.
+Large details may reduce the returned page; always use `display.nextOffset`.
+Rates never recompute from that page. CLI `delegate-jobs stats` retains full local
+output; narrow date/model filters when a detail cannot fit.
 
 `autoFix: { maxRounds }` / `--auto-fix-rounds` is off by default and hard-capped
 at three. A continuation is permitted only for deterministic verification or

@@ -426,3 +426,10 @@ pre-prompt pause.
 ## Response Bounds
 
 Event pages are additionally capped by serialized size (not just event count); a truncated page sets `truncated: "response-size"` and a valid `nextSeq`. Large diffs are windowed: `delegate_diff` accepts `offset`/`maxChars` and returns `totalChars`/`nextOffset`, or `statOnly` for per-file addition/deletion counts. Result text uses the same absolute-offset shape through `delegate_inspect.resultWindow` and `delegate-jobs result`; `find` is case-sensitive and chooses the window start.
+
+MCP `delegate_inspect view="result"` returns compact metadata plus the result
+window (8,000 characters by default), not the full job snapshot. In `full` view,
+`resultWindow` replaces both result-text aliases but does not shrink other job
+metadata. `delegate_stats` bounds pretty-JSON display to 32,000 characters by
+default, accepts `view="summary"` or paginated `full`, and exposes omission/next
+offset metadata. All aggregate rates are computed before display truncation.

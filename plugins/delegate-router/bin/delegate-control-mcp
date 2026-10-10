@@ -4,6 +4,7 @@ import { MCP_INSTRUCTIONS, negotiateMcpVersion, toolAnnotations } from './lib/mc
 import { brokerError, normalizeBrokerError } from './lib/errors.mjs';
 import { enabledProviders, listJobs, loadJob, loadState } from './lib/state.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
+import { boundedStatsView } from './lib/stats-view.mjs';
 import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessions.mjs';
 import { buildNativeWorkState, nativeWorkOptions } from './lib/native-session.mjs';
 import { deriveVerificationProfile } from './lib/verification-profile.mjs';
@@ -72,7 +73,7 @@ const TOOLS = [
       }, description: 'Write modes only. Run this coordinator-owned /bin/sh command in the job cwd after provider completion.' },
       allowedPaths: { type: 'array', items: { type: 'string' }, description: 'Repo-relative path prefixes (or * globs) this job may create/modify. Enforced post-hoc: out-of-scope changed files are recorded as scopeViolations on the job and emitted as a scope.violation event; the fence is also injected into the worker prompt.' },
       allowUnscopedWrite: { type: 'boolean', description: 'Explicit escape hatch for a write packet that has neither an Allowed scope section nor allowedPaths. Omit for the safer scoped-write default.' },
-      waitFor: { enum: ['session', 'turn', 'first-output'], description: 'Bounded wait for provider session establishment, the first turn, or the first visible output event.' },
+      waitFor: { enum: ['session', 'turn', 'first-output'], description: 'Bounded wait for session establishment, first turn STARTED (not completed), or first visible output. Use delegate_events for completion.' },
       waitForSession: { type: 'boolean', description: 'Block (up to ~30s) until the provider session id is recorded before returning, so a plan can be filed under the delegate session id with no race.' },
       dryRun: { type: 'boolean', description: 'Return the fully resolved launch and exact provider packet without creating a job, staging files, or spawning a provider.' },
       sandbox: { enum: ['auto', 'off'], description: 'off disables provider sandboxing (Codex danger-full-access, Cursor --sandbox disabled) so the worker can use git, host CLIs, and live web search/fetch. Judge necessity from the task; if unsure whether the sandbox can stay on, ask the user before setting off.' },
@@ -81,9 +82,13 @@ const TOOLS = [
       transport: { enum: ['app-server', 'acp', 'headless'] }
     } }
   },
-  { name: 'delegate_inspect', description: 'Inspect a supervised or legacy job snapshot and its current revision. full remains the default; summary returns a compact monitoring projection. Orphaned jobs whose worker died are reconciled to failed.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, view: { enum: ['summary', 'full'], default: 'full' }, resultWindow: { type: 'object', additionalProperties: false, properties: { find: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } } } },
+  { name: 'delegate_inspect', description: 'Inspect a job and current revision. full is the default; summary is compact monitoring; result returns summary plus a bounded final-text page, without the full snapshot. resultWindow bounds final text, not full metadata. Orphaned jobs are reconciled.', inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' }, view: { enum: ['summary', 'full', 'result'], default: 'full' }, resultWindow: { type: 'object', additionalProperties: false, properties: { find: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1000, maximum: 200000 } } } } } },
   { name: 'delegate_list', description: 'List recent delegation jobs, optionally filtered by status, phase, or human-input gate, or summarized by fan-out group.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, activeOnly: { type: 'boolean' }, status: { type: 'array', items: { enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] } }, phase: { type: 'array', items: { type: 'string' } }, blockedOnInput: { type: 'boolean' }, groupId: { type: 'string' }, groupSummary: { type: 'boolean' } } } },
   { name: 'delegate_stats', description: 'Return the local outcome ledger: separately sampled provider-completion, real-tree verification-pass, and owner-acceptance rates; exact plan-first completion/degradation counts; broker/date cohorts; transport groups; and an optional confidence-bounded routing recommendation that never changes the static route.', inputSchema: { type: 'object', additionalProperties: false, properties: {
+    view: { enum: ['summary', 'full'], default: 'full' },
+    limit: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: 'Display groups/detail arrays only; aggregate calculations use every selected record.' },
+    offset: { type: 'integer', minimum: 0, description: 'Group-page offset; use display.nextOffset for the next page.' },
+    maxChars: { type: 'integer', minimum: 4000, maximum: 64000, default: 32000, description: 'Bound the serialized statistics text; narrow filters for more detail.' },
     since: { type: 'string', description: "Optional duration ('7d'), ISO date ('2026-07-17'), or broker version ('0.70.0')." },
     until: { type: 'string', description: "Optional exclusive ISO-date upper bound such as '2026-07-17'." },
     model: { type: 'string', minLength: 1, maxLength: 128, description: 'Filter by the exact recorded model ID, without alias-generation inference. Results include exact model/effort/transport/client/policy cohorts.' },
@@ -336,11 +341,21 @@ async function dispatch(name, args) {
   }
   if (name === 'delegate_inspect') {
     if (args.view === 'summary') {
-      if (args.resultWindow) throw brokerError('INVALID_REQUEST', 'resultWindow is available only with view=full');
+      if (args.resultWindow) throw brokerError('INVALID_REQUEST', 'resultWindow is available only with view=full or result');
       return inspectJobSummary(args.jobId);
     }
     const job = inspectJob(args.jobId);
-    return args.resultWindow ? { ...job, ...sliceResultText(job.resultText, args.resultWindow) } : job;
+    if (args.view === 'result') {
+      const page = sliceResultText(job.resultText, { maxChars: 8000, ...args.resultWindow });
+      return { ...inspectJobSummary(args.jobId), ...page };
+    }
+    if (!args.resultWindow) return job;
+    const page = sliceResultText(job.resultText, args.resultWindow);
+    const result = job.result && typeof job.result === 'object' && !Array.isArray(job.result)
+      ? { ...job.result, ...(typeof job.result.text === 'string' ? { text: page.resultText } : {}),
+        ...(typeof job.result.resultText === 'string' ? { resultText: page.resultText } : {}) }
+      : typeof job.result === 'string' ? page.resultText : job.result;
+    return { ...job, result, ...page };
   }
   if (name === 'delegate_events') {
     const deadline = Date.now() + Math.min(Math.max(Number(args.waitMs || 0), 0), 30000);
@@ -353,10 +368,10 @@ async function dispatch(name, args) {
   }
   if (name === 'delegate_list') return args.groupSummary ? groupSummary(args.groupId) : listManagedJobs(args);
   if (name === 'delegate_stats') {
-    const unknown = Object.keys(args).filter((key) => !['since', 'until', 'model', 'recommendFor'].includes(key));
+    const unknown = Object.keys(args).filter((key) => !['since', 'until', 'model', 'recommendFor', 'view', 'limit', 'offset', 'maxChars'].includes(key));
     if (unknown.length) throw brokerError('INVALID_REQUEST', `delegate_stats unknown parameter${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
     const usage = loadState();
-    return aggregateVisibilityStats(readAuditLog(), {
+    return boundedStatsView(aggregateVisibilityStats(readAuditLog(), {
       since: args.since,
       until: args.until,
       model: args.model,
@@ -364,7 +379,7 @@ async function dispatch(name, args) {
       jobs: listJobs(),
       external: externalThreadStats(scanExternalCodexThreads()),
       history: usage.history || []
-    });
+    }), args);
   }
   if (name === 'delegate_transcript') return jobTranscriptPage(args.jobId, args);
   if (name === 'delegate_diff') {
@@ -442,7 +457,7 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.73.0' },
+        serverInfo: { name: 'delegate-control', version: '0.74.0' },
         instructions: MCP_INSTRUCTIONS
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS.map((tool) => ({ ...tool, annotations: toolAnnotations(tool.name) })) } });

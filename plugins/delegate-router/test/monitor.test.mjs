@@ -668,7 +668,9 @@ test('correlation failure records and visibly degrades session scope to workspac
   assert.equal(fs.statSync(path.join(directory, fs.readdirSync(directory).find((name) => name.startsWith('resolution-')))).mode & 0o777, 0o600);
 });
 
-test('direct monitor session identity bypasses marker correlation and SessionStart persists the marker first', () => {
+test('direct monitor session identity bypasses marker correlation and SessionStart persists the marker first', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-direct-monitor-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = fs.readFileSync(path.join(pluginRoot, 'bin', 'delegate-session-hook'), 'utf8');
   const markerWrite = source.indexOf('const marker = writeSessionCorrelationMarker({');
   const optionalInventory = source.indexOf('const jobs = listJobs();');
@@ -683,7 +685,7 @@ test('direct monitor session identity bypasses marker correlation and SessionSta
     projectDir: '/workspace/direct-session',
     store: {
       directory: '/workspace/direct-session/jobs',
-      stateDirectory: '/workspace/direct-session/state',
+      stateDirectory: root,
       scan: () => [],
       readPreference: () => null
     },

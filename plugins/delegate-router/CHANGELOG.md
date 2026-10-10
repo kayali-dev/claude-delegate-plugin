@@ -2,6 +2,29 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.74.0 — 2026-10-10
+
+- Make Mods the primary actionable-notification surface using local transcript
+  observations, never a new Claude turn. A private shared edge ledger transfers
+  dedupe/cooldown/rate limits to the legacy monitor, which skips job scans while
+  the native heartbeat is healthy and takes over after expiry or release.
+  Unacknowledged deliveries retry without indefinitely suppressing fallback.
+- Keep immediate status independent of in-flight agent capture and background
+  refresh. Route human-composer command text through bounded local UI log lines
+  to bypass Claude's active-turn command-result display queue, preserving SDK/
+  plugin result text. Report age and debug-only handler entry/ready lines.
+- Separate structural plan write intent from read-only verification targets.
+  Keep conservative legacy-plan parsing, compare actual left/right scope
+  violations, reject differing explicit edits and avoid duplicate questions.
+- Include advisory writer/claim conflicts in mutation-free dry runs while
+  retaining authoritative locked launch admission. Close live decisions on
+  terminal cancellation and suppress stale input attention.
+- Bound MCP statistics with summary/paging/character limits after full-population
+  aggregation. Add compact result inspection and window both result aliases;
+  full inspection metadata is deliberately not a whole-response character cap.
+- Clarify that `waitFor=turn` waits for turn start, not completion. Add broker,
+  privacy, notification handoff and model-free native regressions.
+
 ## 0.73.0 — 2026-10-10
 
 - Reconcile Codex shell writes from the actual shared tree before scope checks,

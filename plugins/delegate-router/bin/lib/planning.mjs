@@ -37,8 +37,8 @@ export const STRUCTURAL_PLAN_SCHEMA = {
   required: ['targets', 'approach', 'assumptions', 'risks'],
   properties: {
     targets: {
-      type: 'object', additionalProperties: false, required: ['files', 'components'],
-      properties: { files: { type: 'array', items: { type: 'string' } }, components: { type: 'array', items: { type: 'string' } } }
+      type: 'object', additionalProperties: false, required: ['files', 'components', 'writeFiles'],
+      properties: { files: { type: 'array', items: { type: 'string' } }, components: { type: 'array', items: { type: 'string' } }, writeFiles: { type: 'array', items: { type: 'string' } } }
     },
     approach: {
       type: 'array', items: {
@@ -179,6 +179,7 @@ Return exactly one fenced JSON object using this structural contract:
 {
   "targets": {
     "files": ["repo/relative/path"],
+    "writeFiles": ["repo/relative/path-intended-for-modification"],
     "components": ["stable-component-id"]
   },
   "approach": [
@@ -191,7 +192,11 @@ Return exactly one fenced JSON object using this structural contract:
 }
 \`\`\`
 
-Use empty arrays when a dimension cannot be predicted. Do not perform the work;
+Always include targets.writeFiles: only files you intend to create, modify or
+delete. targets.files may also include read-only inspection/verification inputs;
+reading or running an existing test does not authorize or propose editing it.
+Every writeFiles entry must also appear in files. Use empty arrays when a
+dimension cannot be predicted. Do not perform the work;
 the coordinator must explicitly confirm the presented plan before any write.${laneReinforcement}`;
 }
 
@@ -468,6 +473,11 @@ export function parseStructuralPlan(text) {
   const files = uniqueStrings(parsed.targets?.files, displayPath, foldedPathKey);
   const components = uniqueStrings(parsed.targets?.components, displayString, foldedStringKey);
   if (!files || !components) return { ok: false, reason: 'invalid-target-shape' };
+  const writeFiles = parsed.targets?.writeFiles == null ? null
+    : uniqueStrings(parsed.targets.writeFiles, displayPath, foldedPathKey);
+  if (parsed.targets?.writeFiles != null && (!writeFiles || writeFiles.some((file) => !files.includes(file)))) {
+    return { ok: false, reason: 'invalid-write-target-shape' };
+  }
   if (!Array.isArray(parsed.approach) || !Array.isArray(parsed.assumptions) || !Array.isArray(parsed.risks)) {
     return { ok: false, reason: 'missing-structural-dimensions' };
   }
@@ -491,7 +501,7 @@ export function parseStructuralPlan(text) {
   return {
     ok: true,
     plan: {
-      targets: { files, components },
+      targets: { files, components, ...(writeFiles ? { writeFiles } : {}) },
       approach,
       assumptions: assumptions.sort((left, right) => (
         foldedStringKey(left.topic).localeCompare(foldedStringKey(right.topic))
@@ -776,14 +786,29 @@ export function compareStructuralPlans(leftInput, rightInput, options = {}) {
       const pattern = entry.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
       return new RegExp(`^${pattern}(?:/|$)`).test(clean);
     });
-    const outside = [...new Set([...left.plan.targets.files, ...right.plan.targets.files].filter((file) => !inScope(file)))];
-    if (outside.length) {
-      differences.push(blockingDifference('targets.scope', options.allowedPaths, outside, 'targets-outside-allowed-scope'));
+    // Old plans retain conservative semantics; new plans explicitly separate
+    // write intent from read-only verification inputs. Never infer from prose.
+    const outsideLeft = (left.plan.targets.writeFiles || left.plan.targets.files).filter((file) => !inScope(file));
+    const outsideRight = (right.plan.targets.writeFiles || right.plan.targets.files).filter((file) => !inScope(file));
+    if (outsideLeft.length || outsideRight.length) {
+      differences.push(blockingDifference('targets.scope', outsideLeft, outsideRight, 'targets-outside-allowed-scope', { allowedPaths: options.allowedPaths }));
       comparable.push('targets.scope');
       signals.push(structuralSignal('targets.scope', 'strong', 'conflict', 'targets-outside-allowed-scope'));
     }
   }
   let targetAgreement = false;
+
+  const leftWrites = left.plan.targets.writeFiles;
+  const rightWrites = right.plan.targets.writeFiles;
+  if (leftWrites && rightWrites) {
+    comparable.push('targets.writeFiles');
+    if (!sameMembers(leftWrites.map(foldedPathKey), rightWrites.map(foldedPathKey))) {
+      differences.push(blockingDifference('targets.writeFiles', leftWrites, rightWrites, 'write-targets-differ'));
+      signals.push(structuralSignal('targets.writeFiles', 'strong', 'conflict', 'write-targets-differ'));
+    } else {
+      signals.push(structuralSignal('targets.writeFiles', 'strong', 'agreement', 'write-targets-match'));
+    }
+  }
 
   const leftFiles = left.plan.targets.files;
   const rightFiles = right.plan.targets.files;
@@ -996,7 +1021,7 @@ export function planReviewPresentation(primary, comparison, estimate) {
     ambiguityQuestion,
     question: [
       ambiguityQuestion || 'Review the read-only plan before implementation.',
-      comparisonSummary,
+      comparisonSummary !== ambiguityQuestion ? comparisonSummary : null,
       'Accept to continue this same provider session into implementation, or decline to stop without writes.'
     ].filter(Boolean).join(' ')
   };

@@ -13,12 +13,15 @@ import { previewNativeTask, launchNativePreview } from './native-launch.mjs';
 import { enqueueNativePreview, listDispatchQueue, controlDispatchQueue } from './dispatch-queue.mjs';
 import { observeClaudeAgents, bindClaudeAgent } from './native-agents.mjs';
 import { jobTimeBudget } from './job-health.mjs';
+import { NotificationHandoff } from './notification-handoff.mjs';
+import { MonitorStore, preferenceSnoozed } from './monitor-store.mjs';
+import { monitorEnabled, monitorScope, scopeMonitorSnapshots } from './monitor-runtime.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const MAX_ROWS = 40;
 const FIELDS = new Set(['sessionId', 'projectDir', 'scope', 'jobId', 'expectedRevision', 'commandId', 'requestId', 'answer', 'accept', 'text', 'usage', 'confirmed',
-  'draft', 'previewId', 'authorizeCredits', 'priority', 'queueId', 'queueAction', 'agents', 'spawn', 'offset', 'file', 'find', 'evidenceVersion', 'view']);
+  'draft', 'previewId', 'authorizeCredits', 'priority', 'queueId', 'queueAction', 'agents', 'spawn', 'offset', 'file', 'find', 'evidenceVersion', 'view', 'deliveryId']);
 
 function text(value, maximum = 256) {
   return String(redact(String(value ?? ''))).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').slice(0, maximum);
@@ -59,7 +62,7 @@ function row(job, input, enabled) {
   const own = ownSession(job, input);
   const active = ['queued', 'running'].includes(job.status);
   const managed = job.managedBy === 'delegate-control';
-  const liveInput = job.pendingInput && job.pendingInput.timedOut !== true
+  const liveInput = active && job.pendingInput && job.pendingInput.timedOut !== true
     && (!job.pendingInput.expiresAt || job.pendingInput.expiresAt > Date.now());
   const providerEnabled = job.provider === 'claude' || enabled.includes(job.provider);
   return {
@@ -113,7 +116,7 @@ export function nativeOverview(input, options = {}) {
   const all = options.jobs || listJobs();
   const jobs = all.filter((job) => ID.test(job?.id || '') && inScope(job, input))
     .sort((a, b) => {
-      const priority = (job) => job.pendingInput && job.pendingInput.timedOut !== true
+      const priority = (job) => ['queued', 'running'].includes(job.status) && job.pendingInput && job.pendingInput.timedOut !== true
         && (!job.pendingInput.expiresAt || job.pendingInput.expiresAt > Date.now()) ? 0
         : job.status === 'failed' || job.acceptance?.state === 'blocked' || job.scopeViolations?.length ? 1
           : job.acceptance?.state === 'ready-for-review' ? 2
@@ -167,7 +170,31 @@ export async function dispatchNative(action, input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw brokerError('INVALID_REQUEST', 'expected an input object');
   if (Object.keys(input).some((key) => !FIELDS.has(key))) throw brokerError('INVALID_REQUEST', 'unsupported native input field');
   if (input.scope != null && !['session', 'workspace', 'all'].includes(input.scope)) throw brokerError('INVALID_REQUEST', 'invalid scope');
-  if (!['usage', 'snapshot', 'inspect', 'diff', 'evidence', 'cancel', 'steer', 'respond', 'preview', 'launch', 'enqueue', 'queue-control', 'agents', 'agent-bind', 'claim'].includes(action)) throw brokerError('INVALID_REQUEST', 'unsupported native action');
+  if (!['usage', 'snapshot', 'inspect', 'diff', 'evidence', 'cancel', 'steer', 'respond', 'preview', 'launch', 'enqueue', 'queue-control', 'agents', 'agent-bind', 'claim', 'notifications', 'notifications-ack', 'notifications-release'].includes(action)) throw brokerError('INVALID_REQUEST', 'unsupported native action');
+  if (action.startsWith('notifications')) {
+    if (!SESSION.test(input.sessionId || '') || typeof input.projectDir !== 'string' || !path.isAbsolute(input.projectDir)) {
+      throw brokerError('INVALID_REQUEST', 'native notifications require current session and absolute project identity');
+    }
+    const ambientScope = monitorScope();
+    if (!monitorEnabled()) return { disabled: true, lines: [] };
+    const configuredNumber = (name, fallback, minimum) => {
+      const number = Number(process.env[name]);
+      return Number.isFinite(number) && number >= minimum ? number : fallback;
+    };
+    const handoff = new NotificationHandoff({ scope: ambientScope, sessionId: input.sessionId, projectDir: input.projectDir,
+      policyOptions: {
+        stallMs: configuredNumber('DELEGATE_MONITOR_STALL_SECONDS', 600, 0) * 1000,
+        cooldownMs: configuredNumber('DELEGATE_MONITOR_COOLDOWN_SECONDS', 30, 0) * 1000,
+        maxLinesPerMinute: configuredNumber('DELEGATE_MONITOR_MAX_LINES_PER_MINUTE', 6, 1)
+      } });
+    if (action === 'notifications-ack') return handoff.acknowledge(input.deliveryId);
+    if (action === 'notifications-release') return handoff.release();
+    const store = new MonitorStore();
+    const now = Date.now();
+    return handoff.scan('native', () => scopeMonitorSnapshots(store.scan(), {
+      scope: ambientScope, sessionId: input.sessionId, projectDir: input.projectDir
+    }), { now, recipientSessionId: input.sessionId, snoozed: preferenceSnoozed(store.readPreference(), now) });
+  }
   if (action === 'usage') return captureClaudeUsage(input.usage);
   if (action === 'agents') return observeClaudeAgents(input);
   if (action === 'agent-bind') return bindClaudeAgent(input);

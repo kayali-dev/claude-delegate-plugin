@@ -13,6 +13,7 @@ import {
   inspectManagedIntegration,
   discardManagedIntegration,
   launchManagedJob,
+  previewManagedJob,
   prepareManagedIntegration,
   preflightManagedIntegration,
   revertManagedJob,
@@ -315,6 +316,11 @@ test('path and resource claims schedule workspace writers while shared launches 
     job.status = 'running';
     job.workerPid = process.pid;
   });
+  const preview = previewManagedJob({ provider: 'codex', mode: 'implement', cwd: root, prompt: 'overlap preview',
+    allowedPaths: ['src/b.mjs'], pathClaims: ['src/b.mjs'], isolation: 'worktree', planFirst: false });
+  assert.equal(preview.launchBlocked, true);
+  assert.deepEqual(preview.launchBlockers, ['CLAIM_CONFLICT']);
+  assert.equal(preview.writerBlocker.activeJobId, first.id);
   assert.throws(
     () => launchManagedJob({
       provider: 'codex',

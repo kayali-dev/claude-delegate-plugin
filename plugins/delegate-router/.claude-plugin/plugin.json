@@ -1,7 +1,7 @@
 {
   "name": "delegate-router",
   "displayName": "Delegate Router",
-  "version": "0.73.0",
+  "version": "0.74.0",
   "description": "Quota-aware delegation and live supervision for Codex and Cursor agents.",
   "author": {
     "name": "Mahmoud Kayyali",
@@ -25,6 +25,10 @@
     "usage_capture": {
       "type": "boolean", "title": "Capture official Claude allowance", "default": true,
       "description": "Read Claude Code's native subscription-window data locally. Never reads credentials or queries a usage endpoint."
+    },
+    "native_notifications": {
+      "type": "boolean", "title": "Native delegation notifications", "default": true,
+      "description": "Deliver actionable local observations without starting a Claude turn. The legacy monitor waits on standby and takes over if native delivery stops."
     },
     "compact_status": {
       "type": "boolean", "title": "Show active-work status", "default": true,

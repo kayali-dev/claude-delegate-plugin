@@ -4,6 +4,7 @@ import { resolveMonitorSession } from './monitor-correlation.mjs';
 import { NotificationPolicy } from './monitor-policy.mjs';
 import { MonitorStore, preferenceSnoozed } from './monitor-store.mjs';
 import { controllerSession } from './admission.mjs';
+import { NotificationHandoff } from './notification-handoff.mjs';
 
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_DEBOUNCE_MS = 75;
@@ -106,12 +107,16 @@ export class DelegateMonitor {
     this.correlation = null;
     this.degradation = null;
     this.degradationEmitted = false;
-    if (this.scope === 'session') {
+    // Even workspace/all delivery belongs to one receiving Claude session.
+    // Without marker correlation these scopes would miss the native lease and
+    // use a second ledger, allowing duplicate alerts or an unnecessary wakeup.
+    if (this.scope !== 'off') {
       this.correlation = options.correlation || (this.recipientSessionId
         ? { ok: true, sessionId: this.recipientSessionId, reason: null, recorded: true }
         : resolveMonitorSession({
             stateDirectory: this.store.stateDirectory,
             workspaceId: this.workspaceId,
+            requestedScope: this.scope,
             parentPid: options.parentPid ?? options.coordinatorPid,
             ...(options.processTable ? { processTable: options.processTable } : {}),
             ...(options.processes ? { processes: options.processes } : {})
@@ -119,7 +124,7 @@ export class DelegateMonitor {
       if (this.correlation.ok && this.correlation.sessionId) {
         this.sessionId = this.correlation.sessionId;
         this.recipientSessionId = this.correlation.sessionId;
-      } else {
+      } else if (this.scope === 'session') {
         this.effectiveScope = 'workspace';
         this.degradation = {
           requestedScope: 'session',
@@ -134,6 +139,8 @@ export class DelegateMonitor {
       cooldownMs: numericEnv(this.env, 'DELEGATE_MONITOR_COOLDOWN_SECONDS', 30, 0) * 1000,
       maxLinesPerMinute: numericEnv(this.env, 'DELEGATE_MONITOR_MAX_LINES_PER_MINUTE', 6, 1)
     });
+    this.handoff = new NotificationHandoff({ stateDirectory: this.store.stateDirectory,
+      scope: this.effectiveScope, sessionId: this.recipientSessionId, projectDir: this.workspaceId, policy: this.policy });
     this.watchers = new Map();
     this.pollTimer = null;
     this.debounceTimer = null;
@@ -150,16 +157,22 @@ export class DelegateMonitor {
     }
     try {
       const now = Date.now();
-      const snapshots = scopeMonitorSnapshots(this.store.scan(), {
-        scope: this.effectiveScope,
-        projectDir: this.projectDir,
-        workspaceId: this.workspaceId,
-        sessionId: this.sessionId
-      });
       const snoozed = preferenceSnoozed(this.store.readPreference(), now);
-      const policyLines = this.started
-        ? this.policy.observe(snapshots, { now, snoozed, recipientSessionId: this.recipientSessionId })
-        : this.policy.bootstrap(snapshots, { now, snoozed, recipientSessionId: this.recipientSessionId });
+      const snapshots = () => scopeMonitorSnapshots(this.store.scan(), {
+        scope: this.effectiveScope, projectDir: this.projectDir, workspaceId: this.workspaceId, sessionId: this.sessionId
+      });
+      let delivery;
+      try { delivery = this.handoff.scan('monitor', snapshots, { now, snoozed, recipientSessionId: this.recipientSessionId }); }
+      catch (error) {
+        this.logOnce('notification-handoff', error);
+        delivery = { standby: false, lines: this.policy.observe(snapshots(), { now, snoozed, recipientSessionId: this.recipientSessionId }) };
+      }
+      if (delivery.standby) {
+        for (const watcher of this.watchers.values()) { try { watcher.close(); } catch {} }
+        this.watchers.clear();
+        return [];
+      }
+      const policyLines = delivery.lines;
       this.started = true;
       const lines = [...statusLines, ...policyLines];
       for (const line of lines) this.emit(line);

@@ -97,6 +97,10 @@ The plugin uses [Claude Code Mods](https://code.claude.com/docs/en/plugins/mods/
 ```
 
 The panel defaults to this session's jobs, with explicit workspace/all-job views.
+`/delegate-status` shows idle/empty scope even when nothing is running. Native
+commands typed by a person run immediately; their local text paints directly
+instead of waiting for Claude's active turn to end. Status includes observation
+age and never waits behind host-agent capture.
 It shows input gates, review readiness, verification, scope, policy and bounded
 diffs. Review adds file selection, literal search, paginated plans/reports, check
 output and candidate comparison. Foreign-session jobs are read-only until a
@@ -124,7 +128,7 @@ or starting a Claude turn.
 
 The panel renders on terminal and Desktop; other surfaces get text status and
 retain CLI/MCP. It never auto-opens or steals focus. `/config` exposes native
-enablement, allowance capture, compact status, reviewer guard, agent observation,
+enablement, native notifications, allowance capture, compact status, reviewer guard, agent observation,
 attention/inline cards and a 3–30-second
 local refresh interval. Disabling native integration leaves the existing broker,
 classic hooks and CLI intact; it does not change provider configuration.
@@ -181,7 +185,7 @@ Write starts run a read-only plan and pause for confirmation. Inspect the pendin
 
 Current full model IDs also work: for example, `delegate-route --model gpt-6.1-sol --mode review --task "Review the authentication changes"` infers Codex, while `--model claude-opus-5-5` infers Claude. Managed starts still require `--provider codex|cursor`. Account availability remains authoritative; older explicit IDs are preserved. See [model notes](plugins/delegate-router/skills/delegate/references/models.md).
 
-Run `delegate-tui` for the dashboard, fleet, work-item review, plan confirmations, and selected child transcripts. Managed jobs normally belong to a resident supervisor and survive the launching CLI or MCP session. In Claude Code, the plugin monitor supplies actionable notifications; `finishedPath` is the durable fallback. Use `delegate-jobs wait` from a normal terminal.
+Run `delegate-tui` for the dashboard, fleet, work-item review, plan confirmations, and selected child transcripts. Managed jobs normally belong to a resident supervisor and survive the launching CLI or MCP session. In Claude Code, native Mods deliver actionable observations without starting a model turn. The legacy monitor remains on light standby, skipping job scans while native delivery is healthy and taking over if its heartbeat expires; `finishedPath` remains the durable fallback. Use `delegate-jobs wait` from a normal terminal.
 
 Within Claude Code, the skill uses the `delegate_control` MCP server. Read-only `delegate_start` calls return promptly; write starts wait through a bounded plan checkpoint and return a `launchNotice`. Claude advances the `afterSeq` cursor only when monitoring is useful and uses the latest revision for steering or cancellation. Workers are detached from the MCP process, so plugin reloads do not erase their job state.
 

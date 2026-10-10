@@ -1,6 +1,6 @@
 # Native Claude Code integration
 
-Source release 0.73.0 targets Claude Code 2.1.294 or later. Mods add host-native
+Source release 0.74.0 targets Claude Code 2.1.294 or later. Mods add host-native
 commands, a panel and lifecycle handling; the dependency-free Node broker remains
 the source of job truth. They do not replace provider transports, sandbox policy,
 revisioned controls, the external TUI or the coordinator's final review.
@@ -10,7 +10,7 @@ revisioned controls, the external TUI or the coordinator's final review.
 | Immediate command | Behavior |
 | --- | --- |
 | `/delegate-dashboard` | Open the job panel on terminal/Desktop, or return text elsewhere |
-| `/delegate-status` | Read session-scoped job and allowance metadata |
+| `/delegate-status` | Return latest scoped observation immediately, including age, without waiting behind agent capture |
 | `/delegate-inspect <job-id>` | Read bounded evidence, scope, policy and verification |
 | `/delegate-diff <job-id>` | Read up to 32,000 diff characters; full/windowed views remain in CLI/MCP |
 | `/delegate-answer <job-id>` | Ask a person for an ordinary answer or explicit boolean plan decision |
@@ -29,6 +29,51 @@ human-approved composer starts new paid external work through normal broker
 admission. Controls may cause an existing provider job to continue or restart;
 those provider turns consume normal allowance. Cursor steering is cancel/resume,
 not same-turn steering. Plugin-origin control invocations are refused.
+
+All commands register `immediate: true` for human-typed mid-turn use. The host's
+plugin API `$.command.run()` still queues its invocation until idle; that is a
+different path. Status returns cached metadata with observation age, or a bounded
+cold snapshot read. It never waits on the shared agent-capture refresh promise.
+On Claude Code 2.1.296, a real busy-turn reproduction dispatched status promptly
+but held its returned command text until idle. Human-composer commands therefore
+log bounded local lines directly for next-frame paint and omit the duplicate
+delayed result. SDK/headless and plugin-origin calls retain normal returned text.
+If typing a command still delays until turn end, collect a private debug log:
+`claude --debug-file /tmp/claude-delegate-debug.log`. Search only for
+`delegate-router`, `command.run`, `delegate-status handler entered` and
+`delegate-status response ready`. Missing entry while the turn is active means
+the host has not dispatched the command; immediate entry/ready with delayed
+paint points to the host renderer. Logs can contain private prompts: do not
+share the whole file. Reload plugins or start a new session after updating.
+
+## Native notifications and monitor fallback
+
+Native refresh evaluates the same actionable-edge policy as the legacy monitor.
+It appends a bounded, redacted observation through `$.session.append()` and logs
+it locally. Append makes metadata available to the coordinator's next request
+without `prompt.submit`, waking Claude, or starting a paid turn. Observations are
+not human approval or instructions; plan decisions remain explicitly human.
+
+A private `0600` handoff record contains opaque edge identities, cooldown/rate
+state and pending notification lines, never prompts, reasoning or raw provider
+payloads. Native delivery acknowledges each batch before receiving a two-minute
+heartbeat lease. Empty successful scans renew it too. An unacknowledged batch
+has only a 15-second grace, retries with the same ID, and does not extend that
+grace indefinitely. The fallback monitor polls every 30 seconds by default,
+skips job scans and closes job/state watchers while the lease is healthy. It
+takes over after expiry or native session-end release, using the same ledger
+to avoid replaying delivered alerts. A crash after append but before durable
+acknowledgement can still replay a batch: delivery is best-effort, not exactly-once.
+
+The monitor task/process remains visible on light standby for automatic recovery.
+The resident broker supervisor is separate and still required for detached jobs
+and pending dispatch. Disabling `native_notifications` retains normal legacy
+monitor handling; disabling all native integration does likewise.
+`DELEGATE_MONITOR=0` or `DELEGATE_MONITOR_SCOPE=off` disables both ambient
+notification surfaces. Snooze, cooldown and rate-limit settings apply to both.
+Notification scope follows the ambient setting, never a broader dashboard tab.
+The fallback correlates its receiving Claude session even in workspace/all mode,
+so another session's native heartbeat cannot silence this recipient's alerts.
 
 The panel is explicitly opened and focused by the user, never automatically.
 It shows at most 40 jobs, prioritizing pending input, review readiness and active
@@ -155,6 +200,7 @@ Options appear in Claude Code's `/config` plugin rows:
 | Option | Default | Effect |
 | --- | --- | --- |
 | `native_enabled` | `true` | Commands/panel/native observation; classic hooks and CLI/MCP remain independent |
+| `native_notifications` | `true` | Native actionable observations; legacy monitor waits on standby with automatic takeover |
 | `usage_capture` | `true` | Capture official subscription windows locally |
 | `compact_status` | `true` | Show a compact chip only for running, blocked or review-ready work |
 | `reviewer_guard` | `true` | Refuse this plugin's reviewer at the Claude avoid threshold |
@@ -202,4 +248,4 @@ separate explicitly authorized smoke checks.
 Primary host references: [Mods](https://code.claude.com/docs/en/plugins/mods/overview),
 [API](https://code.claude.com/docs/en/plugins/mods/api),
 [testing](https://code.claude.com/docs/en/plugins/mods/test), and
-[manifest/userConfig](https://code.claude.com/docs/en/plugins-reference).
+[manifest/userConfig](https://code.claude.com/docs/en/plugins/manifest-reference).

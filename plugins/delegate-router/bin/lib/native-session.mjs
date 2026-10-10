@@ -100,7 +100,7 @@ function blockerFor(job) {
   const inputTimedOut = job?.pendingInput?.timedOut === true
     || job?.phase === 'input-timeout'
     || job?.stopReason === 'input-timeout';
-  if (!inputTimedOut && (job?.pendingInput || job?.stopReason === 'USER_INPUT_REQUIRED'
+  if (!TERMINAL_STATUSES.has(job?.status) && !inputTimedOut && (job?.pendingInput || job?.stopReason === 'USER_INPUT_REQUIRED'
     || /(?:input|required|approval|permission)/i.test(String(job?.phase || '')))) {
     return { priority: 2, kind: 'human-input', reason: 'human-input-required' };
   }
