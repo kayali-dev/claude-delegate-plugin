@@ -81,10 +81,10 @@ test('control MCP initializes and exposes the complete supervision surface', asy
   assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), [
     'delegate_start', 'delegate_inspect', 'delegate_list', 'delegate_stats', 'delegate_events', 'delegate_transcript', 'delegate_diff',
     'delegate_files', 'delegate_steer', 'delegate_cancel', 'delegate_release', 'delegate_respond', 'delegate_resume', 'delegate_review_round', 'delegate_usage',
-    'delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_integration', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'
+    'delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_integration', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify', 'delegate_notification_health'
   ]);
   const legacySchemas = responses[1].result.tools
-    .filter((tool) => !['delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_integration', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'].includes(tool.name))
+    .filter((tool) => !['delegate_notification_health', 'delegate_work', 'delegate_decide', 'delegate_workspace_discard', 'delegate_integrate', 'delegate_integration', 'delegate_start_trivial', 'delegate_interrogate', 'delegate_verify'].includes(tool.name))
     .map(({ name, inputSchema }) => {
       const legacy = structuredClone(inputSchema);
       if (['delegate_start', 'delegate_resume'].includes(name)) {
@@ -322,7 +322,7 @@ test('control MCP adds bounded resources and common-flow prompts without changin
     resources: { listChanged: false },
     prompts: { listChanged: false }
   });
-  assert.equal(byId.get(2).result.tools.length, 23);
+  assert.equal(byId.get(2).result.tools.length, 24);
   assert.deepEqual(byId.get(3).result.resources.map((resource) => resource.uri), [
     'delegate://work/active',
     'delegate://repo/profile'
@@ -361,7 +361,7 @@ test('native MCP opt-out hides only resources and prompts while preserving every
   assert.equal(result.status, 0, result.stderr);
   const responses = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
   assert.deepEqual(responses[0].result.capabilities, { tools: { listChanged: false } });
-  assert.equal(responses[1].result.tools.length, 23);
+  assert.equal(responses[1].result.tools.length, 24);
   assert.equal(responses[2].error.code, -32601);
 });
 

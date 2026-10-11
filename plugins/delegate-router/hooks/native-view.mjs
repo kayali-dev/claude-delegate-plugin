@@ -67,6 +67,7 @@ export function nativeOptions(values = {}) {
   return {
     native_enabled: values.native_enabled !== false,
     native_notifications: values.native_notifications !== false,
+    native_followups: values.native_followups !== false,
     usage_capture: values.usage_capture !== false,
     compact_status: values.compact_status !== false,
     reviewer_guard: values.reviewer_guard !== false,

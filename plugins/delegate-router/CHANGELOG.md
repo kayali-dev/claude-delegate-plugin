@@ -2,6 +2,28 @@
 
 All surfaces (skill, MCP servers, CLI) version together. The CLI resolves to the installed plugin on every run via `delegate-shim`; the skill and MCP servers pin at Claude Code session start — reload plugins after upgrading to align all surfaces. `delegate-health` prints the active installed version.
 
+## 0.75.0 — 2026-10-11
+
+- Default to native notifications with no resident standby monitor or startup
+  probe. Only explicit `delegate-config notifications legacy-persistent` arms
+  the legacy skill-triggered monitor during native startup (or Claude's next
+  turn if the Mod cannot load).
+  Add native/off/persistent notification configuration, independent of providers.
+- Queue bounded, batched plugin-attributed Claude follow-ups for actionable owned
+  jobs. Require known allowance below the avoid threshold and recheck edges,
+  revisions, ownership, enabled providers and snooze at idle. No human approval,
+  new work or permission changes. `/config` can retain observation-only delivery.
+  Guard engine-raised turn admission rather than self-submitted prompt hooks
+  (which Claude can skip), recheck headroom before each coordinator request,
+  and stop an automatic follow-up after four coordinator requests.
+- Add independent `delegate_notification_health` and a Claude-invokable recovery
+  skill. On-demand watches retain normal host permissions/deadlines and stop on
+  native recovery or no live work. Explicit opt-outs remain authoritative; full
+  Mod unload while Claude is idle does not have instant recovery in native mode.
+- Decouple host-agent capture from broker refresh/notifications so a blocked
+  catalog read cannot stop native delivery. Add model-free wake, quota, recovery,
+  configuration and monitor lifetime regressions. Preserve old MCP tool schemas.
+
 ## 0.74.0 — 2026-10-10
 
 - Make Mods the primary actionable-notification surface using local transcript

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { dataDir, enabledProviders, jobsDir, providerConfigPath, saveEnabledProviders } from './lib/state.mjs';
+import { notificationMode, notificationSettingsPath, setNotificationMode } from './lib/notification-settings.mjs';
 
 const args = process.argv.slice(2);
 const command = args.shift() || 'show';
@@ -242,7 +243,12 @@ function statuslineShow() {
 
 try {
   if (command === 'show') {
-    console.log(JSON.stringify({ configFile: providerConfigPath(), enabled: enabledProviders() }, null, 2));
+    console.log(JSON.stringify({ configFile: providerConfigPath(), enabled: enabledProviders(), notifications: notificationMode() }, null, 2));
+  } else if (command === 'notifications') {
+    const mode = args[0] || 'show';
+    if (args.length > 1) throw new Error('expected notifications show|native|legacy-persistent|off');
+    console.log(JSON.stringify({ configFile: notificationSettingsPath(), mode: mode === 'show' ? notificationMode() : setNotificationMode(mode),
+      note: 'Persistent legacy is armed through its skill in the next Claude session; if native startup is unavailable Claude arms it on its next turn. Running monitors stop on their next scan when mode changes. Native has no startup monitor.' }, null, 2));
   } else if (command === 'providers') {
     const mode = args[0];
     const providers = mode === 'both' ? ['codex', 'cursor'] : mode === 'codex' ? ['codex'] : mode === 'cursor' ? ['cursor'] : null;
@@ -261,7 +267,7 @@ try {
     else if (action === 'show') console.log(JSON.stringify(footerLinksShow(), null, 2));
     else throw new Error('expected footer-links enable|disable|show');
   } else {
-    console.error('Usage: delegate-config show | providers <codex|cursor|both> | statusline <enable|disable|show> | footer-links <enable|disable|show>');
+    console.error('Usage: delegate-config show | providers <codex|cursor|both> | notifications <show|native|legacy-persistent|off> | statusline <enable|disable|show> | footer-links <enable|disable|show>');
     process.exit(command === 'help' ? 0 : 2);
   }
 } catch (error) {

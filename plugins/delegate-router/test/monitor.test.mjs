@@ -1029,6 +1029,6 @@ test('monitors.json uses the documented schema and a space-safe plugin-root comm
   assert.match(monitor.name, /^[a-zA-Z0-9_-]+$/);
   assert.equal(typeof monitor.description, 'string');
   assert.ok(monitor.description.length > 0);
-  assert.equal(monitor.when, 'always');
-  assert.equal(monitor.command, 'node "${CLAUDE_PLUGIN_ROOT}/bin/delegate-monitor"');
+  assert.equal(monitor.when, 'on-skill-invoke:delegate-router:legacy-monitor');
+  assert.equal(monitor.command, 'node "${CLAUDE_PLUGIN_ROOT}/bin/delegate-monitor" --configured');
 });

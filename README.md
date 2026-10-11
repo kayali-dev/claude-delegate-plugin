@@ -123,12 +123,15 @@ provider-reported children. Classic hooks/transcripts remain fallbacks. Quiet
 investigation is not a timeout or failure: managed budgets count elapsed wall
 time, including approval wait, independently of visible output. Native Claude
 agent usage stays unknown unless actually reported. Inline tool cards and the
-AbovePrompt attention band offer inspection without automatically taking focus
-or starting a Claude turn.
+AbovePrompt attention band offer inspection without automatically taking focus.
+Actionable native observations can queue one batched follow-up turn for owned
+jobs, only when Claude allowance is known and below its avoid threshold; they
+recheck at idle and before each coordinator request, end after at most four
+coordinator requests, and never approve plans or widen authority.
 
 The panel renders on terminal and Desktop; other surfaces get text status and
 retain CLI/MCP. It never auto-opens or steals focus. `/config` exposes native
-enablement, native notifications, allowance capture, compact status, reviewer guard, agent observation,
+enablement, native notifications/follow-ups, allowance capture, compact status, reviewer guard, agent observation,
 attention/inline cards and a 3–30-second
 local refresh interval. Disabling native integration leaves the existing broker,
 classic hooks and CLI intact; it does not change provider configuration.
@@ -185,7 +188,25 @@ Write starts run a read-only plan and pause for confirmation. Inspect the pendin
 
 Current full model IDs also work: for example, `delegate-route --model gpt-6.1-sol --mode review --task "Review the authentication changes"` infers Codex, while `--model claude-opus-5-5` infers Claude. Managed starts still require `--provider codex|cursor`. Account availability remains authoritative; older explicit IDs are preserved. See [model notes](plugins/delegate-router/skills/delegate/references/models.md).
 
-Run `delegate-tui` for the dashboard, fleet, work-item review, plan confirmations, and selected child transcripts. Managed jobs normally belong to a resident supervisor and survive the launching CLI or MCP session. In Claude Code, native Mods deliver actionable observations without starting a model turn. The legacy monitor remains on light standby, skipping job scans while native delivery is healthy and taking over if its heartbeat expires; `finishedPath` remains the durable fallback. Use `delegate-jobs wait` from a normal terminal.
+Run `delegate-tui` for the dashboard, fleet, work-item review, plan confirmations, and selected child transcripts. Managed jobs normally belong to a resident supervisor and survive the launching CLI or MCP session. Native Mods are the default notification surface; no persistent standby monitor remains running. Claude checks `delegate_notification_health` while supervising live work and invokes `delegate-router:monitor-fallback` when needed. The fallback self-stops when native delivery recovers or no live work remains; `finishedPath` remains durable. Use `delegate-jobs wait` from a normal terminal.
+
+Notification mode is an independent portable configuration:
+
+```bash
+delegate-config notifications show
+delegate-config notifications native             # default; no resident monitor
+delegate-config notifications legacy-persistent  # opt-in; starts next session
+delegate-config notifications off                # disable ambient delivery
+```
+
+Claude's manifest cannot condition a monitor on plugin `/config` values. Instead,
+explicit legacy mode arms a dedicated skill trigger during native startup; if
+the Mod cannot load, Claude invokes that skill on its next turn. Native/off mode
+starts no monitor process, including probes. Native
+follow-ups consume Claude allowance and can be disabled with `native_followups`
+in `/config`. A completely unloaded Mod cannot recover instantly while Claude
+is idle; the next Claude turn can start recovery. Real ongoing work and explicit
+persistent mode can still produce Claude's normal exit confirmation.
 
 Within Claude Code, the skill uses the `delegate_control` MCP server. Read-only `delegate_start` calls return promptly; write starts wait through a bounded plan checkpoint and return a `launchNotice`. Claude advances the `afterSeq` cursor only when monitoring is useful and uses the latest revision for steering or cancellation. Workers are detached from the MCP process, so plugin reloads do not erase their job state.
 

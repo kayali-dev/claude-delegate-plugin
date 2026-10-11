@@ -16,6 +16,7 @@ import { auditLogPath, effectiveUsage, enabledProviders, loadState, mutateState,
 import { maintenanceLogPath, measureStateStore } from './lib/store-maintenance.mjs';
 import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
 import { probeLegacyCodexMcp } from './lib/codex-cli.mjs';
+import { notificationHealth } from './lib/notification-health.mjs';
 
 function run(command, args, timeout = 12000, maxOutput = 2000) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout, windowsHide: true });
@@ -65,6 +66,8 @@ const report = {
   control: { installed: fs.existsSync(controlServer), path: controlServer, protocol: 'MCP stdio' },
   usage: Object.fromEntries(providerNames().map((name) => [name, effectiveUsage(state, name)]))
 };
+try { report.notifications = notificationHealth(); }
+catch { report.notifications = { mode: 'unavailable', errorCode: 'STATE_ERROR', needsFallback: false }; }
 if (report.usage.cursor && !report.usage.cursor.known) {
   report.usage.cursor.note = 'expected: Cursor exposes no allowance API; record the dashboard percentage manually with delegate-usage set cursor <percent> --window first-party';
 }
@@ -192,6 +195,7 @@ report.ok = report.node.ok && report.claude.installed && report.control.installe
   && (!report.cursor.enabled || report.cursor.installed)
   && !report.store.overBudget
   && report.planFirstProbeHealth.status !== 'degraded';
+if (report.notifications.errorCode) report.ok = false;
 if (!quick && report.cursor.enabled && report.cursor.installed) {
   report.ok = report.ok && report.cursor.status?.ok === true && report.cursor.models?.ok === true
     && report.cursor.projectConfig?.ok !== false && report.cursor.capabilityProbe?.ok === true;
@@ -202,6 +206,7 @@ else {
   console.log(`Delegate Router ${report.version}${deep ? ' deep health (spends real provider allowance)' : ''}: ${report.ok ? 'ready' : 'degraded'} (CLI tracks the installed plugin; skill/MCP pin at session start)`);
   console.log(`Claude: ${report.claude.installed ? 'installed' : 'missing'}`);
   console.log(`Enabled providers: ${configuredProviders.join(', ')}`);
+  console.log(`Notifications: ${report.notifications.mode} · native ${report.notifications.native || 'unavailable'} (delivery health, not agent liveness)`);
   console.log(`Codex: ${report.codex.enabled ? report.codex.installed ? 'installed' : 'missing' : 'disabled'}`);
   if (report.codex.legacyMcp) console.log(`Legacy Codex MCP: ${report.codex.legacyMcp.available ? 'available' : 'unavailable (use managed app-server tools)'}`);
   console.log(`Cursor: ${report.cursor.enabled ? report.cursor.installed ? 'installed' : 'missing' : 'disabled'}${report.cursor.enabled && cursorBinary ? ` (${path.basename(cursorBinary)})` : ''}`);

@@ -16,12 +16,14 @@ import { jobTimeBudget } from './job-health.mjs';
 import { NotificationHandoff } from './notification-handoff.mjs';
 import { MonitorStore, preferenceSnoozed } from './monitor-store.mjs';
 import { monitorEnabled, monitorScope, scopeMonitorSnapshots } from './monitor-runtime.mjs';
+import { notificationMode } from './notification-settings.mjs';
+import { notificationHealth } from './notification-health.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const MAX_ROWS = 40;
 const FIELDS = new Set(['sessionId', 'projectDir', 'scope', 'jobId', 'expectedRevision', 'commandId', 'requestId', 'answer', 'accept', 'text', 'usage', 'confirmed',
-  'draft', 'previewId', 'authorizeCredits', 'priority', 'queueId', 'queueAction', 'agents', 'spawn', 'offset', 'file', 'find', 'evidenceVersion', 'view', 'deliveryId']);
+  'draft', 'previewId', 'authorizeCredits', 'priority', 'queueId', 'queueAction', 'agents', 'spawn', 'offset', 'file', 'find', 'evidenceVersion', 'view', 'deliveryId', 'deliveryEnabled']);
 
 function text(value, maximum = 256) {
   return String(redact(String(value ?? ''))).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').slice(0, maximum);
@@ -133,6 +135,7 @@ export function nativeOverview(input, options = {}) {
   const queueRows = boundedRows(queue.slice(0, 40).map((entry) => ({ ...entry, isOwnSession: entry.sessionId === input.sessionId })), 40, 20_000);
   return {
     schemaVersion: 1,
+    notificationMode: notificationMode(),
     observedAt: Date.now(),
     scope: input.scope || 'session',
     enabledProviders: enabled,
@@ -170,12 +173,13 @@ export async function dispatchNative(action, input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw brokerError('INVALID_REQUEST', 'expected an input object');
   if (Object.keys(input).some((key) => !FIELDS.has(key))) throw brokerError('INVALID_REQUEST', 'unsupported native input field');
   if (input.scope != null && !['session', 'workspace', 'all'].includes(input.scope)) throw brokerError('INVALID_REQUEST', 'invalid scope');
-  if (!['usage', 'snapshot', 'inspect', 'diff', 'evidence', 'cancel', 'steer', 'respond', 'preview', 'launch', 'enqueue', 'queue-control', 'agents', 'agent-bind', 'claim', 'notifications', 'notifications-ack', 'notifications-release'].includes(action)) throw brokerError('INVALID_REQUEST', 'unsupported native action');
+  if (!['usage', 'snapshot', 'inspect', 'diff', 'evidence', 'cancel', 'steer', 'respond', 'preview', 'launch', 'enqueue', 'queue-control', 'agents', 'agent-bind', 'claim', 'notifications', 'notifications-ack', 'notifications-release', 'notifications-wake', 'notifications-wake-check', 'notifications-health', 'notifications-config'].includes(action)) throw brokerError('INVALID_REQUEST', 'unsupported native action');
   if (action.startsWith('notifications')) {
     if (!SESSION.test(input.sessionId || '') || typeof input.projectDir !== 'string' || !path.isAbsolute(input.projectDir)) {
       throw brokerError('INVALID_REQUEST', 'native notifications require current session and absolute project identity');
     }
     const ambientScope = monitorScope();
+    if (action === 'notifications-health') return notificationHealth({ ...input, scope: ambientScope });
     if (!monitorEnabled()) return { disabled: true, lines: [] };
     const configuredNumber = (name, fallback, minimum) => {
       const number = Number(process.env[name]);
@@ -187,13 +191,28 @@ export async function dispatchNative(action, input = {}) {
         cooldownMs: configuredNumber('DELEGATE_MONITOR_COOLDOWN_SECONDS', 30, 0) * 1000,
         maxLinesPerMinute: configuredNumber('DELEGATE_MONITOR_MAX_LINES_PER_MINUTE', 6, 1)
       } });
+    if (action === 'notifications-config') {
+      if (typeof input.deliveryEnabled !== 'boolean') throw brokerError('INVALID_REQUEST', 'deliveryEnabled must be boolean');
+      return handoff.setDeliveryEnabled(input.deliveryEnabled);
+    }
     if (action === 'notifications-ack') return handoff.acknowledge(input.deliveryId);
     if (action === 'notifications-release') return handoff.release();
+    if (notificationMode() !== 'native') { handoff.release(); return { disabled: true, lines: [], allowed: false }; }
     const store = new MonitorStore();
     const now = Date.now();
-    return handoff.scan('native', () => scopeMonitorSnapshots(store.scan(), {
+    const snapshots = () => scopeMonitorSnapshots(store.scan(), {
       scope: ambientScope, sessionId: input.sessionId, projectDir: input.projectDir
-    }), { now, recipientSessionId: input.sessionId, snoozed: preferenceSnoozed(store.readPreference(), now) });
+    });
+    const snoozed = preferenceSnoozed(store.readPreference(), now);
+    const enabled = ['claude', ...enabledProviders()];
+    if (action === 'notifications-wake' || action === 'notifications-wake-check') {
+      if (action === 'notifications-wake-check' && !/^[a-f0-9]{32}$/.test(input.deliveryId || '')) throw brokerError('INVALID_REQUEST', 'invalid notification wake ID');
+      const usage = effectiveUsage(loadState(), 'claude');
+      return handoff.wake(snapshots, { now, sessionId: input.sessionId, enabled,
+        allowed: !snoozed && usage.known && usage.usedPercent < avoidPercentFor('claude'),
+        ...(action === 'notifications-wake-check' ? { deliveryId: input.deliveryId } : {}) });
+    }
+    return handoff.scan('native', snapshots, { now, recipientSessionId: input.sessionId, enabled, snoozed });
   }
   if (action === 'usage') return captureClaudeUsage(input.usage);
   if (action === 'agents') return observeClaudeAgents(input);

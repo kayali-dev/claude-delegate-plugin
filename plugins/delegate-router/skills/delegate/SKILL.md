@@ -79,7 +79,12 @@ bounded; task-level failures are not transport retries.
 Retain job ID and latest revision. Use native `/delegate-dashboard`,
 `/delegate-status`, inspect/diff commands, or native notifications with legacy
 monitor fallback. Status is a cached observation with age, not a synchronous
-provider query. Notifications append metadata without starting a Claude turn.
+provider query. Native follow-ups are plugin-attributed, require known Claude
+headroom, and never grant approval. No persistent monitor runs by default.
+During live supervision or delivery failure, call `delegate_notification_health`
+with current session identity. When `needsFallback` is true, invoke
+`delegate-router:monitor-fallback` yourself; respect opt-outs. It stops on native
+recovery or no live work. Persistent legacy is an explicit configuration choice.
 A quiet agent
 may still be investigating: silence alone is not a stall or timeout. Native host
 status is preferred; absent status/usage stays unknown. Managed timeouts count

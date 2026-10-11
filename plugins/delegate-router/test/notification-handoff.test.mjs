@@ -84,6 +84,42 @@ test('notification recipients are isolated and release keeps the dedupe state', 
   assert.equal(next().scan('monitor', () => [], { now: NOW + 2 }).standby, false);
 });
 
+test('native wake survives observation acknowledgement, batches only owned enabled edges, and consumes once', (t) => {
+  const { next } = fixture(t);
+  const snapshots = [observation({ pendingInput: { requestId: 'human', kind: 'plan-confirmation' } }),
+    observation({ id: 'foreign', origin: { sessionId: 'other' }, pendingInput: { requestId: 'foreign' } }),
+    observation({ id: 'disabled', provider: 'cursor', pendingInput: { requestId: 'cursor' } })];
+  const delivery = next().scan('native', () => snapshots, { now: NOW, recipientSessionId: 'owner', enabled: ['codex'] });
+  next().acknowledge(delivery.deliveryId, NOW + 1);
+  const options = { now: NOW + 2, sessionId: 'owner', enabled: ['codex'], allowed: true };
+  assert.equal(next().wake(() => snapshots, { ...options, allowed: false }).deliveryId, null, 'unknown/blocked quota defers without losing the edge');
+  const intent = next().wake(() => snapshots, options);
+  assert.equal(next().wake(() => snapshots, options).deliveryId, intent.deliveryId, 'one durable outstanding intent');
+  assert.deepEqual(next().wake(() => snapshots, { ...options, deliveryId: intent.deliveryId }), { allowed: true, jobIds: ['job-one'] });
+  assert.deepEqual(next().wake(() => snapshots, { ...options, deliveryId: intent.deliveryId }), { allowed: false, jobIds: [] });
+  assert.equal(next().wake(() => snapshots, options).deliveryId, null);
+  assert.ok(!fs.readFileSync(next().file, 'utf8').includes('plan-confirmation'), 'no decision or provider payload stored in wake queue');
+});
+
+test('native wake rechecks revision, ownership, live edge, provider enablement, quota and snooze at idle', (t) => {
+  const { next } = fixture(t);
+  const gated = observation({ pendingInput: { requestId: 'q1', kind: 'question' } });
+  const options = { now: NOW, recipientSessionId: 'owner', enabled: ['codex'] };
+  next().scan('native', () => [gated], options);
+  const wakeOptions = { now: NOW + 1, sessionId: 'owner', enabled: ['codex'], allowed: true };
+  let intent = next().wake(() => [gated], wakeOptions);
+  assert.equal(next().wake(() => [gated], { ...wakeOptions, deliveryId: intent.deliveryId, allowed: false }).allowed, false);
+  intent = next().wake(() => [gated], wakeOptions);
+  assert.notEqual(intent.deliveryId, null, 'deferred quota decision can retry');
+  assert.equal(next().wake(() => [observation()], { ...wakeOptions, deliveryId: intent.deliveryId }).allowed, false, 'resolved gate does not wake');
+  for (const extra of [{ revision: 5 }, { controller: { sessionId: 'other' } }, { provider: 'cursor' }]) {
+    const isolated = new NotificationHandoff({ stateDirectory: path.dirname(next().directory), sessionId: 'owner', projectDir: `/tmp/${Object.keys(extra)[0]}` });
+    isolated.scan('native', () => [gated], options);
+    const pending = isolated.wake(() => [gated], wakeOptions);
+    assert.equal(isolated.wake(() => [observation({ ...gated.job, ...extra })], { ...wakeOptions, deliveryId: pending.deliveryId }).allowed, false);
+  }
+});
+
 test('monitor closes watchers while native owns delivery and resumes fallback after release', (t) => {
   const { root } = fixture(t);
   let scans = 0, closed = false;

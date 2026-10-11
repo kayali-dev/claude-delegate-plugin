@@ -1,19 +1,32 @@
 #!/usr/bin/env node
 import { DelegateMonitor, monitorEnabled } from './lib/monitor-runtime.mjs';
+import { notificationMode } from './lib/notification-settings.mjs';
 
-if (monitorEnabled(process.env)) {
-  const monitor = new DelegateMonitor();
-  const stop = () => {
-    monitor.stop();
-    process.exitCode = 0;
-  };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
-  process.once('SIGHUP', stop);
-  try {
-    monitor.start();
-  } catch (error) {
-    process.stderr.write(`delegate-monitor: startup failed (${String(error?.code || error?.name || 'error')}); disabled\n`);
-    process.exitCode = 0;
+const args = process.argv.slice(2);
+const mode = args[0] || '--fallback';
+if (args.length > 1 || !['--configured', '--fallback'].includes(mode)) {
+  process.stderr.write('Usage: delegate-monitor [--configured|--fallback]\n');
+  process.exitCode = 2;
+} else if (monitorEnabled(process.env)) {
+  let configured;
+  try { configured = notificationMode(); } catch { configured = 'off'; }
+  // Invoked only through the legacy skill trigger or an on-demand fallback.
+  // Independently recheck mode even if an old skill invocation was queued.
+  if (configured !== 'off' && (mode !== '--configured' || configured === 'legacy-persistent')) {
+    const monitor = new DelegateMonitor({ lifetime: mode === '--configured' ? 'persistent' : 'fallback', configured: true });
+    const stop = () => {
+      monitor.stop();
+      process.exitCode = 0;
+    };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    process.once('SIGHUP', stop);
+    try {
+      monitor.start();
+    } catch (error) {
+      monitor.stop();
+      process.stderr.write(`delegate-monitor: startup failed (${String(error?.code || error?.name || 'error')}); disabled\n`);
+      process.exitCode = 0;
+    }
   }
 }

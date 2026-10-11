@@ -535,13 +535,18 @@ MCP tool, TUI, `finishedPath`, or inspection/control pull behavior.
 
 ## Ambient Push Bridge
 
-Interactive Claude Code sessions with the experimental Monitor surface
-automatically start `delegate-monitor`. Native Mods now deliver the primary
-notifications; the monitor remains on light standby, skipping job scans and
-watchers while a native heartbeat is healthy. It automatically takes over after
-expiry or release with shared dedupe/cooldown/rate state. See [native notification
-delivery](native.md#native-notifications-and-monitor-fallback). Both read bounded job records and
-journal tails and pushes only actionable edge transitions, in this order:
+Native Mods deliver the primary notifications; no persistent standby monitor is
+kept running, and no startup probe is launched. Only explicit
+`delegate-config notifications legacy-persistent` arms a dedicated skill trigger
+during native startup, or on Claude's next turn if the Mod cannot load.
+Claude calls `delegate_notification_health` while supervising live jobs and
+invokes `delegate-router:monitor-fallback` itself when delivery is unhealthy.
+That fixed read-only Monitor-tool watch exits on native recovery or no live work;
+normal permissions and host deadlines remain. Shared dedupe/cooldown/rate state
+transfers between surfaces. See [native notification
+delivery](native.md#native-notifications-and-monitor-fallback), including guarded
+paid native follow-ups, explicit opt-outs and complete-Mod-unload limits.
+Both read bounded job records and journal tails and push only actionable edge transitions, in this order:
 scope policy breach, per-job output `budget-breach`, provider
 `allowance-breach`, human input or blocked permission, ready for review,
 terminal failure, and explicitly unhealthy stalled transport. Output silence

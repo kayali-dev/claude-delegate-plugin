@@ -1,6 +1,6 @@
 # Native Claude Code integration
 
-Source release 0.74.0 targets Claude Code 2.1.294 or later. Mods add host-native
+Source release 0.75.0 targets Claude Code 2.1.294 or later. Mods add host-native
 commands, a panel and lifecycle handling; the dependency-free Node broker remains
 the source of job truth. They do not replace provider transports, sandbox policy,
 revisioned controls, the external TUI or the coordinator's final review.
@@ -51,24 +51,64 @@ share the whole file. Reload plugins or start a new session after updating.
 Native refresh evaluates the same actionable-edge policy as the legacy monitor.
 It appends a bounded, redacted observation through `$.session.append()` and logs
 it locally. Append makes metadata available to the coordinator's next request
-without `prompt.submit`, waking Claude, or starting a paid turn. Observations are
-not human approval or instructions; plan decisions remain explicitly human.
+without itself starting a paid turn. With `native_followups` enabled, genuinely
+actionable owned edges also enter a bounded private wake queue. One outstanding
+plugin-attributed `$.prompt.submit()` batches follow-up coordination once idle;
+it never impersonates a person or approves a plan. Engine-raised turn admission
+rechecks live edges, exact revisions, ownership, provider enablement, snooze and
+known Claude allowance below the avoid threshold. This does not depend on a
+Mod's own prompt hook, which the host can skip for self-submitted prompts.
+Each coordinator request rechecks headroom, mode and session generation; an
+automatic follow-up ends after at most four coordinator requests. Ordinary
+human turns are unaffected. Unknown or exhausted allowance defers the wake but
+does not hide the local observation. Follow-up turns consume allowance.
+Disabling follow-ups retains observation-only delivery.
 
 A private `0600` handoff record contains opaque edge identities, cooldown/rate
 state and pending notification lines, never prompts, reasoning or raw provider
 payloads. Native delivery acknowledges each batch before receiving a two-minute
 heartbeat lease. Empty successful scans renew it too. An unacknowledged batch
 has only a 15-second grace, retries with the same ID, and does not extend that
-grace indefinitely. The fallback monitor polls every 30 seconds by default,
-skips job scans and closes job/state watchers while the lease is healthy. It
-takes over after expiry or native session-end release, using the same ledger
-to avoid replaying delivered alerts. A crash after append but before durable
+grace indefinitely. There is no resident standby monitor. A started fallback
+polls every 30 seconds by default and exits as soon as the lease is healthy or
+no live scoped jobs remain, after draining final observations. Shared policy
+state avoids replaying delivered alerts. A crash after append but before durable
 acknowledgement can still replay a batch: delivery is best-effort, not exactly-once.
+Wake intent is consumed before turn admission: a crash may lose a wake rather
+than automatically replay a paid turn. Wake records contain opaque edge keys,
+job ids and revisions, never provider text. Resolved/stale edges are discarded.
 
-The monitor task/process remains visible on light standby for automatic recovery.
+Claude checks the read-only `delegate_notification_health` tool during active
+supervision and invokes the model-invocable `delegate-router:monitor-fallback`
+skill when `needsFallback` is true. The skill starts the fixed read-only process
+through the host Monitor tool, under normal permissions/Auto-review, for up to
+30 minutes (10 in single-prompt headless mode). It rechecks on deadline and does
+not start duplicates. If Monitor is unavailable/refused, CLI/MCP pull inspection
+and durable finishedPath remain. A surviving Mod can queue one guarded recovery
+prompt; a completely unloaded Mod cannot recover instantly while Claude is idle.
+No independent watchdog is kept alive just in case.
+
+Notification mode is configured separately from provider selection:
+
+```bash
+delegate-config notifications native             # default
+delegate-config notifications legacy-persistent  # starts in next session
+delegate-config notifications off                # all ambient delivery off
+delegate-config notifications show
+```
+
+This private `notifications.json` setting is independent of plugin `/config`:
+Claude's manifest monitor launcher cannot read plugin userConfig. There is no
+`always` monitor entry or startup probe. Only explicit legacy-persistent arms
+the `legacy-monitor` skill trigger through normal Skill permissions during Mod
+startup. If the Mod cannot load, Claude invokes that skill on its next turn.
+The fixed command independently rechecks configuration before starting. A running
+monitor stops on its next scan when its mode no longer applies. Actual ongoing
+work and explicit persistent mode still receive normal host exit protection.
 The resident broker supervisor is separate and still required for detached jobs
-and pending dispatch. Disabling `native_notifications` retains normal legacy
-monitor handling; disabling all native integration does likewise.
+and pending dispatch. Disabling `native_notifications` or `native_enabled` is
+an explicit opt-out, not permission to start a fallback. Set legacy-persistent
+separately if you want legacy delivery with native UI disabled.
 `DELEGATE_MONITOR=0` or `DELEGATE_MONITOR_SCOPE=off` disables both ambient
 notification surfaces. Snooze, cooldown and rate-limit settings apply to both.
 Notification scope follows the ambient setting, never a broader dashboard tab.
@@ -200,7 +240,8 @@ Options appear in Claude Code's `/config` plugin rows:
 | Option | Default | Effect |
 | --- | --- | --- |
 | `native_enabled` | `true` | Commands/panel/native observation; classic hooks and CLI/MCP remain independent |
-| `native_notifications` | `true` | Native actionable observations; legacy monitor waits on standby with automatic takeover |
+| `native_notifications` | `true` | Native actionable observations; no persistent standby |
+| `native_followups` | `true` | One batched owned-job follow-up when known Claude headroom permits; recheck at idle, never approve |
 | `usage_capture` | `true` | Capture official subscription windows locally |
 | `compact_status` | `true` | Show a compact chip only for running, blocked or review-ready work |
 | `reviewer_guard` | `true` | Refuse this plugin's reviewer at the Claude avoid threshold |

@@ -7,6 +7,8 @@ import { aggregateVisibilityStats, readAuditLog } from './lib/stats.mjs';
 import { boundedStatsView } from './lib/stats-view.mjs';
 import { externalThreadStats, scanExternalCodexThreads } from './lib/codex-sessions.mjs';
 import { buildNativeWorkState, nativeWorkOptions } from './lib/native-session.mjs';
+import { notificationHealth } from './lib/notification-health.mjs';
+import { monitorScope } from './lib/monitor-runtime.mjs';
 import { deriveVerificationProfile } from './lib/verification-profile.mjs';
 import { readProjectedWorkItems } from './lib/work-read.mjs';
 import {
@@ -148,7 +150,7 @@ TOOLS.push(
   {
     name: 'delegate_start_trivial',
     description: 'Explicit plan-first escape hatch for a trivial write. Starts through the existing supervised path without the default plan/ambiguity passes; this call itself is the coordinator confirmation to spend allowance and launch writes.',
-    inputSchema: TOOLS[0].inputSchema
+    inputSchema: TOOLS.find((tool) => tool.name === 'delegate_start').inputSchema
   },
   {
     name: 'delegate_interrogate',
@@ -178,6 +180,9 @@ TOOLS.push(
     }
   }
 );
+
+TOOLS.push({ name: 'delegate_notification_health', description: 'Read native delivery heartbeat, notification mode and current-session live job count without inference. If needsFallback is true, Claude should invoke delegate-router:monitor-fallback; never override explicit opt-outs. This does not diagnose agent liveness.',
+  inputSchema: { type: 'object', additionalProperties: false, properties: { sessionId: { type: 'string', maxLength: 256 }, projectDir: { type: 'string', maxLength: 4096 } } } });
 
 Object.assign(TOOLS.find((tool) => tool.name === 'delegate_review_round').inputSchema.properties, {
   planFirst: { type: 'boolean', description: 'Defaults to the normal human plan gate. Set false only for an explicitly trivial in-scope correction; never infer approval from review findings.' },
@@ -407,6 +412,12 @@ async function dispatch(name, args) {
   if (name === 'delegate_resume') return resumeManagedJob(args.jobId, args);
   if (name === 'delegate_review_round') return reviewRoundManagedJob(args.jobId, args);
   if (name === 'delegate_usage') return jobUsage(args.jobId);
+  if (name === 'delegate_notification_health') {
+    if (Object.keys(args).some((key) => !['sessionId', 'projectDir'].includes(key))
+      || (args.sessionId != null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(args.sessionId))
+      || (args.projectDir != null && (typeof args.projectDir !== 'string' || args.projectDir.length > 4096 || !/^(?:\/|[A-Za-z]:[\\/])/.test(args.projectDir)))) throw brokerError('INVALID_REQUEST', 'invalid notification health identity');
+    return notificationHealth({ ...args, scope: monitorScope() });
+  }
   if (name === 'delegate_work') {
     const unknown = Object.keys(args).filter((key) => !['id', 'limit'].includes(key));
     if (unknown.length) throw brokerError('INVALID_REQUEST', `delegate_work unknown parameter${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
@@ -457,7 +468,7 @@ lines.on('line', async (line) => {
             prompts: { listChanged: false }
           } : {})
         },
-        serverInfo: { name: 'delegate-control', version: '0.74.0' },
+        serverInfo: { name: 'delegate-control', version: '0.75.0' },
         instructions: MCP_INSTRUCTIONS
       } });
     } else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools: TOOLS.map((tool) => ({ ...tool, annotations: toolAnnotations(tool.name) })) } });

@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { dataDir } from './state.mjs';
 import { withFileLock } from './lock.mjs';
-import { NotificationPolicy } from './monitor-policy.mjs';
+import { NotificationPolicy, detectActionableEdges, edgeIdentity } from './monitor-policy.mjs';
 import { brokerError } from './errors.mjs';
 
 export const NATIVE_NOTIFICATION_LEASE_MS = 120_000;
@@ -85,7 +85,15 @@ export class NotificationHandoff {
       }
       const deliveryId = source === 'native' && lines.length
         ? record.delivery?.id || crypto.randomBytes(16).toString('hex') : null;
-      this.write({ version: 1, policy: this.policy.checkpoint(), updatedAt: now,
+      const wakes = new Map((Array.isArray(record.wakes) ? record.wakes : []).map((entry) => [entry.jobId, entry]));
+      if (source === 'native' && !retrying) for (const edge of this.policy.offeredEdges) {
+        if (edge.isOwnSession !== true || !(options.enabled || ['codex', 'cursor', 'claude']).includes(edge.job?.provider)
+          || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(edge.jobId) || !Number.isSafeInteger(edge.observedAtRevision)) continue;
+        wakes.set(edge.jobId, { jobId: edge.jobId, revision: edge.observedAtRevision, identity: edgeIdentity(edge), at: now });
+      }
+      this.write({ ...record, version: 1, policy: this.policy.checkpoint(), updatedAt: now,
+        wakes: source === 'native' ? [...wakes.values()].slice(-40) : [],
+        wakeIntent: source === 'native' ? record.wakeIntent : null,
         leaseUntil: source === 'native' ? (retrying ? record.leaseUntil : now + (lines.length ? DELIVERY_GRACE_MS : NATIVE_NOTIFICATION_LEASE_MS)) : 0,
         delivery: deliveryId ? { id: deliveryId, lines } : null });
       return { standby: false, lines, deliveryId };
@@ -103,8 +111,47 @@ export class NotificationHandoff {
 
   release() {
     return this.transaction((record) => {
-      this.write({ ...record, leaseUntil: 0 });
+      this.write({ ...record, leaseUntil: 0, wakeIntent: null });
       return { released: true };
+    });
+  }
+
+  setDeliveryEnabled(enabled) {
+    return this.transaction((record) => {
+      this.write({ ...record, nativeDisabled: !enabled, ...(enabled ? {} : { leaseUntil: 0, wakeIntent: null }) });
+      return { enabled };
+    });
+  }
+
+  // Only opaque edge identities, revisions and job ids survive a restart.
+  // Revalidate current ownership, provider, revision and edge at dispatch time;
+  // neither notification text nor worker content becomes a prompt instruction.
+  wake(loadSnapshots, options = {}) {
+    const now = options.now ?? Date.now();
+    return this.transaction((record) => {
+      const snapshots = loadSnapshots();
+      const valid = (Array.isArray(record.wakes) ? record.wakes : []).filter((entry) => {
+        if (now - entry.at > 24 * 60 * 60 * 1000) return false;
+        const observation = snapshots.find(({ job }) => job?.id === entry.jobId && job.revision === entry.revision);
+        if (!observation || !(options.enabled || []).includes(observation.job.provider)) return false;
+        return detectActionableEdges(observation, { now, recipientSessionId: options.sessionId })
+          .some((edge) => edge.isOwnSession && edgeIdentity(edge) === entry.identity);
+      });
+      let intent = record.wakeIntent;
+      if (intent && (now - intent.at > 5 * 60 * 1000 || !valid.some((entry) => intent.keys.includes(`${entry.jobId}:${entry.identity}`)))) intent = null;
+      if (options.deliveryId) {
+        const entries = intent?.id === options.deliveryId ? valid.filter((entry) => intent.keys.includes(`${entry.jobId}:${entry.identity}`)) : [];
+        const allowed = options.allowed === true && entries.length > 0;
+        // Consume before starting the turn: a crash can lose a wake, but can
+        // never automatically replay an already admitted paid follow-up.
+        this.write({ ...record, wakes: allowed ? valid.filter((entry) => !entries.includes(entry)) : valid, wakeIntent: null });
+        return { allowed, jobIds: allowed ? entries.map((entry) => entry.jobId) : [] };
+      }
+      if (!intent && options.allowed === true && valid.length) intent = { id: crypto.randomBytes(16).toString('hex'), at: now,
+        keys: valid.map((entry) => `${entry.jobId}:${entry.identity}`) };
+      this.write({ ...record, wakes: valid, wakeIntent: intent });
+      return { deliveryId: options.allowed === true ? intent?.id || null : null,
+        jobIds: options.allowed === true && intent ? valid.filter((entry) => intent.keys.includes(`${entry.jobId}:${entry.identity}`)).map((entry) => entry.jobId) : [] };
     });
   }
 }

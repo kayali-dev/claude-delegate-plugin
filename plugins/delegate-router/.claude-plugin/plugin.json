@@ -1,7 +1,7 @@
 {
   "name": "delegate-router",
   "displayName": "Delegate Router",
-  "version": "0.74.0",
+  "version": "0.75.0",
   "description": "Quota-aware delegation and live supervision for Codex and Cursor agents.",
   "author": {
     "name": "Mahmoud Kayyali",
@@ -28,7 +28,11 @@
     },
     "native_notifications": {
       "type": "boolean", "title": "Native delegation notifications", "default": true,
-      "description": "Deliver actionable local observations without starting a Claude turn. The legacy monitor waits on standby and takes over if native delivery stops."
+      "description": "Deliver actionable local observations. No persistent standby monitor. Legacy mode is configured with delegate-config notifications."
+    },
+    "native_followups": {
+      "type": "boolean", "title": "Native delegation follow-up turns", "default": true,
+      "description": "Queue one batched Claude follow-up for actionable owned jobs when allowance is known and below the avoid threshold. Rechecks at idle; never approves plans or changes scope. Disable for observation-only delivery."
     },
     "compact_status": {
       "type": "boolean", "title": "Show active-work status", "default": true,

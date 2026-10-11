@@ -1,8 +1,8 @@
 [
   {
     "name": "delegate-actionable-edges",
-    "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/delegate-monitor\"",
-    "description": "Push redacted actionable Delegate Router job transitions into the active Claude Code session.",
-    "when": "always"
+    "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/delegate-monitor\" --configured",
+    "description": "Explicitly configured persistent legacy delegation notifications.",
+    "when": "on-skill-invoke:delegate-router:legacy-monitor"
   }
 ]

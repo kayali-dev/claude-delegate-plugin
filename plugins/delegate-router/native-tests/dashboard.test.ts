@@ -8,6 +8,7 @@ const JOB = {
   canCancel: true, canSteer: true, canAnswer: false, pendingInput: null
 };
 const SNAPSHOT = {
+  notificationMode: 'native',
   scope: 'session', chip: 'D 1 running · codex ?', jobs: [JOB], omittedCount: 0,
   allowance: [{ provider: 'claude', known: false }, { provider: 'codex', known: false }],
   workState: { runningCount: 1, needsReviewCount: 0, blockedCount: 0 }
@@ -18,13 +19,18 @@ const PANE = {
   props: { title: 'Delegate jobs', isFocused: true, bodyColumns: 60, placement: 'inline', scroll: { offset: 0, bodyRows: 20 }, view: {} }
 } as const;
 
-function setup(on, values: { question?: string, beforeAnswer?: () => Promise<void>, snapshot?: any, job?: any, surfaces?: string[], failAction?: string, failAfter?: number, errorCode?: string, usage?: any, agents?: any[], agentList?: () => Promise<void>, appendDeny?: string, messages?: any[], processResult?: (action: string, payload: any) => any } = {}) {
+function setup(on, values: { question?: string, beforeAnswer?: () => Promise<void>, beforePrompt?: () => Promise<void>, snapshot?: any, job?: any, surfaces?: string[], failAction?: string, failAfter?: number, errorCode?: string, usage?: any, agents?: any[], agentList?: () => Promise<void>, appendDeny?: string, messages?: any[], processResult?: (action: string, payload: any) => any } = {}) {
   const calls: any[] = [];
   const commands: any[] = [];
   const questions: any[] = [];
   const logs: any[] = [];
   const opened: any[] = [];
   const appended: any[] = [];
+  const prompts: any[] = [];
+  const skills: any[] = [];
+  const turns: any[] = [];
+  const aborted: any[] = [];
+  const steps: any[] = [];
   const clock = mock.clock(on);
   on('session.id', () => ({ value: 'native-session' }));
   on('session.root', () => ({ value: '/tmp/native-project' }));
@@ -33,6 +39,12 @@ function setup(on, values: { question?: string, beforeAnswer?: () => Promise<voi
   on('session.surfaces', () => ({ value: values.surfaces || ['terminal'] }));
   on('agent.list', async () => { await values.agentList?.(); return { value: values.agents || [] }; });
   on('session.append', ($, e, next) => { appended.push(e); return values.appendDeny ? { deny: values.appendDeny } : next(e); });
+  // Stop at prompt admission: these tests must never call a live model.
+  on('prompt.submit', async ($, e) => { await values.beforePrompt?.(); prompts.push(e); return { text: e.text, origin: e.origin }; });
+  on('turn.start', ($, e) => { turns.push(e); return { turnId: e.turnId }; });
+  on('turn.abort', ($, e) => { aborted.push(e); return { value: undefined }; });
+  on('turn.step', async function* ($, e) { steps.push(e); yield { kind: 'stop', stopReason: 'end_turn', usage: null };
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }; });
   on('session.messages', () => ({ value: values.messages || [] }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('session.end', () => ({ sessionId: 'native-session' }));
@@ -48,6 +60,7 @@ function setup(on, values: { question?: string, beforeAnswer?: () => Promise<voi
     await values.beforeAnswer?.();
     return { result: { answers: { [e.questions[0].question]: values.question || 'Keep running' } } };
   });
+  on('tool.call', { tool: 'Skill' }, ($, e) => { skills.push(e); return { result: { content: 'armed' } }; });
   on('process.run', ($, e) => {
     calls.push(e);
     const action = e.argv[2];
@@ -60,7 +73,7 @@ function setup(on, values: { question?: string, beforeAnswer?: () => Promise<voi
           : action === 'usage' ? { captured: 0 } : { commandId: 'native-command' });
     return { value: { exitCode: 0, stdout: JSON.stringify({ ok: true, result }), stderr: '' } };
   });
-  return { calls, commands, questions, logs, opened, appended, clock };
+  return { calls, commands, questions, logs, opened, appended, prompts, skills, turns, aborted, steps, clock };
 }
 
 test('status does not wait behind an in-flight host-agent refresh', async ($, on) => {
@@ -75,7 +88,7 @@ test('status does not wait behind an in-flight host-agent refresh', async ($, on
   try {
     const response = await $.command.run({ command: 'delegate-status', args: '' });
     expect(response.text).toContain('native-job');
-    expect(calls.filter((call) => call.argv[2] === 'snapshot').length).toBe(1);
+    expect(calls.filter((call) => call.argv[2] === 'snapshot').length).toBe(2);
     expect(logs.some((line) => line.to === 'debug' && line.text.includes('response ready'))).toBe(true);
   } finally { release(); await refreshing; }
 });
@@ -98,7 +111,151 @@ test('failed native observation delivery is not acknowledged and leaves monitor 
     ? { deliveryId: 'd'.repeat(32), lines: ['delegate[project]: job needs-input'] } : undefined });
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
   expect(calls.filter((call) => call.argv[2] === 'notifications-ack').length).toBe(0);
-  expect(logs.some((line) => line.text.includes('legacy monitor will take over'))).toBe(true);
+  expect(logs.some((line) => line.text.includes('delegate-router:monitor-fallback'))).toBe(true);
+});
+
+test('native default never invokes a monitor skill; explicit persistent config arms its qualified trigger', async ($, on) => {
+  let mode = 'native';
+  const { skills, prompts, clock } = setup(on, { processResult: (action) => action === 'notifications-health' ? { mode } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  expect(skills.length).toBe(0);
+  mode = 'legacy-persistent';
+  await $.classic.SessionStart({ session_id: 'native-session', source: 'clear', cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  expect(skills.length).toBe(1);
+  expect(skills[0].skill).toBe('delegate-router:legacy-monitor');
+  expect(prompts.length).toBe(0);
+});
+
+test('ambient notification opt-out prevents even a legacy startup probe', async ($, on) => {
+  const { skills, prompts, clock } = setup(on, { processResult: (action) => action === 'notifications-health'
+    ? { mode: 'legacy-persistent', ambientEnabled: false } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  expect(skills.length).toBe(0);
+  expect(prompts.length).toBe(0);
+});
+
+test('observation-only native setting never queues follow-up turns', { options: { native_followups: false } }, async ($, on) => {
+  const { prompts, calls, clock } = setup(on, { processResult: (action) => action === 'notifications'
+    ? { deliveryId: 'd'.repeat(32), lines: ['delegate[project]: input required'] } : action === 'notifications-wake'
+      ? { deliveryId: 'a'.repeat(32) } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  expect(prompts.length).toBe(0);
+  expect(calls.some((call) => call.argv[2] === 'notifications-wake')).toBe(false);
+  expect(calls.some((call) => call.argv[2] === 'notifications-ack')).toBe(true);
+});
+
+test('native follow-up admission preserves plugin attribution and cannot approve or launch work', async ($, on) => {
+  const { calls, prompts, clock } = setup(on, { processResult: (action) => action === 'notifications-wake'
+    ? { deliveryId: 'a'.repeat(32) } : action === 'notifications-wake-check'
+      ? { allowed: true, jobIds: ['native-job'] } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  expect(prompts.length).toBe(1);
+  expect(prompts[0].origin).toEqual({ kind: 'plugin', name: 'delegate-router' });
+  await $.turn.start({ turnId: 'automatic-turn', text: 'The delegate-router plugin sent a message:\n' + prompts[0].text });
+  expect(calls.filter((call) => call.argv[2] === 'notifications-wake-check').length).toBe(1);
+  expect(prompts[0].origin.kind).toBe('plugin');
+  expect(prompts[0].origin.name).toBe('delegate-router');
+  expect(prompts[0].text).toContain('ask the human');
+  expect(prompts[0].text).toContain('Completion is not acceptance');
+  expect(calls.some((call) => /^(launch|enqueue|respond|cancel|steer)$/.test(call.argv[2]))).toBe(false);
+});
+
+test('resolved or quota-ineligible native wake is dropped before model admission', async ($, on) => {
+  const { prompts, calls, clock, turns, aborted } = setup(on, { processResult: (action) => action === 'notifications-wake'
+    ? { deliveryId: 'a'.repeat(32) } : action === 'notifications-wake-check'
+      ? { allowed: false, jobIds: [] } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  await $.turn.start({ turnId: 'automatic-turn', text: 'The delegate-router plugin sent a message:\n' + prompts[0].text });
+  expect(calls.filter((call) => call.argv[2] === 'notifications-wake-check').length).toBe(1);
+  expect(turns.length).toBe(0);
+  expect(aborted.length).toBe(1);
+});
+
+async function drainStep(stream) {
+  let item;
+  do { item = await stream.next(); } while (!item.done);
+  return item.value;
+}
+
+test('automatic follow-up checks headroom before every request and stops after four requests', async ($, on) => {
+  const current = { ...SNAPSHOT, allowance: [{ provider: 'claude', known: true, usedPercent: 20, avoidPercent: 85 }] };
+  const { prompts, steps, clock } = setup(on, { snapshot: current, processResult: (action) => action === 'notifications-wake'
+    ? { deliveryId: 'c'.repeat(32), jobIds: ['native-job'] } : action === 'notifications-wake-check'
+      ? { allowed: true, jobIds: ['native-job'] } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  await $.turn.start({ turnId: 'bounded-follow-up', text: 'The delegate-router plugin sent a message:\n' + prompts[0].text });
+  for (let index = 0; index < 5; index++) {
+    const result = await drainStep($.turn.step({ turnId: 'bounded-follow-up', index, model: 'claude-opus-5-5', messageCount: 1 }));
+    expect(result.stopReason).toBe('end_turn');
+  }
+  expect(steps.length).toBe(4);
+});
+
+for (const reason of ['quota', 'mode', 'clear']) {
+  test(`automatic follow-up stops before another request after ${reason} changes`, async ($, on) => {
+    const current = { ...SNAPSHOT, allowance: [{ provider: 'claude', known: true, usedPercent: 20, avoidPercent: 85 }] };
+    const { prompts, steps, clock } = setup(on, { snapshot: current, processResult: (action) => action === 'notifications-wake'
+      ? { deliveryId: 'e'.repeat(32), jobIds: ['native-job'] } : action === 'notifications-wake-check'
+        ? { allowed: true, jobIds: ['native-job'] } : undefined });
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+    await clock.advance(1);
+    await $.turn.start({ turnId: 'guarded-follow-up', text: 'The delegate-router plugin sent a message:\n' + prompts[0].text });
+    await drainStep($.turn.step({ turnId: 'guarded-follow-up', index: 0, model: 'claude-opus-5-5', messageCount: 1 }));
+    if (reason === 'quota') current.allowance[0].usedPercent = 99;
+    else if (reason === 'mode') current.notificationMode = 'off';
+    else await $.classic.SessionStart({ session_id: 'new-session', source: 'clear', cwd: '/tmp/native-project' });
+    await drainStep($.turn.step({ turnId: 'guarded-follow-up', index: 1, model: 'claude-opus-5-5', messageCount: 1 }));
+    expect(steps.length).toBe(1);
+    await $.turn.start({ turnId: 'human-turn', text: 'A normal human request' });
+    await drainStep($.turn.step({ turnId: 'human-turn', index: 0, model: 'claude-opus-5-5', messageCount: 1 }));
+    expect(steps.length).toBe(2);
+  });
+}
+
+test('a queued follow-up from before clear is refused even if the host adds its plugin wrapper', async ($, on) => {
+  const { prompts, turns, aborted, clock } = setup(on, { processResult: (action) => action === 'notifications-wake'
+    ? { deliveryId: 'f'.repeat(32), jobIds: ['native-job'] } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(1);
+  const oldPrompt = prompts[0].text;
+  await $.classic.SessionStart({ session_id: 'new-session', source: 'clear', cwd: '/tmp/native-project' });
+  await $.turn.start({ turnId: 'stale-follow-up', text: 'The delegate-router plugin sent a message:\n' + oldPrompt });
+  expect(turns.length).toBe(0);
+  expect(aborted.length).toBe(1);
+});
+
+test('one outstanding native submission does not block polling or accumulate more prompts', async ($, on) => {
+  let release;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const { prompts, calls, clock } = setup(on, { beforePrompt: () => held, processResult: (action) => action === 'notifications-wake'
+    ? { deliveryId: 'b'.repeat(32) } : action === 'notifications-wake-check'
+      ? { allowed: true, jobIds: ['native-job'] } : undefined });
+  try {
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+    await clock.advance(15_000);
+    expect(calls.filter((call) => call.argv[2] === 'notifications-wake').length).toBe(1);
+    expect(calls.filter((call) => call.argv[2] === 'snapshot').length > 1).toBe(true);
+    expect(prompts.length).toBe(0);
+  } finally { release(); }
+});
+
+test('failed native notifications queue model-managed recovery only with live unhealthy work and headroom', async ($, on) => {
+  const current = { ...SNAPSHOT, allowance: [{ provider: 'claude', known: true, usedPercent: 30, avoidPercent: 85 }] };
+  const { prompts, calls, clock } = setup(on, { snapshot: current, failAction: 'notifications', processResult: (action) => action === 'notifications-health'
+    ? { needsFallback: true, native: 'expired', mode: 'native', liveJobCount: 1 } : undefined });
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/tmp/native-project' });
+  await clock.advance(30_000);
+  expect(prompts.length).toBe(1);
+  expect(prompts[0].text).toContain('delegate-router:monitor-fallback');
+  expect(prompts[0].origin.kind).toBe('plugin');
+  expect(calls.some((call) => call.argv[2] === 'launch')).toBe(false);
 });
 
 test('native startup registers immediate commands and status requires no model call', async ($, on) => {

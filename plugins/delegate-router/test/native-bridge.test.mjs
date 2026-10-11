@@ -9,7 +9,8 @@ import { claudeUsageWindows, captureClaudeUsage } from '../bin/lib/claude-usage.
 import { dispatchNative, nativeOverview } from '../bin/lib/native-bridge.mjs';
 import { negotiateMcpVersion, toolAnnotations } from '../bin/lib/mcp-contract.mjs';
 import { nativeOptions, overviewText, reviewerGuardDecision, orderedJobRows, readablePlan, commandLogPages } from '../hooks/native-view.mjs';
-import { loadState, saveJob, saveState, effectiveUsage } from '../bin/lib/state.mjs';
+import { loadState, saveJob, saveState, effectiveUsage, setWindow } from '../bin/lib/state.mjs';
+import { setNotificationMode } from '../bin/lib/notification-settings.mjs';
 
 const plugin = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -72,6 +73,29 @@ test('native notifications use ambient session scope even when the panel shows a
   assert.deepEqual((await dispatchNative('notifications', { sessionId: 'native-session', projectDir: '/tmp/native-project' })).lines, []);
   process.env.DELEGATE_MONITOR = '0';
   assert.equal((await dispatchNative('notifications', { sessionId: 'native-session', projectDir: '/tmp/native-project' })).disabled, true);
+});
+
+test('broker native follow-up requires current Claude allowance and revalidates at idle', async (t) => {
+  const directory = isolated(t), input = { sessionId: 'native-session', projectDir: '/tmp/native-project' };
+  saveJob(job('gated', { pendingInput: { requestId: 'q1', kind: 'plan-confirmation' } }));
+  const delivery = await dispatchNative('notifications', input);
+  await dispatchNative('notifications-ack', { ...input, deliveryId: delivery.deliveryId });
+  assert.equal((await dispatchNative('notifications-wake', input)).deliveryId, null, 'unknown quota does not start a paid turn');
+  const state = loadState();
+  setWindow(state, 'claude', 'five_hour', 20, { source: 'native-session-usage', resetsAt: Math.floor(Date.now() / 1000) + 3600 });
+  saveState(state);
+  const wake = await dispatchNative('notifications-wake', input);
+  assert.match(wake.deliveryId, /^[a-f0-9]{32}$/);
+  setWindow(state, 'claude', 'five_hour', 99, { source: 'native-session-usage' }); saveState(state);
+  assert.equal((await dispatchNative('notifications-wake-check', { ...input, deliveryId: wake.deliveryId })).allowed, false);
+  setWindow(state, 'claude', 'five_hour', 20, { source: 'native-session-usage' }); saveState(state);
+  const retry = await dispatchNative('notifications-wake', input);
+  saveJob(job('gated', { revision: 4, pendingInput: null }));
+  assert.equal((await dispatchNative('notifications-wake-check', { ...input, deliveryId: retry.deliveryId })).allowed, false);
+  setNotificationMode('off', directory);
+  assert.equal((await dispatchNative('notifications', input)).disabled, true);
+  assert.equal((await dispatchNative('notifications-wake', input)).allowed, false);
+  assert.equal((await dispatchNative('notifications-health', input)).needsFallback, false);
 });
 
 test('native projections do not expose terminal requests as actionable', () => {

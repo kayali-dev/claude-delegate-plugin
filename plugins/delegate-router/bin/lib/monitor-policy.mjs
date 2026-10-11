@@ -413,7 +413,7 @@ function preferred(left, right) {
   return right.priority < left.priority || (right.priority === left.priority && right.key < left.key) ? right : left;
 }
 
-function edgeIdentity(edge) {
+export function edgeIdentity(edge) {
   const value = edge.category === 'needs-input'
     ? `${edge.key}:${edge.requestId || edge.input || 'unknown'}`
     : edge.key;
@@ -460,6 +460,7 @@ export class NotificationPolicy {
       windowMs: options.rateWindowMs
     });
     this.bootstrapped = false;
+    this.offeredEdges = [];
   }
 
   checkpoint() {
@@ -520,10 +521,13 @@ export class NotificationPolicy {
     }
     this.bootstrapped = true;
     if (!attention.length) return [];
-    return this.rate.offer(formatStartupSummary(attention), now, projectSetLabel(attention));
+    const lines = this.rate.offer(formatStartupSummary(attention), now, projectSetLabel(attention));
+    if (lines.length) this.offeredEdges.push(...attention);
+    return lines;
   }
 
   observe(snapshots = [], options = {}) {
+    this.offeredEdges = [];
     if (!this.bootstrapped) return this.bootstrap(snapshots, options);
     const now = Number(options.now ?? Date.now());
     const output = options.snoozed ? [] : this.rate.rotate(now);
@@ -579,6 +583,7 @@ export class NotificationPolicy {
       const offered = this.rate.offer(line, now, monitorProjectLabel(emittedEdge.job));
       output.push(...offered);
       if (offered.includes(line)) {
+        this.offeredEdges.push(emittedEdge);
         const activeEmitted = new Map(this.emittedActive.get(jobId) || []);
         activeEmitted.set(selectedIdentity, emittedEdge);
         this.emittedActive.set(jobId, activeEmitted);

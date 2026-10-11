@@ -195,9 +195,12 @@ test('SessionStart source=compact rehydrates bounded state with a validator-supp
   assert.equal(started.status, 0, started.stderr);
   const sessionOutput = assertValidSessionStartHookOutput(started.stdout);
   assert.deepEqual(sessionOutput.watchPaths, [path.join(root, 'collision-watch.signal')]);
-  assert.equal(sessionOutput.additionalContext, `Delegate work (session; bounded metadata only, max 2048 bytes):
+  assert.ok(sessionOutput.additionalContext.startsWith(`Delegate work (session; bounded metadata only, max 2048 bytes):
 active: codex-live-native-abcdef [codex running]
-Use these IDs directly with delegate_inspect/resume; delegate_list is only the overflow or new-session fallback.`);
+Use these IDs directly with delegate_inspect/resume; delegate_list is only the overflow or new-session fallback.`));
+  assert.match(sessionOutput.additionalContext, /Delegate notification mode: native/);
+  assert.match(sessionOutput.additionalContext, /sessionId "session-native"/);
+  assert.match(sessionOutput.additionalContext, /invoke delegate-router:monitor-fallback yourself/);
   assert.ok(Buffer.byteLength(sessionOutput.additionalContext, 'utf8') <= NATIVE_CONTEXT_MAX_BYTES);
 
   const optedOut = invoke('SessionStart', { source: 'compact' }, { ...env, DELEGATE_NATIVE_CONTEXT: '0' });

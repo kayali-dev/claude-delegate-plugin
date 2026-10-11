@@ -5,6 +5,7 @@ import { NotificationPolicy } from './monitor-policy.mjs';
 import { MonitorStore, preferenceSnoozed } from './monitor-store.mjs';
 import { controllerSession } from './admission.mjs';
 import { NotificationHandoff } from './notification-handoff.mjs';
+import { notificationMode } from './notification-settings.mjs';
 
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_DEBOUNCE_MS = 75;
@@ -84,6 +85,8 @@ export function createOnceLogger(write = (line) => process.stderr.write(`${line}
 export class DelegateMonitor {
   constructor(options = {}) {
     this.env = options.env || process.env;
+    this.lifetime = options.lifetime || 'persistent';
+    this.configured = options.configured === true;
     this.scope = options.scope || monitorScope(this.env);
     this.projectDir = normalizeMonitorProjectDirectory(
       options.projectDir || this.env.CLAUDE_PROJECT_DIR || process.cwd()
@@ -150,6 +153,13 @@ export class DelegateMonitor {
 
   scan() {
     if (this.closed || !monitorEnabled(this.env)) return [];
+    if (this.configured) {
+      try {
+        const mode = notificationMode(this.store.stateDirectory);
+        if (mode === 'off' || (this.lifetime === 'persistent' && mode !== 'legacy-persistent')
+          || (this.lifetime === 'fallback' && mode !== 'native')) { this.stop(); return []; }
+      } catch { this.stop(); return []; }
+    }
     const statusLines = [];
     if (this.degradation && !this.degradationEmitted) {
       this.degradationEmitted = true;
@@ -158,16 +168,19 @@ export class DelegateMonitor {
     try {
       const now = Date.now();
       const snoozed = preferenceSnoozed(this.store.readPreference(), now);
-      const snapshots = () => scopeMonitorSnapshots(this.store.scan(), {
+      let observed;
+      const snapshots = () => observed ||= scopeMonitorSnapshots(this.store.scan(), {
         scope: this.effectiveScope, projectDir: this.projectDir, workspaceId: this.workspaceId, sessionId: this.sessionId
       });
       let delivery;
+      if (this.lifetime === 'fallback' && this.handoff.read().nativeDisabled === true) { this.stop(); return []; }
       try { delivery = this.handoff.scan('monitor', snapshots, { now, snoozed, recipientSessionId: this.recipientSessionId }); }
       catch (error) {
         this.logOnce('notification-handoff', error);
         delivery = { standby: false, lines: this.policy.observe(snapshots(), { now, snoozed, recipientSessionId: this.recipientSessionId }) };
       }
       if (delivery.standby) {
+        if (this.lifetime === 'fallback') { this.stop(); return []; }
         for (const watcher of this.watchers.values()) { try { watcher.close(); } catch {} }
         this.watchers.clear();
         return [];
@@ -176,6 +189,11 @@ export class DelegateMonitor {
       this.started = true;
       const lines = [...statusLines, ...policyLines];
       for (const line of lines) this.emit(line);
+      // Drain a final edge before stopping; terminal history never keeps a
+      // fallback alive. Quiet investigation still counts as live work.
+      if (this.lifetime === 'fallback' && !snapshots().some(({ job }) => ['queued', 'running'].includes(job?.status))) {
+        this.stop(); return lines;
+      }
       this.installWatchers();
       return lines;
     } catch (error) {
@@ -218,7 +236,7 @@ export class DelegateMonitor {
   start() {
     if (!monitorEnabled(this.env)) return { disabled: true };
     this.scan();
-    this.pollTimer = setInterval(() => this.scan(), this.pollMs);
+    if (!this.closed) this.pollTimer = setInterval(() => this.scan(), this.pollMs);
     return {
       disabled: false,
       requestedScope: this.scope,

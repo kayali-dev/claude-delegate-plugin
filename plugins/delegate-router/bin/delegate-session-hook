@@ -3,10 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildCollisionWatchPlan, ensureCollisionWatchSignal } from './lib/collision.mjs';
 import { writeSessionCorrelationMarker } from './lib/monitor-correlation.mjs';
+import { NotificationHandoff } from './lib/notification-handoff.mjs';
+import { monitorScope } from './lib/monitor-runtime.mjs';
+import { notificationHealth } from './lib/notification-health.mjs';
 import {
   buildNativeWorkState,
   nativeWorkOptions,
-  renderNativeAdditionalContext
+  renderNativeAdditionalContext,
+  NATIVE_CONTEXT_MAX_BYTES
 } from './lib/native-session.mjs';
 import { dataDir, listJobs } from './lib/state.mjs';
 
@@ -62,17 +66,31 @@ try {
     workspaceId: projectDir
   });
   if (!marker.ok) warn(marker.reason, event);
+  // An independent hook records deliberate native opt-outs even if the Mod
+  // cannot load. Recovery must not silently undo /config choices.
+  try {
+    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(payloadSessionId)) {
+      new NotificationHandoff({ sessionId: payloadSessionId, projectDir, scope: monitorScope() })
+        .setDeliveryEnabled(process.env.CLAUDE_PLUGIN_OPTION_NATIVE_ENABLED !== 'false'
+          && process.env.CLAUDE_PLUGIN_OPTION_NATIVE_NOTIFICATIONS !== 'false');
+    }
+  } catch { warn('notification-config-unavailable', event); }
   const contextEnabled = String(process.env.DELEGATE_NATIVE_CONTEXT ?? '1') !== '0';
   const jobs = listJobs();
   let context = null;
   if (contextEnabled) {
     try {
+      const delivery = notificationHealth({ sessionId: payloadSessionId, projectDir, scope: monitorScope() }, { jobs });
+      const recovery = 'Delegate notification mode: ' + delivery.mode + '. During live supervision check delegate_notification_health using current sessionId '
+        + JSON.stringify(payloadSessionId) + '. If needsFallback is true, invoke delegate-router:monitor-fallback yourself; never override explicit opt-outs. In legacy-persistent mode invoke delegate-router:legacy-monitor once if not already armed. No startup monitor in native mode.';
       context = renderNativeAdditionalContext({
+        maxBytes: NATIVE_CONTEXT_MAX_BYTES - Buffer.byteLength(recovery, 'utf8') - 1,
         workState: buildNativeWorkState({
           jobs,
           ...nativeWorkOptions(payload, process.env)
         })
       });
+      context = (context || '') + '\n' + recovery;
     } catch (error) {
       warn(`context-${error?.code || error?.name || 'unavailable'}`, event);
     }
